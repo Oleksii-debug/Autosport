@@ -15,6 +15,7 @@ class ReplayTimestampOrderTests(unittest.TestCase):
         sequence: int,
         *,
         ingest_ts: str | None = None,
+        source_ts: str | None = None,
         decimal_odds: str = "2.0",
     ) -> MarketEvent:
         payload = {
@@ -28,6 +29,8 @@ class ReplayTimestampOrderTests(unittest.TestCase):
         }
         if ingest_ts is not None:
             payload["ingest_ts"] = ingest_ts
+        if source_ts is not None:
+            payload["source_ts"] = source_ts
         return MarketEvent.from_dict(payload)
 
     def test_replay_orders_mixed_offsets_by_absolute_instant(self):
@@ -93,6 +96,72 @@ class ReplayTimestampOrderTests(unittest.TestCase):
         )
 
         self.assertEqual(seen, ["available-earlier", "observed-late"])
+
+
+    def test_replay_waits_for_provider_source_clock_as_well_as_local_clocks(self):
+        provider_future = self._event(
+            "provider-future",
+            "2026-01-01T00:00:00+00:00",
+            1,
+            ingest_ts="2026-01-01T00:00:01+00:00",
+            source_ts="2026-01-01T00:10:00+00:00",
+        )
+        fully_available_earlier = self._event(
+            "available-earlier-source",
+            "2026-01-01T00:05:00+00:00",
+            2,
+            ingest_ts="2026-01-01T00:05:00+00:00",
+            source_ts="2026-01-01T00:05:00+00:00",
+        )
+
+        seen: list[str] = []
+        ReplayEngine([provider_future, fully_available_earlier]).run(
+            lambda event: seen.append(event.event_id),
+            run_id="all-three-clocks-causal",
+        )
+
+        self.assertEqual(
+            seen,
+            ["available-earlier-source", "provider-future"],
+        )
+
+    def test_replay_rejects_nonzero_submicrosecond_causal_clocks(self):
+        for field in ("observed_ts", "ingest_ts", "source_ts"):
+            with self.subTest(field=field):
+                event = self._event(
+                    "precision",
+                    "2026-01-01T00:00:00+00:00",
+                    1,
+                    ingest_ts="2026-01-01T00:00:00+00:00",
+                    source_ts="2026-01-01T00:00:00+00:00",
+                )
+                object.__setattr__(
+                    event,
+                    field,
+                    "2026-01-01T00:00:00.0000001+00:00",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "replay event must be canonical",
+                ):
+                    ReplayEngine([event])
+
+    def test_replay_accepts_zero_only_excess_fractional_precision(self):
+        event = self._event(
+            "zero-tail",
+            "2026-01-01T00:00:00.123456000+00:00",
+            1,
+            ingest_ts="2026-01-01T00:00:00.123456000+00:00",
+            source_ts="2026-01-01T00:00:00.123456000+00:00",
+        )
+
+        seen: list[str] = []
+        ReplayEngine([event]).run(
+            lambda item: seen.append(item.event_id),
+            run_id="zero-tail-precision",
+        )
+
+        self.assertEqual(seen, ["zero-tail"])
 
     @staticmethod
     def _dataset_hash_in_order(events: list[MarketEvent]) -> str:

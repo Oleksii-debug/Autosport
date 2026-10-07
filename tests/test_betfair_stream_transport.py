@@ -549,12 +549,17 @@ def test_fragmented_crlf_frame_is_reassembled_exactly_with_authenticated_origin(
     frame = b'{"op":"mcm","clk":"next"}\r\n'
     fake = connected_socket(tail=frame[:7])
     fake.chunks.extend([frame[7:-1], frame[-1:]])
+    ticks = iter((100, 200, 300, 400))
+    fake_monotonic_ns = lambda: next(ticks)
+    monkeypatch.setattr(stream, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(stream.time, "monotonic_ns", fake_monotonic_ns)
     transport = make_transport(monkeypatch, fake)
     transport.connect()
 
     issued = transport.read_authenticated_frame()
 
     assert issued.payload == frame
+    assert issued.received_monotonic_ns == 400
     assert issued.payload_sha256 == sha256(frame).hexdigest()
     assert issued.connection_id == "conn-1"
     assert issued.connection_generation == 1
@@ -569,6 +574,10 @@ def test_coalesced_frames_are_split_without_byte_loss(
     first = b'{"op":"mcm","clk":"a"}\r\n'
     second = b'{"op":"mcm","clk":"b"}\r\n'
     fake = connected_socket(tail=first + second)
+    ticks = iter((100, 200))
+    fake_monotonic_ns = lambda: next(ticks)
+    monkeypatch.setattr(stream, "_MONOTONIC_NS", fake_monotonic_ns)
+    monkeypatch.setattr(stream.time, "monotonic_ns", fake_monotonic_ns)
     transport = make_transport(monkeypatch, fake)
     transport.connect()
 
@@ -577,7 +586,54 @@ def test_coalesced_frames_are_split_without_byte_loss(
 
     assert [one.payload, two.payload] == [first, second]
     assert [one.frame_sequence, two.frame_sequence] == [1, 2]
+    assert [one.received_monotonic_ns, two.received_monotonic_ns] == [200, 200]
     assert one.connection_generation == two.connection_generation == 1
+
+def test_monotonic_receive_clock_rebinding_fails_closed_before_frame_issue(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = connected_socket()
+    transport = make_transport(monkeypatch, fake)
+    transport.connect()
+    fake.chunks.append(b'{"op":"mcm","clk":"next"}\r\n')
+    monkeypatch.setattr(stream.time, "monotonic_ns", lambda: 999)
+
+    with pytest.raises(
+        stream.BetfairStreamTransportError,
+        match="monotonic receive clock dispatch changed",
+    ):
+        transport.read_authenticated_frame()
+
+    assert fake.closed is True
+    assert transport.is_authenticated is False
+    assert transport.connection_id is None
+    assert transport._receive_buffer == bytearray()
+    assert transport._receive_timing_chunks == []
+
+
+def test_invalid_monotonic_receive_clock_value_poisons_connection(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    fake = connected_socket()
+    transport = make_transport(monkeypatch, fake)
+    transport.connect()
+    fake.chunks.append(b'{"op":"mcm","clk":"next"}\r\n')
+
+    invalid_monotonic_ns = lambda: 0
+    monkeypatch.setattr(stream, "_MONOTONIC_NS", invalid_monotonic_ns)
+    monkeypatch.setattr(stream.time, "monotonic_ns", invalid_monotonic_ns)
+
+    with pytest.raises(
+        stream.BetfairStreamTransportError,
+        match="monotonic receive clock is invalid",
+    ):
+        transport.read_authenticated_frame()
+
+    assert fake.closed is True
+    assert transport.is_authenticated is False
+    assert transport._receive_buffer == bytearray()
+    assert transport._receive_timing_chunks == []
+
 
 def test_oversized_no_newline_frame_fails_before_persistence(
     monkeypatch: pytest.MonkeyPatch,
@@ -808,6 +864,7 @@ def test_close_is_idempotent_and_clears_authenticated_and_partial_state(
     assert transport.is_authenticated is False
     assert transport.connection_id is None
     assert transport._receive_buffer == bytearray()
+    assert transport._receive_timing_chunks == []
 
 
 def test_public_protocol_declares_fail_closed_boundaries() -> None:
@@ -825,6 +882,18 @@ def test_public_protocol_declares_fail_closed_boundaries() -> None:
             "requires_authentication_before_subscription"
         ]
         is True
+    )
+    assert (
+        stream.PUBLIC_PROTOCOL[
+            "socket_ingress_monotonic_timestamp_authority"
+        ]
+        is True
+    )
+    assert (
+        stream.PUBLIC_PROTOCOL[
+            "buffered_frame_timestamp_refresh"
+        ]
+        is False
     )
     assert (
         stream.PUBLIC_PROTOCOL[
@@ -989,3 +1058,61 @@ def test_concurrent_connect_fails_closed_before_second_network_open(
     assert "connection_id" not in outcome
     assert isinstance(outcome.get("error"), stream.BetfairStreamTransportError)
     assert transport.is_authenticated is False
+
+
+def test_authenticated_frame_readers_are_serialized_over_shared_buffer(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first = b'{"op":"mcm","clk":"a"}\r\n'
+    second = b'{"op":"mcm","clk":"b"}\r\n'
+    fake = connected_socket(tail=first + second)
+    transport = make_transport(monkeypatch, fake)
+    transport.connect()
+
+    first_consume_entered = Event()
+    allow_first_consume = Event()
+    second_done = Event()
+    results: list[stream.BetfairStreamAuthenticatedFrame] = []
+    errors: list[BaseException] = []
+    original_consume = transport._consume_received_bytes
+    consume_calls = 0
+
+    def blocking_consume(count: int):
+        nonlocal consume_calls
+        consume_calls += 1
+        if consume_calls == 1:
+            first_consume_entered.set()
+            assert allow_first_consume.wait(timeout=2.0)
+        return original_consume(count)
+
+    monkeypatch.setattr(transport, "_consume_received_bytes", blocking_consume)
+
+    def read_one(*, mark_done: bool = False) -> None:
+        try:
+            results.append(transport.read_authenticated_frame())
+        except BaseException as exc:
+            errors.append(exc)
+        finally:
+            if mark_done:
+                second_done.set()
+
+    first_reader = Thread(target=read_one, name="betfair-read-first")
+    first_reader.start()
+    assert first_consume_entered.wait(timeout=2.0)
+
+    second_reader = Thread(
+        target=lambda: read_one(mark_done=True),
+        name="betfair-read-second",
+    )
+    second_reader.start()
+    assert not second_done.wait(timeout=0.05)
+
+    allow_first_consume.set()
+    first_reader.join(timeout=2.0)
+    second_reader.join(timeout=2.0)
+
+    assert not first_reader.is_alive()
+    assert not second_reader.is_alive()
+    assert errors == []
+    assert [frame.payload for frame in results] == [first, second]
+    assert [frame.frame_sequence for frame in results] == [1, 2]

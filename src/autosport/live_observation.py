@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable
 
+from .betfair_stream_codec import BETFAIR_STREAM_SOURCE_ID
 from .ingestion import CommittedIngestionHealthError, IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .market_bus import MarketEventBus, MarketEventDeliveryError
@@ -24,6 +25,57 @@ _MAX_SNAPSHOT_BATCHES = 256
 _MAX_BATCH_ATTEMPTS = 2
 
 
+class _ProviderAuthorityDriftError(RuntimeError):
+    """Cached live batch can no longer be retried under its bound provider identity."""
+
+
+def _exception_text(exc: BaseException) -> str:
+    try:
+        detail = str(exc)
+    except BaseException:
+        detail = "<unprintable exception>"
+    return f"{type(exc).__name__}: {detail}"
+
+
+def _validate_observation_ingress(
+    provider: MarketProvider,
+    *,
+    max_items: int,
+    policy: IngestionPolicy | None,
+    clock: Clock | None,
+) -> IngestionPolicy:
+    """Validate caller-controlled observation inputs before durable side effects."""
+
+    if type(max_items) is not int or max_items <= 0:
+        raise ValueError("max_items must be a positive integer")
+    if policy is not None and type(policy) is not IngestionPolicy:
+        raise TypeError("policy must be an exact IngestionPolicy or None")
+    effective_policy = policy if policy is not None else IngestionPolicy()
+    if max_items > effective_policy.max_batch_size:
+        raise ValueError(
+            f"requested batch {max_items} exceeds backpressure limit "
+            f"{effective_policy.max_batch_size}"
+        )
+    if clock is not None and not callable(clock):
+        raise TypeError("clock must be callable or None")
+    if not callable(getattr(provider, "read_batch", None)):
+        raise TypeError("provider read_batch must be callable")
+    source_id = getattr(provider, "source_id", None)
+    if type(source_id) is not str:
+        raise TypeError("provider source_id must be an exact string")
+    if not source_id or source_id.strip() != source_id or "|" in source_id:
+        raise ValueError("provider source_id must be canonical")
+    if source_id == BETFAIR_STREAM_SOURCE_ID:
+        from .betfair_authenticated_provider import BetfairAuthenticatedMarketProvider
+
+        if type(provider) is not BetfairAuthenticatedMarketProvider:
+            raise TypeError(
+                "Betfair Exchange Stream source requires the canonical authenticated "
+                "stream-to-provider bridge"
+            )
+    return effective_policy
+
+
 @dataclass(frozen=True, slots=True)
 class ObservationWorkerMessage:
     result: ObservationResult | None = None
@@ -32,6 +84,13 @@ class ObservationWorkerMessage:
     def __post_init__(self) -> None:
         if (self.result is None) == (self.error is None):
             raise ValueError("worker message must contain exactly one of result or error")
+        if self.result is not None and type(self.result) is not ObservationResult:
+            raise TypeError("worker message result must be an exact ObservationResult")
+        if self.error is not None:
+            if type(self.error) is not str:
+                raise TypeError("worker message error must be an exact string")
+            if not self.error:
+                raise ValueError("worker message error must be non-empty")
 
 
 class OneShotObservationWorker:
@@ -54,6 +113,8 @@ class OneShotObservationWorker:
             return self._busy
 
     def start(self, task: ObservationTask) -> bool:
+        if not callable(task):
+            raise TypeError("observation task must be callable")
         with self._lock:
             if self._busy:
                 return False
@@ -122,7 +183,7 @@ class OneShotObservationWorker:
         # an ordinary setup failure returns True and publishes one terminal error.
         self._thread = None
         self._messages.put(
-            ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            ObservationWorkerMessage(error=_exception_text(exc))
         )
 
     def _release_unstarted_slot(self) -> None:
@@ -143,13 +204,22 @@ class OneShotObservationWorker:
 
     def _run(self, task: ObservationTask) -> None:
         try:
-            message = ObservationWorkerMessage(result=task())
+            result = task()
+            if type(result) is not ObservationResult:
+                raise TypeError("observation task must return an exact ObservationResult")
+            result.validate()
+            owned_result = ObservationResult(
+                result.stats,
+                result.health,
+                result.current_quotes,
+            )
+            message = ObservationWorkerMessage(result=owned_result)
         except BaseException as exc:
             # SystemExit/KeyboardInterrupt raised inside this background thread do
             # not terminate the GUI process. Publish a terminal failure so poll()
             # clears the single-flight state instead of leaving live observation
             # permanently busy after the worker thread has already died.
-            message = ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            message = ObservationWorkerMessage(error=_exception_text(exc))
         self._messages.put(message)
 
     def poll(self) -> ObservationWorkerMessage | None:
@@ -183,7 +253,12 @@ class _ReplayableBatchProvider:
 
     def __init__(self, provider: MarketProvider) -> None:
         self._provider = provider
-        self.source_id = provider.source_id
+        source_id = provider.source_id
+        if type(source_id) is not str:
+            raise TypeError("provider source_id must be an exact string")
+        if not source_id or source_id.strip() != source_id or "|" in source_id:
+            raise ValueError("provider source_id must be canonical")
+        self.source_id = source_id
         self._inflight: ProviderBatch | None = None
         self._inflight_max_items: int | None = None
         self._carried_quality_flags: tuple[str, ...] = ()
@@ -192,9 +267,89 @@ class _ReplayableBatchProvider:
     def has_inflight(self) -> bool:
         return self._inflight is not None
 
+    def _reset_rejected_provider_read(self, primary_error: BaseException) -> None:
+        """Reset provider-local paging only while the original source authority remains exact."""
+
+        try:
+            current_source_id = getattr(self._provider, "source_id", None)
+        except BaseException as authority_error:
+            try:
+                primary_error.add_note(
+                    "provider pending-snapshot reset skipped because source authority "
+                    f"could not be re-read: {_exception_text(authority_error)}"
+                )
+            except BaseException:
+                pass
+            return
+        if type(current_source_id) is not str or current_source_id != self.source_id:
+            return
+
+        try:
+            reset_snapshot = getattr(
+                self._provider,
+                "reset_pending_snapshot",
+                None,
+            )
+            if not callable(reset_snapshot):
+                reset_snapshot = getattr(
+                    self._provider,
+                    "_clear_pending_snapshot",
+                    None,
+                )
+        except BaseException as cleanup_error:
+            try:
+                primary_error.add_note(
+                    "provider rejected-read snapshot reset lookup also failed: "
+                    f"{_exception_text(cleanup_error)}"
+                )
+            except BaseException:
+                pass
+            return
+        if not callable(reset_snapshot):
+            return
+        try:
+            reset_snapshot()
+        except BaseException as cleanup_error:
+            try:
+                primary_error.add_note(
+                    "provider rejected-read snapshot reset also failed: "
+                    f"{_exception_text(cleanup_error)}"
+                )
+            except BaseException:
+                pass
+
     def read_batch(self, max_items: int = 1000) -> ProviderBatch:
         if self._inflight is None:
+            current_source_id = getattr(self._provider, "source_id", None)
+            if (
+                type(current_source_id) is not str
+                or current_source_id != self.source_id
+            ):
+                raise RuntimeError(
+                    "provider source identity changed before live batch read"
+                )
             batch = self._provider.read_batch(max_items=max_items)
+            try:
+                current_source_id = getattr(self._provider, "source_id", None)
+                if (
+                    type(current_source_id) is not str
+                    or current_source_id != self.source_id
+                ):
+                    raise RuntimeError(
+                        "provider source identity changed during live batch read"
+                    )
+                if type(batch) is not ProviderBatch:
+                    raise TypeError("provider must return an exact ProviderBatch")
+                if batch.source_id != self.source_id:
+                    raise RuntimeError(
+                        "provider batch source identity conflicts with live provider authority"
+                    )
+            except BaseException as exc:
+                # The underlying read may already have advanced provider-local
+                # pagination even though no batch was admitted into this wrapper.
+                # Reset only while the exact original source authority still holds.
+                self._reset_rejected_provider_read(exc)
+                raise
             if self._carried_quality_flags:
                 batch = ProviderBatch(
                     source_id=batch.source_id,
@@ -206,8 +361,16 @@ class _ReplayableBatchProvider:
                 )
             self._inflight = batch
             self._inflight_max_items = max_items
-        elif max_items != self._inflight_max_items:
-            raise RuntimeError("cannot change live batch bound before durable acknowledgement")
+        else:
+            current_source_id = getattr(self._provider, "source_id", None)
+            if type(current_source_id) is not str or current_source_id != self.source_id:
+                raise _ProviderAuthorityDriftError(
+                    "provider source identity changed before live batch retry"
+                )
+            if max_items != self._inflight_max_items:
+                raise RuntimeError(
+                    "cannot change live batch bound before durable acknowledgement"
+                )
         return self._inflight
 
     def carry_quality_flags(self, quality_flags: tuple[str, ...]) -> None:
@@ -235,14 +398,34 @@ class _ReplayableBatchProvider:
         # to unwind and lose its cached batch while that iterator already points at
         # the tail. Reset that snapshot so reusing the same provider refetches from
         # the beginning instead of silently skipping the never-durable prefix.
-        reset_snapshot = getattr(self._provider, "reset_pending_snapshot", None)
-        if not callable(reset_snapshot):
-            reset_snapshot = getattr(self._provider, "_clear_pending_snapshot", None)
-        if callable(reset_snapshot):
-            reset_snapshot()
-        self._inflight = None
-        self._inflight_max_items = None
-        self._carried_quality_flags = ()
+        try:
+            reset_snapshot = getattr(
+                self._provider,
+                "reset_pending_snapshot",
+                None,
+            )
+            if not callable(reset_snapshot):
+                reset_snapshot = getattr(
+                    self._provider,
+                    "_clear_pending_snapshot",
+                    None,
+                )
+            current_source_id = getattr(self._provider, "source_id", None)
+            if (
+                type(current_source_id) is not str
+                or current_source_id != self.source_id
+            ):
+                raise RuntimeError(
+                    "provider source identity changed before pending-snapshot reset"
+                )
+            if callable(reset_snapshot):
+                reset_snapshot()
+        finally:
+            # Cleanup lookup/hooks are provider-controlled. Even a hostile descriptor
+            # must not strand this wrapper's cached batch after abandonment begins.
+            self._inflight = None
+            self._inflight_max_items = None
+            self._carried_quality_flags = ()
 
 
 def _poll_acknowledged(
@@ -269,7 +452,7 @@ def _poll_acknowledged(
             if provider.has_inflight:
                 provider.acknowledge()
             raise
-        except sqlite3.Error:
+        except sqlite3.Error as exc:
             # SQLiteMarketStore commits its batch transaction before poll_once can
             # proceed to source-health publication. A sqlite3.Error escaping that
             # market transaction is therefore the narrow failure class for which
@@ -277,9 +460,39 @@ def _poll_acknowledged(
             if not provider.has_inflight:
                 raise
             if attempt + 1 >= _MAX_BATCH_ATTEMPTS:
-                provider.abandon_uncommitted()
+                try:
+                    provider.abandon_uncommitted()
+                except BaseException as reset_error:
+                    # Cleanup must never replace the primary storage failure. Reset
+                    # hooks are provider-controlled and can themselves raise
+                    # BaseException or even fail during stringification. Diagnostic
+                    # annotation is also best-effort: a hostile sqlite exception
+                    # subclass must not be able to replace the original failure.
+                    try:
+                        exc.add_note(
+                            "provider pending-snapshot reset also failed: "
+                            f"{_exception_text(reset_error)}"
+                        )
+                    except BaseException:
+                        pass
                 raise
             continue
+        except _ProviderAuthorityDriftError as exc:
+            # This failure can occur only while reusing a cached batch after an
+            # earlier sqlite3.Error. That prior attempt did not commit market state,
+            # so retaining the provider's pending snapshot would strand an
+            # unacknowledged prefix behind a changed authority identity.
+            try:
+                provider.abandon_uncommitted()
+            except BaseException as reset_error:
+                try:
+                    exc.add_note(
+                        "provider pending-snapshot reset also failed: "
+                        f"{_exception_text(reset_error)}"
+                    )
+                except BaseException:
+                    pass
+            raise
         except Exception:
             # Do not replay after an arbitrary later-stage failure (for example a
             # source-health JSON write): market events may already be durable, and
@@ -351,18 +564,34 @@ def poll_open_market_store_once(
     only the new provider batch and publishes its material invalidations. It therefore
     avoids re-opening/rebuilding append-only market history on every live cycle.
     """
-    if not isinstance(store, SQLiteMarketStore):
-        raise TypeError("store must be a SQLiteMarketStore")
-    if not isinstance(health_store, SourceHealthStore):
-        raise TypeError("health_store must be a SourceHealthStore")
-    if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
-        raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
+    if type(store) is not SQLiteMarketStore:
+        raise TypeError("store must be an exact SQLiteMarketStore")
+    if type(health_store) is not SourceHealthStore:
+        raise TypeError("health_store must be an exact SourceHealthStore")
+    if type(mirror_updates) is not BoundedMirrorInvalidationBuffer:
+        raise TypeError("mirror_updates must be an exact BoundedMirrorInvalidationBuffer")
+    effective_policy = _validate_observation_ingress(
+        provider,
+        max_items=max_items,
+        policy=policy,
+        clock=clock,
+    )
+    if provider.source_id == BETFAIR_STREAM_SOURCE_ID:
+        from .betfair_authenticated_provider import BetfairAuthenticatedMarketProvider
+
+        if type(provider) is not BetfairAuthenticatedMarketProvider:
+            raise TypeError("noncanonical Betfair stream provider reached durable ingress")
+        durable_current = store.current_by_source()
+        if not provider.durable_bound:
+            provider.bind_durable_current(durable_current)
+        else:
+            provider.assert_durable_current(durable_current)
 
     bus = MarketEventBus(store)
     bus.subscribe(mirror_updates.accept_persisted)
     engine = IngestionEngine(
         bus,
-        policy=policy,
+        policy=effective_policy,
         health_store=health_store,
         clock=clock,
     )
@@ -387,6 +616,15 @@ def observe_workspace_once(
     from that mirror rather than maintaining a second ad-hoc live quote dictionary.
     """
 
+    if mirror_updates is not None and type(mirror_updates) is not BoundedMirrorInvalidationBuffer:
+        raise TypeError("mirror_updates must be an exact BoundedMirrorInvalidationBuffer")
+    effective_policy = _validate_observation_ingress(
+        provider,
+        max_items=max_items,
+        policy=policy,
+        clock=clock,
+    )
+
     root = Path(workspace)
     root.mkdir(parents=True, exist_ok=True)
     store = SQLiteMarketStore(root / "market.db")
@@ -396,20 +634,51 @@ def observe_workspace_once(
             mirror = MarketMirror.from_store(store)
             mirror_updates = BoundedMirrorInvalidationBuffer(mirror)
         else:
-            if not isinstance(mirror_updates, BoundedMirrorInvalidationBuffer):
-                raise TypeError("mirror_updates must be a BoundedMirrorInvalidationBuffer")
             mirror = mirror_updates.mirror
-            # Reconcile the non-durable mirror from canonical append-only history at
-            # each observation boundary. Re-applying identical/stale events is
-            # idempotent and deliberately does not enqueue downstream invalidations.
-            for persisted_event in store.events():
-                mirror.apply(persisted_event)
+            # A caller may retain a long-lived non-durable mirror only for this
+            # canonical workspace history. Never merge foreign workspace state into
+            # current decision truth merely because quote/source identities happen to
+            # be compatible.
+            persisted_history = tuple(store.events_with_append_generation())
+            canonical_events = {
+                (event.source_id, event.dedupe_key): event
+                for event, _append_generation in persisted_history
+            }
+            for existing_event in mirror.snapshot():
+                canonical_event = canonical_events.get(
+                    (existing_event.source_id, existing_event.dedupe_key)
+                )
+                if canonical_event != existing_event:
+                    raise ValueError(
+                        "mirror_updates contains state outside current workspace history"
+                    )
+
+            # Reconcile the non-durable mirror from independently proven canonical
+            # append history at each observation boundary. Preserve generation-zero
+            # migration rows only as audit/sequence fences; only positive product-issued
+            # appends may become decision-causal live state.
+            for persisted_event, append_generation in persisted_history:
+                mirror_updates.reconcile_persisted(
+                    persisted_event,
+                    append_generation=append_generation,
+                )
+
+        if provider.source_id == BETFAIR_STREAM_SOURCE_ID:
+            from .betfair_authenticated_provider import BetfairAuthenticatedMarketProvider
+
+            if type(provider) is not BetfairAuthenticatedMarketProvider:
+                raise TypeError("noncanonical Betfair stream provider reached durable ingress")
+            durable_current = store.current_by_source()
+            if not provider.durable_bound:
+                provider.bind_durable_current(durable_current)
+            else:
+                provider.assert_durable_current(durable_current)
 
         bus = MarketEventBus(store)
         bus.subscribe(mirror_updates.accept_persisted)
         engine = IngestionEngine(
             bus,
-            policy=policy,
+            policy=effective_policy,
             health_store=health_store,
             clock=clock,
         )
@@ -417,8 +686,8 @@ def observe_workspace_once(
         source_id = stats.source_id
         current = tuple(
             sorted(
-                mirror.view(source_ids=source_id).events,
-                key=lambda event: (event.event_id, event.market_id, event.selection_id),
+                mirror.causal_view(source_ids=source_id).events,
+                key=lambda event: event.quote_key,
             )
         )
         return ObservationResult(stats, health_store.get(source_id), current)

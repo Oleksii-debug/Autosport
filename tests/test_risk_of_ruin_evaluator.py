@@ -97,6 +97,81 @@ def _evaluator(tmp_path: Path, name: str = "workspace") -> ProductRiskOfRuinEval
     )
 
 
+
+@pytest.mark.parametrize("field", ("causal_cutoff", "evaluated_at"))
+def test_request_rejects_lossy_submicrosecond_causal_clocks(field: str) -> None:
+    request = _request(planned=2)
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="precision finer than microseconds is unsupported",
+    ):
+        replace(
+            request,
+            **{field: "2026-01-02T00:00:00.0000001+00:00"},
+        )
+
+
+def test_observation_rejects_lossy_submicrosecond_availability_clock() -> None:
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="precision finer than microseconds is unsupported",
+    ):
+        _observation(
+            1,
+            available_at="2026-01-01T00:00:00.0000001+00:00",
+        )
+
+
+def test_request_accepts_zero_only_excess_fractional_clock_precision() -> None:
+    request = replace(
+        _request(planned=2),
+        causal_cutoff="2026-01-02T00:00:00.123456000+00:00",
+        evaluated_at="2026-01-03T00:00:00.123456000+00:00",
+    )
+
+    payload = request.canonical_payload()
+
+    assert payload["causal_cutoff"] == "2026-01-02T00:00:00.123456+00:00"
+    assert payload["evaluated_at"] == "2026-01-03T00:00:00.123456+00:00"
+
+
+@pytest.mark.parametrize(
+    "field",
+    (
+        "base_portfolio_sha256",
+        "capital_state_sha256",
+        "target_sha256",
+        "research_protocol_sha256",
+        "reproducibility_bundle_sha256",
+        "dataset_manifest_sha256",
+    ),
+)
+def test_request_rejects_uppercase_digest_aliases(field: str) -> None:
+    request = _request(planned=2)
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="canonical lowercase SHA-256 digest",
+    ):
+        replace(request, **{field: getattr(request, field).upper()})
+
+
+def test_durable_result_parser_rejects_uppercase_digest_alias() -> None:
+    direct = evaluate_risk_of_ruin(
+        _request(planned=2),
+        workspace_instance_id="workspace:test",
+        issued_at="2026-01-04T00:00:00+00:00",
+        source_sha256=SHA_F,
+    )
+    payload = direct.canonical_payload()
+    payload["request_sha256"] = str(payload["request_sha256"]).upper()
+
+    with pytest.raises(
+        RiskOfRuinIssuanceError,
+        match="invalid issued risk-of-ruin result",
+    ):
+        IssuedRiskOfRuinResult.from_payload(payload)
+
 def test_request_has_no_caller_upper_bound_field() -> None:
     names = {field.name for field in fields(RiskOfRuinEvaluationRequest)}
     assert "upper_bound" not in names
@@ -423,6 +498,34 @@ def test_exact_bound_matches_reference_cases(
     )
     assert abs(bound - expected) < Decimal("1e-14")
 
+
+
+def test_direct_evaluation_rejects_lossy_submicrosecond_issuance_clock() -> None:
+    request = _request(planned=2)
+
+    with pytest.raises(
+        RiskOfRuinEvaluationError,
+        match="precision finer than microseconds is unsupported",
+    ):
+        evaluate_risk_of_ruin(
+            request,
+            workspace_instance_id="workspace:test",
+            issued_at="2026-01-04T00:00:00.0000001+00:00",
+            source_sha256=SHA_F,
+        )
+
+
+def test_direct_evaluation_accepts_zero_only_excess_issuance_precision() -> None:
+    request = _request(planned=2)
+
+    result = evaluate_risk_of_ruin(
+        request,
+        workspace_instance_id="workspace:test",
+        issued_at="2026-01-04T00:00:00.123456000+00:00",
+        source_sha256=SHA_F,
+    )
+
+    assert result.issued_at == "2026-01-04T00:00:00.123456+00:00"
 
 def test_transient_path_breach_counts_as_ruin() -> None:
     observations = tuple(

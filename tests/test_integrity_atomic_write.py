@@ -19,6 +19,34 @@ class EnsureDurableFileTests(unittest.TestCase):
             self.assertTrue(destination.is_file())
             self.assertEqual(destination.read_bytes(), b"")
 
+    def test_missing_file_creation_syncs_parent_directory(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "decisions.jsonl"
+
+            with patch.object(
+                integrity,
+                "_sync_parent_directory",
+                wraps=integrity._sync_parent_directory,
+            ) as sync_parent:
+                integrity.ensure_durable_file(destination)
+
+            sync_parent.assert_called_once_with(destination)
+
+    def test_existing_file_durability_does_not_require_namespace_republication(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "decisions.jsonl"
+            destination.write_bytes(b"existing\n")
+
+            with patch.object(
+                integrity,
+                "_sync_parent_directory",
+                wraps=integrity._sync_parent_directory,
+            ) as sync_parent:
+                integrity.ensure_durable_file(destination)
+
+            sync_parent.assert_not_called()
+            self.assertEqual(destination.read_bytes(), b"existing\n")
+
     def test_concurrent_create_before_open_preserves_new_content(self) -> None:
         with tempfile.TemporaryDirectory() as temporary_directory:
             destination = Path(temporary_directory) / "decisions.jsonl"
@@ -86,6 +114,45 @@ class AtomicWriteJsonTests(unittest.TestCase):
             self.assertTrue(all(not thread.is_alive() for thread in threads))
             self.assertEqual(errors, [])
             self.assertIn(json.loads(destination.read_text(encoding="utf-8")), payloads)
+            self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
+
+    def test_atomic_publication_syncs_parent_after_replace(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "state.json"
+            calls: list[str] = []
+            original_replace = integrity.os.replace
+            original_sync = integrity._sync_parent_directory
+
+            def observed_replace(source, target) -> None:
+                original_replace(source, target)
+                calls.append("replace")
+
+            def observed_sync(path: Path) -> None:
+                calls.append("sync-parent")
+                original_sync(path)
+
+            with (
+                patch.object(integrity.os, "replace", side_effect=observed_replace),
+                patch.object(integrity, "_sync_parent_directory", side_effect=observed_sync),
+            ):
+                integrity.atomic_write_json(destination, {"value": 1})
+
+            self.assertEqual(calls, ["replace", "sync-parent"])
+            self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), {"value": 1})
+
+    def test_parent_directory_sync_failure_is_not_reported_as_success(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary_directory:
+            destination = Path(temporary_directory) / "state.json"
+
+            with patch.object(
+                integrity,
+                "_sync_parent_directory",
+                side_effect=RuntimeError("directory fsync failed"),
+            ):
+                with self.assertRaisesRegex(RuntimeError, "directory fsync failed"):
+                    integrity.atomic_write_json(destination, {"value": 1})
+
+            self.assertEqual(json.loads(destination.read_text(encoding="utf-8")), {"value": 1})
             self.assertEqual(list(destination.parent.glob(f".{destination.name}.*.tmp")), [])
 
     def test_serialization_failure_preserves_destination_and_removes_temporary_file(self) -> None:

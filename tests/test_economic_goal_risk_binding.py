@@ -12,6 +12,7 @@ from autosport.risk import (
     PaperRiskPolicy,
     ProposedTicketRiskContext,
     RiskOfRuinEvidence,
+    RiskOfRuinVectorEvidence,
 )
 
 
@@ -704,6 +705,95 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             TypeError, "economic_goal must be an EconomicGoalContract or None"
         ):
             PaperRiskPolicy(economic_goal=object())  # type: ignore[arg-type]
+
+
+    def test_risk_of_ruin_evidence_rejects_lossy_submicrosecond_causal_clocks(self) -> None:
+        kwargs = dict(
+            evidence_id="ror-precision",
+            research_protocol_sha256="a" * 64,
+            reproducibility_bundle_sha256="b" * 64,
+            producer_identity="test-risk-model-source",
+            causal_cutoff="2026-09-16T14:59:58+00:00",
+            evaluated_at="2026-09-16T15:00:01+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            base_portfolio_sha256="c" * 64,
+            candidate_sha256="d" * 64,
+            evaluated_stake=Decimal("1"),
+            upper_bound=Decimal("0.01"),
+        )
+        for field in ("causal_cutoff", "evaluated_at"):
+            with self.subTest(field=field):
+                malformed = {
+                    **kwargs,
+                    field: "2026-09-16T15:00:00.0000001+00:00",
+                }
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    RiskOfRuinEvidence(**malformed)
+
+    def test_vector_risk_of_ruin_evidence_rejects_lossy_submicrosecond_causal_clocks(self) -> None:
+        kwargs = dict(
+            evidence_id="ror-vector-precision",
+            research_protocol_sha256="a" * 64,
+            reproducibility_bundle_sha256="b" * 64,
+            producer_identity="test-risk-model-source",
+            causal_cutoff="2026-09-16T14:59:58+00:00",
+            evaluated_at="2026-09-16T15:00:01+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            base_portfolio_sha256="c" * 64,
+            candidate_vector_sha256="d" * 64,
+            evaluated_stakes=(Decimal("1"), Decimal("0")),
+            upper_bound=Decimal("0.01"),
+        )
+        for field in ("causal_cutoff", "evaluated_at"):
+            with self.subTest(field=field):
+                malformed = {
+                    **kwargs,
+                    field: "2026-09-16T15:00:00.0000001+00:00",
+                }
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    RiskOfRuinVectorEvidence(**malformed)
+
+    def test_risk_evidence_accepts_zero_only_excess_fractional_precision(self) -> None:
+        evidence = RiskOfRuinEvidence(
+            evidence_id="ror-zero-tail",
+            research_protocol_sha256="a" * 64,
+            reproducibility_bundle_sha256="b" * 64,
+            producer_identity="test-risk-model-source",
+            causal_cutoff="2026-09-16T14:59:58.123456000+00:00",
+            evaluated_at="2026-09-16T15:00:01.123456000+00:00",
+            bankroll_id="paper-bankroll",
+            currency="USD",
+            base_portfolio_sha256="c" * 64,
+            candidate_sha256="d" * 64,
+            evaluated_stake=Decimal("1"),
+            upper_bound=Decimal("0.01"),
+        )
+
+        self.assertEqual(
+            evidence.evaluated_at,
+            "2026-09-16T15:00:01.123456000+00:00",
+        )
+
+
+    def test_future_local_quote_availability_requires_vector_wait(self) -> None:
+        self.assertTrue(
+            PaperRiskPolicy._risk_rejection_requires_wait(
+                "quote was not locally available by proposal timestamp"
+            )
+        )
+        self.assertTrue(
+            PaperRiskPolicy._risk_rejection_requires_wait(
+                "quote local receipt chronology is invalid"
+            )
+        )
 
 
 if __name__ == "__main__":

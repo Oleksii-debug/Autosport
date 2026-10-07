@@ -1057,6 +1057,7 @@ def _execute(
             )
         finally:
             self._prepared_authorities.pop(id(authorized), None)
+            self._prepared_book_states.pop(id(authorized), None)
 
 
 def _on_market_event(self: PaperValueAgent, event, context) -> None:

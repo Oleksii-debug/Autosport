@@ -136,6 +136,7 @@ def test_public_paper_value_prepare_is_descriptor_only(tmp_path) -> None:
 
     assert descriptor.__class__.__name__ == "PaperValueExecutionDescriptor"
     assert runtime._prepared_authorities == {}
+    assert runtime._prepared_book_states == {}
 
     with pytest.raises(
         PaperExecutionAdoptionError,
@@ -209,6 +210,7 @@ def test_caller_authored_general_decision_and_ambient_context_cannot_authorize(
     assert book.balance == Decimal("100.00")
     assert not book.tickets
     assert runtime._prepared_authorities == {}
+    assert runtime._prepared_book_states == {}
 
 
 def test_caller_authored_general_restart_record_cannot_be_first_execution_authority(

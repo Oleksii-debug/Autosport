@@ -8,7 +8,7 @@ from pathlib import Path
 from autosport.ingestion import IngestionEngine
 from autosport.ingestion_health import SourceHealthStore
 from autosport.market_bus import MarketEventBus
-from autosport.providers import ProviderBatch, ProviderQuote
+from autosport.providers import CanonicalNormalizer, ProviderBatch, ProviderQuote
 from autosport.storage import SQLiteMarketStore
 
 
@@ -39,11 +39,13 @@ class MalformedBatchProvider:
 class ProviderBatchOperationalMetadataTests(unittest.TestCase):
     def test_malformed_operational_metadata_fails_before_event_persistence(self) -> None:
         cases: tuple[tuple[str, object, object, type[BaseException], str], ...] = (
-            ("wrong cursor type", 7, (), TypeError, "cursor must be str or None"),
+            ("wrong cursor type", 7, (), TypeError, "cursor must be an exact str or None"),
             ("quality flags not tuple", None, ["GAP"], TypeError, "must be a tuple"),
             ("quality flag not string", None, (7,), TypeError, "quality flag must be str"),
-            ("blank quality flag", None, ("",), ValueError, "non-empty and trimmed"),
-            ("untrimmed quality flag", None, (" GAP",), ValueError, "non-empty and trimmed"),
+            ("blank quality flag", None, ("",), ValueError, "canonical text"),
+            ("untrimmed quality flag", None, (" GAP",), ValueError, "canonical text"),
+            ("cursor control character", "page\nforged", (), ValueError, "control characters"),
+            ("quality flag control character", None, ("GAP\rFORGED",), ValueError, "canonical text"),
         )
 
         for label, cursor, quality_flags, error_type, message in cases:
@@ -86,6 +88,81 @@ class ProviderBatchOperationalMetadataTests(unittest.TestCase):
 
         self.assertEqual(batch.cursor, "")
         self.assertEqual(batch.quality_flags, ("PROVIDER_SEQUENCE_GAP",))
+
+
+    def test_quote_metadata_rejects_non_exact_json_types(self) -> None:
+        class TextSubclass(str):
+            pass
+
+        class IntSubclass(int):
+            pass
+
+        class ListSubclass(list):
+            pass
+
+        class DictSubclass(dict):
+            pass
+
+        normalizer = CanonicalNormalizer()
+        cases: tuple[tuple[str, object, type[BaseException], str], ...] = (
+            ("string subclass", {"value": TextSubclass("x")}, TypeError, "non-canonical JSON value type"),
+            ("integer subclass", {"value": IntSubclass(7)}, TypeError, "non-canonical JSON value type"),
+            ("list subclass", {"value": ListSubclass(["x"])}, TypeError, "non-canonical JSON value type"),
+            ("dict subclass", DictSubclass({"value": "x"}), TypeError, "metadata must be an exact dict"),
+            ("key subclass", {TextSubclass("value"): "x"}, TypeError, "non-canonical JSON object key"),
+        )
+
+        for label, metadata, error_type, message in cases:
+            with self.subTest(label=label):
+                quote = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="player-a",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-14T08:00:00+00:00",
+                    sequence=1,
+                    metadata=metadata,  # type: ignore[arg-type]
+                )
+                with self.assertRaisesRegex(error_type, message):
+                    normalizer.normalize("fixture", quote)
+
+    def test_quote_metadata_snapshots_exact_nested_json(self) -> None:
+        normalizer = CanonicalNormalizer()
+        metadata = {
+            "book": "fixture",
+            "limits": [1, 2.5, True, None, {"currency": "EUR"}],
+        }
+        quote = ProviderQuote(
+            provider_event_id="event-1",
+            provider_market_id="winner",
+            provider_selection_id="player-a",
+            decimal_odds=Decimal("2.0"),
+            observed_ts="2026-09-14T08:00:00+00:00",
+            sequence=1,
+            metadata=metadata,
+        )
+
+        event = normalizer.normalize("fixture", quote)
+        metadata["limits"][4]["currency"] = "USD"  # type: ignore[index]
+
+        self.assertEqual(event.metadata["limits"][4]["currency"], "EUR")
+
+
+    def test_quote_decimal_odds_requires_exact_decimal(self) -> None:
+        class DecimalSubclass(Decimal):
+            pass
+
+        quote = ProviderQuote(
+            provider_event_id="event-1",
+            provider_market_id="winner",
+            provider_selection_id="player-a",
+            decimal_odds=DecimalSubclass("2.0"),
+            observed_ts="2026-09-14T08:00:00+00:00",
+            sequence=1,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact Decimal"):
+            CanonicalNormalizer().normalize("fixture", quote)
 
 
 if __name__ == "__main__":

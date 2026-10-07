@@ -8,8 +8,8 @@ from autosport.providers import ProviderBatch, ProviderQuote
 from autosport.session import AutosportSession
 
 
-class _SingleReadSourceIdProvider:
-    """Provider whose validated source identity may not be re-read after acquisition."""
+class _BoundedReadSourceIdProvider:
+    """Provider identity may be read for ingestion fencing, not again post-commit."""
 
     def __init__(self) -> None:
         self.source_id_reads = 0
@@ -17,7 +17,7 @@ class _SingleReadSourceIdProvider:
     @property
     def source_id(self) -> str:
         self.source_id_reads += 1
-        if self.source_id_reads == 1:
+        if self.source_id_reads <= 2:
             return "fixture:committed-source"
         raise RuntimeError("source_id was re-read after ingestion commit")
 
@@ -40,14 +40,14 @@ class _SingleReadSourceIdProvider:
 
 class SessionObservationIdentityBindingTests(unittest.TestCase):
     def test_post_commit_readback_uses_ingestion_stats_source_identity(self) -> None:
-        provider = _SingleReadSourceIdProvider()
+        provider = _BoundedReadSourceIdProvider()
 
         with tempfile.TemporaryDirectory() as tmp:
             session = AutosportSession(tmp, "10000")
             try:
                 result = session.observe_provider_once(provider, max_items=10)
 
-                self.assertEqual(provider.source_id_reads, 1)
+                self.assertEqual(provider.source_id_reads, 2)
                 self.assertEqual(result.stats.source_id, "fixture:committed-source")
                 self.assertEqual(result.health.source_id, "fixture:committed-source")
                 self.assertEqual(result.health.total_accepted, 1)

@@ -415,8 +415,10 @@ _UK_UA = MappingProxyType(
             "відхилено={rejected}; поточних={current}; прапорці якості={quality_flags}."
         ),
         "ui.observation.quote": (
-            "{event_id} | {market_type} | {market_id} | {selection_id} | коефіцієнт {odds} | час джерела {source_time}"
+            "{event_id} | спорт {sport} | {market_type} | {market_id} | {selection_id} | "
+            "сторона {exchange_side} | коефіцієнт {odds} | час джерела {source_time}"
         ),
+        "ui.observation.unspecified": "не вказано",
         "ui.observation.unknown_time": "невідомий",
         "ui.observation.empty": "Поточні котирування ще відсутні.",
     }

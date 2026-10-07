@@ -1,14 +1,28 @@
 from __future__ import annotations
 
+import hashlib
 import json
+import ntpath
+import os
 import re
 import sqlite3
-from datetime import datetime
+import stat
+import uuid
+from contextlib import contextmanager, nullcontext
+from datetime import datetime, timezone
 from pathlib import Path
 from threading import RLock
-from typing import Iterable
+from typing import Final, Iterable, Iterator
 
 from .domain import MarketEvent
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    AuthorityRecord,
+    MonotonicAuthorityRecoveryRequiredError,
+    MonotonicAuthorityRollbackError,
+    MonotonicWorkspaceAuthority,
+)
+from .workspace_lock import WorkspaceEconomicLock
 
 
 _HISTORY_COLUMNS = (
@@ -49,6 +63,15 @@ _EXPECTED_TABLE_XINFO = {
         (3, "sequence", "INTEGER", 1, None, 0, 0),
         (4, "payload_json", "TEXT", 1, None, 0, 0),
     ),
+    "market_event_commit_order": (
+        (0, "dedupe_key", "TEXT", 0, None, 1, 0),
+        (1, "append_generation", "INTEGER", 1, None, 0, 0),
+    ),
+    "market_replay_cutoffs": (
+        (0, "cutoff_id", "TEXT", 0, None, 1, 0),
+        (1, "as_of", "TEXT", 1, None, 0, 0),
+        (2, "max_append_generation", "INTEGER", 1, None, 0, 0),
+    ),
 }
 _LEGACY_CURRENT_XINFO = (
     (0, "quote_key", "TEXT", 0, None, 1, 0),
@@ -59,6 +82,8 @@ _LEGACY_CURRENT_XINFO = (
 _EXPECTED_PRIMARY_KEYS = {
     "market_events": ("dedupe_key",),
     "current_quotes": ("source_id", "quote_key"),
+    "market_event_commit_order": ("dedupe_key",),
+    "market_replay_cutoffs": ("cutoff_id",),
 }
 _LEGACY_CURRENT_PRIMARY_KEYS = ("quote_key",)
 _CANONICAL_SECONDARY_INDEXES = {
@@ -72,12 +97,65 @@ _FORBIDDEN_TABLE_SQL = re.compile(
 )
 _SQLITE_INTEGER_MIN = -(2**63)
 _SQLITE_INTEGER_MAX = 2**63 - 1
+_REPLAY_CUTOFF_DOMAIN = "autosport.market-replay-cutoff.v1"
+_REPLAY_CUTOFF_MACHINE_DOMAIN: Final = "data.market-replay-causal-cutoff.v1"
+_REPLAY_CUTOFF_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-replay-cutoff:"
+_REPLAY_CUTOFF_STATE_SCHEMA: Final = "autosport.market-replay-cutoff.machine-state.v1"
+_REPLAY_CUTOFF_CORPUS_SCHEMA: Final = "autosport.market-replay-cutoff.corpus.v1"
+_REPLAY_CUTOFF_BINDING_SCHEMA: Final = "autosport.market-replay-cutoff.issuance-binding.v1"
+_APPEND_MACHINE_DOMAIN: Final = "data.market-event-positive-append.v1"
+_APPEND_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-positive-append:"
+_APPEND_STATE_SCHEMA: Final = "autosport.market-event-positive-append.chain.v1"
+_APPEND_BINDING_SCHEMA: Final = "autosport.market-event-positive-append.binding.v1"
+_APPEND_BASELINE_SCHEMA: Final = "autosport.market-event-generation-zero-baseline.v1"
+_APPEND_BASELINE_BINDING_SCHEMA: Final = "autosport.market-event-generation-zero-baseline.binding.v1"
+_APPEND_BASELINE_TX_RE: Final = re.compile(r"^baseline-(?P<nonce>[0-9a-f]{32})$")
+_APPEND_TX_RE: Final = re.compile(
+    r"^append-(?P<start>[1-9][0-9]*)-(?P<end>[1-9][0-9]*)-(?P<nonce>[0-9a-f]{32})$"
+)
+_COMMIT_ORDER_IMMUTABILITY_TRIGGERS: Final = {
+    "market_event_commit_order_no_delete": """CREATE TRIGGER market_event_commit_order_no_delete
+BEFORE DELETE ON market_event_commit_order
+BEGIN
+    SELECT RAISE(ABORT, 'market event append-generation rows are immutable');
+END""",
+    "market_event_commit_order_no_update": """CREATE TRIGGER market_event_commit_order_no_update
+BEFORE UPDATE ON market_event_commit_order
+BEGIN
+    SELECT RAISE(ABORT, 'market event append-generation rows are immutable');
+END""",
+}
+_REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS: Final = {
+    "market_replay_cutoffs_no_delete": """CREATE TRIGGER market_replay_cutoffs_no_delete
+BEFORE DELETE ON market_replay_cutoffs
+BEGIN
+    SELECT RAISE(ABORT, 'market replay cutoff rows are immutable');
+END""",
+    "market_replay_cutoffs_no_update": """CREATE TRIGGER market_replay_cutoffs_no_update
+BEFORE UPDATE ON market_replay_cutoffs
+BEGIN
+    SELECT RAISE(ABORT, 'market replay cutoff rows are immutable');
+END""",
+}
 
 
 def _timezone_aware_instant(value: str, field_name: str) -> datetime:
+    if type(value) is not str:
+        raise ValueError(f"{field_name} must be an exact string")
+    # datetime.fromisoformat() silently truncates fractional-second/offset
+    # precision beyond microseconds. Reject only discarded non-zero digits so
+    # D+submicrosecond evidence can never be rounded backward onto cutoff D.
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{field_name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (AttributeError, ValueError) as exc:
+    except ValueError as exc:
         raise ValueError(f"{field_name} must be valid ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware ISO-8601")
@@ -86,6 +164,161 @@ def _timezone_aware_instant(value: str, field_name: str) -> datetime:
 
 def _observed_instant(value: str) -> datetime:
     return _timezone_aware_instant(value, "observed_ts")
+
+
+def _validate_local_receipt_order(
+    event: MarketEvent,
+    *,
+    require_supported_precision: bool = True,
+) -> tuple[datetime, datetime] | None:
+    """Validate local receipt order without laundering unsupported clock precision."""
+
+    if type(require_supported_precision) is not bool:
+        raise TypeError("require_supported_precision must be a bool")
+    try:
+        observed = _observed_instant(event.observed_ts)
+        ingest = _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    except ValueError as exc:
+        if (
+            not require_supported_precision
+            and "precision finer than microseconds is unsupported" in str(exc)
+        ):
+            # Live/raw mirror state may retain exact unsupported clock text for audit,
+            # but decision views independently fail closed on that precision. Do not
+            # round it merely to decide chronology here.
+            return None
+        raise
+    if ingest < observed:
+        raise ValueError("ingest_ts must not precede observed_ts")
+    return observed, ingest
+
+
+def _canonical_replay_cutoff(value: str) -> str:
+    return _timezone_aware_instant(value, "as_of").astimezone(timezone.utc).isoformat()
+
+
+def _database_authority_key(path: Path) -> str:
+    """Return one machine-authority key for filesystem-equivalent database names."""
+
+    name = path.name
+    if os.name == "nt":
+        # A new database can be opened concurrently through Win32 case/trailing-dot
+        # aliases before Path.resolve() has an existing target from which to recover
+        # canonical spelling. Those aliases still identify one file, so they must not
+        # mint independent append/cutoff authority namespaces.
+        name = ntpath.normcase(name).rstrip(" .")
+    if not name:
+        raise ValueError("market database pathname has no canonical authority name")
+    return name
+
+
+def _replay_cutoff_id(canonical_as_of: str) -> str:
+    payload = f"{_REPLAY_CUTOFF_DOMAIN}\0{canonical_as_of}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _canonical_sha256(payload: object) -> str:
+    return hashlib.sha256(_canonical_json(payload).encode("utf-8")).hexdigest()
+
+
+def _append_baseline_state_sha256(
+    entries: tuple[tuple[str, str], ...],
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_BASELINE_SCHEMA,
+            "entries": [list(entry) for entry in entries],
+        }
+    )
+
+
+def _append_baseline_binding_sha256(state_sha256: str) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_BASELINE_BINDING_SCHEMA,
+            "baseline_state_sha256": state_sha256,
+        }
+    )
+
+
+def _append_state_step_sha256(
+    previous_state_sha256: str | None,
+    *,
+    append_generation: int,
+    dedupe_key: str,
+    payload_json: str,
+) -> str:
+    if (
+        type(append_generation) is not int
+        or append_generation <= 0
+        or type(dedupe_key) is not str
+        or not dedupe_key
+        or type(payload_json) is not str
+    ):
+        raise ValueError("positive market append authority entry is invalid")
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_STATE_SCHEMA,
+            "previous_state_sha256": previous_state_sha256,
+            "append_generation": append_generation,
+            "dedupe_key": dedupe_key,
+            "payload_json": payload_json,
+        }
+    )
+
+
+def _append_binding_sha256(
+    *,
+    previous_state_sha256: str | None,
+    intended_state_sha256: str,
+    entries: tuple[tuple[int, str, str], ...],
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _APPEND_BINDING_SCHEMA,
+            "previous_state_sha256": previous_state_sha256,
+            "intended_state_sha256": intended_state_sha256,
+            "entries": [list(entry) for entry in entries],
+        }
+    )
+
+
+def _replay_cutoff_state_sha256(
+    rows: tuple[tuple[str, str, int], ...],
+    *,
+    sealed_corpus_sha256: str | None,
+) -> str | None:
+    if not rows:
+        if sealed_corpus_sha256 is not None:
+            raise ValueError("empty replay cutoff state cannot seal a corpus")
+        return None
+    if type(sealed_corpus_sha256) is not str or len(sealed_corpus_sha256) != 64:
+        raise ValueError("replay cutoff state requires a canonical sealed corpus digest")
+    return _canonical_sha256(
+        {
+            "schema": _REPLAY_CUTOFF_STATE_SCHEMA,
+            "cutoffs": [list(row) for row in rows],
+            "sealed_corpus_sha256": sealed_corpus_sha256,
+        }
+    )
+
+
+def _replay_cutoff_binding_sha256(
+    *,
+    cutoff_id: str,
+    canonical_as_of: str,
+    max_append_generation: int,
+    corpus_sha256: str,
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": _REPLAY_CUTOFF_BINDING_SCHEMA,
+            "cutoff_id": cutoff_id,
+            "as_of": canonical_as_of,
+            "max_append_generation": max_append_generation,
+            "corpus_sha256": corpus_sha256,
+        }
+    )
 
 
 def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
@@ -182,8 +415,7 @@ def _validate_persistable_sequence(value: object) -> int:
 def _validate_incoming_event(event: MarketEvent) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
     _validate_persistable_sequence(event.sequence)
-    _observed_instant(event.observed_ts)
-    _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    _validate_local_receipt_order(event)
     try:
         raw = event.to_dict()
         payload = _canonical_json(raw)
@@ -226,6 +458,7 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
     event = MarketEvent.from_dict(raw)
     if canonical_raw != _canonical_payload(event):
         raise ValueError("stored market event payload is not canonical")
+    _validate_local_receipt_order(event)
 
     expected = (
         ("dedupe_key", dedupe_key, event.dedupe_key),
@@ -351,6 +584,22 @@ def _validate_table_shape(
     expected_xinfo: tuple[tuple[object, ...], ...],
     expected_primary_key: tuple[str, ...],
 ) -> None:
+    # SQLite resolves TEMP objects before main for unqualified names. Reject both
+    # exact-name shadows (TEMP TABLE/VIEW) and TEMP triggers/indexes attached to a
+    # canonical table before any PRAGMA or data statement can resolve through the
+    # wrong schema.
+    temp_objects = connection.execute(
+        """SELECT type, name, tbl_name
+           FROM sqlite_temp_master
+           WHERE name=? OR tbl_name=?
+           ORDER BY type, name""",
+        (table_name, table_name),
+    ).fetchall()
+    if temp_objects:
+        raise ValueError(
+            f"{table_name} schema is not canonical: temporary schema objects are not allowed"
+        )
+
     schema_object = _schema_object(connection, table_name)
     if schema_object is None or schema_object[0] != "table":
         raise ValueError(f"{table_name} schema is not canonical: expected table")
@@ -391,10 +640,37 @@ def _validate_table_shape(
         raise ValueError(f"{table_name} schema is not canonical: foreign keys are not allowed")
 
     triggers = connection.execute(
-        "SELECT name FROM sqlite_master WHERE type='trigger' AND tbl_name=? ORDER BY name",
+        "SELECT name, sql FROM sqlite_master "
+        "WHERE type='trigger' AND tbl_name=? ORDER BY name",
         (table_name,),
     ).fetchall()
-    if triggers:
+    if table_name == "market_event_commit_order":
+        expected_triggers = tuple(
+            sorted(_COMMIT_ORDER_IMMUTABILITY_TRIGGERS.items())
+        )
+        actual_triggers = tuple(
+            (name, sql)
+            for name, sql in triggers
+            if isinstance(name, str) and isinstance(sql, str)
+        )
+        if actual_triggers != expected_triggers:
+            raise ValueError(
+                "market_event_commit_order schema is not canonical: "
+                "immutable append-generation triggers mismatch"
+            )
+    elif table_name == "market_replay_cutoffs":
+        expected_triggers = tuple(sorted(_REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.items()))
+        actual_triggers = tuple(
+            (name, sql)
+            for name, sql in triggers
+            if isinstance(name, str) and isinstance(sql, str)
+        )
+        if actual_triggers != expected_triggers:
+            raise ValueError(
+                "market_replay_cutoffs schema is not canonical: "
+                "immutable cutoff triggers mismatch"
+            )
+    elif triggers:
         raise ValueError(f"{table_name} schema is not canonical: triggers are not allowed")
 
     index_rows = connection.execute(f"PRAGMA index_list({_quoted_identifier(table_name)})").fetchall()
@@ -528,17 +804,130 @@ class SQLiteMarketStore:
     """
 
     def __init__(self, path: str | Path = "autosport.db") -> None:
-        self.path = Path(path)
+        # Freeze one filesystem-canonical database pathname before SQLite or any
+        # independent authority derives identity from it. In particular, a file
+        # symlink alias must not derive a second independent authority key for the
+        # same durable database.
+        self.path = Path(path).resolve(strict=False)
         self._connection_lock = RLock()
+
+        # Ensure even a brand-new database has an inode that can be witnessed both
+        # before and after sqlite3.connect(). Without this pre/post witness, a
+        # pathname replacement in the connect -> first-lstat window could leave the
+        # SQLite connection bound to one inode while machine authority trusts another.
+        try:
+            file_descriptor = os.open(
+                self.path,
+                os.O_WRONLY | os.O_CREAT | os.O_EXCL,
+                0o600,
+            )
+        except FileExistsError:
+            pass
+        else:
+            os.close(file_descriptor)
+
+        pre_open_identity = self._current_database_path_identity()
         self.connection = sqlite3.connect(self.path, check_same_thread=False)
         try:
+            opened_identity = self._current_database_path_identity()
+            if not os.path.samestat(pre_open_identity, opened_identity):
+                raise ValueError(
+                    "market database pathname changed while opening database"
+                )
+            self._database_identity = opened_identity
             self.connection.execute("PRAGMA journal_mode=WAL")
             self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()
-            self._rebuild_current_quotes()
-        except Exception:
+            append_authority = self._market_append_authority()
+            # Baseline PREPARE/COMMIT is part of the same product-owned append
+            # authority lifecycle as positive generations. Keep it under the sibling
+            # issuance lock so a concurrent constructor cannot mistake a live
+            # generation-zero PREPARE for abandoned crash state.
+            with self._market_append_issuance_lock(append_authority):
+                self._ensure_market_append_baseline_authority()
+                self._rebuild_current_quotes(
+                    append_authority=append_authority,
+                )
+        except BaseException:
             self.connection.close()
             raise
+
+    @classmethod
+    def open_frozen_prefix_reader(
+        cls,
+        path: str | Path,
+    ) -> "SQLiteMarketStore":
+        """Open one existing database for independently proven prefix reads only.
+
+        This deliberately bypasses schema initialization, current-projection rebuild,
+        and current-tail append recovery. It is valid only when the caller already
+        owns a durable append-generation frontier and will read through
+        events_at_committed_append_boundary(), which independently proves that exact
+        prefix against machine authority.
+        """
+
+        reader = cls.__new__(cls)
+        reader.path = Path(path).resolve(strict=False)
+        reader._connection_lock = RLock()
+        pre_open_identity = reader._current_database_path_identity()
+        database_uri = reader.path.as_uri() + "?mode=ro"
+        try:
+            connection = sqlite3.connect(
+                database_uri,
+                uri=True,
+                check_same_thread=False,
+            )
+        except sqlite3.Error as exc:
+            raise ValueError(
+                "cannot open existing market database for frozen-prefix recovery"
+            ) from exc
+        reader.connection = connection
+        try:
+            opened_identity = reader._current_database_path_identity()
+            if not os.path.samestat(pre_open_identity, opened_identity):
+                raise ValueError(
+                    "market database pathname changed while opening "
+                    "frozen-prefix reader"
+                )
+            reader._database_identity = opened_identity
+            connection.execute("PRAGMA query_only=ON")
+            for table_name in (
+                "market_events",
+                "market_event_commit_order",
+                "market_replay_cutoffs",
+            ):
+                _validate_canonical_table(connection, table_name)
+            reader._require_database_path_identity()
+        except BaseException:
+            connection.close()
+            raise
+        return reader
+
+    def _current_database_path_identity(self) -> os.stat_result:
+        try:
+            metadata = self.path.lstat()
+        except OSError as exc:
+            raise ValueError(
+                "market database pathname is missing or inaccessible"
+            ) from exc
+        if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+            raise ValueError(
+                "market database pathname must be a single-link regular file"
+            )
+        return metadata
+
+    def _require_database_path_identity(self) -> None:
+        current = self._current_database_path_identity()
+        if not os.path.samestat(self._database_identity, current):
+            raise ValueError(
+                "market database pathname no longer identifies the opened database"
+            )
+
+    def _commit_stable_database_path(self) -> None:
+        """Commit only while the canonical pathname still identifies this database."""
+        self._require_database_path_identity()
+        self.connection.commit()
+        self._require_database_path_identity()
 
     def _create_current_quotes(self) -> None:
         self.connection.execute(
@@ -587,11 +976,11 @@ class SQLiteMarketStore:
             self.connection.execute("DROP TABLE current_quotes")
             self._create_current_quotes()
             _validate_canonical_table(self.connection, "current_quotes")
-        except Exception:
+        except BaseException:
             self.connection.rollback()
             raise
         else:
-            self.connection.commit()
+            self._commit_stable_database_path()
 
     def _init_schema(self) -> None:
         # Validate any pre-existing tables before creating anything else. Exact
@@ -617,49 +1006,1128 @@ class SQLiteMarketStore:
         else:
             self._create_current_quotes()
 
-        for table_name in _EXPECTED_TABLE_XINFO:
-            _validate_canonical_table(self.connection, table_name)
-        _ensure_canonical_secondary_indexes(self.connection)
-        self.connection.commit()
-
-    def _rebuild_current_quotes(self) -> None:
-        """Repair provider-aware current projection from one write-locked history snapshot."""
-        latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
-        history_by_dedupe: dict[str, MarketEvent] = {}
+        # The causal companion schema and baseline backfill are one crash-atomic
+        # migration. A hard failure cannot leave both tables durable but empty and
+        # thereby strand pre-v1 history without commit-generation witnesses.
         self.connection.execute("BEGIN IMMEDIATE")
         try:
+            commit_order_state = _schema_object(
+                self.connection, "market_event_commit_order"
+            )
+            replay_cutoff_state = _schema_object(
+                self.connection, "market_replay_cutoffs"
+            )
+            if (commit_order_state is None) != (replay_cutoff_state is None):
+                raise ValueError(
+                    "causal replay schema is incomplete: "
+                    "commit order/cutoff tables disagree"
+                )
+            initialize_causal_replay = commit_order_state is None
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS market_event_commit_order (
+                    dedupe_key TEXT PRIMARY KEY,
+                    append_generation INTEGER NOT NULL
+                )"""
+            )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS market_replay_cutoffs (
+                    cutoff_id TEXT PRIMARY KEY,
+                    as_of TEXT NOT NULL,
+                    max_append_generation INTEGER NOT NULL
+                )"""
+            )
+            if initialize_causal_replay:
+                for trigger_sql in _COMMIT_ORDER_IMMUTABILITY_TRIGGERS.values():
+                    self.connection.execute(trigger_sql)
+                for trigger_sql in _REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.values():
+                    self.connection.execute(trigger_sql)
+            self.connection.execute(
+                """CREATE INDEX IF NOT EXISTS idx_market_event_commit_generation
+                   ON market_event_commit_order(append_generation)"""
+            )
+            if _canonical_index_terms(
+                self.connection, "idx_market_event_commit_generation"
+            ) != ("append_generation",):
+                raise ValueError(
+                    "market event append-generation index is not canonical"
+                )
+            if initialize_causal_replay:
+                # Existing pre-v1 history predates product-owned append-generation
+                # evidence. Keep it as one coarse generation-0 baseline rather than
+                # inventing false relative commit chronology from event timestamps.
+                self.connection.execute(
+                    """INSERT INTO market_event_commit_order
+                       (dedupe_key, append_generation)
+                       SELECT dedupe_key, 0 FROM market_events"""
+                )
+
+            for table_name in _EXPECTED_TABLE_XINFO:
+                _validate_canonical_table(self.connection, table_name)
+            _ensure_canonical_secondary_indexes(self.connection)
+            self._validate_causal_replay_state()
+        except BaseException:
+            self.connection.rollback()
+            raise
+        else:
+            self._commit_stable_database_path()
+
+    def _validate_causal_replay_state(self) -> None:
+        """Fail closed if durable append-generation/cutoff evidence is inconsistent."""
+
+        # Cutoff immutability is part of the durable authority, not an optional
+        # optimization. Revalidate every table read below so SQLite TEMP namespace
+        # shadows cannot redirect causal validation away from canonical main history.
+        _validate_canonical_table(self.connection, "market_events")
+        _validate_canonical_table(self.connection, "market_event_commit_order")
+        _validate_canonical_table(self.connection, "market_replay_cutoffs")
+
+        missing_commit = self.connection.execute(
+            """SELECT 1
+               FROM market_events AS m
+               LEFT JOIN market_event_commit_order AS c
+                 ON c.dedupe_key = m.dedupe_key
+               WHERE c.dedupe_key IS NULL
+               LIMIT 1"""
+        ).fetchone()
+        orphan_commit = self.connection.execute(
+            """SELECT 1
+               FROM market_event_commit_order AS c
+               LEFT JOIN market_events AS m
+                 ON m.dedupe_key = c.dedupe_key
+               WHERE m.dedupe_key IS NULL
+               LIMIT 1"""
+        ).fetchone()
+        if missing_commit is not None or orphan_commit is not None:
+            raise ValueError(
+                "market event append-generation authority does not exactly cover history"
+            )
+
+        invalid_generation = self.connection.execute(
+            """SELECT 1 FROM market_event_commit_order
+               WHERE typeof(append_generation) != 'integer'
+                  OR append_generation < 0
+               LIMIT 1"""
+        ).fetchone()
+        if invalid_generation is not None:
+            raise ValueError("market event append generation is invalid")
+
+        duplicate_positive = self.connection.execute(
+            """SELECT 1
+               FROM market_event_commit_order
+               WHERE append_generation > 0
+               GROUP BY append_generation
+               HAVING COUNT(*) != 1
+               LIMIT 1"""
+        ).fetchone()
+        if duplicate_positive is not None:
+            raise ValueError("positive market event append generations are not unique")
+
+        positive_shape = self.connection.execute(
+            """SELECT COUNT(*), COALESCE(MAX(append_generation), 0)
+               FROM market_event_commit_order
+               WHERE append_generation > 0"""
+        ).fetchone()
+        if positive_shape is None:
+            raise RuntimeError("cannot verify market event append generations")
+        positive_count, max_positive = positive_shape
+        if (
+            type(positive_count) is not int
+            or type(max_positive) is not int
+            or positive_count != max_positive
+        ):
+            raise ValueError("positive market event append generations are not contiguous")
+
+    def _next_append_generation(self) -> int:
+        row = self.connection.execute(
+            "SELECT COALESCE(MAX(append_generation), 0) "
+            "FROM market_event_commit_order"
+        ).fetchone()
+        if row is None or type(row[0]) is not int or row[0] < 0:
+            raise ValueError("cannot resolve market event append generation")
+        if row[0] >= _SQLITE_INTEGER_MAX:
+            raise OverflowError("market event append generation exhausted")
+        return row[0] + 1
+
+    def _market_append_authority(self) -> MonotonicWorkspaceAuthority:
+        self._require_database_path_identity()
+        database_path = self.path
+        return MonotonicWorkspaceAuthority(
+            workspace=database_path.parent,
+            domain=_APPEND_MACHINE_DOMAIN,
+            key=f"{_APPEND_MACHINE_KEY_PREFIX}{_database_authority_key(database_path)}",
+        )
+
+    @staticmethod
+    def _market_append_issuance_lock(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> WorkspaceEconomicLock:
+        # Serialize product append PREPARE -> SQLite COMMIT -> machine COMMIT.
+        # Direct SQLite writers do not participate in this lock, so cutoff issuance
+        # still independently recomputes and proves the complete positive chain.
+        return WorkspaceEconomicLock(
+            authority.journal_dir / "market-positive-append-issuance"
+        )
+
+    def _validated_generation_zero_entries(
+        self,
+    ) -> tuple[tuple[str, str], ...]:
+        qualified_columns = ",".join(
+            f"m.{column}" for column in _HISTORY_COLUMNS
+        )
+        rows = self.connection.execute(
+            f"""SELECT {qualified_columns}
+                FROM market_event_commit_order AS c
+                JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                WHERE c.append_generation = 0
+                ORDER BY m.dedupe_key"""
+        ).fetchall()
+        entries: list[tuple[str, str]] = []
+        for row in rows:
+            history_row = tuple(row)
+            _event_from_history_row(history_row)
+            dedupe_key = history_row[0]
+            payload_json = history_row[-1]
+            if type(dedupe_key) is not str or type(payload_json) is not str:
+                raise ValueError("generation-zero market baseline row is invalid")
+            entries.append((dedupe_key, payload_json))
+        return tuple(entries)
+
+    def _generation_zero_baseline_state_sha256(self) -> str:
+        return _append_baseline_state_sha256(
+            self._validated_generation_zero_entries()
+        )
+
+    def _ensure_market_append_baseline_authority(self) -> None:
+        """Seal baseline membership without claiming historical receipt chronology."""
+
+        authority = self._market_append_authority()
+        observed_state_sha256 = self._generation_zero_baseline_state_sha256()
+        history = authority.read_history()
+
+        committed = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if not committed:
+            if history:
+                pending = history[-1]
+                expected_binding_sha256 = _append_baseline_binding_sha256(
+                    observed_state_sha256
+                )
+                if (
+                    pending.phase is not AuthorityPhase.PREPARE
+                    or _APPEND_BASELINE_TX_RE.fullmatch(pending.tx_id) is None
+                    or pending.previous_committed_state_sha256 is not None
+                    or pending.intended_state_sha256 != observed_state_sha256
+                    or pending.semantic_binding_sha256 != expected_binding_sha256
+                ):
+                    raise MonotonicAuthorityRollbackError(
+                        "market append authority has noncanonical generation-zero PREPARE"
+                    )
+                try:
+                    authority.recover(
+                        observed_state_sha256=observed_state_sha256,
+                    )
+                except MonotonicAuthorityRecoveryRequiredError:
+                    authority.recover(
+                        observed_state_sha256=observed_state_sha256,
+                        tx_id=pending.tx_id,
+                        semantic_binding_sha256=pending.semantic_binding_sha256,
+                    )
+                history = authority.read_history()
+                committed = tuple(
+                    record
+                    for record in history
+                    if record.phase is AuthorityPhase.COMMIT
+                )
+
+            if not committed:
+                binding_sha256 = _append_baseline_binding_sha256(
+                    observed_state_sha256
+                )
+                tx_id = f"baseline-{uuid.uuid4().hex}"
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed_state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                authority.recover(
+                    observed_state_sha256=observed_state_sha256,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                history = authority.read_history()
+                committed = tuple(
+                    record
+                    for record in history
+                    if record.phase is AuthorityPhase.COMMIT
+                )
+
+        first_commit = committed[0]
+        if (
+            _APPEND_BASELINE_TX_RE.fullmatch(first_commit.tx_id) is None
+            or first_commit.previous_committed_state_sha256 is not None
+            or first_commit.intended_state_sha256 != observed_state_sha256
+            or first_commit.semantic_binding_sha256
+            != _append_baseline_binding_sha256(observed_state_sha256)
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "generation-zero market baseline is missing, changed, or unproven"
+            )
+
+    @staticmethod
+    def _append_authority_committed_tip(
+        history: tuple[AuthorityRecord, ...],
+    ) -> tuple[int, str]:
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if not commits:
+            raise MonotonicAuthorityRollbackError(
+                "market append authority lacks a committed generation-zero baseline"
+            )
+        baseline = commits[0]
+        if (
+            _APPEND_BASELINE_TX_RE.fullmatch(baseline.tx_id) is None
+            or baseline.previous_committed_state_sha256 is not None
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "market append authority baseline history is invalid"
+            )
+
+        expected_start = 1
+        committed_head = 0
+        committed_state_sha256 = baseline.intended_state_sha256
+        for record in commits[1:]:
+            match = _APPEND_TX_RE.fullmatch(record.tx_id)
+            if match is None:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has invalid transaction identity"
+                )
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+            if start != expected_start or end < start:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history is non-contiguous"
+                )
+            if record.previous_committed_state_sha256 != committed_state_sha256:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has inconsistent state ancestry"
+                )
+            committed_head = end
+            committed_state_sha256 = record.intended_state_sha256
+            expected_start = end + 1
+        return committed_head, committed_state_sha256
+
+    @staticmethod
+    def _require_canonical_append_authority_bindings(
+        history: tuple[AuthorityRecord, ...],
+        entries: tuple[tuple[int, str, str], ...],
+        *,
+        baseline_state_sha256: str,
+    ) -> None:
+        """Prove every committed append transition carries the canonical product binding."""
+
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if not commits:
+            raise MonotonicAuthorityRollbackError(
+                "market append authority lacks a committed generation-zero baseline"
+            )
+
+        baseline = commits[0]
+        expected_baseline_binding = _append_baseline_binding_sha256(
+            baseline_state_sha256
+        )
+        if (
+            _APPEND_BASELINE_TX_RE.fullmatch(baseline.tx_id) is None
+            or baseline.previous_committed_state_sha256 is not None
+            or baseline.intended_state_sha256 != baseline_state_sha256
+            or baseline.semantic_binding_sha256 != expected_baseline_binding
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "market append authority baseline semantic binding is invalid"
+            )
+
+        entry_index = 0
+        previous_state_sha256 = baseline_state_sha256
+        expected_start = 1
+        for record in commits[1:]:
+            match = _APPEND_TX_RE.fullmatch(record.tx_id)
+            if match is None:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has invalid transaction identity"
+                )
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+            if start != expected_start or end < start:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history is non-contiguous"
+                )
+
+            count = end - start + 1
+            transition_entries = entries[entry_index : entry_index + count]
+            if (
+                len(transition_entries) != count
+                or tuple(entry[0] for entry in transition_entries)
+                != tuple(range(start, end + 1))
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority transition does not match durable entries"
+                )
+
+            intended_state_sha256 = previous_state_sha256
+            for generation, dedupe_key, payload_json in transition_entries:
+                intended_state_sha256 = _append_state_step_sha256(
+                    intended_state_sha256,
+                    append_generation=generation,
+                    dedupe_key=dedupe_key,
+                    payload_json=payload_json,
+                )
+
+            expected_binding_sha256 = _append_binding_sha256(
+                previous_state_sha256=previous_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                entries=transition_entries,
+            )
+            if (
+                record.previous_committed_state_sha256 != previous_state_sha256
+                or record.intended_state_sha256 != intended_state_sha256
+                or record.semantic_binding_sha256 != expected_binding_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority semantic binding is invalid"
+                )
+
+            entry_index += count
+            expected_start = end + 1
+            previous_state_sha256 = intended_state_sha256
+
+        if entry_index != len(entries):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append authority does not cover durable entries"
+            )
+
+    @staticmethod
+    def _require_canonical_pending_append_binding(
+        pending: AuthorityRecord,
+        entries: tuple[tuple[int, str, str], ...],
+        *,
+        committed_head: int,
+        committed_state_sha256: str,
+    ) -> None:
+        """Reject a non-product PREPARE before recovery can turn it into COMMIT."""
+
+        match = _APPEND_TX_RE.fullmatch(pending.tx_id)
+        if (
+            pending.phase is not AuthorityPhase.PREPARE
+            or match is None
+            or pending.previous_committed_state_sha256 != committed_state_sha256
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append authority has noncanonical pending transition"
+            )
+
+        start = int(match.group("start"))
+        end = int(match.group("end"))
+        transition_entries = entries[committed_head:]
+        if (
+            start != committed_head + 1
+            or end < start
+            or len(transition_entries) != end - start + 1
+            or tuple(entry[0] for entry in transition_entries)
+            != tuple(range(start, end + 1))
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append PREPARE does not match durable entries"
+            )
+
+        intended_state_sha256 = committed_state_sha256
+        for generation, dedupe_key, payload_json in transition_entries:
+            intended_state_sha256 = _append_state_step_sha256(
+                intended_state_sha256,
+                append_generation=generation,
+                dedupe_key=dedupe_key,
+                payload_json=payload_json,
+            )
+        expected_binding_sha256 = _append_binding_sha256(
+            previous_state_sha256=committed_state_sha256,
+            intended_state_sha256=intended_state_sha256,
+            entries=transition_entries,
+        )
+        if (
+            pending.intended_state_sha256 != intended_state_sha256
+            or pending.semantic_binding_sha256 != expected_binding_sha256
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append PREPARE semantic binding is invalid"
+            )
+
+    def _positive_append_generation_head(self) -> int:
+        row = self.connection.execute(
+            """SELECT COUNT(*), COALESCE(MAX(append_generation), 0)
+               FROM market_event_commit_order
+               WHERE append_generation > 0"""
+        ).fetchone()
+        if (
+            row is None
+            or type(row[0]) is not int
+            or type(row[1]) is not int
+            or row[0] != row[1]
+            or row[1] < 0
+        ):
+            raise ValueError("positive market event append generations are not contiguous")
+        return row[1]
+
+    def _validated_positive_append_entries(
+        self,
+        *,
+        max_generation: int | None = None,
+    ) -> tuple[tuple[int, str, str], ...]:
+        qualified_columns = ",".join(
+            f"m.{column}" for column in _HISTORY_COLUMNS
+        )
+        if (
+            max_generation is not None
+            and (type(max_generation) is not int or max_generation < 0)
+        ):
+            raise ValueError("max_generation must be a non-negative int")
+        if max_generation is None:
+            rows = self.connection.execute(
+                f"""SELECT c.append_generation, {qualified_columns}
+                    FROM market_event_commit_order AS c
+                    JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                    WHERE c.append_generation > 0
+                    ORDER BY c.append_generation"""
+            ).fetchall()
+        else:
+            rows = self.connection.execute(
+                f"""SELECT c.append_generation, {qualified_columns}
+                    FROM market_event_commit_order AS c
+                    JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                    WHERE c.append_generation > 0
+                      AND c.append_generation <= ?
+                    ORDER BY c.append_generation""",
+                (max_generation,),
+            ).fetchall()
+        entries: list[tuple[int, str, str]] = []
+        expected_generation = 1
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS) + 1:
+                raise ValueError("positive market append authority row has invalid shape")
+            generation = row[0]
+            history_row = tuple(row[1:])
+            if type(generation) is not int or generation != expected_generation:
+                raise ValueError("positive market append authority is non-contiguous")
+            _event_from_history_row(history_row)
+            dedupe_key = history_row[0]
+            payload_json = history_row[-1]
+            if type(dedupe_key) is not str or type(payload_json) is not str:
+                raise ValueError("positive market append authority row is invalid")
+            entries.append((generation, dedupe_key, payload_json))
+            expected_generation += 1
+        return tuple(entries)
+
+    @staticmethod
+    def _append_state_from_entries(
+        entries: tuple[tuple[int, str, str], ...],
+        *,
+        baseline_state_sha256: str,
+    ) -> str:
+        state_sha256 = baseline_state_sha256
+        expected_generation = 1
+        for generation, dedupe_key, payload_json in entries:
+            if generation != expected_generation:
+                raise ValueError("positive market append authority is non-contiguous")
+            state_sha256 = _append_state_step_sha256(
+                state_sha256,
+                append_generation=generation,
+                dedupe_key=dedupe_key,
+                payload_json=payload_json,
+            )
+            expected_generation += 1
+        return state_sha256
+
+    def _recover_positive_append_authority(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[int, str]:
+        history = authority.read_history()
+        if history and history[-1].phase is AuthorityPhase.PREPARE:
+            pending = history[-1]
+            entries = self._validated_positive_append_entries()
+            baseline_state_sha256 = self._generation_zero_baseline_state_sha256()
+            committed_head, committed_state_sha256 = (
+                self._append_authority_committed_tip(history)
+            )
+            if len(entries) < committed_head:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append chronology is missing durable committed entries"
+                )
+            self._require_canonical_append_authority_bindings(
+                history,
+                entries[:committed_head],
+                baseline_state_sha256=baseline_state_sha256,
+            )
+            observed_state_sha256 = self._append_state_from_entries(
+                entries,
+                baseline_state_sha256=baseline_state_sha256,
+            )
+            try:
+                authority.recover(observed_state_sha256=observed_state_sha256)
+            except MonotonicAuthorityRecoveryRequiredError:
+                self._require_canonical_pending_append_binding(
+                    pending,
+                    entries,
+                    committed_head=committed_head,
+                    committed_state_sha256=committed_state_sha256,
+                )
+                authority.recover(
+                    observed_state_sha256=observed_state_sha256,
+                    tx_id=pending.tx_id,
+                    semantic_binding_sha256=pending.semantic_binding_sha256,
+                )
+            history = authority.read_history()
+        committed_head, committed_state_sha256 = (
+            self._append_authority_committed_tip(history)
+        )
+
+        # A matching numeric head is not sufficient authority.  A direct SQLite
+        # writer can coherently rewrite an already-issued positive MarketEvent while
+        # preserving every generation number.  Recompute the complete product-owned
+        # chain before any caller is allowed to extend or rely on that authority.
+        entries = self._validated_positive_append_entries()
+        baseline_state_sha256 = self._generation_zero_baseline_state_sha256()
+        observed_state_sha256 = self._append_state_from_entries(
+            entries,
+            baseline_state_sha256=baseline_state_sha256,
+        )
+        self._require_canonical_append_authority_bindings(
+            history,
+            entries,
+            baseline_state_sha256=baseline_state_sha256,
+        )
+        observed_head = entries[-1][0] if entries else 0
+        if (
+            observed_head != committed_head
+            or observed_state_sha256 != committed_state_sha256
+        ):
+            raise MonotonicAuthorityRollbackError(
+                "positive market append chronology is missing, forged, or unproven"
+            )
+        return committed_head, committed_state_sha256
+
+    def _require_product_issued_positive_history(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+    ) -> None:
+        # Cutoff issuance runs this while holding BEGIN IMMEDIATE, so an
+        # uncooperating direct SQLite writer cannot change the corpus between this
+        # proof and cutoff publication.  _recover_positive_append_authority performs
+        # the full baseline + positive-chain digest proof, not merely a head check.
+        self._recover_positive_append_authority(authority)
+
+    def _require_committed_append_authority_through(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        max_generation: int,
+    ) -> frozenset[int]:
+        """Prove a frozen cutoff is an exact committed append transition prefix.
+
+        This deliberately does not recover a pending append. Existing cutoffs must
+        remain readable while a newer live writer owns PREPARE, but they may never
+        rely on a SQLite generation that lacks an independently committed product
+        append transition. A cutoff inside one atomic multi-event append batch is
+        likewise invalid: only the batch's committed end generation was ever a
+        product-issued durable state.
+        """
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+        history = authority.read_history()
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if not commits:
+            raise MonotonicAuthorityRollbackError(
+                "market append authority lacks a committed generation-zero baseline"
+            )
+
+        prefix_commits: list[AuthorityRecord] = [commits[0]]
+        committed_boundaries = {0}
+        covered_generation = 0
+        expected_start = 1
+        for record in commits[1:]:
+            if covered_generation == max_generation:
+                break
+            match = _APPEND_TX_RE.fullmatch(record.tx_id)
+            if match is None:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history has invalid transaction identity"
+                )
+            start = int(match.group("start"))
+            end = int(match.group("end"))
+            if start != expected_start or end < start:
+                raise MonotonicAuthorityRollbackError(
+                    "positive market append authority history is non-contiguous"
+                )
+            if end > max_generation:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff is not an exact committed append transition boundary"
+                )
+            prefix_commits.append(record)
+            committed_boundaries.add(end)
+            covered_generation = end
+            expected_start = end + 1
+
+        if covered_generation != max_generation:
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff exceeds independently committed append authority"
+            )
+
+        entries = self._validated_positive_append_entries(
+            max_generation=max_generation
+        )
+        if len(entries) != max_generation:
+            raise MonotonicAuthorityRollbackError(
+                "committed append authority is missing durable market history"
+            )
+        baseline_state_sha256 = self._generation_zero_baseline_state_sha256()
+        self._require_canonical_append_authority_bindings(
+            tuple(prefix_commits),
+            entries,
+            baseline_state_sha256=baseline_state_sha256,
+        )
+        return frozenset(committed_boundaries)
+
+    def _replay_cutoff_authority(self) -> MonotonicWorkspaceAuthority:
+        self._require_database_path_identity()
+        database_path = self.path
+        return MonotonicWorkspaceAuthority(
+            workspace=database_path.parent,
+            domain=_REPLAY_CUTOFF_MACHINE_DOMAIN,
+            key=f"{_REPLAY_CUTOFF_MACHINE_KEY_PREFIX}{_database_authority_key(database_path)}",
+        )
+
+    def _validated_replay_cutoff_rows(
+        self,
+        *,
+        require_current_append_head: bool = True,
+    ) -> tuple[tuple[str, str, int], ...]:
+        if type(require_current_append_head) is not bool:
+            raise TypeError("require_current_append_head must be a bool")
+        latest_generation: int | None = None
+        if require_current_append_head:
+            latest_row = self.connection.execute(
+                """SELECT COALESCE(MAX(append_generation), 0)
+                   FROM market_event_commit_order"""
+            ).fetchone()
+            if (
+                latest_row is None
+                or type(latest_row[0]) is not int
+                or latest_row[0] < 0
+            ):
+                raise ValueError("cannot validate causal replay cutoff generation")
+            latest_generation = latest_row[0]
+
+        raw_rows = self.connection.execute(
+            """SELECT cutoff_id, as_of, max_append_generation
+               FROM market_replay_cutoffs
+               ORDER BY cutoff_id"""
+        ).fetchall()
+        rows: list[tuple[str, str, int]] = []
+        for cutoff_id, stored_as_of, max_generation in raw_rows:
+            if (
+                type(cutoff_id) is not str
+                or type(stored_as_of) is not str
+                or type(max_generation) is not int
+                or max_generation < 0
+                or (
+                    latest_generation is not None
+                    and max_generation > latest_generation
+                )
+            ):
+                raise ValueError("causal replay cutoff authority is invalid")
+            canonical_as_of = _canonical_replay_cutoff(stored_as_of)
+            if (
+                stored_as_of != canonical_as_of
+                or cutoff_id != _replay_cutoff_id(canonical_as_of)
+            ):
+                raise ValueError("causal replay cutoff authority is invalid")
+            rows.append((cutoff_id, canonical_as_of, max_generation))
+        return tuple(rows)
+
+    def _replay_cutoff_authority_state_sha256(
+        self,
+        rows: tuple[tuple[str, str, int], ...],
+    ) -> str | None:
+        if not rows:
+            return _replay_cutoff_state_sha256(
+                rows,
+                sealed_corpus_sha256=None,
+            )
+        sealed_generation = max(row[2] for row in rows)
+        return _replay_cutoff_state_sha256(
+            rows,
+            sealed_corpus_sha256=self._frozen_replay_corpus_sha256(
+                sealed_generation
+            ),
+        )
+
+    @staticmethod
+    def _replay_cutoff_issuance_lock(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> WorkspaceEconomicLock:
+        # Keep one crash-releasing resolver transaction lock outside market.db.
+        # MonotonicWorkspaceAuthority owns its own inner journal lock; this sibling
+        # lock spans PREPARE -> SQLite COMMIT -> authority recovery/COMMIT so a second
+        # resolver cannot mistake a live PREPARE for abandoned crash state.
+        return WorkspaceEconomicLock(
+            authority.journal_dir / "replay-cutoff-issuance"
+        )
+
+    def _frozen_replay_corpus_sha256(self, max_generation: int) -> str:
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+        qualified_columns = ",".join(
+            f"m.{column}" for column in _HISTORY_COLUMNS
+        )
+        rows = self.connection.execute(
+            f"""SELECT c.append_generation, {qualified_columns}
+                FROM market_event_commit_order AS c
+                JOIN market_events AS m ON m.dedupe_key = c.dedupe_key
+                WHERE c.append_generation = 0
+                   OR (
+                       c.append_generation > 0
+                       AND c.append_generation <= ?
+                   )
+                ORDER BY c.append_generation, m.dedupe_key""",
+            (max_generation,),
+        ).fetchall()
+        encoded_rows: list[list[object]] = []
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS) + 1:
+                raise ValueError("causal replay corpus authority is invalid")
+            generation = row[0]
+            history_row = tuple(row[1:])
+            if type(generation) is not int or generation < 0:
+                raise ValueError("causal replay corpus authority is invalid")
+
+            # Do not let the independent machine authority bless malformed durable
+            # event bytes. The digest format remains unchanged for compatibility,
+            # but every row is first proven to be the exact canonical MarketEvent
+            # represented by its redundant SQLite columns.
+            _event_from_history_row(history_row)
+            dedupe_key = history_row[0]
+            payload_json = history_row[-1]
+            if type(dedupe_key) is not str or type(payload_json) is not str:
+                raise ValueError("causal replay corpus authority is invalid")
+            encoded_rows.append([generation, dedupe_key, payload_json])
+        return _canonical_sha256(
+            {
+                "schema": _REPLAY_CUTOFF_CORPUS_SCHEMA,
+                "max_append_generation": max_generation,
+                "rows": encoded_rows,
+            }
+        )
+
+    def _recover_replay_cutoff_authority(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        observed_state_sha256: str | None,
+        *,
+        append_authority: MonotonicWorkspaceAuthority,
+        cutoff_rows: tuple[tuple[str, str, int], ...],
+    ) -> None:
+        history = authority.read_history()
+        pending = (
+            history[-1]
+            if history and history[-1].phase is AuthorityPhase.PREPARE
+            else None
+        )
+
+        # Generic authority recovery automatically records ABORT when durable state
+        # still equals a PREPARE's previous COMMIT. That terminal record is itself an
+        # irreversible machine-authority mutation, so do not let it extend an already
+        # noncanonical committed cutoff chain. Prove the unchanged durable row-set
+        # first; only then may recovery append the ABORT.
+        if (
+            pending is not None
+            and observed_state_sha256
+            == pending.previous_committed_state_sha256
+        ):
+            self._require_canonical_cutoff_authority_bindings(
+                authority,
+                append_authority,
+                cutoff_rows,
+            )
+            authority.recover(observed_state_sha256=observed_state_sha256)
+            return
+
+        try:
+            authority.recover(observed_state_sha256=observed_state_sha256)
+            return
+        except MonotonicAuthorityRecoveryRequiredError:
+            history = authority.read_history()
+            if not history or history[-1].phase is not AuthorityPhase.PREPARE:
+                raise
+            pending = history[-1]
+
+            # Recovery may only COMMIT the exact one-row cutoff transition that the
+            # product would have issued. Infer the previous durable row-set by
+            # removing each current row in turn and matching the PREPARE ancestry;
+            # then bind the newly added row to its exact frozen corpus digest.
+            candidates: list[
+                tuple[
+                    tuple[str, str, int],
+                    tuple[tuple[str, str, int], ...],
+                ]
+            ] = []
+            for index, row in enumerate(cutoff_rows):
+                prior_rows = cutoff_rows[:index] + cutoff_rows[index + 1 :]
+                prior_state_sha256 = self._replay_cutoff_authority_state_sha256(
+                    prior_rows
+                )
+                if prior_state_sha256 == pending.previous_committed_state_sha256:
+                    candidates.append((row, prior_rows))
+            if (
+                len(candidates) != 1
+                or pending.intended_state_sha256 != observed_state_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff PREPARE is not one canonical row addition"
+                )
+
+            (
+                (cutoff_id, canonical_as_of, max_generation),
+                prior_rows,
+            ) = candidates[0]
+            tx_prefix = f"{cutoff_id[:32]}-"
+            tx_suffix = pending.tx_id[len(tx_prefix) :] if pending.tx_id.startswith(tx_prefix) else ""
+            corpus_sha256 = self._frozen_replay_corpus_sha256(max_generation)
+            expected_binding_sha256 = _replay_cutoff_binding_sha256(
+                cutoff_id=cutoff_id,
+                canonical_as_of=canonical_as_of,
+                max_append_generation=max_generation,
+                corpus_sha256=corpus_sha256,
+            )
+            if (
+                len(tx_suffix) != 32
+                or re.fullmatch(r"[0-9a-f]{32}", tx_suffix) is None
+                or pending.semantic_binding_sha256 != expected_binding_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff PREPARE semantic binding is invalid"
+                )
+
+            # Recovery itself is an irreversible machine-authority effect.
+            # First prove the complete committed cutoff ancestry represented by the
+            # PREPARE's previous state, then prove that the new cutoff generation is
+            # already an exact independently committed append transition. Otherwise an
+            # invalid historical cutoff chain or forged/unissued SQLite tail could be
+            # extended by a durable machine COMMIT before the subsequent read fails.
+            self._require_canonical_cutoff_authority_bindings(
+                authority,
+                append_authority,
+                prior_rows,
+            )
+            if prior_rows:
+                candidate_instant = _timezone_aware_instant(
+                    canonical_as_of,
+                    "as_of",
+                ).astimezone(timezone.utc)
+                for _prior_id, prior_as_of, prior_generation in prior_rows:
+                    prior_instant = _timezone_aware_instant(
+                        prior_as_of,
+                        "as_of",
+                    ).astimezone(timezone.utc)
+                    if (
+                        candidate_instant < prior_instant
+                        and max_generation > prior_generation
+                    ):
+                        raise MonotonicAuthorityRollbackError(
+                            "causal replay cutoff PREPARE retroactively "
+                            "advances append generation"
+                        )
+            self._require_committed_append_authority_through(
+                append_authority,
+                max_generation,
+            )
+            authority.recover(
+                observed_state_sha256=observed_state_sha256,
+                tx_id=pending.tx_id,
+                semantic_binding_sha256=pending.semantic_binding_sha256,
+            )
+
+    def _require_canonical_cutoff_authority_bindings(
+        self,
+        authority: MonotonicWorkspaceAuthority,
+        append_authority: MonotonicWorkspaceAuthority,
+        cutoff_rows: tuple[tuple[str, str, int], ...],
+    ) -> None:
+        """Prove every committed cutoff is one canonical product row transition."""
+
+        history = authority.read_history()
+        commits = tuple(
+            record for record in history if record.phase is AuthorityPhase.COMMIT
+        )
+        if len(commits) != len(cutoff_rows):
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff authority commit count does not match durable rows"
+            )
+
+        rows_by_tx_prefix: dict[str, list[tuple[str, str, int]]] = {}
+        for row in cutoff_rows:
+            rows_by_tx_prefix.setdefault(row[0][:32], []).append(row)
+
+        corpus_by_generation: dict[int, str] = {}
+
+        def corpus_for(max_generation: int) -> str:
+            cached = corpus_by_generation.get(max_generation)
+            if cached is None:
+                cached = self._frozen_replay_corpus_sha256(max_generation)
+                corpus_by_generation[max_generation] = cached
+            return cached
+
+        append_boundaries = (
+            self._require_committed_append_authority_through(
+                append_authority,
+                max(row[2] for row in cutoff_rows),
+            )
+            if cutoff_rows
+            else frozenset()
+        )
+
+        remaining = set(cutoff_rows)
+        issued: list[tuple[str, str, int]] = []
+        previous_max_generation = 0
+        for record in commits:
+            if len(record.tx_id) != 65 or record.tx_id[32] != "-":
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff committed transaction identity is invalid"
+                )
+            tx_prefix = record.tx_id[:32]
+            tx_suffix = record.tx_id[33:]
+            if re.fullmatch(r"[0-9a-f]{32}", tx_suffix) is None:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff committed transaction identity is invalid"
+                )
+
+            candidates: list[tuple[str, str, int]] = []
+            for row in rows_by_tx_prefix.get(tx_prefix, ()):
+                if row not in remaining:
+                    continue
+                cutoff_id, canonical_as_of, max_generation = row
+                expected_binding_sha256 = _replay_cutoff_binding_sha256(
+                    cutoff_id=cutoff_id,
+                    canonical_as_of=canonical_as_of,
+                    max_append_generation=max_generation,
+                    corpus_sha256=corpus_for(max_generation),
+                )
+                if record.semantic_binding_sha256 == expected_binding_sha256:
+                    candidates.append(row)
+
+            if len(candidates) != 1:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff commit does not identify one canonical row"
+                )
+            row = candidates[0]
+            _cutoff_id, _canonical_as_of, max_generation = row
+            cutoff_instant = _timezone_aware_instant(
+                _canonical_as_of,
+                "as_of",
+            ).astimezone(timezone.utc)
+            if issued and max_generation < previous_max_generation:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff commit regresses append generation"
+                )
+            for (
+                _prior_cutoff_id,
+                prior_as_of,
+                prior_generation,
+            ) in issued:
+                prior_instant = _timezone_aware_instant(
+                    prior_as_of,
+                    "as_of",
+                ).astimezone(timezone.utc)
+                if (
+                    cutoff_instant < prior_instant
+                    and max_generation > prior_generation
+                ):
+                    raise MonotonicAuthorityRollbackError(
+                        "causal replay cutoff commit retroactively advances "
+                        "append generation"
+                    )
+
+            if max_generation not in append_boundaries:
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff is not an exact committed append transition boundary"
+                )
+            prior_rows = tuple(sorted(issued, key=lambda item: item[0]))
+            prior_state_sha256 = _replay_cutoff_state_sha256(
+                prior_rows,
+                sealed_corpus_sha256=(
+                    corpus_for(previous_max_generation) if issued else None
+                ),
+            )
+            intended_rows = tuple(
+                sorted((*issued, row), key=lambda item: item[0])
+            )
+            intended_state_sha256 = _replay_cutoff_state_sha256(
+                intended_rows,
+                sealed_corpus_sha256=corpus_for(max_generation),
+            )
+            if (
+                record.previous_committed_state_sha256 != prior_state_sha256
+                or record.intended_state_sha256 != intended_state_sha256
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "causal replay cutoff committed transition state is invalid"
+                )
+
+            issued.append(row)
+            remaining.remove(row)
+            previous_max_generation = max_generation
+
+        if remaining:
+            raise MonotonicAuthorityRollbackError(
+                "causal replay cutoff rows lack canonical committed transitions"
+            )
+
+    def _rebuild_current_quotes(
+        self,
+        *,
+        append_authority: MonotonicWorkspaceAuthority,
+    ) -> None:
+        """Repair current projection from history proven in the same write snapshot."""
+        latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
+        self.connection.execute("BEGIN IMMEDIATE")
+        try:
+            # Startup repair is itself a trust-boundary write. Re-prove both mutable
+            # tables and the complete append chronology only after the SQLite write
+            # snapshot is established, so a direct writer cannot alter history or
+            # inject a projection trigger between authority proof and repair.
+            _validate_canonical_table(self.connection, "market_events")
+            _validate_canonical_table(self.connection, "current_quotes")
+            self._validate_causal_replay_state()
+            self._require_product_issued_positive_history(append_authority)
+
             rows = self.connection.execute(
                 f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
             ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
-                history_by_dedupe[event.dedupe_key] = event
                 order_key = _projection_order_key(event)
                 projection_key = (event.source_id, event.quote_key)
                 previous = latest.get(projection_key)
                 if previous is None or order_key > previous[0]:
                     latest[projection_key] = (order_key, event)
 
-            projection_rows = self.connection.execute(
-                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
-            ).fetchall()
-            for projection_row in projection_rows:
-                try:
-                    projection_event = _event_from_current_payload(projection_row[4])
-                except (KeyError, TypeError, ValueError):
-                    continue
-                history_event = history_by_dedupe.get(projection_event.dedupe_key)
-                if history_event is None:
-                    raise ValueError(
-                        "current_quotes projection event is missing from authoritative history"
-                    )
-                if _canonical_payload(history_event) != _canonical_payload(projection_event):
-                    continue
-                try:
-                    _event_from_current_row(projection_row)
-                except (KeyError, TypeError, ValueError):
-                    continue
-
+            # current_quotes is a derived cache, not an authority. Its old
+            # payload bytes are deliberately not parsed: once canonical history and
+            # append authority are proven in this write snapshot, every projection
+            # row can be discarded and reconstructed from history alone.
             self.connection.execute("DELETE FROM current_quotes")
             for projection_key in sorted(latest):
                 event = latest[projection_key][1]
@@ -676,15 +2144,54 @@ class SQLiteMarketStore:
                         payload,
                     ),
                 )
-        except Exception:
+        except BaseException:
             self.connection.rollback()
             raise
         else:
-            self.connection.commit()
+            self._commit_stable_database_path()
+
+    def _repair_current_projection_for_key(
+        self,
+        *,
+        source_id: str,
+        quote_key: str,
+    ) -> MarketEvent:
+        """Re-derive one repairable current row from canonical history only."""
+
+        row = self.connection.execute(
+            f"""SELECT {_HISTORY_COLUMNS_SQL}
+                FROM market_events
+                WHERE source_id=? AND quote_key=?
+                ORDER BY sequence DESC, dedupe_key DESC
+                LIMIT 1""",
+            (source_id, quote_key),
+        ).fetchone()
+        if row is None:
+            raise RuntimeError(
+                "cannot project current quote without canonical market history"
+            )
+        event = _event_from_history_row(row)
+        payload = _canonical_payload(event)
+        self.connection.execute(
+            """INSERT INTO current_quotes
+               (source_id,quote_key,observed_ts,sequence,payload_json)
+               VALUES (?,?,?,?,?)
+               ON CONFLICT(source_id,quote_key) DO UPDATE SET
+               observed_ts=excluded.observed_ts,
+               sequence=excluded.sequence,
+               payload_json=excluded.payload_json""",
+            (
+                event.source_id,
+                event.quote_key,
+                event.observed_ts,
+                event.sequence,
+                payload,
+            ),
+        )
+        return event
 
     def _insert_one(self, event: MarketEvent) -> bool:
         payload = _validate_incoming_event(event)
-        incoming_key = _projection_order_key(event)
         cursor = self.connection.execute(
             """INSERT INTO market_events
                (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,observed_ts,source_id,sequence,payload_json)
@@ -716,74 +2223,923 @@ class SQLiteMarketStore:
                     "conflicting duplicate market event identity: "
                     f"{event.dedupe_key}"
                 )
-            return False
-        previous = self.connection.execute(
-            f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
-                WHERE source_id=? AND quote_key=?""",
-            (event.source_id, event.quote_key),
-        ).fetchone()
-        previous_event = _event_from_current_row(previous) if previous is not None else None
-        if previous_event is None or incoming_key > _projection_order_key(previous_event):
-            self.connection.execute(
-                """INSERT INTO current_quotes
-                   (source_id,quote_key,observed_ts,sequence,payload_json)
-                   VALUES (?,?,?,?,?)
-                   ON CONFLICT(source_id,quote_key) DO UPDATE SET
-                   observed_ts=excluded.observed_ts,
-                   sequence=excluded.sequence,
-                   payload_json=excluded.payload_json""",
-                (
-                    event.source_id,
-                    event.quote_key,
-                    event.observed_ts,
-                    event.sequence,
-                    payload,
-                ),
+            commit_row = self.connection.execute(
+                """SELECT append_generation
+                   FROM market_event_commit_order
+                   WHERE dedupe_key=?""",
+                (event.dedupe_key,),
+            ).fetchone()
+            if (
+                commit_row is None
+                or type(commit_row[0]) is not int
+                or commit_row[0] < 0
+            ):
+                raise ValueError(
+                    "duplicate market event lacks valid append-generation authority"
+                )
+            self._repair_current_projection_for_key(
+                source_id=event.source_id,
+                quote_key=event.quote_key,
             )
+            return False
+
+        self.connection.execute(
+            """INSERT INTO market_event_commit_order
+               (dedupe_key, append_generation)
+               VALUES (?, ?)""",
+            (event.dedupe_key, self._next_append_generation()),
+        )
+        self._repair_current_projection_for_key(
+            source_id=event.source_id,
+            quote_key=event.quote_key,
+        )
         return True
 
     def append(self, event: MarketEvent) -> bool:
-        with self._connection_lock:
-            with self.connection:
-                return self._insert_one(event)
+        return bool(self.append_batch_accepted((event,)))
 
     def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
-        """Insert one normalized batch in one transaction and return newly accepted events."""
-        accepted: list[MarketEvent] = []
-        with self._connection_lock:
-            with self.connection:
-                for event in events:
-                    if self._insert_one(event):
-                        accepted.append(event)
-        return accepted
+        """Insert one normalized batch and independently issue its positive chronology."""
+
+        # Consume caller-controlled iterables before taking any product authority or
+        # SQLite writer lock. A generator may perform arbitrary I/O or re-enter this
+        # store; executing it under the issuance lock/BEGIN IMMEDIATE would turn
+        # caller code into part of the durable critical section and can deadlock or
+        # stall live ingestion. Snapshot each yielded event immediately into its
+        # canonical durable representation before asking the generator for the next
+        # value, so later caller mutation of nested metadata cannot rewrite admitted
+        # batch bytes during PREPARE -> SQLite COMMIT -> machine COMMIT.
+        admitted: list[MarketEvent] = []
+        try:
+            iterator = iter(events)
+        except TypeError as exc:
+            raise TypeError("events must be an iterable of MarketEvent values") from exc
+        for event in iterator:
+            if type(event) is not MarketEvent:
+                raise TypeError("events must contain only exact MarketEvent values")
+            payload = _validate_incoming_event(event)
+            admitted.append(MarketEvent.from_dict(_load_history_payload(payload)))
+        batch = tuple(admitted)
+
+        authority = self._market_append_authority()
+        # Keep the global lock order identical to trusted readers: cross-process
+        # append issuance first, then this instance's SQLite connection lock.
+        # Reversing these two locks creates an AB-BA deadlock when one thread is
+        # appending while another calls events()/current_by_source().
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN IMMEDIATE")
+                prepared: tuple[str, str] | None = None
+                accepted: list[MarketEvent] = []
+                try:
+                    # Re-prove the mutable live-storage schema at the write
+                    # boundary.  A direct SQLite writer must not be able to add a
+                    # trigger after startup and have product append bless trigger
+                    # side effects into canonical history/current projection.
+                    _validate_canonical_table(self.connection, "market_events")
+                    _validate_canonical_table(self.connection, "current_quotes")
+                    self._validate_causal_replay_state()
+                    committed_head, committed_state_sha256 = (
+                        self._recover_positive_append_authority(authority)
+                    )
+                    for event in batch:
+                        if self._insert_one(event):
+                            accepted.append(event)
+
+                    if not accepted:
+                        self._commit_stable_database_path()
+                        return accepted
+
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
+                    entries: list[tuple[int, str, str]] = []
+                    for event in accepted:
+                        row = self.connection.execute(
+                            f"""SELECT c.append_generation, {qualified_columns}
+                                FROM market_event_commit_order AS c
+                                JOIN market_events AS m
+                                  ON m.dedupe_key = c.dedupe_key
+                                WHERE c.dedupe_key=?""",
+                            (event.dedupe_key,),
+                        ).fetchone()
+                        if row is None or len(row) != len(_HISTORY_COLUMNS) + 1:
+                            raise RuntimeError(
+                                "accepted market event lacks append authority row"
+                            )
+                        generation = row[0]
+                        history_row = tuple(row[1:])
+                        _event_from_history_row(history_row)
+                        dedupe_key = history_row[0]
+                        payload_json = history_row[-1]
+                        if (
+                            type(generation) is not int
+                            or type(dedupe_key) is not str
+                            or type(payload_json) is not str
+                        ):
+                            raise ValueError(
+                                "accepted market event append authority is invalid"
+                            )
+                        entries.append((generation, dedupe_key, payload_json))
+
+                    entries.sort(key=lambda entry: entry[0])
+                    expected_generation = committed_head + 1
+                    intended_state_sha256 = committed_state_sha256
+                    for generation, dedupe_key, payload_json in entries:
+                        if generation != expected_generation:
+                            raise MonotonicAuthorityRollbackError(
+                                "positive market append chronology diverged during product append"
+                            )
+                        intended_state_sha256 = _append_state_step_sha256(
+                            intended_state_sha256,
+                            append_generation=generation,
+                            dedupe_key=dedupe_key,
+                            payload_json=payload_json,
+                        )
+                        expected_generation += 1
+                    entry_tuple = tuple(entries)
+                    binding_sha256 = _append_binding_sha256(
+                        previous_state_sha256=committed_state_sha256,
+                        intended_state_sha256=intended_state_sha256,
+                        entries=entry_tuple,
+                    )
+                    start_generation = entry_tuple[0][0]
+                    end_generation = entry_tuple[-1][0]
+                    tx_id = (
+                        f"append-{start_generation}-{end_generation}-{uuid.uuid4().hex}"
+                    )
+                    authority.prepare(
+                        tx_id=tx_id,
+                        observed_state_sha256=committed_state_sha256,
+                        intended_state_sha256=intended_state_sha256,
+                        semantic_binding_sha256=binding_sha256,
+                    )
+                    prepared = (tx_id, binding_sha256)
+                    self._commit_stable_database_path()
+                except BaseException:
+                    # Once PREPARE exists, do not guess whether SQLite publication
+                    # is durable. A commit can succeed before a post-commit pathname
+                    # check fails, and rollback cannot undo that durable state. Leave
+                    # the PREPARE as a crash prefix: the next append/trusted read
+                    # recomputes canonical SQLite state and lets independent recovery
+                    # either ABORT previous-state or COMMIT exact intended-state.
+                    self.connection.rollback()
+                    raise
+
+                assert prepared is not None
+                tx_id, binding_sha256 = prepared
+                self._require_database_path_identity()
+                authority.recover(
+                    observed_state_sha256=intended_state_sha256,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                # The pathname can still be replaced after the pre-recovery identity
+                # check while the independent machine COMMIT is being persisted.
+                # Re-check before reporting append success so a detached SQLite inode
+                # can never flow into the live mirror as a successful durable update.
+                # If this fails, the machine COMMIT remains recoverable once the
+                # canonical pathname is restored.
+                self._require_database_path_identity()
+                return accepted
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))
 
-    def events(self, event_id: str | None = None) -> list[MarketEvent]:
+    def append_generation_hint(self) -> int:
+        """Return an untrusted cheap append-generation hint for race fencing.
+
+        This is deliberately analogous to external_change_token(): it is not market
+        authority and callers must prove the selected generation through
+        require_committed_append_generation() before persisting or acting on it.
+        """
+
         with self._connection_lock:
-            if event_id is None:
-                rows = self.connection.execute(
-                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
-                ).fetchall()
-            else:
-                rows = self.connection.execute(
-                    f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE event_id=?",
-                    (event_id,),
-                ).fetchall()
-            events = [_event_from_history_row(row) for row in rows]
-        return sorted(events, key=_event_order_key)
+            self._require_database_path_identity()
+            row = self.connection.execute(
+                "SELECT COALESCE(MAX(append_generation), 0) "
+                "FROM market_event_commit_order"
+            ).fetchone()
+            self._require_database_path_identity()
+        if (
+            row is None
+            or len(row) != 1
+            or type(row[0]) is not int
+            or row[0] < 0
+        ):
+            raise ValueError("market append generation hint is invalid")
+        return row[0]
+
+    def require_committed_append_generation(self, max_generation: int) -> None:
+        """Prove one previously sampled generation is a committed product boundary."""
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    _validate_canonical_table(
+                        self.connection,
+                        "market_event_commit_order",
+                    )
+                    # Prove only the caller's already-sampled immutable prefix. Later
+                    # rows are outside this recovery authority and may be malformed,
+                    # direct-written, or abandoned without revoking an earlier exact
+                    # machine-committed boundary. The prefix proof itself still binds
+                    # every row at or below max_generation to committed append history.
+                    self._require_committed_append_authority_through(
+                        authority,
+                        max_generation,
+                    )
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+
+    def _events_at_append_boundary_unlocked(
+        self,
+        max_generation: int,
+    ) -> list[tuple[MarketEvent, int]]:
+        qualified_columns = ",".join(
+            f"m.{column}" for column in _HISTORY_COLUMNS
+        )
+        rows = self.connection.execute(
+            f"""SELECT c.append_generation, {qualified_columns}
+                FROM market_events AS m
+                JOIN market_event_commit_order AS c
+                  ON c.dedupe_key = m.dedupe_key
+                WHERE c.append_generation = 0
+                   OR (
+                       c.append_generation > 0
+                       AND c.append_generation <= ?
+                   )""",
+            (max_generation,),
+        ).fetchall()
+
+        events_with_generation: list[tuple[MarketEvent, int]] = []
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS) + 1:
+                raise ValueError(
+                    "market event append-generation row has unexpected shape"
+                )
+            generation = row[0]
+            if type(generation) is not int or generation < 0:
+                raise ValueError(
+                    "market event append generation must be a non-negative int"
+                )
+            event = _event_from_history_row(tuple(row[1:]))
+            events_with_generation.append((event, generation))
+        return sorted(
+            events_with_generation,
+            key=lambda item: _event_order_key(item[0]),
+        )
+
+    @contextmanager
+    def _guard_current_append_authority_with_boundary(
+        self,
+        max_generation: int,
+    ) -> Iterator[list[tuple[MarketEvent, int]]]:
+        """Hold exact current market authority until economic publication completes.
+
+        The append issuance lock fences all cooperating product writers. BEGIN
+        IMMEDIATE additionally reserves the SQLite writer slot so direct writers
+        cannot change the proven market database between verification and the
+        caller's durable publication step.
+        """
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN IMMEDIATE")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(authority)
+                    current_head = self._positive_append_generation_head()
+                    if max_generation > current_head:
+                        raise MonotonicAuthorityRollbackError(
+                            "requested market append boundary exceeds "
+                            "committed authority"
+                        )
+                    self._require_committed_append_authority_through(
+                        authority,
+                        max_generation,
+                    )
+                    prefix = self._events_at_append_boundary_unlocked(
+                        max_generation
+                    )
+                    self._require_database_path_identity()
+                    yield prefix
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+
+    def require_current_append_authority_with_boundary(
+        self,
+        max_generation: int,
+    ) -> None:
+        """Prove both one sampled boundary and the complete current append authority.
+
+        Live economic publication uses this stronger gate: the selected historical
+        boundary must be an exact committed transition, and every later durable
+        positive generation currently present must also be independently product-issued.
+        Read-only crash recovery uses require_committed_append_generation() instead so
+        a later unissued tail cannot revoke an older immutable committed prefix.
+        """
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+
+        with self._guard_current_append_authority_with_boundary(
+            max_generation
+        ):
+            pass
+
+    @contextmanager
+    def _guard_committed_append_boundary(
+        self,
+        max_generation: int,
+    ) -> Iterator[list[tuple[MarketEvent, int]]]:
+        """Hold one independently committed immutable append prefix for a caller."""
+
+        if type(max_generation) is not int or max_generation < 0:
+            raise ValueError("max_generation must be a non-negative int")
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    _validate_canonical_table(
+                        self.connection,
+                        "market_event_commit_order",
+                    )
+                    # Prove only the caller's already-sampled immutable prefix. Later
+                    # rows are outside this recovery authority and may be malformed,
+                    # direct-written, or abandoned without revoking an earlier exact
+                    # machine-committed boundary. The prefix proof itself still binds
+                    # every row at or below max_generation to committed append history.
+                    self._require_committed_append_authority_through(
+                        authority,
+                        max_generation,
+                    )
+                    events_with_generation = (
+                        self._events_at_append_boundary_unlocked(
+                            max_generation
+                        )
+                    )
+                    self._require_database_path_identity()
+                    yield events_with_generation
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+
+    def events_at_committed_append_boundary(
+        self,
+        max_generation: int,
+    ) -> list[tuple[MarketEvent, int]]:
+        """Read the trusted immutable history prefix at one committed append boundary.
+
+        Unlike replay cutoff issuance, this does not mint timestamp authority. The
+        caller supplies a previously observed generation frontier; this method proves
+        that it is an exact independently committed append transition boundary and
+        returns only the canonical corpus at or below it.
+        """
+
+        with self._guard_committed_append_boundary(max_generation) as prefix:
+            return list(prefix)
+
+    def events_with_append_generation(
+        self,
+        event_id: str | None = None,
+    ) -> list[tuple[MarketEvent, int]]:
+        """Read trusted history together with its durable append generation."""
+
+        authority = self._market_append_authority()
+        # A read must not recover or inspect the transient PREPARE of a live writer.
+        # Take the same sibling issuance lock used by append, then prove the exact
+        # canonical history before any row escapes to long-lived mirror/replay users.
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(authority)
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
+                    if event_id is None:
+                        rows = self.connection.execute(
+                            f"""SELECT c.append_generation, {qualified_columns}
+                                FROM market_events AS m
+                                JOIN market_event_commit_order AS c
+                                  ON c.dedupe_key = m.dedupe_key"""
+                        ).fetchall()
+                    else:
+                        rows = self.connection.execute(
+                            f"""SELECT c.append_generation, {qualified_columns}
+                                FROM market_events AS m
+                                JOIN market_event_commit_order AS c
+                                  ON c.dedupe_key = m.dedupe_key
+                                WHERE m.event_id=?""",
+                            (event_id,),
+                        ).fetchall()
+
+                    events_with_generation: list[tuple[MarketEvent, int]] = []
+                    for row in rows:
+                        if len(row) != len(_HISTORY_COLUMNS) + 1:
+                            raise ValueError(
+                                "market event append-generation row has unexpected shape"
+                            )
+                        generation = row[0]
+                        if type(generation) is not int or generation < 0:
+                            raise ValueError(
+                                "market event append generation must be a non-negative int"
+                            )
+                        event = _event_from_history_row(tuple(row[1:]))
+                        events_with_generation.append((event, generation))
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+        return sorted(
+            events_with_generation,
+            key=lambda item: _event_order_key(item[0]),
+        )
+
+    def events(self, event_id: str | None = None) -> list[MarketEvent]:
+        """Read only history proven against the independent append authority."""
+
+        return [
+            event
+            for event, _generation in self.events_with_append_generation(event_id)
+        ]
+
+    def replay_events_at_frozen_cutoff(
+        self,
+        *,
+        as_of: str,
+        _with_append_generation: bool = False,
+    ) -> list[MarketEvent] | list[tuple[MarketEvent, int]]:
+        """Return the exact independently issued durable history cutoff for as_of.
+
+        SQLite remains the canonical event/history store, but a cutoff row is accepted
+        only when the existing machine-state MonotonicWorkspaceAuthority proves that
+        product issuance. The independent state digest seals both the cutoff table and
+        the exact corpus through the highest issued generation, so coherent same-DB
+        DDL rewrites cannot be silently blessed by issuing a later cutoff.
+
+        Generation-zero rows remain part of that tamper-evident sealed corpus, but they
+        are never emitted as causal decision history: their baseline authority proves
+        exact membership at authority activation, not historical product receipt order.
+
+        The private provenance mode returns the same final proven SQLite snapshot with
+        generation-zero rows included and tagged, solely so MarketMirror can preserve
+        legacy provider sequence fences without making those rows decision-causal.
+        """
+
+        if type(_with_append_generation) is not bool:
+            raise TypeError("_with_append_generation must be a bool")
+        canonical_as_of = _canonical_replay_cutoff(as_of)
+        cutoff_id = _replay_cutoff_id(canonical_as_of)
+        authority = self._replay_cutoff_authority()
+        append_authority = self._market_append_authority()
+
+        # Existing independently issued cutoffs never depend on later append-machine
+        # progress, so keep them readable while another store is publishing a newer
+        # append.  A first-time cutoff, however, must own the append sibling lock:
+        # append commits SQLite before machine COMMIT, and BEGIN IMMEDIATE alone
+        # therefore leaves a real SQLite-COMMIT -> machine-COMMIT window in which a
+        # resolver could otherwise recover a still-live writer's PREPARE.
+        # Lock order for first issuance is replay-cutoff sibling -> append sibling ->
+        # this instance's SQLite connection. Append writers never acquire the replay
+        # sibling, so there is no reverse dependency. Resolve the pre-existing hint
+        # only after owning the replay sibling, so another resolver cannot publish the
+        # same cutoff between admission and append-lock selection.
+        with self._replay_cutoff_issuance_lock(authority):
+            with self._connection_lock:
+                preexisting_cutoff = (
+                    self.connection.execute(
+                        "SELECT 1 FROM market_replay_cutoffs WHERE cutoff_id=? LIMIT 1",
+                        (cutoff_id,),
+                    ).fetchone()
+                    is not None
+                )
+            append_guard = (
+                nullcontext()
+                if preexisting_cutoff
+                else self._market_append_issuance_lock(append_authority)
+            )
+
+            # Final escaping-row materialization happens after these coordination
+            # locks. Canonical corpus validation may still decode rows here as part of
+            # the authority proof; do not overstate this as a lock-free decode path.
+            with append_guard, self._connection_lock:
+                if preexisting_cutoff:
+                    _validate_canonical_table(self.connection, "market_events")
+                    _validate_canonical_table(
+                        self.connection,
+                        "market_event_commit_order",
+                    )
+                    _validate_canonical_table(
+                        self.connection,
+                        "market_replay_cutoffs",
+                    )
+                else:
+                    self._validate_causal_replay_state()
+                cutoff_rows = self._validated_replay_cutoff_rows(
+                    require_current_append_head=not preexisting_cutoff
+                )
+                observed_state_sha256 = (
+                    self._replay_cutoff_authority_state_sha256(cutoff_rows)
+                )
+                self._recover_replay_cutoff_authority(
+                    authority,
+                    observed_state_sha256,
+                    append_authority=append_authority,
+                    cutoff_rows=cutoff_rows,
+                )
+                self._require_canonical_cutoff_authority_bindings(
+                    authority,
+                    append_authority,
+                    cutoff_rows,
+                )
+
+                current_row = next(
+                    (
+                        (stored_as_of, max_generation)
+                        for stored_cutoff_id, stored_as_of, max_generation in cutoff_rows
+                        if stored_cutoff_id == cutoff_id
+                    ),
+                    None,
+                )
+
+                if current_row is None and preexisting_cutoff:
+                    raise MonotonicAuthorityRollbackError(
+                        "pre-existing causal replay cutoff disappeared before proof"
+                    )
+
+                if current_row is None:
+                    # Serialize only cutoff issuance against canonical appends. The
+                    # potentially large replay scan/decode happens after the SQLite
+                    # write transaction commits. The outer resolver lock stays held
+                    # until the independent authority has recovered/committed the exact
+                    # published cutoff state, preventing false abandonment of PREPARE.
+                    self.connection.execute("BEGIN IMMEDIATE")
+                    try:
+                        self._validate_causal_replay_state()
+                        self._require_product_issued_positive_history(
+                            append_authority
+                        )
+                        cutoff_rows = self._validated_replay_cutoff_rows()
+                        observed_state_sha256 = (
+                            self._replay_cutoff_authority_state_sha256(cutoff_rows)
+                        )
+                        self._recover_replay_cutoff_authority(
+                            authority,
+                            observed_state_sha256,
+                            append_authority=append_authority,
+                            cutoff_rows=cutoff_rows,
+                        )
+                        self._require_canonical_cutoff_authority_bindings(
+                            authority,
+                            append_authority,
+                            cutoff_rows,
+                        )
+                        current_row = next(
+                            (
+                                (stored_as_of, max_generation)
+                                for (
+                                    stored_cutoff_id,
+                                    stored_as_of,
+                                    max_generation,
+                                ) in cutoff_rows
+                                if stored_cutoff_id == cutoff_id
+                            ),
+                            None,
+                        )
+                        if current_row is None:
+                            generation_row = self.connection.execute(
+                                """SELECT COALESCE(MAX(append_generation), 0)
+                                   FROM market_event_commit_order"""
+                            ).fetchone()
+                            if (
+                                generation_row is None
+                                or type(generation_row[0]) is not int
+                                or generation_row[0] < 0
+                            ):
+                                raise ValueError(
+                                    "cannot freeze causal replay append generation"
+                                )
+                            max_generation = generation_row[0]
+                            if cutoff_rows:
+                                requested_instant = _timezone_aware_instant(
+                                    canonical_as_of,
+                                    "as_of",
+                                ).astimezone(timezone.utc)
+                                for (
+                                    _prior_id,
+                                    prior_as_of,
+                                    prior_generation,
+                                ) in cutoff_rows:
+                                    prior_instant = _timezone_aware_instant(
+                                        prior_as_of,
+                                        "as_of",
+                                    ).astimezone(timezone.utc)
+                                    if (
+                                        requested_instant < prior_instant
+                                        and max_generation > prior_generation
+                                    ):
+                                        raise MonotonicAuthorityRollbackError(
+                                            "causal replay cutoff issuance "
+                                            "retroactively advances append generation"
+                                        )
+                            current_row = (canonical_as_of, max_generation)
+                            corpus_sha256 = self._frozen_replay_corpus_sha256(
+                                max_generation
+                            )
+                            binding_sha256 = _replay_cutoff_binding_sha256(
+                                cutoff_id=cutoff_id,
+                                canonical_as_of=canonical_as_of,
+                                max_append_generation=max_generation,
+                                corpus_sha256=corpus_sha256,
+                            )
+                            intended_rows = tuple(
+                                sorted(
+                                    (
+                                        *cutoff_rows,
+                                        (
+                                            cutoff_id,
+                                            canonical_as_of,
+                                            max_generation,
+                                        ),
+                                    ),
+                                    key=lambda row: row[0],
+                                )
+                            )
+                            intended_state_sha256 = _replay_cutoff_state_sha256(
+                                intended_rows,
+                                sealed_corpus_sha256=corpus_sha256,
+                            )
+                            if intended_state_sha256 is None:
+                                raise RuntimeError(
+                                    "non-empty causal replay cutoff state has no digest"
+                                )
+                            tx_id = f"{cutoff_id[:32]}-{uuid.uuid4().hex}"
+                            authority.prepare(
+                                tx_id=tx_id,
+                                observed_state_sha256=observed_state_sha256,
+                                intended_state_sha256=intended_state_sha256,
+                                semantic_binding_sha256=binding_sha256,
+                            )
+                            self.connection.execute(
+                                """INSERT INTO market_replay_cutoffs
+                                   (cutoff_id, as_of, max_append_generation)
+                                   VALUES (?, ?, ?)""",
+                                (cutoff_id, canonical_as_of, max_generation),
+                            )
+                        self._commit_stable_database_path()
+                    except BaseException:
+                        # PREPARE is intentionally retained on every post-prepare
+                        # failure. SQLite commit outcome and the final pathname
+                        # identity can diverge across an exception boundary; durable
+                        # recovery must decide from the actual cutoff row-set instead
+                        # of an eager caller-supplied ABORT claim.
+                        self.connection.rollback()
+                        raise
+
+                    # Use the actual committed SQLite state rather than trusting the
+                    # intended digest passed to PREPARE. This also closes the crash
+                    # window where SQLite committed but the machine authority did not.
+                    cutoff_rows = self._validated_replay_cutoff_rows()
+                    observed_state_sha256 = (
+                        self._replay_cutoff_authority_state_sha256(cutoff_rows)
+                    )
+                    self._require_database_path_identity()
+                    self._recover_replay_cutoff_authority(
+                        authority,
+                        observed_state_sha256,
+                        append_authority=append_authority,
+                        cutoff_rows=cutoff_rows,
+                    )
+                    self._require_canonical_cutoff_authority_bindings(
+                        authority,
+                        append_authority,
+                        cutoff_rows,
+                    )
+
+                # Re-read and independently prove the exact durable state after
+                # issuance/recovery, then consume rows from that same SQLite read
+                # snapshot. In WAL mode this deferred transaction does not take the
+                # writer lock, but it prevents a second connection from changing a
+                # previously verified frozen corpus between binding verification and
+                # the SELECT whose rows escape to replay consumers.
+                self.connection.execute("BEGIN")
+                try:
+                    if preexisting_cutoff:
+                        _validate_canonical_table(self.connection, "market_events")
+                        _validate_canonical_table(
+                            self.connection,
+                            "market_event_commit_order",
+                        )
+                        _validate_canonical_table(
+                            self.connection,
+                            "market_replay_cutoffs",
+                        )
+                    else:
+                        self._validate_causal_replay_state()
+                    cutoff_rows = self._validated_replay_cutoff_rows(
+                        require_current_append_head=not preexisting_cutoff
+                    )
+                    observed_state_sha256 = (
+                        self._replay_cutoff_authority_state_sha256(cutoff_rows)
+                    )
+                    self._recover_replay_cutoff_authority(
+                        authority,
+                        observed_state_sha256,
+                        append_authority=append_authority,
+                        cutoff_rows=cutoff_rows,
+                    )
+                    self._require_canonical_cutoff_authority_bindings(
+                        authority,
+                        append_authority,
+                        cutoff_rows,
+                    )
+                    current_row = next(
+                        (
+                            (stored_as_of, max_generation)
+                            for stored_cutoff_id, stored_as_of, max_generation in cutoff_rows
+                            if stored_cutoff_id == cutoff_id
+                        ),
+                        None,
+                    )
+                    if current_row is None:
+                        raise RuntimeError("causal replay cutoff issuance disappeared")
+
+                    stored_as_of, max_generation = current_row
+                    if stored_as_of != canonical_as_of:
+                        raise ValueError("causal replay cutoff authority is invalid")
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
+                    # Read baseline and positive rows from this exact proven SQLite
+                    # snapshot. Compatibility callers still suppress generation zero;
+                    # the private provenance path keeps it tagged for sequence fencing.
+                    rows = self.connection.execute(
+                        f"""SELECT c.append_generation, {qualified_columns}
+                            FROM market_events AS m
+                            JOIN market_event_commit_order AS c
+                              ON c.dedupe_key = m.dedupe_key
+                            WHERE c.append_generation = 0
+                               OR (
+                                   c.append_generation > 0
+                                   AND c.append_generation <= ?
+                               )""",
+                        (max_generation,),
+                    ).fetchall()
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+
+        events_with_generation: list[tuple[MarketEvent, int]] = []
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS) + 1:
+                raise ValueError("causal replay row has unexpected shape")
+            generation = row[0]
+            if type(generation) is not int or generation < 0:
+                raise ValueError("causal replay append generation is invalid")
+            event = _event_from_history_row(tuple(row[1:]))
+            events_with_generation.append((event, generation))
+        events_with_generation.sort(key=lambda item: _event_order_key(item[0]))
+        if _with_append_generation:
+            return events_with_generation
+        return [
+            event
+            for event, generation in events_with_generation
+            if generation > 0
+        ]
+
+    def external_change_token(self) -> int:
+        """Return SQLite's connection-local token for commits by other connections.
+
+        This is only a cheap invalidation hint. It does not authorize market data:
+        callers that observe a changed token must still re-read through a proven
+        SQLiteMarketStore authority method before using any market value.
+        """
+
+        with self._connection_lock:
+            self._require_database_path_identity()
+            row = self.connection.execute("PRAGMA data_version").fetchone()
+            self._require_database_path_identity()
+        if (
+            row is None
+            or len(row) != 1
+            or type(row[0]) is not int
+            or row[0] < 0
+        ):
+            raise ValueError("SQLite data_version is invalid")
+        return row[0]
+
+    def current_by_source_with_append_generation(
+        self,
+    ) -> dict[tuple[str, str], tuple[MarketEvent, int]]:
+        """Return proven current projection values together with append provenance."""
+
+        authority = self._market_append_authority()
+        with self._market_append_issuance_lock(authority):
+            with self._connection_lock:
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    _validate_canonical_table(self.connection, "current_quotes")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(authority)
+
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
+                    history_rows = self.connection.execute(
+                        f"""SELECT c.append_generation, {qualified_columns}
+                            FROM market_events AS m
+                            JOIN market_event_commit_order AS c
+                              ON c.dedupe_key = m.dedupe_key"""
+                    ).fetchall()
+                    expected: dict[
+                        tuple[str, str],
+                        tuple[MarketEvent, int],
+                    ] = {}
+                    for history_row in history_rows:
+                        if len(history_row) != len(_HISTORY_COLUMNS) + 1:
+                            raise ValueError(
+                                "current projection provenance row has unexpected shape"
+                            )
+                        append_generation = history_row[0]
+                        if type(append_generation) is not int or append_generation < 0:
+                            raise ValueError(
+                                "current projection append generation is invalid"
+                            )
+                        event = _event_from_history_row(tuple(history_row[1:]))
+                        key = (event.source_id, event.quote_key)
+                        previous = expected.get(key)
+                        if (
+                            previous is None
+                            or _projection_order_key(event)
+                            > _projection_order_key(previous[0])
+                        ):
+                            expected[key] = (event, append_generation)
+
+                    rows = self.connection.execute(
+                        f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
+                    ).fetchall()
+                    current: dict[tuple[str, str], MarketEvent] = {}
+                    for row in rows:
+                        event = _event_from_current_row(row)
+                        key = (event.source_id, event.quote_key)
+                        if key in current:
+                            raise ValueError(
+                                "current quote projection contains duplicate provider key"
+                            )
+                        current[key] = event
+
+                    if current.keys() != expected.keys() or any(
+                        _canonical_payload(current[key])
+                        != _canonical_payload(expected[key][0])
+                        for key in expected
+                    ):
+                        raise ValueError(
+                            "current quote projection diverges from canonical market history"
+                        )
+                    current_with_generation = {
+                        key: (current[key], expected[key][1])
+                        for key in current
+                    }
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+                return current_with_generation
 
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
-        with self._connection_lock:
-            rows = self.connection.execute(
-                f"SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes"
-            ).fetchall()
-            current: dict[tuple[str, str], MarketEvent] = {}
-            for row in rows:
-                event = _event_from_current_row(row)
-                current[(event.source_id, event.quote_key)] = event
-            return current
+        """Return only a projection proven to equal independently trusted history."""
+
+        return {
+            key: event
+            for key, (event, _append_generation) in (
+                self.current_by_source_with_append_generation().items()
+            )
+        }
 
     def current(self) -> dict[str, MarketEvent]:
         current: dict[str, MarketEvent] = {}

@@ -23,6 +23,19 @@ PaperExecutionRun = _impl.PaperExecutionRun
 PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
 
+def _sha256_text(value: object, name: str) -> str:
+    digest = _impl._text(value, name)
+    if (
+        len(digest) != 64
+        or digest != digest.lower()
+        or any(char not in "0123456789abcdef" for char in digest)
+    ):
+        raise ValueError(
+            f"{name} must be a lowercase 64-character SHA-256 digest"
+        )
+    return digest
+
+
 def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
@@ -142,6 +155,735 @@ def _derive_run_economics(
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
 
+    _ALLOWED_EVENT_TYPES = frozenset(
+        {
+            "OBSERVATION_EVIDENCE_REGISTERED",
+            "PAPER_EXPOSURE_SCOPE_BOUND",
+            "RUN_RESERVED",
+            "ATTEMPT_RECORDED",
+            "RUN_COMPLETED",
+        }
+    )
+
+    def _load_unlocked(self) -> list[dict[str, Any]]:
+        events = super()._load_unlocked()
+        for event in events:
+            event_type = event.get("event_type")
+            if event_type not in self._ALLOWED_EVENT_TYPES:
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger contains unsupported event_type"
+                )
+            try:
+                run_id = _impl._text(event.get("run_id"), "ledger run_id")
+            except (TypeError, ValueError) as exc:
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger run_id is invalid"
+                ) from exc
+            event_key = event.get("event_key")
+            payload = event.get("payload")
+            if event_type == "OBSERVATION_EVIDENCE_REGISTERED":
+                if (
+                    type(payload) is not dict
+                    or set(payload)
+                    != {"evidence_id", "evidence_sha256", "record"}
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER execution evidence payload schema is invalid"
+                    )
+                evidence_id = payload.get("evidence_id")
+                record = PaperExecutionEvidenceRecord.from_dict(
+                    payload.get("record")
+                )
+                if (
+                    type(evidence_id) is not str
+                    or not evidence_id
+                    or run_id != evidence_id
+                    or event_key != f"evidence:{evidence_id}"
+                    or record.evidence_id != evidence_id
+                    or payload.get("evidence_sha256")
+                    != record.evidence_sha256
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER execution evidence event identity is invalid"
+                    )
+            elif event_type == "PAPER_EXPOSURE_SCOPE_BOUND":
+                expected_scope_keys = {
+                    "schema",
+                    "schema_version",
+                    "plan_id",
+                    "plan_fingerprint",
+                    "intent_evidence_sha256",
+                    "bindings",
+                    "binding_sha256",
+                }
+                if (
+                    event_key != f"{run_id}:exposure-scope"
+                    or type(payload) is not dict
+                    or set(payload) != expected_scope_keys
+                    or payload.get("schema")
+                    != "autosport.paper_execution.exposure_scope_binding"
+                    or payload.get("schema_version") != 1
+                    or type(payload.get("bindings")) is not list
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope payload is invalid"
+                    )
+                binding_action_ids: list[str] = []
+                for binding in payload["bindings"]:
+                    if (
+                        type(binding) is not dict
+                        or set(binding)
+                        != {
+                            "action_id",
+                            "sport",
+                            "bankroll_id",
+                            "currency",
+                        }
+                    ):
+                        raise PaperExecutionIntegrityError(
+                            "PAPER exposure-scope binding is invalid"
+                        )
+                    try:
+                        action_id = _impl._text(
+                            binding.get("action_id"),
+                            "scope action_id",
+                        )
+                        sport = binding.get("sport")
+                        if sport is not None:
+                            _impl._text(sport, "scope sport")
+                        bankroll_id = binding.get("bankroll_id")
+                        currency = binding.get("currency")
+                        if (bankroll_id is None) != (currency is None):
+                            raise ValueError(
+                                "scope bankroll/currency must be paired"
+                            )
+                        if bankroll_id is not None:
+                            _impl._text(
+                                bankroll_id,
+                                "scope bankroll_id",
+                            )
+                            currency = _impl._text(
+                                currency,
+                                "scope currency",
+                            )
+                            if (
+                                len(currency) != 3
+                                or not currency.isascii()
+                                or not currency.isalpha()
+                                or currency != currency.upper()
+                            ):
+                                raise ValueError(
+                                    "scope currency is noncanonical"
+                                )
+                    except (TypeError, ValueError) as exc:
+                        raise PaperExecutionIntegrityError(
+                            "PAPER exposure-scope binding is invalid"
+                        ) from exc
+                    binding_action_ids.append(action_id)
+                if len(binding_action_ids) != len(
+                    set(binding_action_ids)
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope bindings are not unique"
+                    )
+                try:
+                    _impl._text(
+                        payload.get("plan_id"),
+                        "scope plan_id",
+                    )
+                    _sha256_text(
+                        payload.get("plan_fingerprint"),
+                        "scope plan_fingerprint",
+                    )
+                    _sha256_text(
+                        payload.get("intent_evidence_sha256"),
+                        "scope intent_evidence_sha256",
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope identity is invalid"
+                    ) from exc
+                scope_body = dict(payload)
+                binding_sha256 = scope_body.pop("binding_sha256")
+                if binding_sha256 != _impl._digest(scope_body):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER exposure-scope digest is invalid"
+                    )
+            elif event_type == "RUN_RESERVED":
+                base_reservation_keys = {
+                    "trigger_id",
+                    "plan_id",
+                    "plan_fingerprint",
+                    "model_fingerprint",
+                    "started_at",
+                    "action_ids",
+                    "observation_evidence_ids",
+                }
+                allowed_reservation_keys = {
+                    frozenset(base_reservation_keys),
+                    frozenset(
+                        base_reservation_keys | {"suspended_action_ids"}
+                    ),
+                }
+                if (
+                    event_key != f"{run_id}:reserve"
+                    or type(payload) is not dict
+                    or frozenset(payload) not in allowed_reservation_keys
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER reservation payload is invalid"
+                    )
+                action_ids = payload.get("action_ids")
+                observation_ids = payload.get(
+                    "observation_evidence_ids"
+                )
+                suspended_ids = payload.get("suspended_action_ids", [])
+                if (
+                    type(action_ids) is not list
+                    or any(
+                        type(action_id) is not str or not action_id
+                        for action_id in action_ids
+                    )
+                    or len(action_ids) != len(set(action_ids))
+                    or type(observation_ids) is not dict
+                    or any(
+                        type(action_id) is not str
+                        or not action_id
+                        or action_id not in action_ids
+                        or type(evidence_id) is not str
+                        or not evidence_id
+                        for action_id, evidence_id
+                        in observation_ids.items()
+                    )
+                    or type(suspended_ids) is not list
+                    or any(
+                        type(action_id) is not str
+                        or not action_id
+                        or action_id not in action_ids
+                        for action_id in suspended_ids
+                    )
+                    or suspended_ids != sorted(suspended_ids)
+                    or len(suspended_ids) != len(set(suspended_ids))
+                    or set(observation_ids) & set(suspended_ids)
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER reservation execution inputs are invalid"
+                    )
+                try:
+                    _impl._text(payload.get("trigger_id"), "trigger_id")
+                    _impl._text(payload.get("plan_id"), "plan_id")
+                    _sha256_text(
+                        payload.get("plan_fingerprint"),
+                        "plan_fingerprint",
+                    )
+                    _sha256_text(
+                        payload.get("model_fingerprint"),
+                        "model_fingerprint",
+                    )
+                    _impl._timestamp(
+                        payload.get("started_at"),
+                        "started_at",
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise PaperExecutionIntegrityError(
+                        "PAPER reservation identity fields are invalid"
+                    ) from exc
+            elif event_type == "ATTEMPT_RECORDED":
+                attempt = PaperLegAttempt.from_dict(payload)
+                if (
+                    attempt.run_id != run_id
+                    or event_key
+                    != f"{run_id}:attempt:{attempt.sequence}"
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER attempt event identity is invalid"
+                    )
+            elif event_type == "RUN_COMPLETED":
+                if (
+                    event_key != f"{run_id}:complete"
+                    or type(payload) is not dict
+                    or set(payload)
+                    != {
+                        "pending_action_ids",
+                        "recovery_decision",
+                        "worst_case_exposure",
+                    }
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER completion payload is invalid"
+                    )
+                pending_ids = payload.get("pending_action_ids")
+                if (
+                    type(pending_ids) is not list
+                    or any(
+                        type(action_id) is not str or not action_id
+                        for action_id in pending_ids
+                    )
+                    or len(pending_ids) != len(set(pending_ids))
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER completion pending actions are invalid"
+                    )
+                try:
+                    RecoveryDecision(payload.get("recovery_decision"))
+                    _impl._decimal(
+                        payload.get("worst_case_exposure"),
+                        "worst_case_exposure",
+                        allow_zero=True,
+                    )
+                except (TypeError, ValueError, InvalidOperation) as exc:
+                    raise PaperExecutionIntegrityError(
+                        "PAPER completion economics are invalid"
+                    ) from exc
+        return events
+
+    @staticmethod
+    def _reservation_payload(
+        *,
+        trigger_id: str,
+        plan: ExecutionPlan,
+        config: PaperExecutionModelConfig,
+        started_at: str,
+        observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str],
+    ) -> dict[str, Any]:
+        try:
+            _impl._text(trigger_id, "trigger_id")
+            _impl._text(plan.plan_id, "plan_id")
+            _sha256_text(plan.fingerprint, "plan_fingerprint")
+            _sha256_text(config.fingerprint, "model_fingerprint")
+            _impl._timestamp(started_at, "started_at")
+        except (AttributeError, TypeError, ValueError) as exc:
+            raise PaperExecutionStateError(
+                "reservation identity fields are invalid"
+            ) from exc
+        if type(suspended_action_ids) is not frozenset or any(
+            type(action_id) is not str or not action_id
+            for action_id in suspended_action_ids
+        ):
+            raise TypeError(
+                "suspended_action_ids must be a frozenset of non-empty strings"
+            )
+        plan_action_ids = {action.action_id for action in plan.actions}
+        if len(plan_action_ids) != len(plan.actions):
+            raise PaperExecutionStateError(
+                "execution plan action identities must be unique"
+            )
+        if not isinstance(observation_evidence_ids, Mapping):
+            raise TypeError(
+                "observation_evidence_ids must be a mapping"
+            )
+        observation_ids = dict(observation_evidence_ids)
+        if any(
+            type(action_id) is not str
+            or not action_id
+            or action_id not in plan_action_ids
+            or type(evidence_id) is not str
+            or not evidence_id
+            for action_id, evidence_id in observation_ids.items()
+        ):
+            raise PaperExecutionStateError(
+                "observation_evidence_ids contain invalid execution evidence"
+            )
+        if not suspended_action_ids.issubset(plan_action_ids):
+            raise PaperExecutionStateError(
+                "suspended_action_ids contain action outside execution plan"
+            )
+        if set(observation_ids) & suspended_action_ids:
+            raise PaperExecutionStateError(
+                "one execution action cannot be both observed and synthetically suspended"
+            )
+        payload: dict[str, Any] = {
+            "trigger_id": trigger_id,
+            "plan_id": plan.plan_id,
+            "plan_fingerprint": plan.fingerprint,
+            "model_fingerprint": config.fingerprint,
+            "started_at": started_at,
+            "action_ids": [action.action_id for action in plan.actions],
+            "observation_evidence_ids": dict(
+                sorted(observation_ids.items())
+            ),
+        }
+        if suspended_action_ids:
+            payload["suspended_action_ids"] = sorted(suspended_action_ids)
+        return payload
+
+    def reserve_run(
+        self,
+        *,
+        run_id: str,
+        trigger_id: str,
+        plan: ExecutionPlan,
+        config: PaperExecutionModelConfig,
+        started_at: str,
+        observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        if any(action.side != "BACK" for action in plan.actions):
+            raise PaperExecutionStateError(
+                "PAPER execution-reality exposure model supports BACK only "
+                "until canonical LAY liability authority exists"
+            )
+        payload = self._reservation_payload(
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
+        )
+        durable_events = self.events()
+        if observation_evidence_ids:
+            action_by_id = {
+                action.action_id: action for action in plan.actions
+            }
+            for action_id, evidence_id in (
+                observation_evidence_ids.items()
+            ):
+                matches = [
+                    event
+                    for event in durable_events
+                    if (
+                        event["event_type"]
+                        == "OBSERVATION_EVIDENCE_REGISTERED"
+                        and event["payload"]["evidence_id"]
+                        == evidence_id
+                    )
+                ]
+                if len(matches) != 1:
+                    raise PaperExecutionStateError(
+                        "reserved observation evidence is not durably registered"
+                    )
+                record = PaperExecutionEvidenceRecord.from_dict(
+                    matches[0]["payload"]["record"]
+                )
+                action = action_by_id[action_id]
+                if (
+                    record.evidence_id != evidence_id
+                    or record.action_id != action.action_id
+                    or record.bookmaker_id != action.bookmaker_id
+                    or record.account_id != action.account_id
+                    or record.event_id != action.event_id
+                    or record.market_id != action.market_id
+                    or record.selection_id != action.selection_id
+                    or record.side != action.side
+                    or record.quote_id != action.quote_id
+                ):
+                    raise PaperExecutionStateError(
+                        "reserved observation evidence does not bind exact action"
+                    )
+                sequence = next(
+                    index
+                    for index, candidate in enumerate(plan.actions)
+                    if candidate.action_id == action_id
+                )
+                _impl._observed_attempt(
+                    run_id=run_id,
+                    plan=plan,
+                    action=action,
+                    sequence=sequence,
+                    config=config,
+                    observation=record.as_observation(),
+                    started_at=started_at,
+                )
+        expected_run_id = _impl._run_id(
+            plan,
+            trigger_id,
+            config,
+        )
+        if run_id != expected_run_id:
+            raise PaperExecutionStateError(
+                "run_id does not match canonical plan/trigger/model identity"
+            )
+        run_events = [
+            event
+            for event in durable_events
+            if event["run_id"] == run_id
+        ]
+        reservations = [
+            event
+            for event in run_events
+            if event["event_type"] == "RUN_RESERVED"
+        ]
+        if not reservations and any(
+            event["event_type"]
+            in {"ATTEMPT_RECORDED", "RUN_COMPLETED"}
+            for event in run_events
+        ):
+            raise PaperExecutionIntegrityError(
+                "RUN_RESERVED cannot be retroactively appended after run state"
+            )
+        self._append_event(
+            event_type="RUN_RESERVED",
+            run_id=run_id,
+            key=f"{run_id}:reserve",
+            payload=payload,
+        )
+
+
+    def _append_event_unlocked(
+        self,
+        *,
+        events: list[dict[str, Any]],
+        event_type: str,
+        run_id: str,
+        key: str,
+        payload: dict[str, Any],
+    ) -> None:
+        by_key = {item["event_key"]: item for item in events}
+        prior = by_key.get(key)
+        sequence = len(events)
+        previous_sha256 = None if not events else events[-1]["event_sha256"]
+        event = self._event(
+            event_type=event_type,
+            run_id=run_id,
+            key=key,
+            payload=payload,
+            sequence=sequence,
+            previous_sha256=previous_sha256,
+        )
+        if prior is not None:
+            comparable = dict(prior)
+            comparable.pop("sequence", None)
+            comparable.pop("previous_sha256", None)
+            comparable.pop("event_sha256", None)
+            proposed = dict(event)
+            proposed.pop("sequence", None)
+            proposed.pop("previous_sha256", None)
+            proposed.pop("event_sha256", None)
+            if comparable != proposed:
+                raise PaperExecutionIntegrityError(
+                    "event_key already has different payload"
+                )
+            return
+
+        encoded = _impl._canonical(event) + "\n"
+        path_existed_before = self.path.exists()
+        try:
+            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            if not path_existed_before or not self._path_durable:
+                self._sync_parent_directory()
+            self._write_anchor_unlocked(events + [event])
+        except OSError as exc:
+            self._path_durable = False
+            raise PaperExecutionIntegrityError(
+                "PAPER execution ledger durability barrier failed"
+            ) from exc
+        self._path_durable = True
+
+    @staticmethod
+    def _validated_exposure_scope_payload(
+        payload: object,
+    ) -> dict[str, Any]:
+        expected_keys = {
+            "schema",
+            "schema_version",
+            "plan_id",
+            "plan_fingerprint",
+            "intent_evidence_sha256",
+            "bindings",
+            "binding_sha256",
+        }
+        if type(payload) is not dict or set(payload) != expected_keys:
+            raise PaperExecutionStateError(
+                "exposure scope payload schema is invalid"
+            )
+        if (
+            payload["schema"]
+            != "autosport.paper_execution.exposure_scope_binding"
+            or type(payload["schema_version"]) is not int
+            or payload["schema_version"] != 1
+        ):
+            raise PaperExecutionStateError(
+                "exposure scope payload schema is invalid"
+            )
+        try:
+            _impl._text(payload["plan_id"], "plan_id")
+            _sha256_text(
+                payload["plan_fingerprint"],
+                "plan_fingerprint",
+            )
+            _sha256_text(
+                payload["intent_evidence_sha256"],
+                "intent_evidence_sha256",
+            )
+            supplied_binding_sha256 = _sha256_text(
+                payload["binding_sha256"],
+                "binding_sha256",
+            )
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionStateError(
+                "exposure scope identity is invalid"
+            ) from exc
+
+        raw_bindings = payload["bindings"]
+        if type(raw_bindings) is not list or not raw_bindings:
+            raise PaperExecutionStateError(
+                "exposure scope bindings are invalid"
+            )
+        action_ids: list[str] = []
+        for raw_binding in raw_bindings:
+            if type(raw_binding) is not dict or set(raw_binding) != {
+                "action_id",
+                "sport",
+                "bankroll_id",
+                "currency",
+            }:
+                raise PaperExecutionStateError(
+                    "exposure scope bindings are invalid"
+                )
+            try:
+                action_id = _impl._text(
+                    raw_binding["action_id"],
+                    "action_id",
+                )
+                sport = raw_binding["sport"]
+                if sport is not None:
+                    _impl._text(sport, "sport")
+                bankroll_id = raw_binding["bankroll_id"]
+                currency = raw_binding["currency"]
+                if (bankroll_id is None) != (currency is None):
+                    raise ValueError(
+                        "bankroll_id and currency must be paired"
+                    )
+                if bankroll_id is not None:
+                    _impl._text(bankroll_id, "bankroll_id")
+                    canonical_currency = _impl._text(
+                        currency,
+                        "currency",
+                    )
+                    if (
+                        len(canonical_currency) != 3
+                        or not canonical_currency.isascii()
+                        or not canonical_currency.isalpha()
+                        or canonical_currency != canonical_currency.upper()
+                    ):
+                        raise ValueError("currency is not canonical")
+            except (TypeError, ValueError) as exc:
+                raise PaperExecutionStateError(
+                    "exposure scope bindings are invalid"
+                ) from exc
+            action_ids.append(action_id)
+        if len(action_ids) != len(set(action_ids)):
+            raise PaperExecutionStateError(
+                "exposure scope bindings contain duplicate action_id"
+            )
+
+        body = {
+            key: payload[key]
+            for key in (
+                "schema",
+                "schema_version",
+                "plan_id",
+                "plan_fingerprint",
+                "intent_evidence_sha256",
+                "bindings",
+            )
+        }
+        if _impl._digest(body) != supplied_binding_sha256:
+            raise PaperExecutionStateError(
+                "exposure scope binding digest is invalid"
+            )
+        return payload
+
+    def publish_exposure_scope(
+        self,
+        *,
+        run_id: str,
+        payload: dict[str, Any],
+    ) -> None:
+        """Publish the adoption exposure scope before run state, atomically."""
+        try:
+            canonical_run_id = _impl._text(run_id, "run_id")
+            if not canonical_run_id.startswith("paper-exec-v2-"):
+                raise ValueError("run_id prefix is invalid")
+            _sha256_text(
+                canonical_run_id.removeprefix("paper-exec-v2-"),
+                "run_id digest",
+            )
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionStateError(
+                "exposure scope run_id is invalid"
+            ) from exc
+        validated_payload = self._validated_exposure_scope_payload(
+            payload
+        )
+        key = f"{canonical_run_id}:exposure-scope"
+
+        def mutate() -> None:
+            self._ensure_existing_path_durable()
+            events = self._load_unlocked()
+            run_events = [
+                event
+                for event in events
+                if event["run_id"] == canonical_run_id
+            ]
+            scope_events = [
+                event
+                for event in run_events
+                if event["event_type"] == "PAPER_EXPOSURE_SCOPE_BOUND"
+            ]
+            if scope_events:
+                if (
+                    len(scope_events) != 1
+                    or scope_events[0]["payload"] != validated_payload
+                ):
+                    raise PaperExecutionStateError(
+                        "durable exposure scope conflicts with prepared execution"
+                    )
+                return
+            if run_events:
+                raise PaperExecutionStateError(
+                    "exposure scope cannot be retroactively published after run state"
+                )
+            self._append_event_unlocked(
+                events=events,
+                event_type="PAPER_EXPOSURE_SCOPE_BOUND",
+                run_id=canonical_run_id,
+                key=key,
+                payload=validated_payload,
+            )
+
+        self._with_writer_lock(mutate)
+
+    @staticmethod
+    def _attempts_in_event_order(
+        events: list[dict[str, Any]],
+    ) -> tuple[list[dict[str, Any]], tuple[PaperLegAttempt, ...]]:
+        attempt_events = [
+            event
+            for event in events
+            if event["event_type"] == "ATTEMPT_RECORDED"
+        ]
+        attempts = tuple(
+            PaperLegAttempt.from_dict(event["payload"])
+            for event in attempt_events
+        )
+        if tuple(
+            attempt.sequence for attempt in attempts
+        ) != tuple(range(len(attempts))):
+            raise PaperExecutionIntegrityError(
+                "durable attempt events are not in canonical sequence order"
+            )
+        for event, attempt in zip(
+            attempt_events,
+            attempts,
+            strict=True,
+        ):
+            event_run_id = event["run_id"]
+            if (
+                attempt.run_id != event_run_id
+                or event["event_key"]
+                != f"{event_run_id}:attempt:{attempt.sequence}"
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable attempt event identity is invalid"
+                )
+        return attempt_events, attempts
+
     def _append_completion_unlocked(
         self,
         *,
@@ -194,6 +936,191 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             ) from exc
         self._path_durable = True
 
+    def record_attempt(self, attempt: PaperLegAttempt) -> None:
+        if not isinstance(attempt, PaperLegAttempt):
+            raise TypeError("attempt must be PaperLegAttempt")
+
+        def mutate() -> None:
+            self._ensure_existing_path_durable()
+            events = self._load_unlocked()
+            run_events = [
+                event
+                for event in events
+                if event["run_id"] == attempt.run_id
+            ]
+            reservations = [
+                event
+                for event in run_events
+                if event["event_type"] == "RUN_RESERVED"
+            ]
+            if len(reservations) != 1:
+                raise PaperExecutionStateError(
+                    "attempt requires exactly one durable reservation"
+                )
+            reservation_event = reservations[0]
+            _, existing_attempts = self._attempts_in_event_order(
+                run_events
+            )
+            retry_existing = attempt.sequence < len(
+                existing_attempts
+            )
+            if attempt.sequence > len(existing_attempts):
+                raise PaperExecutionStateError(
+                    "attempt sequence must extend the exact durable prefix"
+                )
+            reservation = reservations[0]["payload"]
+            action_ids = reservation["action_ids"]
+            if (
+                attempt.sequence >= len(action_ids)
+                or action_ids[attempt.sequence] != attempt.action_id
+            ):
+                raise PaperExecutionStateError(
+                    "attempt does not extend reserved action order"
+                )
+            if (
+                attempt.plan_id != reservation["plan_id"]
+                or attempt.model_fingerprint
+                != reservation["model_fingerprint"]
+            ):
+                raise PaperExecutionStateError(
+                    "attempt conflicts with reserved plan/model identity"
+                )
+            observation_ids = reservation[
+                "observation_evidence_ids"
+            ]
+            suspended_ids = frozenset(
+                reservation.get("suspended_action_ids", [])
+            )
+            evidence_id = observation_ids.get(attempt.action_id)
+            if evidence_id is None:
+                if (
+                    attempt.evidence_grade is not EvidenceGrade.SYNTHETIC
+                    or attempt.evidence_id is not None
+                    or attempt.evidence_sha256 is not None
+                    or attempt.suspended
+                    is not (attempt.action_id in suspended_ids)
+                ):
+                    raise PaperExecutionStateError(
+                        "attempt conflicts with reserved synthetic authority"
+                    )
+            else:
+                if (
+                    attempt.evidence_grade is EvidenceGrade.SYNTHETIC
+                    or attempt.evidence_id != evidence_id
+                    or attempt.evidence_sha256 is None
+                ):
+                    raise PaperExecutionStateError(
+                        "attempt conflicts with reserved observed authority"
+                    )
+                evidence_events = [
+                    event
+                    for event in events
+                    if (
+                        event["event_type"]
+                        == "OBSERVATION_EVIDENCE_REGISTERED"
+                        and event["payload"]["evidence_id"]
+                        == evidence_id
+                    )
+                ]
+                if (
+                    len(evidence_events) != 1
+                    or evidence_events[0]["sequence"]
+                    >= reservation_event["sequence"]
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "reserved observation evidence was not durable before "
+                        "RUN_RESERVED"
+                    )
+                record = PaperExecutionEvidenceRecord.from_dict(
+                    evidence_events[0]["payload"]["record"]
+                )
+                if (
+                    record.evidence_id != attempt.evidence_id
+                    or record.evidence_sha256
+                    != attempt.evidence_sha256
+                    or record.action_id != attempt.action_id
+                    or record.bookmaker_id != attempt.bookmaker_id
+                    or record.account_id != attempt.account_id
+                    or record.event_id != attempt.event_id
+                    or record.market_id != attempt.market_id
+                    or record.selection_id != attempt.selection_id
+                    or record.side != attempt.side
+                    or record.quote_id != attempt.decision_quote_id
+                    or record.outcome is not attempt.outcome
+                    or record.observed_at
+                    != attempt.execution_observed_at
+                    or record.evidence_grade
+                    is not attempt.evidence_grade
+                    or record.evidence_source
+                    != attempt.evidence_source
+                    or record.accepted_odds
+                    != attempt.execution_odds
+                    or record.accepted_stake
+                    != attempt.execution_stake
+                    or record.suspended is not attempt.suspended
+                    or record.reason != attempt.reason
+                ):
+                    raise PaperExecutionStateError(
+                        "attempt conflicts with durable observed evidence"
+                    )
+            if retry_existing:
+                if existing_attempts[attempt.sequence] != attempt:
+                    raise PaperExecutionIntegrityError(
+                        "durable attempt sequence already has different payload"
+                    )
+                return
+            if any(
+                event["event_type"] == "RUN_COMPLETED"
+                for event in run_events
+            ):
+                raise PaperExecutionStateError(
+                    "attempt cannot be appended after RUN_COMPLETED"
+                )
+            if (
+                existing_attempts
+                and existing_attempts[-1].outcome
+                is not PaperAttemptOutcome.ACCEPTED
+            ):
+                raise PaperExecutionStateError(
+                    "attempt cannot follow a terminal execution outcome"
+                )
+
+            key = f"{attempt.run_id}:attempt:{attempt.sequence}"
+            sequence = len(events)
+            previous_sha256 = (
+                None if not events else events[-1]["event_sha256"]
+            )
+            event = self._event(
+                event_type="ATTEMPT_RECORDED",
+                run_id=attempt.run_id,
+                key=key,
+                payload=attempt.to_dict(),
+                sequence=sequence,
+                previous_sha256=previous_sha256,
+            )
+            encoded = _impl._canonical(event) + "\n"
+            path_existed_before = self.path.exists()
+            try:
+                with self.path.open(
+                    "a",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    os.fsync(handle.fileno())
+                if not path_existed_before or not self._path_durable:
+                    self._sync_parent_directory()
+                self._write_anchor_unlocked(events + [event])
+            except OSError as exc:
+                self._path_durable = False
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger durability barrier failed"
+                ) from exc
+            self._path_durable = True
+
+        self._with_writer_lock(mutate)
+
     def complete_run(
         self,
         *,
@@ -230,16 +1157,39 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionIntegrityError(
                     "durable reservation action_ids are invalid"
                 )
-            attempts = tuple(
-                sorted(
-                    (
-                        PaperLegAttempt.from_dict(event["payload"])
-                        for event in run_events
-                        if event["event_type"] == "ATTEMPT_RECORDED"
-                    ),
-                    key=lambda item: item.sequence,
-                )
+            attempt_events, attempts = self._attempts_in_event_order(
+                run_events
             )
+            reservation_event = reservations[0]
+            if any(
+                event["sequence"] <= reservation_event["sequence"]
+                for event in attempt_events
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable attempt appears before RUN_RESERVED"
+                )
+            completions = [
+                event
+                for event in run_events
+                if event["event_type"] == "RUN_COMPLETED"
+            ]
+            if len(completions) > 1:
+                raise PaperExecutionIntegrityError(
+                    "run has multiple completion events"
+                )
+            if completions:
+                completion = completions[0]
+                if (
+                    completion["sequence"]
+                    <= reservation_event["sequence"]
+                    or any(
+                        event["sequence"] > completion["sequence"]
+                        for event in attempt_events
+                    )
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "durable completion chronology is invalid"
+                    )
             derived = _derive_run_economics(tuple(action_ids_raw), attempts)
             if not derived.can_complete:
                 raise PaperExecutionStateError(
@@ -281,44 +1231,190 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         config: PaperExecutionModelConfig,
         started_at: str,
         observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] = frozenset(),
+        evidence_registry: PaperExecutionEvidenceRegistry | None = None,
     ) -> PaperExecutionRun | None:
-        events = self.events(run_id)
+        all_events = self.events()
+        events = tuple(
+            event
+            for event in all_events
+            if event["run_id"] == run_id
+        )
         if not events:
             return None
         reserve = [event for event in events if event["event_type"] == "RUN_RESERVED"]
         if len(reserve) != 1:
             raise PaperExecutionIntegrityError("run needs exactly one reservation")
-        expected_reserve = {
-            "trigger_id": trigger_id,
-            "plan_id": plan.plan_id,
-            "plan_fingerprint": plan.fingerprint,
-            "model_fingerprint": config.fingerprint,
-            "started_at": started_at,
-            "action_ids": [action.action_id for action in plan.actions],
-            "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
-        }
-        if reserve[0]["payload"] != expected_reserve:
-            raise PaperExecutionStateError("run identity conflicts with durable reservation")
-
-        attempt_events = [
-            event for event in events if event["event_type"] == "ATTEMPT_RECORDED"
-        ]
-        attempts = tuple(
-            sorted(
-                (PaperLegAttempt.from_dict(event["payload"]) for event in attempt_events),
-                key=lambda item: item.sequence,
-            )
+        expected_reserve = self._reservation_payload(
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
         )
+        reservation_event = reserve[0]
+        if reservation_event["event_key"] != f"{run_id}:reserve":
+            raise PaperExecutionIntegrityError(
+                "durable reservation event identity is invalid"
+            )
+        if reservation_event["payload"] != expected_reserve:
+            raise PaperExecutionStateError(
+                "run identity conflicts with durable reservation"
+            )
+        for evidence_id in observation_evidence_ids.values():
+            evidence_events = [
+                event
+                for event in all_events
+                if (
+                    event["event_type"]
+                    == "OBSERVATION_EVIDENCE_REGISTERED"
+                    and event["payload"]["evidence_id"] == evidence_id
+                )
+            ]
+            if (
+                len(evidence_events) != 1
+                or evidence_events[0]["sequence"]
+                >= reservation_event["sequence"]
+            ):
+                raise PaperExecutionIntegrityError(
+                    "reserved observation evidence was not durable before "
+                    "RUN_RESERVED"
+                )
+
+        scopes = [
+            event
+            for event in events
+            if event["event_type"] == "PAPER_EXPOSURE_SCOPE_BOUND"
+        ]
+        if len(scopes) > 1:
+            raise PaperExecutionIntegrityError(
+                "run has multiple exposure-scope events"
+            )
+        if scopes:
+            scope_event = scopes[0]
+            scope_payload = scope_event["payload"]
+            scope_bindings = scope_payload["bindings"]
+            if (
+                scope_event["event_key"] != f"{run_id}:exposure-scope"
+                or scope_event["sequence"]
+                >= reservation_event["sequence"]
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable exposure scope chronology is invalid"
+                )
+            if (
+                scope_payload["plan_id"] != plan.plan_id
+                or scope_payload["plan_fingerprint"] != plan.fingerprint
+                or [
+                    binding["action_id"]
+                    for binding in scope_bindings
+                ]
+                != [
+                    action.action_id for action in plan.actions
+                ]
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable exposure scope conflicts with execution plan"
+                )
+
+        attempt_events, attempts = self._attempts_in_event_order(events)
+        if any(
+            event["sequence"] <= reservation_event["sequence"]
+            for event in attempt_events
+        ):
+            raise PaperExecutionIntegrityError(
+                "durable attempt appears before RUN_RESERVED"
+            )
         derived = _derive_run_economics(
             tuple(action.action_id for action in plan.actions),
             attempts,
         )
+        for index, attempt in enumerate(attempts):
+            action = plan.actions[index]
+            if (
+                attempt.plan_id != plan.plan_id
+                or attempt.model_fingerprint != config.fingerprint
+                or attempt.bookmaker_id != action.bookmaker_id
+                or attempt.account_id != action.account_id
+                or attempt.event_id != action.event_id
+                or attempt.market_id != action.market_id
+                or attempt.selection_id != action.selection_id
+                or attempt.side != action.side
+                or attempt.decision_quote_id != action.quote_id
+                or attempt.decision_odds != action.requested_odds
+                or attempt.requested_stake != action.requested_stake
+                or attempt.decision_observed_at != action.quote_observed_at
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable attempt conflicts with execution plan/model"
+                )
+            evidence_id = observation_evidence_ids.get(action.action_id)
+            if evidence_id is None:
+                expected_attempt = _synthetic_attempt(
+                    run_id=run_id,
+                    plan=plan,
+                    action=action,
+                    sequence=index,
+                    config=config,
+                    started_at=started_at,
+                    suspended=action.action_id in suspended_action_ids,
+                )
+                if attempt != expected_attempt:
+                    raise PaperExecutionIntegrityError(
+                        "durable synthetic attempt is not reproducible"
+                    )
+            else:
+                if not isinstance(
+                    evidence_registry,
+                    PaperExecutionEvidenceRegistry,
+                ):
+                    raise PaperExecutionIntegrityError(
+                        "durable observed attempt requires evidence registry"
+                    )
+                try:
+                    record = evidence_registry.resolve(evidence_id)
+                    observation = record.as_observation()
+                    _impl._verify_observation_authority(
+                        action=action,
+                        observation=observation,
+                        registry=evidence_registry,
+                    )
+                    expected_attempt = _impl._observed_attempt(
+                        run_id=run_id,
+                        plan=plan,
+                        action=action,
+                        sequence=index,
+                        config=config,
+                        observation=observation,
+                        started_at=started_at,
+                    )
+                except (
+                    PaperExecutionIntegrityError,
+                    PaperExecutionStateError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    raise PaperExecutionIntegrityError(
+                        "durable observed attempt evidence is invalid"
+                    ) from exc
+                if attempt != expected_attempt:
+                    raise PaperExecutionIntegrityError(
+                        "durable observed attempt is not reproducible"
+                    )
 
         completions = [event for event in events if event["event_type"] == "RUN_COMPLETED"]
         if len(completions) > 1:
             raise PaperExecutionIntegrityError("run has multiple completion events")
         if completions:
             completion = completions[0]
+            if (
+                completion["event_key"] != f"{run_id}:complete"
+                or completion["sequence"] <= reservation_event["sequence"]
+            ):
+                raise PaperExecutionIntegrityError(
+                    "durable completion event identity/chronology is invalid"
+                )
             if any(
                 event["sequence"] > completion["sequence"] for event in attempt_events
             ):
@@ -527,9 +1623,20 @@ def execute_paper_plan(
     action_by_id = {action.action_id: action for action in plan.actions}
     if set(observations) - set(action_by_id):
         raise PaperExecutionStateError("observations contain action outside execution plan")
+    if type(suspended_action_ids) is not frozenset or any(
+        type(action_id) is not str or not action_id
+        for action_id in suspended_action_ids
+    ):
+        raise TypeError(
+            "suspended_action_ids must be a frozenset of non-empty strings"
+        )
     if set(suspended_action_ids) - set(action_by_id):
         raise PaperExecutionStateError(
             "suspended_action_ids contain action outside execution plan"
+        )
+    if set(observations) & set(suspended_action_ids):
+        raise PaperExecutionStateError(
+            "one execution action cannot be both observed and synthetically suspended"
         )
     if observations and not isinstance(
         evidence_registry,
@@ -550,6 +1657,24 @@ def execute_paper_plan(
         observation_evidence_ids[action_id] = observation.evidence_id
 
     run_id = _impl._run_id(plan, trigger_id, config)
+    for sequence, action in enumerate(plan.actions):
+        if action.side != "BACK":
+            raise PaperExecutionStateError(
+                "PAPER execution-reality exposure model supports BACK only "
+                "until canonical LAY liability authority exists"
+            )
+        observation = observations.get(action.action_id)
+        if observation is not None:
+            _impl._observed_attempt(
+                run_id=run_id,
+                plan=plan,
+                action=action,
+                sequence=sequence,
+                config=config,
+                observation=observation,
+                started_at=started_at,
+            )
+
     ledger.reserve_run(
         run_id=run_id,
         trigger_id=trigger_id,
@@ -557,6 +1682,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
     )
     existing = ledger.load_run(
         run_id=run_id,
@@ -565,6 +1691,8 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
+        evidence_registry=evidence_registry,
     )
     assert existing is not None
     if existing.completed:
@@ -589,6 +1717,8 @@ def execute_paper_plan(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
+            evidence_registry=evidence_registry,
         )
         assert result is not None
         return result
@@ -606,11 +1736,6 @@ def execute_paper_plan(
 
     for sequence in range(len(attempts), len(plan.actions)):
         action = plan.actions[sequence]
-        if action.side != "BACK":
-            raise PaperExecutionStateError(
-                "PAPER execution-reality exposure model supports BACK only "
-                "until canonical LAY liability authority exists"
-            )
         observation = observations.get(action.action_id)
         if observation is not None:
             attempt = _impl._observed_attempt(
@@ -676,6 +1801,8 @@ def execute_paper_plan(
                 config=config,
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
+                suspended_action_ids=suspended_action_ids,
+                evidence_registry=evidence_registry,
             )
             assert result is not None
             return result
@@ -693,6 +1820,8 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspended_action_ids,
+        evidence_registry=evidence_registry,
     )
     assert result is not None
     return result

@@ -3,7 +3,11 @@
 This module owns only verified provider TLS/authentication and bounded opaque CRLF
 frame ingress. A positive transport-origin frame proves only that these exact bytes were
 read by this product transport after Betfair returned SUCCESS on the same verified TLS
-connection. Configured account/application labels are not provider-attested identity,
+connection. Each issued authenticated frame also binds the local monotonic timestamp of
+the socket recv block containing that frame's final byte; buffered/coalesced frames do
+not acquire a newer timestamp merely because a caller consumes them later. This is a
+local queue-age authority, not a provider/wall-clock arrival claim. Configured
+account/application labels are not provider-attested identity,
 and this layer deliberately does not claim durable persistence. It does not decode
 stream JSON semantics, persist credentials, auto-login, or expose betting-write methods.
 """
@@ -19,7 +23,7 @@ from queue import Empty, Queue
 from threading import Event, RLock, Thread
 from types import MappingProxyType
 from typing import Protocol
-from weakref import WeakKeyDictionary
+from weakref import ReferenceType, WeakKeyDictionary, ref
 
 from .betfair_account_readonly import BetfairSessionCredentials
 
@@ -38,6 +42,7 @@ _BACKOFF_BASE_SECONDS = 1.0
 _BACKOFF_MAX_SECONDS = 60.0
 _ALLOWED_APP_KEY_CLASSES = frozenset({"DELAYED", "LIVE"})
 _ALLOWED_ENVIRONMENTS = frozenset({"PRODUCTION"})
+_MONOTONIC_NS = time.monotonic_ns
 
 
 class BetfairStreamTransportError(RuntimeError):
@@ -104,6 +109,24 @@ class BetfairStreamSessionIdentity:
     def provider_attested(self) -> bool:
         """Configured account/app/key labels are not attested by Stream auth SUCCESS."""
         return False
+
+    @property
+    def authenticated_app_key_class(self) -> str | None:
+        with self._lifecycle_lock:
+            if (
+                self._socket is None
+                or self._connection_id is None
+                or self._authenticated_identity_sha256 is None
+                or self._authenticated_app_key_class is None
+            ):
+                return None
+            try:
+                current_identity_sha256 = self._identity.identity_sha256
+            except Exception:
+                return None
+            if current_identity_sha256 != self._authenticated_identity_sha256:
+                return None
+            return self._authenticated_app_key_class
 
     @property
     def grants_provider_write_authority(self) -> bool:
@@ -244,15 +267,26 @@ class BetfairStreamAuthenticatedFrame:
         return False
 
     def assert_transport_issued(self) -> None:
-        expected = _ISSUED_AUTHENTICATED_FRAMES.get(self)
-        if expected is None or expected != _authenticated_frame_fingerprint(self):
+        authority = _ISSUED_AUTHENTICATED_FRAMES.get(self)
+        if (
+            authority is None
+            or authority[0] != _authenticated_frame_fingerprint(self)
+        ):
             raise BetfairStreamAuthenticationError(
                 "Betfair authenticated frame was not issued by this product transport"
             )
 
+    def assert_receive_clock_authority(self, clock: object) -> None:
+        self.assert_transport_issued()
+        authority = _ISSUED_AUTHENTICATED_FRAMES.get(self)
+        if authority is None or authority[1] is not clock:
+            raise BetfairStreamAuthenticationError(
+                "Betfair authenticated frame receive clock authority mismatch"
+            )
+
 
 _ISSUED_AUTHENTICATED_FRAMES: WeakKeyDictionary[
-    BetfairStreamAuthenticatedFrame, str
+    BetfairStreamAuthenticatedFrame, tuple[str, object]
 ] = WeakKeyDictionary()
 
 
@@ -384,6 +418,7 @@ class BetfairStreamTlsTransport:
         self._max_frame_bytes = max_frame_bytes
         self._socket: _TlsSocket | None = None
         self._receive_buffer = bytearray()
+        self._receive_timing_chunks: list[tuple[int, int, object]] = []
         self._connection_id: str | None = None
         self._frame_sequence = 0
         self._consecutive_connect_failures = 0
@@ -392,6 +427,10 @@ class BetfairStreamTlsTransport:
         self._lifecycle_generation = 0
         self._active_connect_cancel: Event | None = None
         self._lifecycle_lock = RLock()
+        self._receive_lock = RLock()
+        self._authenticated_reader_ref: ReferenceType[object] | None = None
+        self._authenticated_identity_sha256: str | None = None
+        self._authenticated_app_key_class: str | None = None
 
     def __repr__(self) -> str:
         return (
@@ -488,9 +527,11 @@ class BetfairStreamTlsTransport:
             )
             if not stale_attempt:
                 self._socket = stream
-                self._receive_buffer.clear()
+                self._clear_receive_buffer()
                 self._connection_id = None
                 self._frame_sequence = 0
+                self._authenticated_identity_sha256 = None
+                self._authenticated_app_key_class = None
         if stale_attempt:
             _close_socket_quietly(stream)
             self._finish_connect_attempt(cancellation)
@@ -567,8 +608,14 @@ class BetfairStreamTlsTransport:
                     raise BetfairStreamTransportError(
                         "Betfair stream connection was cancelled"
                     )
+                if not lease.matches(self._identity):
+                    raise BetfairStreamAuthenticationError(
+                        "Betfair stream identity changed during authentication"
+                    )
                 self._connection_generation += 1
                 self._connection_id = connection_id
+                self._authenticated_identity_sha256 = self._identity.identity_sha256
+                self._authenticated_app_key_class = lease.app_key_class
                 self._active_connect_cancel = None
                 self._consecutive_connect_failures = 0
                 self._next_connect_monotonic = 0.0
@@ -605,91 +652,174 @@ class BetfairStreamTlsTransport:
                 "Betfair stream handshake failed validation"
             ) from None
 
-    def read_authenticated_frame(self) -> BetfairStreamAuthenticatedFrame:
+    def _clear_receive_buffer(self) -> None:
+        self._receive_buffer.clear()
+        self._receive_timing_chunks.clear()
+
+    def _append_received_block(self, block: bytes) -> None:
+        if type(block) is not bytes or not block:
+            raise BetfairStreamProtocolError(
+                "Betfair stream receive block must be non-empty bytes"
+            )
+        if time.monotonic_ns is not _MONOTONIC_NS:
+            self._close_with_backoff()
+            raise BetfairStreamTransportError(
+                "Betfair stream monotonic receive clock dispatch changed"
+            )
+        received_monotonic_ns = _MONOTONIC_NS()
+        if type(received_monotonic_ns) is not int or received_monotonic_ns <= 0:
+            self._close_with_backoff()
+            raise BetfairStreamTransportError(
+                "Betfair stream monotonic receive clock is invalid"
+            )
+        self._receive_buffer.extend(block)
+        self._receive_timing_chunks.append(
+            (len(block), received_monotonic_ns, _MONOTONIC_NS)
+        )
+
+    def _consume_received_bytes(self, count: int) -> tuple[int, object]:
+        if type(count) is not int or count <= 0:
+            raise BetfairStreamProtocolError(
+                "Betfair stream receive accounting count must be positive"
+            )
+        remaining = count
+        last_received_monotonic_ns: int | None = None
+        last_clock_witness: object | None = None
+        while remaining:
+            if not self._receive_timing_chunks:
+                raise BetfairStreamProtocolError(
+                    "Betfair stream receive timing accounting is inconsistent"
+                )
+            (
+                chunk_size,
+                received_monotonic_ns,
+                clock_witness,
+            ) = self._receive_timing_chunks[0]
+            if chunk_size <= remaining:
+                remaining -= chunk_size
+                last_received_monotonic_ns = received_monotonic_ns
+                last_clock_witness = clock_witness
+                self._receive_timing_chunks.pop(0)
+            else:
+                self._receive_timing_chunks[0] = (
+                    chunk_size - remaining,
+                    received_monotonic_ns,
+                    clock_witness,
+                )
+                last_received_monotonic_ns = received_monotonic_ns
+                last_clock_witness = clock_witness
+                remaining = 0
+        if last_received_monotonic_ns is None or last_clock_witness is None:
+            raise BetfairStreamProtocolError(
+                "Betfair stream receive timing accounting produced no authority"
+            )
+        return last_received_monotonic_ns, last_clock_witness
+
+    def read_authenticated_frame(
+        self,
+        *,
+        reader: object | None = None,
+    ) -> BetfairStreamAuthenticatedFrame:
         """Return one exact frame with process-local authenticated transport-origin proof."""
 
-        stream = self._socket
-        connection_id = self._connection_id
-        connection_generation = self._connection_generation
-        if stream is None or connection_id is None or connection_generation <= 0:
-            raise BetfairStreamTransportError(
-                "Betfair stream transport is not authenticated"
-            )
+        with self._receive_lock:
+            with self._lifecycle_lock:
+                owner_ref = self._authenticated_reader_ref
+                owner = None if owner_ref is None else owner_ref()
+                if owner_ref is not None and owner is None:
+                    self._authenticated_reader_ref = None
+                elif owner is not None and owner is not reader:
+                    raise BetfairStreamTransportError(
+                        "Betfair authenticated frame reader is owned by another runtime"
+                    )
+                stream = self._socket
+                connection_id = self._connection_id
+                connection_generation = self._connection_generation
+            if stream is None or connection_id is None or connection_generation <= 0:
+                raise BetfairStreamTransportError(
+                    "Betfair stream transport is not authenticated"
+                )
 
-        while True:
-            marker = self._receive_buffer.find(b"\r\n")
-            if marker >= 0:
-                if marker > self._max_frame_bytes:
+            while True:
+                marker = self._receive_buffer.find(b"\r\n")
+                if marker >= 0:
+                    if marker > self._max_frame_bytes:
+                        self._close_with_backoff()
+                        raise BetfairStreamProtocolError(
+                            "Betfair stream frame exceeded the configured size limit"
+                        )
+                    payload_size = marker + 2
+                    payload = bytes(self._receive_buffer[:payload_size])
+                    (
+                        received_monotonic_ns,
+                        received_clock_witness,
+                    ) = self._consume_received_bytes(payload_size)
+                    del self._receive_buffer[:payload_size]
+                    if marker == 0:
+                        self._close_with_backoff()
+                        raise BetfairStreamProtocolError(
+                            "Betfair stream frame must not be empty"
+                        )
+                    break
+
+                bare_lf = self._receive_buffer.find(b"\n")
+                if bare_lf >= 0 and (
+                    bare_lf == 0 or self._receive_buffer[bare_lf - 1] != 0x0D
+                ):
+                    self._close_with_backoff()
+                    raise BetfairStreamProtocolError(
+                        "Betfair stream frame used a non-CRLF delimiter"
+                    )
+                if len(self._receive_buffer) > self._max_frame_bytes:
                     self._close_with_backoff()
                     raise BetfairStreamProtocolError(
                         "Betfair stream frame exceeded the configured size limit"
                     )
-                payload = bytes(self._receive_buffer[: marker + 2])
-                del self._receive_buffer[: marker + 2]
-                if marker == 0:
+
+                try:
+                    block = stream.recv(_SOCKET_READ_BYTES)
+                except (OSError, ssl.SSLError, TimeoutError):
                     self._close_with_backoff()
-                    raise BetfairStreamProtocolError(
-                        "Betfair stream frame must not be empty"
+                    raise BetfairStreamTransportError(
+                        "Betfair stream receive failed"
+                    ) from None
+                if not block:
+                    had_partial = bool(self._receive_buffer)
+                    self._close_with_backoff()
+                    if had_partial:
+                        raise BetfairStreamProtocolError(
+                            "Betfair stream disconnected with a truncated frame"
+                        )
+                    raise BetfairStreamTransportError(
+                        "Betfair stream connection closed before receiving data"
                     )
-                break
+                self._append_received_block(block)
 
-            bare_lf = self._receive_buffer.find(b"\n")
-            if bare_lf >= 0 and (
-                bare_lf == 0 or self._receive_buffer[bare_lf - 1] != 0x0D
-            ):
-                self._close_with_backoff()
-                raise BetfairStreamProtocolError(
-                    "Betfair stream frame used a non-CRLF delimiter"
-                )
-            if len(self._receive_buffer) > self._max_frame_bytes:
-                self._close_with_backoff()
-                raise BetfairStreamProtocolError(
-                    "Betfair stream frame exceeded the configured size limit"
-                )
-
-            try:
-                block = stream.recv(_SOCKET_READ_BYTES)
-            except (OSError, ssl.SSLError, TimeoutError):
-                self._close_with_backoff()
-                raise BetfairStreamTransportError(
-                    "Betfair stream receive failed"
-                ) from None
-            if not block:
-                had_partial = bool(self._receive_buffer)
-                self._close_with_backoff()
-                if had_partial:
-                    raise BetfairStreamProtocolError(
-                        "Betfair stream disconnected with a truncated frame"
+            with self._lifecycle_lock:
+                if (
+                    self._socket is not stream
+                    or self._connection_id != connection_id
+                    or self._connection_generation != connection_generation
+                ):
+                    raise BetfairStreamTransportError(
+                        "Betfair stream connection changed during frame acquisition"
                     )
-                raise BetfairStreamTransportError(
-                    "Betfair stream connection closed before receiving data"
-                )
-            self._receive_buffer.extend(block)
+                self._frame_sequence += 1
+                frame_sequence = self._frame_sequence
 
-        with self._lifecycle_lock:
-            if (
-                self._socket is not stream
-                or self._connection_id != connection_id
-                or self._connection_generation != connection_generation
-            ):
-                raise BetfairStreamTransportError(
-                    "Betfair stream connection changed during frame acquisition"
-                )
-            self._frame_sequence += 1
-            frame_sequence = self._frame_sequence
-
-        issued = BetfairStreamAuthenticatedFrame(
-            connection_id=connection_id,
-            connection_generation=connection_generation,
-            frame_sequence=frame_sequence,
-            payload=payload,
-            payload_sha256=sha256(payload).hexdigest(),
-            received_monotonic_ns=time.monotonic_ns(),
-        )
-        _ISSUED_AUTHENTICATED_FRAMES[issued] = _authenticated_frame_fingerprint(
-            issued
-        )
-        return issued
+            issued = BetfairStreamAuthenticatedFrame(
+                connection_id=connection_id,
+                connection_generation=connection_generation,
+                frame_sequence=frame_sequence,
+                payload=payload,
+                payload_sha256=sha256(payload).hexdigest(),
+                received_monotonic_ns=received_monotonic_ns,
+            )
+            _ISSUED_AUTHENTICATED_FRAMES[issued] = (
+                _authenticated_frame_fingerprint(issued),
+                received_clock_witness,
+            )
+            return issued
 
     def read_persisted_frame(
         self,
@@ -700,6 +830,28 @@ class BetfairStreamTlsTransport:
         raise BetfairStreamPersistenceError(
             "Betfair stream transport does not issue durable persistence authority"
         )
+
+    def _claim_authenticated_reader(self, reader: object) -> None:
+        if reader is None:
+            raise TypeError("authenticated frame reader owner must be an object")
+        try:
+            reader_ref = ref(reader)
+        except TypeError as exc:
+            raise TypeError(
+                "authenticated frame reader owner must support weak references"
+            ) from exc
+        with self._lifecycle_lock:
+            if not self.is_authenticated:
+                raise BetfairStreamTransportError(
+                    "Betfair stream transport is not authenticated"
+                )
+            current_ref = self._authenticated_reader_ref
+            current = None if current_ref is None else current_ref()
+            if current is not None and current is not reader:
+                raise BetfairStreamTransportError(
+                    "Betfair authenticated frame reader is already owned"
+                )
+            self._authenticated_reader_ref = reader_ref
 
     def _finish_connect_attempt(self, cancellation: Event) -> None:
         with self._lifecycle_lock:
@@ -715,7 +867,9 @@ class BetfairStreamTlsTransport:
             if self._socket is stream:
                 self._socket = None
                 self._connection_id = None
-                self._receive_buffer.clear()
+                self._authenticated_identity_sha256 = None
+                self._authenticated_app_key_class = None
+                self._clear_receive_buffer()
             if self._active_connect_cancel is cancellation:
                 self._active_connect_cancel = None
         _close_socket_quietly(stream)
@@ -736,7 +890,10 @@ class BetfairStreamTlsTransport:
             stream = self._socket
             self._socket = None
             self._connection_id = None
-            self._receive_buffer.clear()
+            self._authenticated_reader_ref = None
+            self._authenticated_identity_sha256 = None
+            self._authenticated_app_key_class = None
+            self._clear_receive_buffer()
         if stream is not None:
             _close_socket_quietly(stream)
 
@@ -763,8 +920,10 @@ class BetfairStreamTlsTransport:
                     raise BetfairStreamProtocolError(
                         "Betfair stream handshake message exceeded the size limit"
                     )
+                consumed_size = marker + 2
                 raw = bytes(self._receive_buffer[:marker])
-                del self._receive_buffer[: marker + 2]
+                self._consume_received_bytes(consumed_size)
+                del self._receive_buffer[:consumed_size]
                 if not raw:
                     raise BetfairStreamProtocolError(
                         "Betfair stream handshake contained an empty message"
@@ -791,7 +950,7 @@ class BetfairStreamTlsTransport:
                 raise BetfairStreamTransportError(
                     "Betfair stream connection closed during handshake"
                 )
-            self._receive_buffer.extend(block)
+            self._append_received_block(block)
 
 
 def _open_verified_tls_socket(
@@ -1015,6 +1174,8 @@ PUBLIC_PROTOCOL = MappingProxyType(
         "configured_identity_provider_attested": False,
         "durable_persistence_authority": False,
         "authenticated_transport_origin_authority": True,
+        "socket_ingress_monotonic_timestamp_authority": True,
+        "buffered_frame_timestamp_refresh": False,
         "connect_cancellation_supported": True,
         "market_write_authority": False,
         "betting_write_authority": False,

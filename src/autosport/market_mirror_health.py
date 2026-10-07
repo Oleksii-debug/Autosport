@@ -35,6 +35,57 @@ class ProviderHealthReplayBoundary:
     recorded_at: str | None
     transition_order: int
 
+    def __post_init__(self) -> None:
+        if (
+            type(self.source_id) is not str
+            or not self.source_id
+            or self.source_id.strip() != self.source_id
+        ):
+            raise ValueError(
+                "health replay source_id must be a non-empty trimmed string"
+            )
+        if (
+            type(self.transition_order) is not int
+            or self.transition_order < 0
+        ):
+            raise ValueError(
+                "health replay transition_order must be a non-negative integer"
+            )
+        if self.transition_order == 0:
+            if self.recorded_at is not None:
+                raise ValueError(
+                    "zero health replay boundary cannot carry recorded_at"
+                )
+        else:
+            if type(self.recorded_at) is not str:
+                raise ValueError(
+                    "positive health replay boundary requires recorded_at"
+                )
+            parse_source_timestamp(self.recorded_at)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source_id": self.source_id,
+            "recorded_at": self.recorded_at,
+            "transition_order": self.transition_order,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "ProviderHealthReplayBoundary":
+        if type(raw) is not dict or set(raw) != {
+            "source_id",
+            "recorded_at",
+            "transition_order",
+        }:
+            raise ValueError(
+                "health replay boundary must contain canonical fields"
+            )
+        return cls(
+            source_id=raw["source_id"],
+            recorded_at=raw["recorded_at"],
+            transition_order=raw["transition_order"],
+        )
+
 
 @dataclass(frozen=True, slots=True)
 class ProviderHealthDecision:
@@ -77,12 +128,12 @@ class HealthGatedMirrorDecisionIndex:
         *,
         max_health_age: timedelta,
     ) -> None:
-        if not isinstance(dependencies, FocusedMirrorDependencyIndex):
-            raise TypeError("dependencies must be a FocusedMirrorDependencyIndex")
-        if not isinstance(health_store, SourceHealthStore):
-            raise TypeError("health_store must be a SourceHealthStore")
-        if not isinstance(max_health_age, timedelta):
-            raise TypeError("max_health_age must be a timedelta")
+        if type(dependencies) is not FocusedMirrorDependencyIndex:
+            raise TypeError("dependencies must be an exact FocusedMirrorDependencyIndex")
+        if type(health_store) is not SourceHealthStore:
+            raise TypeError("health_store must be an exact SourceHealthStore")
+        if type(max_health_age) is not timedelta:
+            raise TypeError("max_health_age must be an exact timedelta")
         if max_health_age < timedelta(0):
             raise ValueError("max_health_age must be non-negative")
         self._dependencies = dependencies
@@ -91,21 +142,21 @@ class HealthGatedMirrorDecisionIndex:
 
     @staticmethod
     def _as_of(value: datetime) -> datetime:
-        if not isinstance(value, datetime):
-            raise TypeError("as_of must be a datetime")
+        if type(value) is not datetime:
+            raise TypeError("as_of must be an exact datetime")
         if value.tzinfo is None or value.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
         return value.astimezone(timezone.utc)
 
     @staticmethod
     def _source_id(value: str) -> str:
-        if not isinstance(value, str) or not value or value.strip() != value:
+        if type(value) is not str or not value or value.strip() != value:
             raise ValueError("source_id must be a non-empty trimmed string")
         return value
 
     @staticmethod
     def _boundary_order(value: object) -> int:
-        if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        if type(value) is not int or value < 0:
             raise ValueError("health replay transition_order must be a non-negative integer")
         return value
 
@@ -143,7 +194,7 @@ class HealthGatedMirrorDecisionIndex:
         elif entries:
             available_order = (
                 entries[-1]["transition_order"]
-                if schema_version == 3
+                if schema_version in {3, 4}
                 else len(entries)
             )
             available_recorded_at = entries[-1]["recorded_at"]
@@ -168,13 +219,15 @@ class HealthGatedMirrorDecisionIndex:
                         break
                     horizon_order = (
                         entry["transition_order"]
-                        if schema_version == 3
+                        if schema_version in {3, 4}
                         else index
                     )
                     horizon_recorded_at = entry["recorded_at"]
         else:
-            if not isinstance(replay_boundary, ProviderHealthReplayBoundary):
-                raise TypeError("replay_boundary must be a ProviderHealthReplayBoundary")
+            if type(replay_boundary) is not ProviderHealthReplayBoundary:
+                raise TypeError(
+                    "replay_boundary must be an exact ProviderHealthReplayBoundary"
+                )
             if replay_boundary.source_id != source_id:
                 raise ValueError("health replay boundary source_id mismatch")
             horizon_order = self._boundary_order(replay_boundary.transition_order)
@@ -191,7 +244,7 @@ class HealthGatedMirrorDecisionIndex:
                     expected = entries[horizon_order - 1]
                     expected_order = (
                         expected["transition_order"]
-                        if schema_version == 3
+                        if schema_version in {3, 4}
                         else horizon_order
                     )
                     if expected_order != horizon_order:
@@ -222,7 +275,11 @@ class HealthGatedMirrorDecisionIndex:
 
         selected: dict | None = None
         for index, entry in enumerate(entries, start=1):
-            order = entry["transition_order"] if schema_version == 3 else index
+            order = (
+                entry["transition_order"]
+                if schema_version in {3, 4}
+                else index
+            )
             if order > horizon_order:
                 break
             if parse_source_timestamp(entry["recorded_at"]) <= as_of:
@@ -279,42 +336,45 @@ class HealthGatedMirrorDecisionIndex:
             replay_boundary=bound,
         )
 
-    def decision_view(
+    def gate_snapshot(
         self,
-        input_id: str,
+        captured: MirrorSnapshot,
         *,
         as_of: datetime,
-        max_age: timedelta,
         health_boundaries: Mapping[str, ProviderHealthReplayBoundary] | None = None,
     ) -> HealthGatedMirrorSnapshot:
-        """Return a focused view and the durable health horizons used to filter it.
-
-        Pass ``health_boundaries`` from an earlier returned snapshot to reproduce that
-        health decision identity after additional equal-time transitions are appended.
-        The returned object remains a ``MirrorSnapshot`` subtype for existing callers.
-        """
+        """Health-gate an already proven market snapshot without rebuilding market truth."""
+        if type(captured) is not MirrorSnapshot:
+            raise TypeError("captured must be an exact MirrorSnapshot")
         boundary = self._as_of(as_of)
-        captured: MirrorSnapshot = self._dependencies.decision_view(
-            input_id,
-            as_of=boundary,
-            max_age=max_age,
-        )
         source_ids = tuple(sorted({event.source_id for event in captured.events}))
-        supplied: Mapping[str, ProviderHealthReplayBoundary]
-        if health_boundaries is None:
-            supplied = {}
-        else:
-            if not isinstance(health_boundaries, Mapping):
-                raise TypeError("health_boundaries must be a mapping or null")
+        if health_boundaries is not None:
+            if type(health_boundaries) is not dict:
+                raise TypeError("health_boundaries must be an exact dict or null")
+            if any(type(key) is not str for key in health_boundaries):
+                raise TypeError(
+                    "health replay boundary mapping keys must be exact strings"
+                )
+            if any(
+                type(value) is not ProviderHealthReplayBoundary
+                for value in health_boundaries.values()
+            ):
+                raise TypeError(
+                    "health replay boundary mapping values must be exact boundaries"
+                )
             if set(health_boundaries) != set(source_ids):
-                raise ValueError("health replay boundaries must match decision-view sources")
-            supplied = health_boundaries
-
+                raise ValueError(
+                    "health replay boundaries must match decision-view sources"
+                )
         decisions = {
             source_id: self.provider_health(
                 source_id,
                 as_of=boundary,
-                replay_boundary=(supplied[source_id] if health_boundaries is not None else None),
+                replay_boundary=(
+                    health_boundaries[source_id]
+                    if health_boundaries is not None
+                    else None
+                ),
             )
             for source_id in source_ids
         }
@@ -328,6 +388,27 @@ class HealthGatedMirrorDecisionIndex:
             health_boundaries=tuple(
                 decisions[source_id].replay_boundary for source_id in source_ids
             ),
+        )
+
+    def decision_view(
+        self,
+        input_id: str,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+        health_boundaries: Mapping[str, ProviderHealthReplayBoundary] | None = None,
+    ) -> HealthGatedMirrorSnapshot:
+        """Return a focused view and the durable health horizons used to filter it."""
+        boundary = self._as_of(as_of)
+        captured: MirrorSnapshot = self._dependencies.decision_view(
+            input_id,
+            as_of=boundary,
+            max_age=max_age,
+        )
+        return self.gate_snapshot(
+            captured,
+            as_of=boundary,
+            health_boundaries=health_boundaries,
         )
 
     def affected_inputs_for_source(

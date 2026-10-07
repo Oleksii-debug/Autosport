@@ -7,11 +7,18 @@ from enum import Enum
 from threading import RLock
 
 from .domain import MarketEvent, _quote_identity
-from .storage import SQLiteMarketStore
+from .market_state_identity import MarketStateIdentityError, same_semantic_market_state
+from .storage import (
+    SQLiteMarketStore,
+    _timezone_aware_instant,
+    _validate_local_receipt_order,
+    _validate_persistable_sequence,
+)
 
 
 class MirrorUpdate(str, Enum):
     APPLIED = "applied"
+    SEMANTIC_REFRESH = "semantic_refresh"
     DUPLICATE = "duplicate"
     STALE = "stale"
 
@@ -46,6 +53,11 @@ class MarketMirror:
 
     def __init__(self) -> None:
         self._latest: dict[tuple[str, str], MarketEvent] = {}
+        # Keys may exist only as sealed generation-zero migration baseline. Those
+        # values remain audit-visible and preserve provider sequence ordering, but
+        # they cannot authorize economic decisions until a positive product-issued
+        # append becomes the current event for that key.
+        self._decision_causal_keys: set[tuple[str, str]] = set()
         self._revision = 0
         self._lock = RLock()
 
@@ -58,7 +70,9 @@ class MarketMirror:
     @staticmethod
     def _snapshot_event(event: MarketEvent) -> MarketEvent:
         """Own an independent canonical value snapshot, including nested metadata."""
-        return MarketEvent.from_dict(event.to_dict())
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
+        return MarketEvent.from_dict(MarketEvent.to_dict(event))
 
     @staticmethod
     def _same_sequence_payload(left: MarketEvent, right: MarketEvent) -> bool:
@@ -81,10 +95,8 @@ class MarketMirror:
     def _utc_timestamp(value: str) -> datetime | None:
         """Parse one provider/observation timestamp, failing closed on bad input."""
         try:
-            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
-        except (AttributeError, ValueError):
-            return None
-        if parsed.tzinfo is None or parsed.utcoffset() is None:
+            parsed = _timezone_aware_instant(value, "timestamp")
+        except ValueError:
             return None
         return parsed.astimezone(timezone.utc)
 
@@ -98,44 +110,132 @@ class MarketMirror:
         if values is None:
             return None
         if isinstance(values, str):
+            if type(values) is not str:
+                raise TypeError(f"{name} must be an exact string")
             selected = frozenset({values})
         else:
+            if isinstance(values, str):
+                raise TypeError(f"{name} entries must be exact strings")
             try:
-                selected = frozenset(values)
+                materialized = tuple(values)
             except TypeError as exc:
                 raise TypeError(f"{name} must be a string or iterable of strings") from exc
-        if any(not isinstance(value, str) or not value for value in selected):
+            if any(type(value) is not str for value in materialized):
+                raise TypeError(f"{name} entries must be exact strings")
+            selected = frozenset(materialized)
+        if any(not value for value in selected):
             raise ValueError(f"{name} entries must be non-empty strings")
         return selected
 
     @staticmethod
+    def _quote_key_set(
+        keys: Iterable[tuple[str, str]],
+    ) -> frozenset[tuple[str, str]]:
+        if isinstance(keys, (str, bytes)):
+            raise TypeError("keys must be an iterable of (source_id, quote_key) tuples")
+        try:
+            values = tuple(keys)
+        except TypeError as exc:
+            raise TypeError(
+                "keys must be an iterable of (source_id, quote_key) tuples"
+            ) from exc
+        normalized: set[tuple[str, str]] = set()
+        for value in values:
+            if type(value) is not tuple or len(value) != 2:
+                raise ValueError("mirror key must be a (source_id, quote_key) tuple")
+            source_id, quote_key = value
+            if type(source_id) is not str or not source_id or source_id.strip() != source_id:
+                raise ValueError("mirror key source_id must be a non-empty trimmed string")
+            if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
+                raise ValueError("mirror key quote_key must be a non-empty trimmed string")
+            normalized.add((source_id, quote_key))
+        return frozenset(normalized)
+
+    @staticmethod
     def _decision_boundary(*, as_of: datetime, max_age: timedelta) -> tuple[datetime, timedelta]:
-        if not isinstance(as_of, datetime):
-            raise TypeError("as_of must be a datetime")
+        if type(as_of) is not datetime:
+            raise TypeError("as_of must be an exact datetime")
         if as_of.tzinfo is None or as_of.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
-        if not isinstance(max_age, timedelta):
-            raise TypeError("max_age must be a timedelta")
+        if type(max_age) is not timedelta:
+            raise TypeError("max_age must be an exact timedelta")
         if max_age < timedelta(0):
             raise ValueError("max_age must be non-negative")
         return as_of.astimezone(timezone.utc), max_age
 
-    def apply(self, event: MarketEvent) -> MirrorApplyResult:
-        """Apply one event iff it advances source-local sequence state.
+    @classmethod
+    def _event_causal_times(
+        cls,
+        event: MarketEvent,
+    ) -> tuple[datetime, datetime, datetime] | None:
+        """Return normalized source/observed/ingest clocks when all are usable."""
 
-        A repeated identical sequence is idempotent. A lower sequence is stale and
-        ignored. Reusing an existing sequence for different content is a conflict
-        and fails closed rather than silently replacing canonical evidence. Material
-        updates are serialized with readers and advance one mirror-wide revision.
-        """
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
+        observed_time = cls._utc_timestamp(event.observed_ts)
+        ingest_time = cls._utc_timestamp(event.ingest_ts)
+        if source_time is None or observed_time is None or ingest_time is None:
+            return None
+        return source_time, observed_time, ingest_time
+
+    @classmethod
+    def _event_causally_available(
+        cls,
+        event: MarketEvent,
+        *,
+        boundary: datetime,
+    ) -> bool:
+        """Return whether all causal clocks make one event usable at boundary."""
+
+        causal_times = cls._event_causal_times(event)
+        return causal_times is not None and all(
+            timestamp <= boundary for timestamp in causal_times
+        )
+
+    @classmethod
+    def _decision_visible_event(
+        cls,
+        event: MarketEvent,
+        *,
+        boundary: datetime,
+        max_age: timedelta,
+    ) -> bool:
+        """Require provider freshness and local causal availability at one cutoff."""
+
+        if event.status not in cls._DECISION_ELIGIBLE_STATUSES:
+            return False
+        if not cls._event_causally_available(event, boundary=boundary):
+            return False
+        source_time = cls._utc_timestamp(event.source_ts or event.observed_ts)
+        if source_time is None:
+            return False
+        age = boundary - source_time
+        return timedelta(0) <= age <= max_age
+
+    def _apply_with_causal_authority(
+        self,
+        event: MarketEvent,
+        *,
+        decision_causal: bool,
+    ) -> MirrorApplyResult:
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
+        if type(decision_causal) is not bool:
+            raise TypeError("decision_causal must be a bool")
+        _validate_persistable_sequence(event.sequence)
+        _validate_local_receipt_order(
+            event,
+            require_supported_precision=False,
+        )
 
         key = self._key(event)
         with self._lock:
             previous = self._latest.get(key)
             if previous is None:
                 self._latest[key] = self._snapshot_event(event)
+                if decision_causal:
+                    self._decision_causal_keys.add(key)
+                else:
+                    self._decision_causal_keys.discard(key)
                 self._revision += 1
                 return MirrorApplyResult(
                     MirrorUpdate.APPLIED,
@@ -156,6 +256,26 @@ class MarketMirror:
 
             if event.sequence == previous.sequence:
                 if self._same_sequence_payload(event, previous):
+                    previous_decision_causal = key in self._decision_causal_keys
+                    if previous_decision_causal != decision_causal:
+                        # Provenance is part of decision truth even when provider
+                        # payload identity did not change. Reconciliation must be
+                        # able to revoke a falsely causal generation-zero value or
+                        # restore product-issued authority without inventing a new
+                        # provider sequence.
+                        self._latest[key] = self._snapshot_event(event)
+                        if decision_causal:
+                            self._decision_causal_keys.add(key)
+                        else:
+                            self._decision_causal_keys.discard(key)
+                        self._revision += 1
+                        return MirrorApplyResult(
+                            MirrorUpdate.APPLIED,
+                            event.source_id,
+                            event.quote_key,
+                            previous.sequence,
+                            previous.sequence,
+                        )
                     return MirrorApplyResult(
                         MirrorUpdate.DUPLICATE,
                         event.source_id,
@@ -167,15 +287,50 @@ class MarketMirror:
                     "conflicting MarketEvent payload reused an existing source-local sequence"
                 )
 
+            previous_decision_causal = key in self._decision_causal_keys
+            try:
+                semantic_refresh = (
+                    previous_decision_causal
+                    and decision_causal
+                    and same_semantic_market_state(previous, event)
+                )
+            except MarketStateIdentityError:
+                # A malformed/unsupported claimed semantic contract cannot mint
+                # duplicate suppression. Preserve the durable acquisition as an
+                # ordinary material transition so restart/live reconstruction
+                # remains available while downstream work is conservatively invalidated.
+                semantic_refresh = False
             self._latest[key] = self._snapshot_event(event)
+            if decision_causal:
+                self._decision_causal_keys.add(key)
+            else:
+                self._decision_causal_keys.discard(key)
             self._revision += 1
             return MirrorApplyResult(
-                MirrorUpdate.APPLIED,
+                (
+                    MirrorUpdate.SEMANTIC_REFRESH
+                    if semantic_refresh
+                    else MirrorUpdate.APPLIED
+                ),
                 event.source_id,
                 event.quote_key,
                 previous.sequence,
                 event.sequence,
             )
+
+    def apply(self, event: MarketEvent) -> MirrorApplyResult:
+        """Apply one live/product-issued event iff it advances source-local state.
+
+        Public apply calls are decision-causal by construction: production subscribers
+        receive only events accepted by SQLiteMarketStore as positive durable appends.
+        Generation-zero migration state is loaded through the private provenance-aware
+        restoration path instead.
+        """
+
+        return self._apply_with_causal_authority(
+            event,
+            decision_causal=True,
+        )
 
     def persist_and_apply(
         self,
@@ -190,13 +345,66 @@ class MarketMirror:
         but valid provider observations may still be retained in history for audit;
         ``apply`` then keeps the live source-local projection monotonic.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
 
-        store.append(event)
-        return self.apply(event)
+        admitted_event = self._snapshot_event(event)
+        prior = self.event_for_quote_key(
+            admitted_event.source_id,
+            admitted_event.quote_key,
+        )
+        accepted = store.append_batch_accepted((admitted_event,))
+        if accepted:
+            if len(accepted) != 1:
+                raise RuntimeError("single market append returned invalid accepted cardinality")
+            # Apply the exact canonical value snapshot that storage admitted, not the
+            # caller-owned object. Nested MarketEvent metadata is mutable even though
+            # the dataclass is frozen; this closes SQLite-COMMIT -> mirror-apply TOCTOU.
+            return self.apply(accepted[0])
+
+        # A strictly older duplicate cannot advance authority. A same-sequence
+        # duplicate may use the fast path only when this mirror already carries
+        # decision-causal authority for that key; otherwise trusted durable
+        # append-generation evidence is required before provenance can change.
+        if prior is not None:
+            key = self._key(admitted_event)
+            if prior.sequence > admitted_event.sequence:
+                return self.apply(admitted_event)
+            if (
+                prior.sequence == admitted_event.sequence
+                and key in self._decision_causal_keys
+            ):
+                return self.apply(admitted_event)
+
+        # Storage intentionally treats a retry of one source-local sequence as the
+        # same provider observation even when local receipt clocks changed. On a
+        # fresh/incomplete mirror, applying the caller's retry object would expose
+        # local timestamps that are not the durable canonical history. Re-read the
+        # independently trusted persisted event before mutating live state.
+        canonical_with_generation = next(
+            (
+                (persisted, append_generation)
+                for persisted, append_generation in store.events_with_append_generation(
+                    admitted_event.event_id
+                )
+                if persisted.dedupe_key == admitted_event.dedupe_key
+            ),
+            None,
+        )
+        if canonical_with_generation is None:
+            raise RuntimeError(
+                "duplicate market event disappeared from canonical history"
+            )
+        canonical, append_generation = canonical_with_generation
+        # A storage duplicate can refer to sealed generation-zero migration history.
+        # Reconstructing a fresh/incomplete mirror must preserve that row as an
+        # audit/sequence fence without laundering it into decision-causal live state.
+        return self._apply_with_causal_authority(
+            canonical,
+            decision_causal=append_generation > 0,
+        )
 
     def view(
         self,
@@ -206,6 +414,7 @@ class MarketMirror:
         event_ids: str | Iterable[str] | None = None,
         market_ids: str | Iterable[str] | None = None,
         selection_ids: str | Iterable[str] | None = None,
+        _causal_only: bool = False,
     ) -> MirrorSnapshot:
         """Capture one coherent revision and optionally filter it for a consumer.
 
@@ -219,12 +428,15 @@ class MarketMirror:
         selected_events = self._selector(event_ids, name="event_ids")
         selected_markets = self._selector(market_ids, name="market_ids")
         selected_selections = self._selector(selection_ids, name="selection_ids")
+        if type(_causal_only) is not bool:
+            raise TypeError("_causal_only must be a bool")
 
         with self._lock:
             revision = self._revision
             events = tuple(
                 self._snapshot_event(event)
-                for _, event in sorted(self._latest.items(), key=lambda item: item[0])
+                for key, event in sorted(self._latest.items(), key=lambda item: item[0])
+                if not _causal_only or key in self._decision_causal_keys
             )
 
         filtered = tuple(
@@ -240,6 +452,32 @@ class MarketMirror:
             )
         )
         return MirrorSnapshot(revision=revision, events=filtered)
+
+    def causal_view(
+        self,
+        *,
+        source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        """Return product-issued current state without freshness/status filtering.
+
+        This is the operator/current-state counterpart to active_view: it excludes
+        sealed generation-zero migration rows from live product truth while retaining
+        positive durable rows even when they are stale, closed, or otherwise not
+        decision-eligible. Use view()/snapshot() when raw audit/order state is required.
+        """
+
+        return self.view(
+            source_ids=source_ids,
+            sports=sports,
+            event_ids=event_ids,
+            market_ids=market_ids,
+            selection_ids=selection_ids,
+            _causal_only=True,
+        )
 
     def active_view(
         self,
@@ -260,24 +498,23 @@ class MarketMirror:
         ``source_ts`` is preferred over the local observation clock when available.
         """
         boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
-        captured = self.view(
+        captured = self.causal_view(
             source_ids=source_ids,
             sports=sports,
             event_ids=event_ids,
             market_ids=market_ids,
             selection_ids=selection_ids,
         )
-        eligible: list[MarketEvent] = []
-        for event in captured.events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=captured.revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in captured.events
+            if self._decision_visible_event(
+                event,
+                boundary=boundary,
+                max_age=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=captured.revision, events=eligible)
 
     def event_for_quote_key(
         self,
@@ -293,6 +530,32 @@ class MarketMirror:
             event = self._latest.get((source_id, quote_key))
             return None if event is None else self._snapshot_event(event)
 
+    def view_for_keys(
+        self,
+        keys: Iterable[tuple[str, str]],
+        *,
+        _causal_only: bool = False,
+    ) -> MirrorSnapshot:
+        """Return one coherent latest-event view for explicit source/quote keys.
+
+        _causal_only is an internal authority fence for routing consumers that
+        must not treat sealed generation-zero/audit-only state as live decision truth.
+        Both raw and causal projections capture one mirror revision under the same
+        lock and remain bounded to the requested identities.
+        """
+        normalized = self._quote_key_set(keys)
+        if type(_causal_only) is not bool:
+            raise TypeError("_causal_only must be a bool")
+        with self._lock:
+            revision = self._revision
+            events = tuple(
+                self._snapshot_event(self._latest[key])
+                for key in sorted(normalized)
+                if key in self._latest
+                and (not _causal_only or key in self._decision_causal_keys)
+            )
+        return MirrorSnapshot(revision=revision, events=events)
+
     def active_view_for_keys(
         self,
         keys: Iterable[tuple[str, str]],
@@ -306,45 +569,26 @@ class MarketMirror:
         second market-state authority. Incremental consumers can therefore avoid a
         whole-mirror snapshot when only bounded dirty quote identities changed.
         """
-        if isinstance(keys, (str, bytes)):
-            raise TypeError("keys must be an iterable of (source_id, quote_key) tuples")
-        try:
-            values = tuple(keys)
-        except TypeError as exc:
-            raise TypeError(
-                "keys must be an iterable of (source_id, quote_key) tuples"
-            ) from exc
-        normalized: set[tuple[str, str]] = set()
-        for value in values:
-            if type(value) is not tuple or len(value) != 2:
-                raise ValueError("mirror key must be a (source_id, quote_key) tuple")
-            source_id, quote_key = value
-            if type(source_id) is not str or not source_id or source_id.strip() != source_id:
-                raise ValueError("mirror key source_id must be a non-empty trimmed string")
-            if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
-                raise ValueError("mirror key quote_key must be a non-empty trimmed string")
-            normalized.add((source_id, quote_key))
-
+        normalized = self._quote_key_set(keys)
         boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
         with self._lock:
             revision = self._revision
             events = tuple(
                 self._snapshot_event(self._latest[key])
                 for key in sorted(normalized)
-                if key in self._latest
+                if key in self._latest and key in self._decision_causal_keys
             )
 
-        eligible: list[MarketEvent] = []
-        for event in events:
-            if event.status not in self._DECISION_ELIGIBLE_STATUSES:
-                continue
-            timestamp = self._utc_timestamp(event.source_ts or event.observed_ts)
-            if timestamp is None:
-                continue
-            age = boundary - timestamp
-            if timedelta(0) <= age <= age_limit:
-                eligible.append(event)
-        return MirrorSnapshot(revision=revision, events=tuple(eligible))
+        eligible = tuple(
+            event
+            for event in events
+            if self._decision_visible_event(
+                event,
+                boundary=boundary,
+                max_age=age_limit,
+            )
+        )
+        return MirrorSnapshot(revision=revision, events=eligible)
 
     def snapshot(self) -> tuple[MarketEvent, ...]:
         """Return a deterministic, ownership-isolated snapshot by source and quote."""
@@ -387,6 +631,91 @@ class MarketMirror:
         return self.active_view(as_of=as_of, max_age=max_age).events
 
     @classmethod
+    def _decision_view_from_proven_history(
+        cls,
+        events_with_generation: Iterable[tuple[MarketEvent, int]],
+        *,
+        boundary: datetime,
+        max_age: timedelta,
+        source_ids: frozenset[str] | None,
+        sports: frozenset[str] | None,
+        event_ids: frozenset[str] | None,
+        market_ids: frozenset[str] | None,
+        selection_ids: frozenset[str] | None,
+    ) -> MirrorSnapshot:
+        """Reconstruct latest causally available state from already-proven history."""
+
+        mirror = cls()
+        for event, append_generation in events_with_generation:
+            if type(append_generation) is not int or append_generation < 0:
+                raise ValueError(
+                    "market history append generation must be a non-negative int"
+                )
+            if append_generation == 0:
+                # Legacy baseline remains an audit/sequence fence only.
+                mirror._apply_with_causal_authority(
+                    event,
+                    decision_causal=False,
+                )
+                continue
+            if not cls._event_causally_available(event, boundary=boundary):
+                # A future successor must not negatively erase the latest predecessor
+                # that was actually available at this decision boundary.
+                continue
+            mirror._apply_with_causal_authority(
+                event,
+                decision_causal=True,
+            )
+        return mirror.active_view(
+            as_of=boundary,
+            max_age=max_age,
+            source_ids=source_ids,
+            sports=sports,
+            event_ids=event_ids,
+            market_ids=market_ids,
+            selection_ids=selection_ids,
+        )
+
+    @classmethod
+    def current_history_view_from_store(
+        cls,
+        store: SQLiteMarketStore,
+        *,
+        as_of: datetime,
+        max_age: timedelta,
+        source_ids: str | Iterable[str] | None = None,
+        sports: str | Iterable[str] | None = None,
+        event_ids: str | Iterable[str] | None = None,
+        market_ids: str | Iterable[str] | None = None,
+        selection_ids: str | Iterable[str] | None = None,
+    ) -> MirrorSnapshot:
+        """Resolve current live as-of state from verified append history without a cutoff.
+
+        This is an exceptional live fallback for a latest projection containing a
+        causally-future successor. It verifies the existing product-issued append
+        history but does not create a replay cutoff or a second durable authority.
+        """
+
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
+        boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
+        selected_sources = cls._selector(source_ids, name="source_ids")
+        selected_sports = cls._selector(sports, name="sports")
+        selected_events = cls._selector(event_ids, name="event_ids")
+        selected_markets = cls._selector(market_ids, name="market_ids")
+        selected_selections = cls._selector(selection_ids, name="selection_ids")
+        return cls._decision_view_from_proven_history(
+            store.events_with_append_generation(),
+            boundary=boundary,
+            max_age=age_limit,
+            source_ids=selected_sources,
+            sports=selected_sports,
+            event_ids=selected_events,
+            market_ids=selected_markets,
+            selection_ids=selected_selections,
+        )
+
+    @classmethod
     def replay_view_from_store(
         cls,
         store: SQLiteMarketStore,
@@ -401,48 +730,88 @@ class MarketMirror:
     ) -> MirrorSnapshot:
         """Reconstruct exactly the decision-visible mirror state at as_of.
 
-        Replay is read-only over canonical append-only history. Events whose local
-        observation or ingestion/receipt instant is after as_of are never applied,
-        even when their provider timestamp is older, so later-received evidence cannot
-        leak into an earlier decision. Malformed causal clocks fail closed. The
-        reconstructed mirror then applies the same canonical status/freshness/selectors
-        contract as a live active_view.
+        Replay never mutates canonical market history/current projection. The first
+        read of an exact normalized as_of durably issues a causal cutoff by freezing
+        the store's product-owned append generation; later appends therefore cannot
+        rewrite that already-issued cutoff,
+        even when they carry backdated local clocks. Pre-authority generation-zero
+        migration rows remain sealed for tamper detection but are not admitted as
+        causal decision history because their historical receipt chronology is
+        unproven. Events whose local observation or ingestion/receipt instant is after
+        as_of are still excluded. Malformed causal clocks fail closed. The
+        reconstructed mirror then applies the same canonical
+        status/freshness/selectors contract as a live active_view.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
-        mirror = cls()
-        for event in store.events():
-            observed = cls._utc_timestamp(event.observed_ts)
-            ingested = cls._utc_timestamp(event.ingest_ts)
-            if observed is None or ingested is None:
-                continue
-            if observed <= boundary and ingested <= boundary:
-                mirror.apply(event)
-        return mirror.active_view(
-            as_of=boundary,
+
+        # Validate and materialize every request selector before issuing the durable
+        # forward-observed cutoff. A malformed selector must not permanently freeze
+        # an otherwise valid decision instant, and one-shot iterables must not be
+        # consumed once for validation and then silently disappear during filtering.
+        selected_sources = cls._selector(source_ids, name="source_ids")
+        selected_sports = cls._selector(sports, name="sports")
+        selected_events = cls._selector(event_ids, name="event_ids")
+        selected_markets = cls._selector(market_ids, name="market_ids")
+        selected_selections = cls._selector(selection_ids, name="selection_ids")
+
+        replay_events = store.replay_events_at_frozen_cutoff(
+            as_of=boundary.isoformat(),
+            _with_append_generation=True,
+        )
+        return cls._decision_view_from_proven_history(
+            replay_events,
+            boundary=boundary,
             max_age=age_limit,
-            source_ids=source_ids,
-            sports=sports,
-            event_ids=event_ids,
-            market_ids=market_ids,
-            selection_ids=selection_ids,
+            source_ids=selected_sources,
+            sports=selected_sports,
+            event_ids=selected_events,
+            market_ids=selected_markets,
+            selection_ids=selected_selections,
         )
 
     @classmethod
-    def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
-        """Restore latest source-specific mirror state from authoritative history.
+    def _from_proven_history(
+        cls,
+        events_with_generation: Iterable[tuple[MarketEvent, int]],
+    ) -> "MarketMirror":
+        """Restore one mirror from caller-owned, independently proven history."""
 
-        The canonical store remains the only writer/owner of durable market history.
-        Replaying ``store.events()`` reconstructs source-local sequence protection after
-        restart without letting this mirror mutate the store's shared current projection.
-        """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
         mirror = cls()
-        for event in store.events():
-            mirror.apply(event)
+        for item in events_with_generation:
+            if type(item) is not tuple or len(item) != 2:
+                raise TypeError(
+                    "proven market history must contain "
+                    "(MarketEvent, generation) tuples"
+                )
+            event, append_generation = item
+            if type(event) is not MarketEvent:
+                raise TypeError("proven market history must contain exact MarketEvent values")
+            if type(append_generation) is not int or append_generation < 0:
+                raise ValueError(
+                    "proven market history append generation must be non-negative"
+                )
+            mirror._apply_with_causal_authority(
+                event,
+                decision_causal=append_generation > 0,
+            )
         return mirror
+
+    @classmethod
+    def from_store(cls, store: SQLiteMarketStore) -> "MarketMirror":
+        """Restore audit/order state without laundering legacy baseline into decisions.
+
+        Every durable event remains in the mirror so restart preserves provider-local
+        sequence fences and raw audit views. Only positive append generations are marked
+        decision-causal; generation-zero migration rows stay visible through view() and
+        snapshot() but are excluded from active decision views.
+        """
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
+        return cls._from_proven_history(
+            store.events_with_append_generation()
+        )
 
     def __len__(self) -> int:
         with self._lock:

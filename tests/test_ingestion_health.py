@@ -1,14 +1,21 @@
 import json
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 
-from autosport.ingestion import IngestionEngine, IngestionStats
+from autosport.ingestion import (
+    CommittedIngestionHealthError,
+    IngestionEngine,
+    IngestionStats,
+)
 from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
-from autosport.market_bus import MarketEventBus
+from autosport.market_bus import MarketEventBus, MarketEventDeliveryError
 from autosport.providers import (
+    CanonicalNormalizer,
     InMemoryProvider,
     ProviderBatch,
     ProviderQuote,
@@ -45,6 +52,172 @@ class StaticProvider:
 
 
 class IngestionHealthTests(unittest.TestCase):
+    def test_provider_dtos_reject_string_subclass_identity_fields(self):
+        class Text(str):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "source_id must be an exact str"):
+            ProviderBatch(Text("source-a"), ())
+        with self.assertRaisesRegex(TypeError, "cursor must be an exact str"):
+            ProviderBatch("source-a", (), cursor=Text("cursor-1"))
+        with self.assertRaisesRegex(ValueError, "source_id must not contain control"):
+            ProviderBatch("source\nforged", ())
+        with self.assertRaisesRegex(ValueError, "cursor must not contain control"):
+            ProviderBatch("source-a", (), cursor="cursor\rforged")
+        with self.assertRaisesRegex(TypeError, "provider_event_id must be an exact str"):
+            ProviderQuote(
+                provider_event_id=Text("event-1"),
+                provider_market_id="winner",
+                provider_selection_id="alice",
+                decimal_odds=Decimal("2.0"),
+                observed_ts="2026-09-12T12:00:00+00:00",
+                sequence=1,
+            )
+        with self.assertRaisesRegex(TypeError, "status must be an exact str"):
+            ProviderQuote(
+                provider_event_id="event-1",
+                provider_market_id="winner",
+                provider_selection_id="alice",
+                decimal_odds=Decimal("2.0"),
+                observed_ts="2026-09-12T12:00:00+00:00",
+                sequence=1,
+                status=Text("open"),
+            )
+
+    def test_ingestion_rejects_substituted_provider_identity_and_batch_types(self):
+        class Text(str):
+            pass
+
+        class Batch(ProviderBatch):
+            pass
+
+        class SourceSubclassProvider:
+            source_id = Text("source-a")
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        class BatchSubclassProvider:
+            source_id = "source-a"
+
+            def read_batch(self, max_items: int = 1000):
+                return Batch("source-a", ())
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            try:
+                with self.assertRaisesRegex(TypeError, "source_id must be an exact string"):
+                    engine.poll_once(SourceSubclassProvider(), max_items=1)
+                with self.assertRaisesRegex(TypeError, "exact ProviderBatch"):
+                    engine.poll_once(BatchSubclassProvider(), max_items=1)
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_ingestion_engine_rejects_substituted_authority_components(self):
+        class Bus(MarketEventBus):
+            pass
+
+        class Normalizer(CanonicalNormalizer):
+            pass
+
+        class Policy(IngestionPolicy):
+            pass
+
+        class HealthStore(SourceHealthStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            health = SourceHealthStore(root / "source-health.json")
+            bus = MarketEventBus(store)
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEventBus"):
+                    IngestionEngine(Bus(store))
+                with self.assertRaisesRegex(TypeError, "exact CanonicalNormalizer"):
+                    IngestionEngine(bus, Normalizer())
+                with self.assertRaisesRegex(TypeError, "exact IngestionPolicy"):
+                    IngestionEngine(bus, policy=Policy())
+                with self.assertRaisesRegex(TypeError, "exact SourceHealthStore"):
+                    IngestionEngine(
+                        bus,
+                        health_store=HealthStore(root / "other-health.json"),
+                    )
+                with self.assertRaisesRegex(TypeError, "clock must be callable"):
+                    IngestionEngine(bus, health_store=health, clock=object())
+            finally:
+                store.close()
+
+    def test_ingestion_stats_rejects_noncanonical_payloads(self):
+        class Text(str):
+            pass
+
+        with self.assertRaisesRegex(ValueError, "source_id"):
+            IngestionStats(Text("source-a"), 1, 1, 0, 0.1, None)
+        with self.assertRaisesRegex(ValueError, "received"):
+            IngestionStats("source-a", True, 0, 0, 0.1, None)
+        with self.assertRaisesRegex(ValueError, "cannot exceed received"):
+            IngestionStats("source-a", 1, 1, 1, 0.1, None)
+        with self.assertRaisesRegex(ValueError, "elapsed_seconds"):
+            IngestionStats("source-a", 1, 1, 0, float("nan"), None)
+        with self.assertRaisesRegex(TypeError, "cursor"):
+            IngestionStats("source-a", 1, 1, 0, 0.1, Text("cursor"))
+        with self.assertRaisesRegex(TypeError, "quality_flags"):
+            IngestionStats("source-a", 1, 1, 0, 0.1, None, ["STALE_SOURCE"])
+        with self.assertRaisesRegex(ValueError, "source_id"):
+            IngestionStats("source\nforged", 1, 1, 0, 0.1, None)
+        with self.assertRaisesRegex(ValueError, "cursor must not contain control"):
+            IngestionStats("source-a", 1, 1, 0, 0.1, "cursor\nforged")
+        with self.assertRaisesRegex(ValueError, "canonical non-empty strings"):
+            IngestionStats(
+                "source-a",
+                1,
+                1,
+                0,
+                0.1,
+                None,
+                ("STALE\rFORGED",),
+            )
+        with self.assertRaisesRegex(ValueError, "duplicates"):
+            IngestionStats(
+                "source-a",
+                1,
+                1,
+                0,
+                0.1,
+                None,
+                ("STALE_SOURCE", "STALE_SOURCE"),
+            )
+        with self.assertRaisesRegex(ValueError, "health_status"):
+            IngestionStats("source-a", 1, 1, 0, 0.1, None, (), Text("healthy"))
+
+    def test_ingestion_poll_rejects_integer_subclass_batch_bound(self):
+        class BatchSize(int):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            try:
+                with self.assertRaisesRegex(ValueError, "max_items"):
+                    engine.poll_once(StaticProvider("source", []), max_items=BatchSize(1))
+            finally:
+                store.close()
+
+    def test_ingestion_policy_rejects_numeric_subclasses(self):
+        class BatchSize(int):
+            pass
+
+        class Seconds(float):
+            pass
+
+        with self.assertRaisesRegex(ValueError, "max_batch_size"):
+            IngestionPolicy(max_batch_size=BatchSize(100))
+        with self.assertRaisesRegex(ValueError, "stale_after_seconds"):
+            IngestionPolicy(stale_after_seconds=Seconds(60.0))
+        with self.assertRaisesRegex(ValueError, "max_future_skew_seconds"):
+            IngestionPolicy(max_future_skew_seconds=Seconds(5.0))
+
     def _engine(self, tmp: str, *, now: str = "2026-09-12T12:00:00+00:00", policy=None):
         store = SQLiteMarketStore(Path(tmp) / "market.db")
         bus = MarketEventBus(store)
@@ -77,6 +250,195 @@ class IngestionHealthTests(unittest.TestCase):
             sequence=sequence,
             source_ts=source_ts,
         )
+
+    def test_source_health_rejects_path_rebinding_before_read_or_write(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            canonical = store.path
+            store.path = root / "foreign-health.json"
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "persistence authority changed",
+            ):
+                store.get("source-a")
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "persistence authority changed",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertTrue(canonical.exists())
+            self.assertFalse((root / "foreign-health.json").exists())
+
+    def test_source_health_rejects_lock_namespace_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            store._lock_path = root / "foreign.lock"
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "persistence authority changed",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertFalse((root / "foreign.lock").exists())
+
+    def test_source_health_rejects_preexisting_temporary_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            target = root / "foreign-target.json"
+            target.write_text("sentinel", encoding="utf-8")
+            temporary = store._temporary_path_authority
+            try:
+                temporary.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "temporary persistence path already exists",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "sentinel")
+            self.assertTrue(temporary.is_symlink())
+
+    def test_source_health_rejects_preexisting_temporary_regular_file(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            temporary = store._temporary_path_authority
+            temporary.write_text("stale", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "temporary persistence path already exists",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertEqual(temporary.read_text(encoding="utf-8"), "stale")
+
+    def test_source_health_rejects_writer_lock_symlink(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            store._lock_path.unlink(missing_ok=True)
+            target = root / "foreign-lock-target"
+            target.write_text("sentinel", encoding="utf-8")
+            try:
+                store._lock_path.symlink_to(target)
+            except (OSError, NotImplementedError):
+                self.skipTest("file symlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "writer-lock path is unavailable|regular file",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+            self.assertEqual(target.read_text(encoding="utf-8"), "sentinel")
+
+    def test_source_health_rejects_hardlinked_target_alias(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "source-health.json"
+            store = SourceHealthStore(path)
+            alias = root / "source-health-alias.json"
+            try:
+                os.link(path, alias)
+            except OSError:
+                self.skipTest("hardlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "one regular non-symlink file",
+            ):
+                store.get("source-a")
+
+    def test_source_health_rejects_hardlinked_writer_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SourceHealthStore(root / "source-health.json")
+            alias = root / "source-health-lock-alias"
+            try:
+                os.link(store._lock_path, alias)
+            except OSError:
+                self.skipTest("hardlinks are unavailable")
+
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "writer-lock path must be one regular file",
+            ):
+                store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+
+    def test_source_health_relative_path_survives_cwd_change(self):
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            try:
+                os.chdir(first)
+                store = SourceHealthStore("source-health.json")
+                canonical = store.path
+                os.chdir(second)
+                state = store.record_failure(
+                    "source-a",
+                    now="2026-09-12T12:00:00+00:00",
+                    error=RuntimeError("offline"),
+                )
+                self.assertEqual(state.status, "failed")
+                self.assertEqual(store.path, canonical)
+                self.assertTrue(canonical.exists())
+                self.assertFalse((second / "source-health.json").exists())
+            finally:
+                os.chdir(original_cwd)
+
+    def test_source_health_symlinked_parent_aliases_share_lock_namespace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            real = root / "real"
+            alias = root / "alias"
+            real.mkdir()
+            try:
+                alias.symlink_to(real, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks are unavailable")
+
+            first = SourceHealthStore(real / "source-health.json")
+            second = SourceHealthStore(alias / "source-health.json")
+            self.assertEqual(first.path, second.path)
+            self.assertEqual(first._lock_path, second._lock_path)
 
     def test_stats_throughput_uses_finite_positive_elapsed(self):
         stats = IngestionStats(
@@ -146,6 +508,136 @@ class IngestionHealthTests(unittest.TestCase):
                 engine.poll_once(provider, max_items=11)
             self.assertEqual(provider.calls, 0)
             store.close()
+
+    def test_provider_source_identity_mutation_during_read_fails_before_market_persistence(self):
+        class MutatingProvider:
+            def __init__(self) -> None:
+                self.source_id = "source"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.source_id = "mutated-source"
+                return ProviderBatch(
+                    "source",
+                    (IngestionHealthTests._quote(None),),
+                    cursor="cursor-1",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            with self.assertRaisesRegex(
+                ValueError,
+                "source_id changed during batch acquisition",
+            ):
+                engine.poll_once(MutatingProvider(), max_items=10)
+
+            self.assertEqual(store.events(), ())
+            state = health.get("source")
+            self.assertEqual(state.status, "failed")
+            self.assertEqual(state.last_failure_kind, "provider_or_validation")
+            store.close()
+
+    def test_provider_failure_survives_hostile_note_when_health_persistence_also_fails(self):
+        class HostileProviderError(RuntimeError):
+            def add_note(self, note: str) -> None:
+                raise RuntimeError("note-rejected")
+
+        class Provider:
+            source_id = "source"
+
+            def read_batch(self, max_items: int = 1000):
+                raise HostileProviderError("provider-primary")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            health_failure = OSError("health-write-failed")
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_failure",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaisesRegex(
+                        HostileProviderError,
+                        "provider-primary",
+                    ) as raised:
+                        engine.poll_once(Provider(), max_items=1)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_provider_failure_survives_health_base_exception(self):
+        class Provider:
+            source_id = "source"
+
+            def read_batch(self, max_items: int = 1000):
+                raise RuntimeError("provider-primary")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            health_failure = SystemExit("health-stop")
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_failure",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "provider-primary",
+                    ) as raised:
+                        engine.poll_once(Provider(), max_items=1)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertTrue(
+                    any(
+                        "source health failure persistence also failed: "
+                        "SystemExit: health-stop" in note
+                        for note in getattr(raised.exception, "__notes__", ())
+                    )
+                )
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_provider_failure_note_survives_unprintable_health_persistence_error(self):
+        class UnprintableHealthError(OSError):
+            def __str__(self) -> str:
+                raise RuntimeError("health-stringification-failed")
+
+        class Provider:
+            source_id = "source"
+
+            def read_batch(self, max_items: int = 1000):
+                raise RuntimeError("provider-primary")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            health_failure = UnprintableHealthError()
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_failure",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaisesRegex(
+                        RuntimeError,
+                        "provider-primary",
+                    ) as raised:
+                        engine.poll_once(Provider(), max_items=1)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertTrue(
+                    any(
+                        "source health failure persistence also failed: "
+                        "UnprintableHealthError: <unprintable exception>" in note
+                        for note in getattr(raised.exception, "__notes__", ())
+                    )
+                )
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
 
     def test_provider_cannot_return_more_than_requested_batch_bound(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -246,6 +738,175 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(health.get("source").status, "degraded")
             store.close()
 
+    def test_subscriber_interrupt_records_committed_health_before_delivery_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [
+                    ProviderBatch(
+                        "source",
+                        (self._quote("2026-09-12T11:59:59+00:00"),),
+                        cursor="cursor-1",
+                    )
+                ],
+            )
+
+            def interrupt(_event):
+                raise SystemExit("subscriber-stop")
+
+            engine.bus.subscribe(interrupt)
+            try:
+                with self.assertRaises(MarketEventDeliveryError) as raised:
+                    engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(raised.exception.accepted_count, 1)
+                self.assertEqual(len(store.events()), 1)
+                state = health.get("source")
+                self.assertEqual(state.poll_count, 1)
+                self.assertEqual(state.total_received, 1)
+                self.assertEqual(state.total_accepted, 1)
+                self.assertEqual(state.total_failures, 0)
+            finally:
+                store.close()
+
+    def test_committed_delivery_outcome_survives_health_base_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [
+                    ProviderBatch(
+                        "source",
+                        (self._quote("2026-09-12T11:59:59+00:00"),),
+                        cursor="cursor-1",
+                    )
+                ],
+            )
+            health_failure = SystemExit("health-stop")
+
+            def fail_delivery(_event):
+                raise RuntimeError("subscriber-failed")
+
+            engine.bus.subscribe(fail_delivery)
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_success",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaises(CommittedIngestionHealthError) as raised:
+                        engine.poll_once(provider, max_items=10)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertIsNotNone(raised.exception.delivery_error)
+                self.assertEqual(raised.exception.outcome.accepted, 1)
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
+    def test_committed_market_outcome_survives_health_base_exception(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, _health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [
+                    ProviderBatch(
+                        "source",
+                        (self._quote("2026-09-12T11:59:59+00:00"),),
+                        cursor="cursor-1",
+                    )
+                ],
+            )
+            health_failure = SystemExit("health-stop")
+            try:
+                with patch.object(
+                    SourceHealthStore,
+                    "record_success",
+                    side_effect=health_failure,
+                ):
+                    with self.assertRaises(CommittedIngestionHealthError) as raised:
+                        engine.poll_once(provider, max_items=10)
+
+                self.assertIs(raised.exception.__cause__, health_failure)
+                self.assertEqual(raised.exception.outcome.accepted, 1)
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
+    def test_source_health_locked_success_adds_regression_flag_against_current_high_water(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = SourceHealthStore(Path(tmp) / "source-health.json")
+            health.record_success(
+                "source",
+                now="2026-09-12T12:00:00+00:00",
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="high",
+                latest_source_ts="2026-09-12T11:59:59+00:00",
+                quality_flags=(),
+            )
+
+            state = health.record_success(
+                "source",
+                now="2026-09-12T12:00:01+00:00",
+                received=1,
+                accepted=1,
+                rejected=0,
+                cursor="regressed",
+                latest_source_ts="2026-09-12T11:59:58+00:00",
+                quality_flags=(),
+            )
+
+            self.assertEqual(state.latest_source_ts, "2026-09-12T11:59:59+00:00")
+            self.assertEqual(state.status, "degraded")
+            self.assertIn("SOURCE_TIME_REGRESSION", state.quality_flags)
+
+    def test_ingestion_stats_reflect_health_locked_regression_race(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            provider = StaticProvider(
+                "source",
+                [
+                    ProviderBatch(
+                        "source",
+                        (self._quote("2026-09-12T11:59:58+00:00"),),
+                        cursor="poll",
+                    )
+                ],
+            )
+            original_publish = engine.bus.publish_many
+
+            def publish_then_advance_health(events):
+                accepted = original_publish(events)
+                health.record_success(
+                    "source",
+                    now="2026-09-12T12:00:00+00:00",
+                    received=0,
+                    accepted=0,
+                    rejected=0,
+                    cursor="peer",
+                    latest_source_ts="2026-09-12T11:59:59+00:00",
+                    quality_flags=(),
+                )
+                return accepted
+
+            with patch.object(
+                engine.bus,
+                "publish_many",
+                side_effect=publish_then_advance_health,
+            ):
+                stats = engine.poll_once(provider, max_items=10)
+
+            self.assertIn("SOURCE_TIME_REGRESSION", stats.quality_flags)
+            self.assertEqual(stats.health_status, "degraded")
+            self.assertEqual(
+                health.get("source").latest_source_ts,
+                "2026-09-12T11:59:59+00:00",
+            )
+            store.close()
+
     def test_source_time_regression_is_detected_without_lowering_high_water_mark(self):
         with tempfile.TemporaryDirectory() as tmp:
             engine, store, health = self._engine(tmp)
@@ -265,6 +926,29 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(state.status, "degraded")
             self.assertEqual(state.latest_source_ts, "2026-09-12T11:59:50+00:00")
             store.close()
+
+    def test_provider_base_exception_is_persisted_and_rethrown(self):
+        class InterruptingProvider:
+            source_id = "interrupting-source"
+
+            def read_batch(self, max_items: int = 1000):
+                raise SystemExit("provider-stop")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            engine, store, health = self._engine(tmp)
+            try:
+                with self.assertRaisesRegex(SystemExit, "provider-stop"):
+                    engine.poll_once(InterruptingProvider(), max_items=10)
+
+                state = health.get("interrupting-source")
+                self.assertEqual(state.status, "failed")
+                self.assertEqual(state.total_failures, 1)
+                self.assertEqual(state.consecutive_failures, 1)
+                self.assertEqual(state.last_failure_kind, "provider_or_validation")
+                self.assertIn("SystemExit", state.last_error or "")
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
 
     def test_provider_failure_is_persisted_and_rethrown(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -391,6 +1075,443 @@ class IngestionHealthTests(unittest.TestCase):
             self.assertEqual(stats.accepted, 1)
             self.assertEqual(stats.health_status, "healthy")
             store.close()
+
+
+    def test_future_local_observation_is_rejected_before_market_persistence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [
+                        ProviderBatch(
+                            "source",
+                            (
+                                ProviderQuote(
+                                    provider_event_id="event-1",
+                                    provider_market_id="winner",
+                                    provider_selection_id="future-local",
+                                    decimal_odds=Decimal("2.0"),
+                                    observed_ts="2026-09-12T12:00:01+00:00",
+                                    sequence=1,
+                                    source_ts="2026-09-12T11:59:59+00:00",
+                                ),
+                            ),
+                            cursor="future-local",
+                        )
+                    ],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 0)
+                self.assertEqual(stats.rejected, 1)
+                self.assertEqual(
+                    stats.quality_flags,
+                    ("FUTURE_OBSERVATION_TIMESTAMP",),
+                )
+                self.assertEqual(store.events(), [])
+                state = health.get("source")
+                self.assertEqual(state.status, "degraded")
+                self.assertEqual(state.total_received, 1)
+                self.assertEqual(state.total_accepted, 0)
+                self.assertEqual(state.total_rejected, 1)
+                self.assertEqual(
+                    state.quality_flags,
+                    ("FUTURE_OBSERVATION_TIMESTAMP",),
+                )
+            finally:
+                store.close()
+
+    def test_future_local_observation_does_not_reject_valid_sibling_quote(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                valid = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="valid",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00+00:00",
+                    sequence=1,
+                    source_ts="2026-09-12T11:59:59+00:00",
+                )
+                future = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="future",
+                    decimal_odds=Decimal("2.1"),
+                    observed_ts="2026-09-12T12:00:00.000001+00:00",
+                    sequence=2,
+                    source_ts="2026-09-12T11:59:59+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (valid, future), cursor="mixed")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 1)
+                self.assertIn("FUTURE_OBSERVATION_TIMESTAMP", stats.quality_flags)
+                persisted = store.events()
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(persisted[0].selection_id, "source:valid")
+            finally:
+                store.close()
+
+
+    def test_submicrosecond_local_observation_is_quote_local_rejection(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:01+00:00",
+                )
+                valid = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="valid",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00+00:00",
+                    sequence=1,
+                )
+                unsupported = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="submicro",
+                    decimal_odds=Decimal("2.1"),
+                    observed_ts="2026-09-12T12:00:00.0000001+00:00",
+                    sequence=2,
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (valid, unsupported), cursor="precision")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 1)
+                self.assertIn("INVALID_QUOTE", stats.quality_flags)
+                persisted = store.events()
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(persisted[0].selection_id, "source:valid")
+                self.assertEqual(health.get("source").status, "degraded")
+            finally:
+                store.close()
+
+    def test_zero_only_submicrosecond_receipt_tail_remains_exactly_admissible(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:01+00:00",
+                )
+                quote = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="exact-zero-tail",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00.123456000+00:00",
+                    sequence=1,
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (quote,), cursor="zero-tail")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 0)
+                self.assertEqual(stats.quality_flags, ())
+                persisted = store.events()
+                self.assertEqual(len(persisted), 1)
+                self.assertEqual(
+                    persisted[0].observed_ts,
+                    "2026-09-12T12:00:00.123456000+00:00",
+                )
+            finally:
+                store.close()
+
+
+    def test_submicrosecond_source_time_is_rejected_before_truth_classification(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    policy=IngestionPolicy(
+                        max_batch_size=10,
+                        stale_after_seconds=60,
+                        max_future_skew_seconds=5,
+                    ),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                quote = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="submicro-source",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00+00:00",
+                    sequence=1,
+                    source_ts="2026-09-12T12:00:05.0000001+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (quote,), cursor="source-precision")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 0)
+                self.assertEqual(stats.rejected, 1)
+                self.assertEqual(stats.quality_flags, ("INVALID_SOURCE_TIMESTAMP",))
+                self.assertEqual(store.events(), [])
+                state = health.get("source")
+                self.assertEqual(state.status, "degraded")
+                self.assertIsNone(state.latest_source_ts)
+            finally:
+                store.close()
+
+    def test_zero_only_source_precision_tail_preserves_source_high_water(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:01+00:00",
+                )
+                quote = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="zero-tail-source",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T12:00:00+00:00",
+                    sequence=1,
+                    source_ts="2026-09-12T11:59:59.123456000+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (quote,), cursor="source-zero-tail")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 0)
+                self.assertNotIn("INVALID_SOURCE_TIMESTAMP", stats.quality_flags)
+                state = health.get("source")
+                self.assertEqual(
+                    state.latest_source_ts,
+                    "2026-09-12T11:59:59.123456+00:00",
+                )
+            finally:
+                store.close()
+
+
+    def test_source_health_rejects_nonzero_submicrosecond_transition_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = SourceHealthStore(Path(tmp) / "source-health.json")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "precision finer than microseconds is unsupported",
+            ):
+                health.record_success(
+                    "source",
+                    now="2026-09-12T12:00:00.0000001+00:00",
+                    received=0,
+                    accepted=0,
+                    rejected=0,
+                    cursor="submicro-now",
+                    latest_source_ts=None,
+                    quality_flags=(),
+                )
+
+            state = health.get("source")
+            self.assertEqual(state.status, "unknown")
+            self.assertEqual(state.poll_count, 0)
+
+    def test_source_health_accepts_zero_only_precision_tail(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            health = SourceHealthStore(Path(tmp) / "source-health.json")
+
+            state = health.record_success(
+                "source",
+                now="2026-09-12T12:00:00.123456000+00:00",
+                received=0,
+                accepted=0,
+                rejected=0,
+                cursor="zero-tail-now",
+                latest_source_ts=None,
+                quality_flags=(),
+            )
+
+            self.assertEqual(
+                state.last_success_at,
+                "2026-09-12T12:00:00.123456000+00:00",
+            )
+            as_of = health.get_as_of(
+                "source",
+                as_of=datetime.fromisoformat(
+                    "2026-09-12T12:00:00.123456+00:00"
+                ),
+            )
+            self.assertEqual(as_of.poll_count, 1)
+
+    def test_ingestion_clock_submicrosecond_precision_fails_before_market_commit(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00.0000001+00:00",
+                )
+                provider = StaticProvider(
+                    "source",
+                    [
+                        ProviderBatch(
+                            "source",
+                            (
+                                ProviderQuote(
+                                    provider_event_id="event-1",
+                                    provider_market_id="winner",
+                                    provider_selection_id="selection",
+                                    decimal_odds=Decimal("2.0"),
+                                    observed_ts="2026-09-12T12:00:00+00:00",
+                                    sequence=1,
+                                ),
+                            ),
+                        )
+                    ],
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(store.events(), [])
+                self.assertEqual(health.get("source").poll_count, 0)
+            finally:
+                store.close()
+
+
+    def test_observed_time_is_freshness_fallback_when_source_time_is_missing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    policy=IngestionPolicy(
+                        max_batch_size=10,
+                        stale_after_seconds=60,
+                        max_future_skew_seconds=5,
+                    ),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                stale = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="stale-observed",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T11:58:59+00:00",
+                    sequence=1,
+                    source_ts=None,
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (stale,), cursor="stale-observed")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.rejected, 0)
+                self.assertIn("STALE_SOURCE", stats.quality_flags)
+                state = health.get("source")
+                self.assertEqual(state.status, "degraded")
+                self.assertIn("STALE_SOURCE", state.quality_flags)
+                self.assertIsNone(state.latest_source_ts)
+            finally:
+                store.close()
+
+    def test_fresh_observed_fallback_without_source_time_remains_healthy(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source-health.json")
+                engine = IngestionEngine(
+                    MarketEventBus(store),
+                    policy=IngestionPolicy(
+                        max_batch_size=10,
+                        stale_after_seconds=60,
+                        max_future_skew_seconds=5,
+                    ),
+                    health_store=health,
+                    clock=lambda: "2026-09-12T12:00:00+00:00",
+                )
+                fresh = ProviderQuote(
+                    provider_event_id="event-1",
+                    provider_market_id="winner",
+                    provider_selection_id="fresh-observed",
+                    decimal_odds=Decimal("2.0"),
+                    observed_ts="2026-09-12T11:59:30+00:00",
+                    sequence=1,
+                    source_ts=None,
+                )
+                provider = StaticProvider(
+                    "source",
+                    [ProviderBatch("source", (fresh,), cursor="fresh-observed")],
+                )
+
+                stats = engine.poll_once(provider, max_items=10)
+
+                self.assertEqual(stats.accepted, 1)
+                self.assertEqual(stats.quality_flags, ())
+                self.assertEqual(stats.health_status, "healthy")
+                self.assertEqual(health.get("source").status, "healthy")
+            finally:
+                store.close()
 
 
 if __name__ == "__main__":

@@ -3,18 +3,22 @@ from __future__ import annotations
 import hashlib
 import heapq
 import json
+from contextlib import nullcontext
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
-from decimal import Decimal, ROUND_FLOOR
+from decimal import Decimal, InvalidOperation, ROUND_FLOOR
 from enum import Enum
 from pathlib import Path
+from threading import RLock
 from time import monotonic
 from typing import Callable, Protocol
 
 from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
+    ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY,
     MATERIAL_ACTION_ID_PAYLOAD_KEY,
+    RISK_POLICY_PROVENANCE_PAYLOAD_KEY,
     DecisionLedgerIntegrityError,
     DecisionRecord,
     EconomicDecisionAuthority,
@@ -27,23 +31,53 @@ from .ingestion_health import IngestionPolicy, SourceHealthStore
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .live_observation import poll_open_market_store_once
+from .live_market_actionability import (
+    LiveInputRecheckTrigger,
+    LiveInputWaitReason,
+    evaluate_registered_input_current_view,
+)
 from .market_mirror import MarketMirror, MirrorSnapshot
+from .market_mirror_health import (
+    HealthGatedMirrorDecisionIndex,
+    HealthGatedMirrorSnapshot,
+    ProviderDecisionEligibility,
+    ProviderHealthReplayBoundary,
+)
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependency,
+    FocusedMirrorDependencyChurnError,
     FocusedMirrorDependencyIndex,
 )
+from .opportunity import Opportunity, OpportunityContractError, QuoteRef
 from .paper import PaperBook
 from .paper_execution_adoption import (
+    PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
+    PaperExposureBinding,
     PreparedPaperExecution,
 )
+from .paper_execution_reality import (
+    PaperAttemptOutcome,
+    PaperExecutionIntegrityError,
+    PaperLegAttempt,
+    RecoveryDecision,
+    _derive_run_economics,
+    _synthetic_attempt,
+)
 from .portfolio_plan import (
+    OpportunityEvidence,
     PortfolioDependencyGraph,
     PortfolioPlan,
     build_portfolio_plan,
 )
 from .providers import MarketProvider, ProviderUnavailableError
+from .real_execution_ledger import ExecutionAction, ExecutionPlan
 from .scientific_registry import ModelVersion, ScientificRegistry, StrategyVersion
 from .storage import SQLiteMarketStore
 from .workspace_lock import WorkspaceEconomicLock
@@ -121,7 +155,7 @@ PostAppendHook = Callable[[], None]
 
 
 _PROGRESS_SCHEMA = "autosport.live_decision_progress"
-_PROGRESS_VERSION = 1
+_PROGRESS_VERSION = 3
 _PROGRESS_KEYS = frozenset(
     {
         "schema",
@@ -130,6 +164,8 @@ _PROGRESS_KEYS = frozenset(
         "phase",
         "decision_ts",
         "market_state_sha256",
+        "market_append_generation",
+        "health_boundaries",
         "decision_context_sha256",
         "affected_input_ids",
         "registered_input_ids",
@@ -139,24 +175,30 @@ _PROGRESS_KEYS = frozenset(
         "gate",
     }
 )
+_PROGRESS_KEYS_V2 = _PROGRESS_KEYS - {"health_boundaries"}
+_PROGRESS_KEYS_V1 = _PROGRESS_KEYS_V2 - {"market_append_generation"}
 _PHASE_PENDING = "pending"
 _PHASE_APPEND_PENDING = "append_pending"
 _PHASE_COMMITTED = "committed"
 _GATE_NORMAL = "normal"
 _GATE_PROVIDER_GAP = "provider_gap"
+_GATE_ACTIONABILITY_WAIT = "actionability_wait"
 _SHA256_HEX = frozenset("0123456789abcdef")
 _CONTROL_SCHEMA = "autosport.live_decision_control"
 _CONTROL_VERSION = 1
 _CONTROL_KEYS = frozenset({"schema", "schema_version", "loop_id", "state"})
+_CONTROL_AUTHORITY_DOMAIN = "autosport.live-decision-control.v1"
 _INPUTS_SCHEMA = "autosport.live_decision_inputs"
 _INPUTS_VERSION = 2
 _INPUTS_KEYS = frozenset({"schema", "schema_version", "loop_id", "inputs"})
+_INPUTS_AUTHORITY_DOMAIN = "autosport.live-decision-inputs.v1"
 _INPUT_SPEC_KEYS_V1 = frozenset(
     {"input_id", "source_ids", "event_ids", "market_ids", "selection_ids"}
 )
 _INPUT_SPEC_KEYS_V2 = frozenset(
     {"input_id", "source_ids", "sports", "event_ids", "market_ids", "selection_ids"}
 )
+_MARKET_FRONTIER_RETRY_LIMIT = 8
 
 
 def _canonical_text(name: str, value: object) -> str:
@@ -242,8 +284,8 @@ class LiveIntentProvenance:
             _canonical_timestamp("model_available_at", self.model_available_at)
 
     def assert_available_at(self, as_of: datetime) -> None:
-        if not isinstance(as_of, datetime):
-            raise TypeError("intent provenance as_of must be datetime")
+        if type(as_of) is not datetime:
+            raise TypeError("intent provenance as_of must be an exact datetime")
         if as_of.tzinfo is None or as_of.utcoffset() is None:
             raise ValueError("intent provenance as_of must be timezone-aware")
         cutoff = as_of.astimezone(timezone.utc)
@@ -275,8 +317,8 @@ class LiveIntentProvenance:
         *,
         as_of: datetime,
     ) -> "LiveIntentProvenance":
-        if not isinstance(registry, ScientificRegistry):
-            raise TypeError("scientific_registry must be ScientificRegistry")
+        if type(registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be an exact ScientificRegistry")
         wanted = _canonical_text("intent_strategy_version_id", strategy_version_id)
         strategy_entry = registry.get("StrategyVersion", wanted)
         if strategy_entry is None:
@@ -371,8 +413,8 @@ class LiveIntentProvenance:
 
 def _require_utc_clock(clock: Clock) -> datetime:
     now = clock()
-    if not isinstance(now, datetime):
-        raise TypeError("live loop clock must return datetime")
+    if type(now) is not datetime:
+        raise TypeError("live loop clock must return an exact datetime")
     if now.tzinfo is None or now.utcoffset() is None:
         raise ValueError("live loop clock must return a timezone-aware datetime")
     return now.astimezone(timezone.utc)
@@ -544,6 +586,8 @@ class _Progress:
     phase: str
     decision_ts: str
     market_state_sha256: str
+    market_append_generation: int | None
+    health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None
     decision_context_sha256: str
     affected_input_ids: tuple[str, ...]
     registered_input_ids: tuple[str, ...]
@@ -556,6 +600,32 @@ class _Progress:
         _canonical_text("loop_id", self.loop_id)
         _canonical_timestamp("decision_ts", self.decision_ts)
         _canonical_sha256("market_state_sha256", self.market_state_sha256)
+        if self.market_append_generation is not None and (
+            type(self.market_append_generation) is not int
+            or self.market_append_generation < 0
+        ):
+            raise LiveDecisionProgressError(
+                "market_append_generation must be a non-negative int or null"
+            )
+        if self.health_boundaries is not None:
+            if type(self.health_boundaries) is not tuple:
+                raise LiveDecisionProgressError(
+                    "health_boundaries must be a tuple or null"
+                )
+            if any(
+                type(boundary) is not ProviderHealthReplayBoundary
+                for boundary in self.health_boundaries
+            ):
+                raise LiveDecisionProgressError(
+                    "health_boundaries must contain exact provider health replay boundaries"
+                )
+            health_source_ids = tuple(
+                boundary.source_id for boundary in self.health_boundaries
+            )
+            if health_source_ids != tuple(sorted(set(health_source_ids))):
+                raise LiveDecisionProgressError(
+                    "health_boundaries must be sorted and unique by source_id"
+                )
         _canonical_sha256("decision_context_sha256", self.decision_context_sha256)
         if self.phase not in {
             _PHASE_PENDING,
@@ -563,7 +633,11 @@ class _Progress:
             _PHASE_COMMITTED,
         }:
             raise LiveDecisionProgressError("unsupported live progress phase")
-        if self.gate not in {_GATE_NORMAL, _GATE_PROVIDER_GAP}:
+        if self.gate not in {
+            _GATE_NORMAL,
+            _GATE_PROVIDER_GAP,
+            _GATE_ACTIONABILITY_WAIT,
+        }:
             raise LiveDecisionProgressError("unsupported live progress gate")
         if type(self.affected_input_ids) is not tuple:
             raise LiveDecisionProgressError("affected_input_ids must be a tuple")
@@ -582,13 +656,18 @@ class _Progress:
                 "affected_input_ids must be a subset of registered_input_ids"
             )
         if self.phase == _PHASE_PENDING:
-            if (
-                self.decision_id is not None
-                or self.plan_sha256 is not None
-                or self.ledger_offset is not None
-            ):
+            if self.decision_id is not None or self.plan_sha256 is not None:
                 raise LiveDecisionProgressError(
                     "pending live progress cannot claim append identity"
+                )
+            # New PENDING cursors freeze the Decision Ledger byte frontier at
+            # publication time. Legacy v1 cursors may still carry null here.
+            if self.ledger_offset is not None and (
+                type(self.ledger_offset) is not int
+                or self.ledger_offset < 0
+            ):
+                raise LiveDecisionProgressError(
+                    "pending live progress ledger frontier must be non-negative"
                 )
         else:
             if self.decision_id is None or self.plan_sha256 is None:
@@ -598,8 +677,7 @@ class _Progress:
             _canonical_text("decision_id", self.decision_id)
             _canonical_sha256("plan_sha256", self.plan_sha256)
             if (
-                isinstance(self.ledger_offset, bool)
-                or not isinstance(self.ledger_offset, int)
+                type(self.ledger_offset) is not int
                 or self.ledger_offset < 0
             ):
                 raise LiveDecisionProgressError(
@@ -614,6 +692,15 @@ class _Progress:
             "phase": self.phase,
             "decision_ts": self.decision_ts,
             "market_state_sha256": self.market_state_sha256,
+            "market_append_generation": self.market_append_generation,
+            "health_boundaries": (
+                None
+                if self.health_boundaries is None
+                else [
+                    ProviderHealthReplayBoundary.to_dict(boundary)
+                    for boundary in self.health_boundaries
+                ]
+            ),
             "decision_context_sha256": self.decision_context_sha256,
             "affected_input_ids": list(self.affected_input_ids),
             "registered_input_ids": list(self.registered_input_ids),
@@ -625,11 +712,25 @@ class _Progress:
 
     @classmethod
     def from_dict(cls, raw: object) -> "_Progress":
-        if type(raw) is not dict or set(raw) != _PROGRESS_KEYS:
+        if type(raw) is not dict:
             raise LiveDecisionProgressError(
                 "live decision progress must contain canonical fields"
             )
-        if raw["schema"] != _PROGRESS_SCHEMA or raw["schema_version"] != _PROGRESS_VERSION:
+        schema_version = raw.get("schema_version")
+        expected_keys = (
+            _PROGRESS_KEYS
+            if type(schema_version) is int and schema_version == _PROGRESS_VERSION
+            else _PROGRESS_KEYS_V2
+            if type(schema_version) is int and schema_version == 2
+            else _PROGRESS_KEYS_V1
+            if type(schema_version) is int and schema_version == 1
+            else None
+        )
+        if expected_keys is None or set(raw) != expected_keys:
+            raise LiveDecisionProgressError(
+                "live decision progress must contain canonical fields"
+            )
+        if raw["schema"] != _PROGRESS_SCHEMA:
             raise LiveDecisionProgressError("unsupported live decision progress schema")
         input_ids = raw["affected_input_ids"]
         registered_ids = raw["registered_input_ids"]
@@ -643,12 +744,36 @@ class _Progress:
             raise LiveDecisionProgressError(
                 "registered_input_ids must be a JSON string array"
             )
+        health_boundaries_raw = (
+            None if schema_version in {1, 2} else raw["health_boundaries"]
+        )
+        if (
+            health_boundaries_raw is not None
+            and type(health_boundaries_raw) is not list
+        ):
+            raise LiveDecisionProgressError(
+                "health_boundaries must be a JSON array or null"
+            )
         try:
+            health_boundaries = (
+                None
+                if health_boundaries_raw is None
+                else tuple(
+                    ProviderHealthReplayBoundary.from_dict(value)
+                    for value in health_boundaries_raw
+                )
+            )
             return cls(
                 loop_id=raw["loop_id"],
                 phase=raw["phase"],
                 decision_ts=raw["decision_ts"],
                 market_state_sha256=raw["market_state_sha256"],
+                market_append_generation=(
+                    None
+                    if schema_version == 1
+                    else raw["market_append_generation"]
+                ),
+                health_boundaries=health_boundaries,
                 decision_context_sha256=raw["decision_context_sha256"],
                 affected_input_ids=tuple(input_ids),
                 registered_input_ids=tuple(registered_ids),
@@ -705,14 +830,27 @@ class PersistentLiveDecisionLoop:
         catalog_required_history: timedelta = timedelta(0),
     ) -> None:
         self.workspace = Path(workspace)
-        self.workspace.mkdir(parents=True, exist_ok=True)
+        self._workspace_authority = self.workspace
         self.loop_id = _canonical_text("loop_id", loop_id)
-        if not isinstance(mode, LiveDecisionMode):
-            raise TypeError("mode must be LiveDecisionMode")
-        if not isinstance(book, PaperBook):
-            raise TypeError("book must be PaperBook")
-        if not isinstance(authority, EconomicDecisionAuthority):
-            raise TypeError("authority must be EconomicDecisionAuthority")
+        self._loop_id_authority = self.loop_id
+        if type(mode) is not LiveDecisionMode:
+            raise TypeError("mode must be an exact LiveDecisionMode")
+        if type(book) is not PaperBook:
+            raise TypeError("book must be an exact PaperBook")
+        if type(authority) is not EconomicDecisionAuthority:
+            raise TypeError("authority must be an exact EconomicDecisionAuthority")
+        if type(scientific_registry) is not ScientificRegistry:
+            raise TypeError("scientific_registry must be an exact ScientificRegistry")
+        if decision_ledger is not None and type(decision_ledger) is not JsonlDecisionLedger:
+            raise TypeError("decision_ledger must be an exact JsonlDecisionLedger or None")
+        if paper_execution is not None and type(paper_execution) is not PaperExecutionAdoptionRuntime:
+            raise TypeError(
+                "paper_execution must be an exact PaperExecutionAdoptionRuntime or None"
+            )
+        if ingestion_policy is not None and type(ingestion_policy) is not IngestionPolicy:
+            raise TypeError("ingestion_policy must be an exact IngestionPolicy or None")
+        if bounds is not None and type(bounds) is not LiveLoopBounds:
+            raise TypeError("bounds must be an exact LiveLoopBounds or None")
         if not callable(intent_factory):
             raise TypeError("intent_factory must be callable")
         factory_strategy_version_id = getattr(
@@ -734,8 +872,10 @@ class PersistentLiveDecisionLoop:
         goal_quote_age = authority.contract.max_quote_age_seconds
         if max_quote_age is None:
             max_quote_age = _conservative_timedelta(goal_quote_age)
-        elif not isinstance(max_quote_age, timedelta) or max_quote_age < timedelta(0):
-            raise ValueError("max_quote_age must be a non-negative timedelta or None")
+        elif type(max_quote_age) is not timedelta:
+            raise TypeError("max_quote_age must be an exact timedelta or None")
+        elif max_quote_age < timedelta(0):
+            raise ValueError("max_quote_age must be non-negative")
         elif _timedelta_decimal_seconds(max_quote_age) > goal_quote_age:
             raise ValueError(
                 "max_quote_age cannot exceed EconomicGoalContract.max_quote_age_seconds"
@@ -743,43 +883,110 @@ class PersistentLiveDecisionLoop:
         if observation_runner is None and provider is None:
             raise ValueError("provider is required when observation_runner is omitted")
 
+        self.workspace.mkdir(parents=True, exist_ok=True)
+
         self.mode = mode
+        self._configured_mode = mode
         self.book = book
+        self._book_authority = book
         self.authority = authority
+        self._economic_authority = authority
+        self._economic_contract_authority = authority.contract
+        self._economic_contract_sha256_authority = provenance_for(
+            authority.contract
+        ).contract_sha256
+        self._risk_policy_authority = authority.risk_policy
+        self._risk_policy_sha256_authority = authority.risk_policy.provenance_sha256
         self.intent_factory = intent_factory
+        self._intent_factory_authority = intent_factory
+        self._intent_factory_strategy_version_id_authority = factory_strategy_version_id
         self.intent_provenance = intent_provenance
+        self._intent_provenance_authority = intent_provenance
+        self._intent_provenance_sha256_authority = intent_provenance.provenance_sha256
         self.provider = provider
-        self.decision_ledger = decision_ledger or JsonlDecisionLedger(
-            self.workspace / "decisions.jsonl"
+        self._provider_authority = provider if observation_runner is None else None
+        self._provider_source_id_authority = (
+            None
+            if self._provider_authority is None
+            else _canonical_text("provider source_id", self._provider_authority.source_id)
         )
+        self.decision_ledger = decision_ledger or JsonlDecisionLedger(
+            self._workspace_authority / "decisions.jsonl"
+        )
+        if self.decision_ledger.path != self._workspace_authority / "decisions.jsonl":
+            raise ValueError(
+                "decision_ledger must use the canonical live workspace Decision Ledger"
+            )
+        self._decision_ledger_authority = self.decision_ledger
         if paper_execution is not None:
-            if not isinstance(paper_execution, PaperExecutionAdoptionRuntime):
-                raise TypeError(
-                    "paper_execution must be PaperExecutionAdoptionRuntime or None"
-                )
             if paper_execution.book is not book:
                 raise ValueError(
                     "paper_execution must materialize into the live loop PaperBook"
                 )
-            canonical_book_path = self.workspace / "paper_book.json"
+            canonical_book_path = self._workspace_authority / "paper_book.json"
             if paper_execution.paper_book_path != canonical_book_path:
                 raise ValueError(
                     "paper_execution must persist the canonical live workspace PaperBook"
                 )
+            canonical_execution_ledger_path = (
+                self._workspace_authority / "paper-execution.jsonl"
+            )
+            if paper_execution.ledger.path != canonical_execution_ledger_path:
+                raise ValueError(
+                    "paper_execution must use the canonical live workspace execution ledger"
+                )
         self.paper_execution = paper_execution
+        self._paper_execution_authority = paper_execution
+        self._paper_execution_ledger_authority = (
+            None if paper_execution is None else paper_execution.ledger
+        )
+        self._paper_execution_config_authority = (
+            None if paper_execution is None else paper_execution.config
+        )
+        self._paper_execution_model_fingerprint_authority = (
+            None if paper_execution is None else paper_execution.config.fingerprint
+        )
+        self._paper_execution_max_quote_age_authority = (
+            None if paper_execution is None else paper_execution.max_quote_age
+        )
         self.ingestion_policy = ingestion_policy
+        self._ingestion_policy_authority = ingestion_policy
+        self._ingestion_policy_semantics_authority = (
+            None
+            if ingestion_policy is None
+            else (
+                ingestion_policy.max_batch_size,
+                ingestion_policy.stale_after_seconds,
+                ingestion_policy.max_future_skew_seconds,
+            )
+        )
         self.max_quote_age = max_quote_age
+        self._max_quote_age_authority = max_quote_age
         self.bounds = bounds or LiveLoopBounds()
+        self._bounds_authority = self.bounds
+        self._bounds_semantics_authority = (
+            self.bounds.observation_max_items,
+            self.bounds.max_dirty_keys,
+            self.bounds.max_dirty_per_cycle,
+            self.bounds.max_registered_inputs,
+        )
         self.clock = resolved_clock
+        self._clock_authority = self.clock
+        self._last_clock_time = provenance_as_of
         self.post_append_hook = post_append_hook
-        if catalog_lifecycle is not None and not isinstance(
-            catalog_lifecycle, ContinuousEventLifecycle
+        if (
+            catalog_lifecycle is not None
+            and type(catalog_lifecycle) is not ContinuousEventLifecycle
         ):
-            raise TypeError("catalog_lifecycle must be ContinuousEventLifecycle or None")
+            raise TypeError(
+                "catalog_lifecycle must be an exact ContinuousEventLifecycle or None"
+            )
         if catalog_fetch_page is not None and not callable(catalog_fetch_page):
             raise TypeError("catalog_fetch_page must be callable or None")
         if catalog_source_id is not None:
             catalog_source_id = _canonical_text("catalog_source_id", catalog_source_id)
+        if type(catalog_required_history) is not timedelta:
+            raise TypeError("catalog_required_history must be an exact timedelta")
         if catalog_required_history < timedelta(0):
             raise ValueError("catalog_required_history must be non-negative")
         if (catalog_lifecycle is None) != (catalog_fetch_page is None):
@@ -794,21 +1001,103 @@ class PersistentLiveDecisionLoop:
         self.catalog_fetch_page = catalog_fetch_page
         self.catalog_source_id = catalog_source_id
         self.catalog_required_history = catalog_required_history
+        self._catalog_lifecycle_authority = catalog_lifecycle
+        self._catalog_fetch_page_authority = catalog_fetch_page
+        self._catalog_source_id_authority = catalog_source_id
+        self._catalog_required_history_authority = catalog_required_history
         self._default_market_store: SQLiteMarketStore | None = None
         self._default_health_store: SourceHealthStore | None = None
+        self._default_market_change_token: int | None = None
 
-        store = SQLiteMarketStore(self.workspace / "market.db")
-        try:
-            mirror = MarketMirror.from_store(store)
-        finally:
-            store.close()
+        self.progress_path = self._workspace_authority / self.PROGRESS_FILE_NAME
+        self.pre_action_book_path = (
+            self._workspace_authority / self.PRE_ACTION_BOOK_FILE_NAME
+        )
+        self.control_path = self._workspace_authority / self.CONTROL_FILE_NAME
+        self._progress_path_authority = self.progress_path
+        self._pre_action_book_path_authority = self.pre_action_book_path
+        self._control_path_authority = self.control_path
+        self._control_authority = MonotonicWorkspaceAuthority(
+            workspace=self._workspace_authority.resolve(strict=False),
+            domain=_CONTROL_AUTHORITY_DOMAIN,
+            key=self.loop_id,
+        )
+        self._control_authority_object = self._control_authority
+        self._control_authority_namespace = self._control_authority.namespace_sha256
+        self._progress = self._load_progress()
+        if self._progress is not None and self._progress.loop_id != self.loop_id:
+            raise LiveDecisionProgressError(
+                "persisted live progress belongs to a different loop_id"
+            )
+        if self._progress is not None:
+            _, durable_decision_time = _canonical_timestamp(
+                "persisted decision_ts",
+                self._progress.decision_ts,
+            )
+            if durable_decision_time > self._last_clock_time:
+                self._last_clock_time = durable_decision_time
+
+        unfinished_generation = (
+            self._progress.market_append_generation
+            if self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+            else None
+        )
+        if unfinished_generation is None:
+            store = SQLiteMarketStore(self.workspace / "market.db")
+            try:
+                mirror = MarketMirror.from_store(store)
+            finally:
+                store.close()
+        else:
+            store = SQLiteMarketStore.open_frozen_prefix_reader(
+                self.workspace / "market.db"
+            )
+            try:
+                mirror = MarketMirror._from_proven_history(
+                    store.events_at_committed_append_boundary(
+                        unfinished_generation
+                    )
+                )
+            finally:
+                store.close()
         self.mirror_updates = BoundedMirrorInvalidationBuffer(
             mirror,
             max_dirty_keys=self.bounds.max_dirty_keys,
         )
         self.dependencies = FocusedMirrorDependencyIndex(mirror)
-        self.inputs_path = self.workspace / self.INPUTS_FILE_NAME
-        durable_input_specs = self._load_input_registry() or ()
+        self._health_gate: HealthGatedMirrorDecisionIndex | None = None
+        if observation_runner is None:
+            self._default_health_store = SourceHealthStore(
+                self.workspace / "source_health.json"
+            )
+            effective_health_policy = ingestion_policy or IngestionPolicy()
+            self._health_gate = HealthGatedMirrorDecisionIndex(
+                self.dependencies,
+                self._default_health_store,
+                max_health_age=timedelta(
+                    seconds=effective_health_policy.stale_after_seconds
+                ),
+            )
+        self._health_gate_authority = self._health_gate
+        self._health_store_authority = self._default_health_store
+        self._health_max_age_authority = (
+            None
+            if self._health_gate is None
+            else self._health_gate._max_health_age
+        )
+        self._dependency_mutation_lock = RLock()
+        self.inputs_path = self._workspace_authority / self.INPUTS_FILE_NAME
+        self._inputs_path_authority = self.inputs_path
+        self._inputs_authority = MonotonicWorkspaceAuthority(
+            workspace=self._workspace_authority.resolve(strict=False),
+            domain=_INPUTS_AUTHORITY_DOMAIN,
+            key=self.loop_id,
+        )
+        self._inputs_authority_object = self._inputs_authority
+        self._inputs_authority_namespace = self._inputs_authority.namespace_sha256
+        with WorkspaceEconomicLock(self.workspace):
+            durable_input_specs = self._load_input_registry() or ()
         if len(durable_input_specs) > self.bounds.max_registered_inputs:
             raise LiveDecisionProgressError(
                 "durable live dependency registry exceeds max_registered_inputs"
@@ -830,6 +1119,16 @@ class PersistentLiveDecisionLoop:
                 )
             self._input_specs[spec.input_id] = spec
 
+        self._pending_dependency_revisions: tuple[tuple[str, int], ...] | None = None
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            self._pending_dependency_revisions = tuple(
+                (dependency.input_id, revision)
+                for dependency, revision in self.dependencies.registry_state_snapshot()
+            )
+
         if observation_runner is None:
             assert provider is not None
 
@@ -838,52 +1137,105 @@ class PersistentLiveDecisionLoop:
             ) -> object:
                 store = self._default_market_store
                 health_store = self._default_health_store
-                if store is None:
+                opened_here = store is None
+                if opened_here:
                     store = SQLiteMarketStore(self.workspace / "market.db")
-                    try:
-                        health_store = SourceHealthStore(
-                            self.workspace / "source_health.json"
-                        )
-                        # One bounded-current reconciliation covers durable changes
-                        # between construction and the first live poll. Subsequent
-                        # cycles reuse this exact canonical store and rely on the bus.
-                        for persisted_event in store.current_by_source().values():
-                            updates.accept_persisted(persisted_event)
-                    except BaseException:
+                assert store is not None
+                assert health_store is not None
+
+                try:
+                    self._reconcile_default_market_changes(
+                        store,
+                        updates,
+                        force=opened_here,
+                    )
+                except BaseException:
+                    if opened_here:
                         store.close()
-                        raise
+                    raise
+
+                if opened_here:
                     self._default_market_store = store
                     self._default_health_store = health_store
-                assert health_store is not None
-                return poll_open_market_store_once(
-                    store,
-                    health_store,
-                    provider,
-                    mirror_updates=updates,
-                    max_items=self.bounds.observation_max_items,
-                    policy=self.ingestion_policy,
-                )
+
+                try:
+                    result = poll_open_market_store_once(
+                        store,
+                        health_store,
+                        provider,
+                        mirror_updates=updates,
+                        max_items=self.bounds.observation_max_items,
+                        policy=self.ingestion_policy,
+                        clock=lambda: self._sample_clock().isoformat(),
+                    )
+                except ProviderUnavailableError:
+                    # A peer may have committed market truth while provider I/O was
+                    # failing. Reconcile it before the caller persists a ZERO
+                    # provider-gap decision against this observation boundary.
+                    self._reconcile_default_market_changes(store, updates)
+                    raise
+
+                # Catch peer commits that landed while provider I/O was in flight.
+                # Same-connection appends are already delivered synchronously by the
+                # local MarketEventBus and do not advance SQLite data_version here.
+                self._reconcile_default_market_changes(store, updates)
+                return result
 
             self._observe = _default_observer
         else:
             self._observe = observation_runner
+        self._observe_authority = self._observe
 
-        self.progress_path = self.workspace / self.PROGRESS_FILE_NAME
-        self.pre_action_book_path = self.workspace / self.PRE_ACTION_BOOK_FILE_NAME
-        self.control_path = self.workspace / self.CONTROL_FILE_NAME
-        self._progress = self._load_progress()
-        if self._progress is not None and self._progress.loop_id != self.loop_id:
-            raise LiveDecisionProgressError(
-                "persisted live progress belongs to a different loop_id"
-            )
         if self.decision_ledger.path.exists():
-            with WorkspaceEconomicLock(self.workspace):
-                self.decision_ledger.verify_integrity()
-                if (
-                    self._progress is not None
-                    and self._progress.phase == _PHASE_COMMITTED
-                ):
-                    self._verify_committed_progress_ledger_binding(self._progress)
+            def verify_decision_history(
+                committed_market_history: tuple[
+                    tuple[MarketEvent, int], ...
+                ]
+                | None = None,
+            ) -> None:
+                with WorkspaceEconomicLock(self.workspace):
+                    self.decision_ledger.verify_integrity()
+                    if self._progress is None:
+                        live_run_id = f"live:{self.loop_id}"
+                        if self._verified_latest_ledger_record(
+                            replay_run_id=live_run_id,
+                        ) is not None:
+                            raise LiveDecisionProgressError(
+                                "durable live decision history exists but "
+                                "progress is missing"
+                            )
+                    if (
+                        self._progress is not None
+                        and self._progress.phase == _PHASE_COMMITTED
+                    ):
+                        self._verify_committed_progress_ledger_binding(
+                            self._progress,
+                            committed_market_history=committed_market_history,
+                        )
+
+            committed_generation = (
+                self._progress.market_append_generation
+                if self._progress is not None
+                and self._progress.phase == _PHASE_COMMITTED
+                else None
+            )
+            if committed_generation is None:
+                verify_decision_history()
+            else:
+                prefix_reader = (
+                    SQLiteMarketStore.open_frozen_prefix_reader(
+                        self.workspace / "market.db"
+                    )
+                )
+                try:
+                    with prefix_reader._guard_committed_append_boundary(
+                        committed_generation
+                    ) as committed_history:
+                        verify_decision_history(
+                            tuple(committed_history)
+                        )
+                finally:
+                    prefix_reader.close()
         elif (
             self._progress is not None
             and self._progress.phase == _PHASE_COMMITTED
@@ -899,7 +1251,8 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision requires exact durable dependency registry"
             )
-        durable_control = self._load_control()
+        with WorkspaceEconomicLock(self.workspace):
+            durable_control = self._load_control()
         if durable_control is None:
             durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
         elif durable_control.loop_id != self.loop_id:
@@ -909,19 +1262,177 @@ class PersistentLiveDecisionLoop:
         self._control = durable_control
         self._intent_cache: dict[str, tuple[object, ...]] = {}
         self._input_market_sha256: dict[str, str] = {}
+        self._input_health_boundaries: dict[
+            str, tuple[ProviderHealthReplayBoundary, ...]
+        ] = {}
+        self._health_eligibility_cache: dict[str, str] = {}
         self._pending_affected: dict[str, None] = {}
         self._needs_cache_rebuild = True
         self._freshness_deadlines: dict[str, datetime | None] = {}
         self._freshness_generations: dict[str, int] = {}
         self._freshness_heap: list[tuple[datetime, str, int]] = []
+        self._availability_deadlines: dict[str, datetime | None] = {}
+        self._availability_generations: dict[str, int] = {}
+        self._availability_heap: list[tuple[datetime, str, int]] = []
+        self._decision_market_frontier_as_of: datetime | None = None
+        self._decision_market_append_generation: int | None = None
+        self._decision_market_history: tuple[tuple[MarketEvent, int], ...] | None = None
+        self._decision_market_history_frozen = False
 
     def close(self) -> None:
         """Release the optional long-lived default market-store connection."""
         store = self._default_market_store
         self._default_market_store = None
         self._default_health_store = None
+        self._default_market_change_token = None
+        self._decision_market_frontier_as_of = None
+        self._decision_market_append_generation = None
+        self._decision_market_history = None
+        self._decision_market_history_frozen = False
         if store is not None:
             store.close()
+
+    def _reconcile_default_market_changes(
+        self,
+        store: SQLiteMarketStore,
+        updates: BoundedMirrorInvalidationBuffer,
+        *,
+        force: bool = False,
+    ) -> int:
+        """Reconcile peer-process commits through independently proven market truth."""
+
+        if not isinstance(store, SQLiteMarketStore):
+            raise TypeError("store must be a SQLiteMarketStore")
+        if not isinstance(updates, BoundedMirrorInvalidationBuffer):
+            raise TypeError("updates must be a BoundedMirrorInvalidationBuffer")
+        if type(force) is not bool:
+            raise TypeError("force must be a bool")
+
+        # MarketEventBus delivery is process-local. SQLite data_version is only a
+        # cheap cross-connection invalidation hint; market values still enter the
+        # mirror exclusively through the independently proven current projection.
+        change_token = store.external_change_token()
+        if not force and self._default_market_change_token == change_token:
+            return change_token
+        for (
+            persisted_event,
+            append_generation,
+        ) in store.current_by_source_with_append_generation().values():
+            updates.reconcile_persisted(
+                persisted_event,
+                append_generation=append_generation,
+            )
+        self._default_market_change_token = change_token
+        return change_token
+
+    def _decision_refresh_may_need_history(self, as_of: datetime) -> bool:
+        """Return whether this cycle can reach focused snapshot materialization."""
+
+        if (
+            self.mirror_updates.pending_count
+            or self.mirror_updates.full_refresh_required
+            or self._pending_affected
+            or self._needs_cache_rebuild
+        ):
+            return True
+        return any(
+            deadline is not None and deadline <= as_of
+            for deadline in (
+                *self._freshness_deadlines.values(),
+                *self._availability_deadlines.values(),
+            )
+        )
+
+    def _sample_decision_market_frontier(self) -> datetime:
+        """Choose a cutoff and freeze any exceptional history it may consume."""
+
+        self._decision_market_frontier_as_of = None
+        self._decision_market_append_generation = None
+        self._decision_market_history = None
+        self._decision_market_history_frozen = False
+
+        store = self._default_market_store
+        owns_store = store is None
+        if store is None:
+            # Custom observation runners still participate in the canonical durable
+            # market authority. Open one bounded verifier connection so their crash
+            # cursor gets the same append-generation frontier as the default provider
+            # path instead of falling back to timestamp-only recovery.
+            store = SQLiteMarketStore(self.workspace / "market.db")
+
+        try:
+            # The token is sampled before trusted projection reconciliation and again
+            # after the candidate decision clock. If a peer commits anywhere across that
+            # interval, discard the candidate cutoff, reconcile the newly durable truth,
+            # and sample again. When the latest-only mirror hides a causally visible
+            # predecessor, freeze the already-proven append history inside this same token
+            # interval. A later fallback must consume this snapshot rather than re-open the
+            # database after the decision cutoff.
+            for _ in range(_MARKET_FRONTIER_RETRY_LIMIT):
+                expected_token = self._reconcile_default_market_changes(
+                    store,
+                    self.mirror_updates,
+                    force=owns_store,
+                )
+                # Sample only a cheap, explicitly untrusted generation hint inside the
+                # same token interval as the decision clock. A material cycle proves this
+                # exact boundary immediately before PENDING publication; idle cycles never
+                # pay the full append-history authority proof.
+                append_generation = store.append_generation_hint()
+                decision_time = self._sample_clock()
+                frozen_history: tuple[tuple[MarketEvent, int], ...] | None = None
+                dependency_ids = self.dependencies.input_ids
+                try:
+                    dependency_revisions = tuple(
+                        (
+                            input_id,
+                            self.dependencies.dependency_revision(input_id),
+                        )
+                        for input_id in dependency_ids
+                    )
+                    history_required = (
+                        self._decision_refresh_may_need_history(decision_time)
+                        and any(
+                            self.dependencies.requires_current_history_fallback(
+                                input_id,
+                                as_of=decision_time,
+                            )
+                            for input_id in dependency_ids
+                        )
+                    )
+                    registry_stable = (
+                        self.dependencies.input_ids == dependency_ids
+                        and all(
+                            self.dependencies.dependency_revision(input_id)
+                            == revision
+                            for input_id, revision in dependency_revisions
+                        )
+                    )
+                except KeyError:
+                    registry_stable = False
+                    history_required = False
+                if not registry_stable:
+                    # A focused selector was registered, retired, or replaced while
+                    # history need was being classified. Re-sample the complete
+                    # market frontier rather than freezing history for a stale
+                    # dependency incarnation.
+                    continue
+                if history_required:
+                    frozen_history = tuple(store.events_with_append_generation())
+
+                if store.external_change_token() == expected_token:
+                    self._decision_market_frontier_as_of = decision_time
+                    self._decision_market_append_generation = append_generation
+                    self._decision_market_history = frozen_history
+                    self._decision_market_history_frozen = True
+                    return decision_time
+        finally:
+            if owns_store:
+                store.close()
+
+        raise LiveDecisionProgressError(
+            "cross-process market truth changed continuously across decision cutoff"
+        )
 
     def __enter__(self) -> "PersistentLiveDecisionLoop":
         return self
@@ -937,7 +1448,58 @@ class PersistentLiveDecisionLoop:
     def stopped(self) -> bool:
         return self._control.state is LiveControlState.STOPPED
 
+    def _restore_dependency_registry(
+        self,
+        specs: tuple[_InputSpec, ...],
+    ) -> None:
+        """Restore exact pre-mutation focused/durable-process registry ordering."""
+        with self.dependencies.registry_mutation_guard():
+            for current_id in self.dependencies.input_ids:
+                if not self.dependencies.unregister(current_id):
+                    raise LiveDecisionProgressError(
+                        "live dependency rollback could not clear current registry"
+                    )
+            self._input_specs.clear()
+            for spec in specs:
+                restored_dependency = self.dependencies.register(
+                    spec.input_id,
+                    source_ids=spec.source_ids,
+                    sports=spec.sports,
+                    event_ids=spec.event_ids,
+                    market_ids=spec.market_ids,
+                    selection_ids=spec.selection_ids,
+                )
+                if _InputSpec.from_dependency(restored_dependency) != spec:
+                    raise LiveDecisionProgressError(
+                        "live dependency rollback changed canonical selectors"
+                    )
+                self._input_specs[spec.input_id] = spec
+        # Rebuilding the focused registry creates fresh incarnation tokens. Any
+        # process-local intent/freshness cache was derived from the pre-failure
+        # incarnations and must be re-established before another economic decision.
+        self._needs_cache_rebuild = True
+
     def register_input(
+        self,
+        input_id: str,
+        *,
+        source_ids: str | tuple[str, ...] | None = None,
+        sports: str | tuple[str, ...] | None = None,
+        event_ids: str | tuple[str, ...] | None = None,
+        market_ids: str | tuple[str, ...] | None = None,
+        selection_ids: str | tuple[str, ...] | None = None,
+    ) -> None:
+        with self._dependency_mutation_lock:
+            self._register_input_locked(
+                input_id,
+                source_ids=source_ids,
+                sports=sports,
+                event_ids=event_ids,
+                market_ids=market_ids,
+                selection_ids=selection_ids,
+            )
+
+    def _register_input_locked(
         self,
         input_id: str,
         *,
@@ -962,7 +1524,26 @@ class PersistentLiveDecisionLoop:
                 raise ValueError(
                     f"input_id {normalized_id!r} conflicts with durable registration"
                 )
+            focused = tuple(
+                dependency
+                for dependency in self.dependencies.registry_snapshot()
+                if dependency.input_id == normalized_id
+            )
+            if (
+                len(focused) != 1
+                or _InputSpec.from_dependency(focused[0]) != existing
+            ):
+                raise LiveDecisionProgressError(
+                    "live dependency registry is inconsistent during idempotent registration"
+                )
             return
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            raise LiveDecisionProgressError(
+                "cannot mutate live dependency registry while a decision is unfinished"
+            )
         if len(self._input_specs) >= self.bounds.max_registered_inputs:
             raise ValueError("max_registered_inputs would be exceeded")
 
@@ -979,17 +1560,34 @@ class PersistentLiveDecisionLoop:
         try:
             self._persist_input_registry(expected_previous=previous_specs)
         except BaseException:
-            self._input_specs.pop(candidate.input_id, None)
-            self.dependencies.unregister(candidate.input_id)
+            self._restore_dependency_registry(previous_specs)
             raise
         self._pending_affected[dependency.input_id] = None
         self._needs_cache_rebuild = True
 
     def unregister_input(self, input_id: str) -> bool:
+        with self._dependency_mutation_lock:
+            return self._unregister_input_locked(input_id)
+
+    def _unregister_input_locked(self, input_id: str) -> bool:
         normalized_id = FocusedMirrorDependencyIndex._input_id(input_id)
         existing = self._input_specs.get(normalized_id)
         if existing is None:
+            if any(
+                dependency.input_id == normalized_id
+                for dependency in self.dependencies.registry_snapshot()
+            ):
+                raise LiveDecisionProgressError(
+                    "live dependency registry contains an undurable ghost registration"
+                )
             return False
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            raise LiveDecisionProgressError(
+                "cannot mutate live dependency registry while a decision is unfinished"
+            )
         previous_specs = tuple(self._input_specs.values())
         if not self.dependencies.unregister(normalized_id):
             raise LiveDecisionProgressError(
@@ -999,15 +1597,10 @@ class PersistentLiveDecisionLoop:
         try:
             self._persist_input_registry(expected_previous=previous_specs)
         except BaseException:
-            self._input_specs[normalized_id] = existing
-            self.dependencies.register(
-                existing.input_id,
-                source_ids=existing.source_ids,
-                sports=existing.sports,
-                event_ids=existing.event_ids,
-                market_ids=existing.market_ids,
-                selection_ids=existing.selection_ids,
-            )
+            # Registry order participates in durable progress identity. Any failed
+            # publication must leave the complete process-local registry exactly at
+            # its pre-mutation semantic state, not append a retired input at the end.
+            self._restore_dependency_registry(previous_specs)
             raise
         self._pending_affected.pop(normalized_id, None)
         self._intent_cache.pop(normalized_id, None)
@@ -1015,6 +1608,10 @@ class PersistentLiveDecisionLoop:
         self._freshness_deadlines.pop(normalized_id, None)
         self._freshness_generations[normalized_id] = (
             self._freshness_generations.get(normalized_id, 0) + 1
+        )
+        self._availability_deadlines.pop(normalized_id, None)
+        self._availability_generations[normalized_id] = (
+            self._availability_generations.get(normalized_id, 0) + 1
         )
         return True
 
@@ -1030,6 +1627,44 @@ class PersistentLiveDecisionLoop:
 
     def stop(self) -> None:
         self._persist_control(LiveControlState.STOPPED)
+
+    def _refresh_cycle_authorities(self) -> None:
+        """Fence stale loop instances before catalog/provider observation."""
+
+        self._assert_canonical_persistence_authority()
+        with WorkspaceEconomicLock(self._workspace_authority):
+            durable_progress = self._load_progress()
+            if durable_progress != self._progress:
+                raise LiveDecisionProgressError(
+                    "live decision progress changed concurrently before cycle"
+                )
+
+            durable_input_specs = self._load_input_registry() or ()
+            if durable_input_specs != tuple(self._input_specs.values()):
+                raise LiveDecisionProgressError(
+                    "live dependency registry changed concurrently before cycle"
+                )
+
+            durable_control = self._load_control()
+            if durable_control is None:
+                durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
+            elif durable_control.loop_id != self.loop_id:
+                raise LiveDecisionProgressError(
+                    "persisted live control belongs to a different loop_id"
+                )
+
+        self._control = durable_control
+
+    def _sample_clock(self) -> datetime:
+        """Return UTC wall time without allowing causal decision chronology to regress."""
+
+        now = _require_utc_clock(self.clock)
+        if now < self._last_clock_time:
+            raise LiveDecisionProgressError(
+                "live decision clock moved backwards across causal chronology"
+            )
+        self._last_clock_time = now
+        return now
 
     def run(
         self,
@@ -1058,6 +1693,18 @@ class PersistentLiveDecisionLoop:
         return tuple(results)
 
     def run_cycle(self) -> LiveCycleResult:
+        self._refresh_cycle_authorities()
+
+        # PENDING/APPEND_PENDING is an already-started durable transaction. Finish
+        # or fail closed on that exact identity before honoring a later PAUSE/STOP;
+        # otherwise an operator control written after publication can strand an
+        # economic decision forever in an unverifiable half-state.
+        if (
+            self._progress is not None
+            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+        ):
+            return self._recover_unfinished_progress()
+
         if self.stopped:
             return LiveCycleResult(
                 LiveCycleStatus.STOPPED,
@@ -1069,30 +1716,91 @@ class PersistentLiveDecisionLoop:
                 detail="durable PAUSE is active; provider was not polled",
             )
 
-        if (
-            self._progress is not None
-            and self._progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
-        ):
-            return self._recover_unfinished_progress()
-
-        catalog_now = _require_utc_clock(self.clock)
+        catalog_now = self._sample_clock()
         try:
             if self.catalog_lifecycle is not None:
                 self._refresh_catalog_lifecycle(catalog_now)
+                # Catalog refresh can perform provider I/O and may publish durable
+                # dependency changes through register/retire callbacks.  Re-fence
+                # every workspace authority before starting the main market poll:
+                # a peer STOP/PAUSE, decision-progress advance, or registry mutation
+                # that happened while catalog I/O was in flight must win at this
+                # safe boundary rather than allowing one more stale provider call.
+                self._refresh_cycle_authorities()
+                if self.stopped:
+                    return LiveCycleResult(
+                        LiveCycleStatus.STOPPED,
+                        detail=(
+                            "durable STOP became active during catalog refresh; "
+                            "market provider was not polled"
+                        ),
+                    )
+                if self.paused:
+                    return LiveCycleResult(
+                        LiveCycleStatus.PAUSED,
+                        detail=(
+                            "durable PAUSE became active during catalog refresh; "
+                            "market provider was not polled"
+                        ),
+                    )
             self._observe(self.mirror_updates)
+            # Provider observation is another external-I/O boundary.  Re-resolve
+            # durable workspace authorities before draining invalidations or doing
+            # any decision work so a peer mutation that happened while the poll was
+            # in flight cannot flow through stale process-local state.
+            self._refresh_cycle_authorities()
+            if self.stopped:
+                return LiveCycleResult(
+                    LiveCycleStatus.STOPPED,
+                    detail=(
+                        "durable STOP became active during provider observation; "
+                        "no economic decision was published"
+                    ),
+                )
+            if self.paused:
+                return LiveCycleResult(
+                    LiveCycleStatus.PAUSED,
+                    detail=(
+                        "durable PAUSE became active during provider observation; "
+                        "no economic decision was published"
+                    ),
+                )
         except ProviderUnavailableError as exc:
             self._needs_cache_rebuild = True
+            # A provider failure does not outrank a concurrent operator control or
+            # peer decision/registry publication.  Fence those authorities before
+            # turning the failure into durable provider-gap economic evidence.
+            self._refresh_cycle_authorities()
+            if self.stopped:
+                return LiveCycleResult(
+                    LiveCycleStatus.STOPPED,
+                    detail=(
+                        "durable STOP became active during failed provider observation; "
+                        "provider gap was not published"
+                    ),
+                )
+            if self.paused:
+                return LiveCycleResult(
+                    LiveCycleStatus.PAUSED,
+                    detail=(
+                        "durable PAUSE became active during failed provider observation; "
+                        "provider gap was not published"
+                    ),
+                )
             return self._persist_provider_gap(
-                _require_utc_clock(self.clock),
+                self._sample_decision_market_frontier(),
                 exc,
             )
 
-        now = _require_utc_clock(self.clock)
+        now = self._sample_decision_market_frontier()
         batch = self.mirror_updates.drain(
             max_items=self.bounds.max_dirty_per_cycle
         )
         batch_affected = self.dependencies.affected_inputs(batch)
         for input_id in batch_affected:
+            self._pending_affected[input_id] = None
+        health_affected = self._health_eligibility_changed_inputs(now)
+        for input_id in health_affected:
             self._pending_affected[input_id] = None
         if batch.full_refresh_required:
             self._pending_affected = {
@@ -1111,17 +1819,45 @@ class PersistentLiveDecisionLoop:
             )
 
         freshness_expired_inputs = self._expire_freshness_inputs(now)
-        for input_id in freshness_expired_inputs:
+        availability_reached_inputs = self._activate_available_inputs(now)
+        for input_id in (*freshness_expired_inputs, *availability_reached_inputs):
             self._pending_affected[input_id] = None
-        freshness_expired = bool(freshness_expired_inputs)
+        freshness_expired = bool(
+            freshness_expired_inputs or availability_reached_inputs
+        )
 
-        registered_input_ids = self.dependencies.input_ids
+        registered_dependency_state = self.dependencies.registry_state_snapshot()
+        registered_dependencies = tuple(
+            dependency for dependency, _revision in registered_dependency_state
+        )
+        expected_dependency_revisions = tuple(
+            (dependency.input_id, revision)
+            for dependency, revision in registered_dependency_state
+        )
+        registered_input_ids = tuple(
+            dependency.input_id for dependency in registered_dependencies
+        )
+        expected_input_specs = tuple(self._input_specs.values())
+        if (
+            tuple(
+                _InputSpec.from_dependency(dependency)
+                for dependency in registered_dependencies
+            )
+            != expected_input_specs
+        ):
+            raise LiveDecisionProgressError(
+                "live dependency registry diverged before snapshot capture"
+            )
         if self._needs_cache_rebuild:
             for input_id in registered_input_ids:
                 self._pending_affected[input_id] = None
 
-        refresh_input_ids = tuple(self._pending_affected)
-        affected = refresh_input_ids
+        affected = tuple(self._pending_affected)
+        refresh_input_ids = (
+            self.dependencies.input_ids
+            if self._health_gate is not None and affected
+            else affected
+        )
         if not affected:
             return LiveCycleResult(
                 LiveCycleStatus.NO_CHANGE,
@@ -1131,6 +1867,44 @@ class PersistentLiveDecisionLoop:
         decision_time = now
         snapshots = self._capture_input_views(refresh_input_ids, decision_time)
         current_market_sha = self._market_state_sha256()
+        actionability_wait_evidence = self._derive_actionability_wait_evidence(
+            refresh_input_ids,
+            decision_time,
+            captured_snapshots=snapshots,
+        )
+        if actionability_wait_evidence:
+            decision_ts = decision_time.isoformat()
+            self._write_pending(
+                decision_ts=decision_ts,
+                market_state_sha256=current_market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_ACTIONABILITY_WAIT,
+                expected_input_specs=expected_input_specs,
+                expected_dependency_revisions=expected_dependency_revisions,
+            )
+            plan = build_portfolio_plan(
+                self.book,
+                (),
+                self.authority.risk_policy,
+                decision_ts,
+                dependency_graph=None,
+                market_outcome_authorities=(),
+            )
+            result = self._persist_plan(
+                plan=plan,
+                intents=(),
+                market_state_sha256=current_market_sha,
+                affected_input_ids=affected,
+                gate=_GATE_ACTIONABILITY_WAIT,
+                detail=(
+                    "live-state actionability failed closed before strategy/portfolio "
+                    "evaluation"
+                ),
+                actionability_wait_evidence=actionability_wait_evidence,
+            )
+            self._pending_affected.clear()
+            self._needs_cache_rebuild = False
+            return result
 
         clean_committed_restart = (
             self._needs_cache_rebuild
@@ -1139,6 +1913,12 @@ class PersistentLiveDecisionLoop:
             and self._progress.gate == _GATE_NORMAL
             and self._progress.market_state_sha256 == current_market_sha
             and self._progress.registered_input_ids == registered_input_ids
+            and tuple(self._input_specs.values()) == expected_input_specs
+            and tuple(
+                _InputSpec.from_dependency(dependency)
+                for dependency in self.dependencies.registry_snapshot()
+            )
+            == expected_input_specs
             and not batch_affected
             and not batch.full_refresh_required
             and not freshness_expired
@@ -1161,6 +1941,8 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=current_market_sha,
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
+            expected_input_specs=expected_input_specs,
+            expected_dependency_revisions=expected_dependency_revisions,
         )
         self._refresh_intents_from_snapshots(snapshots)
 
@@ -1239,7 +2021,14 @@ class PersistentLiveDecisionLoop:
             and left._settlement_times == right._settlement_times
         )
 
-    def _decision_context_sha256_for_book(self, book: PaperBook) -> str:
+    def _decision_context_sha256_for_book(
+        self,
+        book: PaperBook,
+        *,
+        health_aware: bool = True,
+    ) -> str:
+        if type(health_aware) is not bool:
+            raise TypeError("health_aware must be a bool")
         self._verify_intent_factory_provenance()
         if not isinstance(book, PaperBook):
             raise TypeError("book must be PaperBook")
@@ -1251,24 +2040,38 @@ class PersistentLiveDecisionLoop:
                 "cannot derive canonical PaperBook decision context"
             )
         provenance = self.intent_provenance
-        return _canonical_json_sha256(
-            {
-                "schema": "autosport.live_decision_runtime_context",
-                "schema_version": 2,
-                "mode": self.mode.value,
-                "intent_strategy_version_id": provenance.strategy_version_id,
-                "intent_model_version_id": provenance.model_version_id,
-                "intent_provenance_sha256": provenance.provenance_sha256,
-                "economic_goal_contract_sha256": provenance_for(
-                    self.authority.contract
-                ).contract_sha256,
-                "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
-                "book_state_sha256": book_state_sha256,
-                "max_quote_age_seconds": str(
-                    _timedelta_decimal_seconds(self.max_quote_age)
-                ),
-            }
-        )
+        context_payload = {
+            "schema": "autosport.live_decision_runtime_context",
+            "schema_version": 3 if health_aware else 2,
+            "mode": self.mode.value,
+            "intent_strategy_version_id": provenance.strategy_version_id,
+            "intent_model_version_id": provenance.model_version_id,
+            "intent_provenance_sha256": provenance.provenance_sha256,
+            "economic_goal_contract_sha256": provenance_for(
+                self.authority.contract
+            ).contract_sha256,
+            "risk_policy_sha256": self.authority.risk_policy.provenance_sha256,
+            "book_state_sha256": book_state_sha256,
+            "max_quote_age_seconds": str(
+                _timedelta_decimal_seconds(self.max_quote_age)
+            ),
+        }
+        if health_aware:
+            context_payload["max_health_age_seconds"] = (
+                None
+                if self._health_gate is None
+                else str(
+                    _timedelta_decimal_seconds(
+                        self._health_gate._max_health_age
+                    )
+                )
+            )
+
+        if self.paper_execution is not None:
+            context_payload["paper_execution_model_fingerprint"] = (
+                self.paper_execution.config.fingerprint
+            )
+        return _canonical_json_sha256(context_payload)
 
     def _decision_context_sha256(self) -> str:
         return self._decision_context_sha256_for_book(self.book)
@@ -1282,7 +2085,26 @@ class PersistentLiveDecisionLoop:
             raise LiveDecisionProgressError(
                 "unfinished live decision recovery requires pending progress"
             )
-        if progress.registered_input_ids != self.dependencies.input_ids:
+        with WorkspaceEconomicLock(self.workspace):
+            durable_input_specs = self._load_input_registry() or ()
+        current_input_specs = tuple(self._input_specs.values())
+        focused_dependency_state = self.dependencies.registry_state_snapshot()
+        focused_input_specs = tuple(
+            _InputSpec.from_dependency(dependency)
+            for dependency, _revision in focused_dependency_state
+        )
+        focused_dependency_revisions = tuple(
+            (dependency.input_id, revision)
+            for dependency, revision in focused_dependency_state
+        )
+        durable_input_ids = tuple(spec.input_id for spec in durable_input_specs)
+        if (
+            progress.registered_input_ids != durable_input_ids
+            or current_input_specs != durable_input_specs
+            or focused_input_specs != durable_input_specs
+            or self._pending_dependency_revisions is None
+            or focused_dependency_revisions != self._pending_dependency_revisions
+        ):
             raise LiveDecisionProgressError(
                 "unfinished live decision requires exact durable dependency registry"
             )
@@ -1311,7 +2133,10 @@ class PersistentLiveDecisionLoop:
 
         if (
             progress.decision_context_sha256
-            != self._decision_context_sha256_for_book(pre_action_book)
+            != self._decision_context_sha256_for_book(
+                pre_action_book,
+                health_aware=progress.health_boundaries is not None,
+            )
         ):
             raise LiveDecisionProgressError(
                 "unfinished live decision runtime context changed across restart"
@@ -1325,15 +2150,35 @@ class PersistentLiveDecisionLoop:
                 "PaperBook changed before durable decision"
             )
 
-        if progress.gate == _GATE_NORMAL:
-            self._refresh_intents_from_replay(
+        replayed_snapshots = self._refresh_intents_from_replay(
+            progress.registered_input_ids,
+            decision_time,
+            expected_market_state_sha256=progress.market_state_sha256,
+            max_append_generation=progress.market_append_generation,
+            health_boundaries=progress.health_boundaries,
+            refresh_intents=progress.gate == _GATE_NORMAL,
+        )
+        intents = (
+            self._all_cached_intents()
+            if progress.gate == _GATE_NORMAL
+            else ()
+        )
+        actionability_wait_evidence = (
+            self._derive_actionability_wait_evidence(
                 progress.registered_input_ids,
                 decision_time,
-                expected_market_state_sha256=progress.market_state_sha256,
+                captured_snapshots=replayed_snapshots,
             )
-            intents = self._all_cached_intents()
-        else:
-            intents = ()
+            if progress.gate == _GATE_ACTIONABILITY_WAIT
+            else None
+        )
+        if (
+            progress.gate == _GATE_ACTIONABILITY_WAIT
+            and not actionability_wait_evidence
+        ):
+            raise LiveDecisionProgressError(
+                "unfinished actionability WAIT no longer reproduces its blocker"
+            )
 
         # Once the exact economic DecisionRecord is durable, it is the immutable
         # pre-action plan authority. In particular, an accepted #623 attempt may
@@ -1388,6 +2233,16 @@ class PersistentLiveDecisionLoop:
                 raise LiveDecisionProgressError(
                     "append-pending durable PortfolioPlan identity changed"
                 )
+            latest_live = self._verified_latest_ledger_record(
+                replay_run_id=f"live:{self.loop_id}",
+            )
+            if (
+                latest_live is None
+                or latest_live[1].decision_id != durable_record.decision_id
+            ):
+                raise LiveDecisionProgressError(
+                    "append-pending live progress is not the latest durable live decision"
+                )
             if (
                 tuple(getattr(intent, "intent_id", None) for intent in intents)
                 != plan.intent_ids
@@ -1423,6 +2278,45 @@ class PersistentLiveDecisionLoop:
                 market_outcome_authorities=(),
             )
 
+        if progress.phase == _PHASE_PENDING:
+            if (
+                progress.ledger_offset is not None
+                and self._ledger_end_offset() < progress.ledger_offset
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "pending live decision ledger frontier was truncated"
+                )
+            prospective_decision_id = self._decision_identity(
+                plan=plan,
+                market_state_sha256=progress.market_state_sha256,
+                gate=progress.gate,
+                decision_context_sha256=progress.decision_context_sha256,
+                actionability_wait_evidence=actionability_wait_evidence,
+            )[1]
+            latest_live = self._verified_latest_ledger_record(
+                replay_run_id=f"live:{self.loop_id}",
+            )
+            if latest_live is not None:
+                latest_offset, latest_record = latest_live
+                if (
+                    progress.ledger_offset is not None
+                    and latest_offset >= progress.ledger_offset
+                ):
+                    raise LiveDecisionProgressError(
+                        "pending live progress was superseded after publication"
+                    )
+                _, latest_time = _canonical_timestamp(
+                    "latest durable live decision observed_ts",
+                    latest_record.observed_ts,
+                )
+                if (
+                    latest_record.decision_id == prospective_decision_id
+                    or latest_time > decision_time
+                ):
+                    raise LiveDecisionProgressError(
+                        "pending live progress predates an already durable live decision"
+                    )
+
         result = self._persist_plan(
             plan=plan,
             intents=intents,
@@ -1433,6 +2327,7 @@ class PersistentLiveDecisionLoop:
                 "recovered unfinished durable live decision before provider polling"
             ),
             decision_context_sha256_override=progress.decision_context_sha256,
+            actionability_wait_evidence=actionability_wait_evidence,
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = True
@@ -1440,6 +2335,9 @@ class PersistentLiveDecisionLoop:
         self._freshness_deadlines.clear()
         self._freshness_generations.clear()
         self._freshness_heap.clear()
+        self._availability_deadlines.clear()
+        self._availability_generations.clear()
+        self._availability_heap.clear()
         return result
 
     def _refresh_intents_from_replay(
@@ -1448,27 +2346,61 @@ class PersistentLiveDecisionLoop:
         as_of: datetime,
         *,
         expected_market_state_sha256: str,
-    ) -> None:
+        max_append_generation: int | None,
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None = None,
+        refresh_intents: bool = True,
+    ) -> dict[str, MirrorSnapshot]:
         _canonical_sha256(
             "expected replay market_state_sha256",
             expected_market_state_sha256,
         )
-        store = SQLiteMarketStore(self.workspace / "market.db")
-        try:
-            snapshot = MarketMirror.replay_view_from_store(
-                store,
-                as_of=as_of,
-                max_age=self.max_quote_age,
+        if type(refresh_intents) is not bool:
+            raise TypeError("refresh_intents must be a bool")
+        store = (
+            SQLiteMarketStore(self.workspace / "market.db")
+            if max_append_generation is None
+            else SQLiteMarketStore.open_frozen_prefix_reader(
+                self.workspace / "market.db"
             )
+        )
+        try:
+            if max_append_generation is None:
+                # Legacy progress did not persist a market-generation frontier.
+                snapshot = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=as_of,
+                    max_age=self.max_quote_age,
+                )
+            else:
+                boundary, age_limit = MarketMirror._decision_boundary(
+                    as_of=as_of,
+                    max_age=self.max_quote_age,
+                )
+                snapshot = MarketMirror._decision_view_from_proven_history(
+                    store.events_at_committed_append_boundary(
+                        max_append_generation
+                    ),
+                    boundary=boundary,
+                    max_age=age_limit,
+                    source_ids=None,
+                    sports=None,
+                    event_ids=None,
+                    market_ids=None,
+                    selection_ids=None,
+                )
         finally:
             store.close()
 
-        replay_market_sha256 = self._market_state_sha256_for_events(snapshot.events)
+        replay_market_sha256 = self._market_state_sha256_for_events(
+            snapshot.events,
+            as_of=as_of,
+            health_boundaries=health_boundaries,
+        )
         if replay_market_sha256 != expected_market_state_sha256:
             raise LiveDecisionProgressError(
                 "unfinished live decision replayed market state changed across restart"
             )
-
+        focused_snapshots: dict[str, MirrorSnapshot] = {}
         for input_id in input_ids:
             try:
                 spec = self._input_specs[input_id]
@@ -1493,8 +2425,38 @@ class PersistentLiveDecisionLoop:
                     )
                 ),
             )
-            produced = self.intent_factory(input_id, focused)
-            self._intent_cache[input_id] = self._validated_intents(produced)
+            if self._health_gate is not None and health_boundaries is not None:
+                boundary_map = {
+                    boundary.source_id: boundary
+                    for boundary in health_boundaries
+                }
+                source_ids = {
+                    event.source_id for event in focused.events
+                }
+                if not source_ids.issubset(boundary_map):
+                    raise LiveDecisionProgressError(
+                        "unfinished live decision lacks provider-health replay horizons"
+                    )
+                focused = self._health_gate.gate_snapshot(
+                    focused,
+                    as_of=as_of,
+                    health_boundaries={
+                        source_id: boundary_map[source_id]
+                        for source_id in source_ids
+                    },
+                )
+                self._input_health_boundaries[input_id] = (
+                    focused.health_boundaries
+                )
+            else:
+                self._input_health_boundaries[input_id] = ()
+            focused_snapshots[input_id] = focused
+            if refresh_intents:
+                produced = self.intent_factory(input_id, focused)
+                intents = self._validated_intents(produced)
+                self._require_intents_bound_to_snapshot(intents, focused)
+                self._intent_cache[input_id] = intents
+        return focused_snapshots
 
     def _validated_intents(self, produced: object) -> tuple[object, ...]:
         from .portfolio_plan import OpportunityIntent
@@ -1522,6 +2484,31 @@ class PersistentLiveDecisionLoop:
                 )
         return produced
 
+    @staticmethod
+    def _require_intents_bound_to_snapshot(
+        intents: tuple[object, ...],
+        snapshot: MirrorSnapshot,
+    ) -> None:
+        """Reject canonical intents whose quote bytes did not come from this view."""
+
+        if not isinstance(snapshot, MirrorSnapshot):
+            raise TypeError("snapshot must be MirrorSnapshot")
+        for intent in intents:
+            for quote in intent.opportunity.quotes:
+                matches = tuple(
+                    event
+                    for event in snapshot.events
+                    if QuoteRef.from_market_event(
+                        event,
+                        market_snapshot_hash=quote.market_snapshot_hash,
+                    )
+                    == quote
+                )
+                if len(matches) != 1:
+                    raise LiveDecisionProgressError(
+                        "live intent quote is not bound to focused market snapshot"
+                    )
+
     def _capture_input_views(
         self,
         input_ids: tuple[str, ...],
@@ -1535,18 +2522,551 @@ class PersistentLiveDecisionLoop:
             if incremental
             else self.dependencies.decision_view
         )
-        for input_id in input_ids:
-            snapshot = reader(
-                input_id,
+        history_store: SQLiteMarketStore | None = None
+        history_events: tuple[tuple[MarketEvent, int], ...] | None = None
+        owns_history_store = False
+        try:
+            for input_id in input_ids:
+                for _attempt in range(_MARKET_FRONTIER_RETRY_LIMIT):
+                    dependency_revision = self.dependencies.dependency_revision(
+                        input_id
+                    )
+                    history_fallback = (
+                        self.dependencies.requires_current_history_fallback(
+                            input_id,
+                            as_of=as_of,
+                        )
+                    )
+                    if history_fallback:
+                        if (
+                            self._decision_market_history_frozen
+                            and self._decision_market_frontier_as_of == as_of
+                        ):
+                            if self._decision_market_history is None:
+                                raise LiveDecisionProgressError(
+                                    "decision frontier did not freeze required market history"
+                                )
+                            history_events = self._decision_market_history
+                        else:
+                            if history_store is None:
+                                history_store = self._default_market_store
+                                if history_store is None:
+                                    history_store = SQLiteMarketStore(
+                                        self.workspace / "market.db"
+                                    )
+                                    owns_history_store = True
+                            if history_events is None:
+                                history_events = tuple(
+                                    history_store.events_with_append_generation()
+                                )
+                        (
+                            snapshot,
+                            next_history_availability,
+                        ) = self.dependencies.decision_state_from_proven_history(
+                            input_id,
+                            history_events,
+                            as_of=as_of,
+                            max_age=self.max_quote_age,
+                        )
+                    else:
+                        snapshot = reader(
+                            input_id,
+                            as_of=as_of,
+                            max_age=self.max_quote_age,
+                        )
+                        next_history_availability = (
+                            self._next_availability_deadline(input_id, as_of)
+                        )
+
+                    if (
+                        self.dependencies.dependency_revision(input_id)
+                        == dependency_revision
+                    ):
+                        break
+                    # The focused selector changed between history classification
+                    # and snapshot/deadline materialization. Retry the complete
+                    # decision read so a replacement that requires durable-history
+                    # fallback cannot be evaluated through latest-only mirror truth.
+                else:
+                    raise LiveDecisionProgressError(
+                        "focused dependency changed continuously during snapshot capture"
+                    )
+
+                if self._health_gate is not None:
+                    replay_boundaries = None
+                    if (
+                        self._progress is not None
+                        and self._progress.phase
+                        in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+                    ):
+                        _, progress_time = _canonical_timestamp(
+                            "persisted decision_ts",
+                            self._progress.decision_ts,
+                        )
+                        if progress_time == as_of.astimezone(timezone.utc):
+                            available = {
+                                boundary.source_id: boundary
+                                for boundary in self._progress.health_boundaries
+                            }
+                            source_ids = {
+                                event.source_id for event in snapshot.events
+                            }
+                            if not source_ids.issubset(available):
+                                raise LiveDecisionProgressError(
+                                    "unfinished live decision lacks exact provider-health horizons"
+                                )
+                            replay_boundaries = {
+                                source_id: available[source_id]
+                                for source_id in source_ids
+                            }
+                    snapshot = self._health_gate.gate_snapshot(
+                        snapshot,
+                        as_of=as_of,
+                        health_boundaries=replay_boundaries,
+                    )
+                    self._input_health_boundaries[input_id] = (
+                        snapshot.health_boundaries
+                    )
+                else:
+                    self._input_health_boundaries[input_id] = ()
+                snapshots[input_id] = snapshot
+                self._input_market_sha256[input_id] = (
+                    self._snapshot_state_sha256(snapshot)
+                )
+                self._record_freshness_deadline(input_id, snapshot)
+                self._set_availability_deadline(
+                    input_id,
+                    next_history_availability,
+                )
+        except FocusedMirrorDependencyChurnError as exc:
+            raise LiveDecisionProgressError(
+                "focused dependency changed continuously during snapshot capture"
+            ) from exc
+        finally:
+            if owns_history_store and history_store is not None:
+                history_store.close()
+        return snapshots
+
+    @staticmethod
+    def _validated_actionability_wait_evidence(
+        raw: object,
+    ) -> tuple[dict[str, object], ...]:
+        if type(raw) not in {tuple, list} or not raw:
+            raise LiveDecisionProgressError(
+                "actionability WAIT evidence must be a non-empty sequence"
+            )
+        canonical: list[dict[str, object]] = []
+        previous_input_id: str | None = None
+        structural_trigger_by_reason = {
+            LiveInputWaitReason.NO_COMPONENTS.value: (
+                LiveInputRecheckTrigger.MATCHING_COMPONENT_CHANGE.value
+            ),
+            LiveInputWaitReason.NON_OPEN_STATUS.value: (
+                LiveInputRecheckTrigger.MARKET_STATUS_CHANGE.value
+            ),
+            LiveInputWaitReason.INVALID_CAUSAL_TIMESTAMP.value: (
+                LiveInputRecheckTrigger.VALID_CAUSAL_OBSERVATION.value
+            ),
+            LiveInputWaitReason.FUTURE_CAUSALITY.value: (
+                LiveInputRecheckTrigger.CAUSALLY_ADMISSIBLE_OBSERVATION.value
+            ),
+            LiveInputWaitReason.STALE.value: (
+                LiveInputRecheckTrigger.FRESH_OBSERVATION.value
+            ),
+        }
+        allowed_provider_reasons = {
+            f"provider_health:{eligibility.value}"
+            for eligibility in ProviderDecisionEligibility
+            if eligibility is not ProviderDecisionEligibility.ELIGIBLE
+        }
+        for item in raw:
+            if type(item) is not dict or set(item) != {
+                "input_id",
+                "structural_evidence_sha256",
+                "wait_reasons",
+                "recheck_triggers",
+                "provider_health",
+                "evidence_sha256",
+            }:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT evidence row is noncanonical"
+                )
+            input_id = _canonical_text(
+                "actionability WAIT input_id",
+                item["input_id"],
+            )
+            if previous_input_id is not None and input_id <= previous_input_id:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT evidence must be sorted and unique by input_id"
+                )
+            previous_input_id = input_id
+            structural_sha = _canonical_sha256(
+                "actionability structural evidence_sha256",
+                item["structural_evidence_sha256"],
+            )
+            reasons = item["wait_reasons"]
+            triggers = item["recheck_triggers"]
+            provider_health = item["provider_health"]
+            if (
+                type(reasons) is not list
+                or not reasons
+                or any(type(value) is not str or not value for value in reasons)
+                or reasons != sorted(set(reasons))
+            ):
+                raise LiveDecisionProgressError(
+                    "actionability WAIT reasons must be sorted unique strings"
+                )
+            if (
+                type(triggers) is not list
+                or not triggers
+                or any(type(value) is not str or not value for value in triggers)
+                or triggers != sorted(set(triggers))
+            ):
+                raise LiveDecisionProgressError(
+                    "actionability WAIT recheck triggers must be sorted unique strings"
+                )
+            if type(provider_health) is not list:
+                raise LiveDecisionProgressError(
+                    "actionability provider-health evidence must be a list"
+                )
+            previous_source_id: str | None = None
+            canonical_health: list[dict[str, object]] = []
+            for health in provider_health:
+                if type(health) is not dict or set(health) != {
+                    "source_id",
+                    "eligibility",
+                    "source_status",
+                    "last_success_at",
+                    "replay_boundary",
+                }:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health row is noncanonical"
+                    )
+                source_id = _canonical_text(
+                    "actionability provider-health source_id",
+                    health["source_id"],
+                )
+                if previous_source_id is not None and source_id <= previous_source_id:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health rows must be sorted and unique"
+                    )
+                previous_source_id = source_id
+                try:
+                    eligibility = ProviderDecisionEligibility(health["eligibility"])
+                except (TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health eligibility is invalid"
+                    ) from exc
+                source_status = _canonical_text(
+                    "actionability provider-health source_status",
+                    health["source_status"],
+                )
+                last_success_at = health["last_success_at"]
+                if last_success_at is not None:
+                    _canonical_timestamp(
+                        "actionability provider-health last_success_at",
+                        last_success_at,
+                    )
+                try:
+                    bound = ProviderHealthReplayBoundary.from_dict(
+                        health["replay_boundary"]
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health replay boundary is invalid"
+                    ) from exc
+                if bound.source_id != source_id:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health replay source is inconsistent"
+                    )
+                canonical_health.append(
+                    {
+                        "source_id": source_id,
+                        "eligibility": eligibility.value,
+                        "source_status": source_status,
+                        "last_success_at": last_success_at,
+                        "replay_boundary": bound.to_dict(),
+                    }
+                )
+
+            reason_set = set(reasons)
+            structural_reason_set = reason_set.intersection(
+                structural_trigger_by_reason
+            )
+            provider_reason_set = reason_set.difference(structural_reason_set)
+            if not provider_reason_set.issubset(allowed_provider_reasons):
+                raise LiveDecisionProgressError(
+                    "actionability WAIT reason is not canonical"
+                )
+            if structural_reason_set and canonical_health:
+                raise LiveDecisionProgressError(
+                    "structural actionability WAIT cannot carry provider-health evidence"
+                )
+            health_reason_set = {
+                f"provider_health:{health['eligibility']}"
+                for health in canonical_health
+                if health["eligibility"]
+                != ProviderDecisionEligibility.ELIGIBLE.value
+            }
+            if provider_reason_set != health_reason_set:
+                raise LiveDecisionProgressError(
+                    "provider-health WAIT reasons do not match canonical evidence"
+                )
+            expected_triggers = {
+                structural_trigger_by_reason[reason]
+                for reason in structural_reason_set
+            }
+            if health_reason_set:
+                expected_triggers.add("provider_health_transition")
+            if set(triggers) != expected_triggers:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT recheck triggers do not match reasons"
+                )
+
+            row_without_hash: dict[str, object] = {
+                "input_id": input_id,
+                "structural_evidence_sha256": structural_sha,
+                "wait_reasons": list(reasons),
+                "recheck_triggers": list(triggers),
+                "provider_health": canonical_health,
+            }
+            evidence_sha = _canonical_sha256(
+                "actionability WAIT evidence_sha256",
+                item["evidence_sha256"],
+            )
+            if _canonical_json_sha256(row_without_hash) != evidence_sha:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT evidence hash is invalid"
+                )
+            canonical.append(
+                {
+                    **row_without_hash,
+                    "evidence_sha256": evidence_sha,
+                }
+            )
+        return tuple(canonical)
+
+    @staticmethod
+    def _require_actionability_wait_health_boundaries(
+        wait_evidence: tuple[dict[str, object], ...],
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None,
+    ) -> None:
+        if type(wait_evidence) is not tuple:
+            raise TypeError("canonical actionability WAIT evidence must be an exact tuple")
+        available: dict[str, ProviderHealthReplayBoundary] = {}
+        if health_boundaries is not None:
+            if type(health_boundaries) is not tuple:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT health boundaries must be an exact tuple"
+                )
+            for boundary in health_boundaries:
+                if type(boundary) is not ProviderHealthReplayBoundary:
+                    raise LiveDecisionProgressError(
+                        "actionability WAIT health boundary is noncanonical"
+                    )
+                if boundary.source_id in available:
+                    raise LiveDecisionProgressError(
+                        "actionability WAIT health boundaries contain duplicate source"
+                    )
+                available[boundary.source_id] = boundary
+
+        for item in wait_evidence:
+            for health in item["provider_health"]:
+                try:
+                    boundary = ProviderHealthReplayBoundary.from_dict(
+                        health["replay_boundary"]
+                    )
+                except (KeyError, TypeError, ValueError) as exc:
+                    raise LiveDecisionProgressError(
+                        "actionability WAIT provider-health horizon is invalid"
+                    ) from exc
+                if available.get(boundary.source_id) != boundary:
+                    raise LiveDecisionProgressError(
+                        "actionability WAIT provider-health evidence is outside "
+                        "the exact decision health boundaries"
+                    )
+
+    def _require_actionability_wait_provider_health_truth(
+        self,
+        wait_evidence: tuple[dict[str, object], ...],
+        *,
+        as_of: datetime,
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None,
+    ) -> None:
+        self._require_actionability_wait_health_boundaries(
+            wait_evidence,
+            health_boundaries,
+        )
+        provider_rows = tuple(
+            health
+            for item in wait_evidence
+            for health in item["provider_health"]
+        )
+        if not provider_rows:
+            return
+        gate = self._health_gate
+        if gate is None:
+            raise LiveDecisionProgressError(
+                "actionability WAIT provider-health evidence lacks canonical health gate"
+            )
+        for health in provider_rows:
+            boundary = ProviderHealthReplayBoundary.from_dict(
+                health["replay_boundary"]
+            )
+            try:
+                expected = gate.provider_health(
+                    boundary.source_id,
+                    as_of=as_of,
+                    replay_boundary=boundary,
+                )
+            except (OSError, TypeError, ValueError) as exc:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT provider-health history cannot be replayed"
+                ) from exc
+            expected_row = {
+                "source_id": expected.source_id,
+                "eligibility": expected.eligibility.value,
+                "source_status": expected.source_status,
+                "last_success_at": expected.last_success_at,
+                "replay_boundary": expected.replay_boundary.to_dict(),
+            }
+            if health != expected_row:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT provider-health row conflicts with "
+                    "frozen source history"
+                )
+
+    def _derive_actionability_wait_evidence(
+        self,
+        input_ids: tuple[str, ...],
+        as_of: datetime,
+        *,
+        captured_snapshots: dict[str, MirrorSnapshot],
+    ) -> tuple[dict[str, object], ...]:
+        if type(input_ids) is not tuple:
+            raise TypeError("actionability input_ids must be an exact tuple")
+        if len(input_ids) != len(set(input_ids)):
+            raise LiveDecisionProgressError(
+                "actionability input_ids must be unique"
+            )
+        if type(captured_snapshots) is not dict:
+            raise TypeError("captured_snapshots must be an exact dict")
+        if set(captured_snapshots) != set(input_ids):
+            raise LiveDecisionProgressError(
+                "actionability snapshots must match evaluated input_ids"
+            )
+        if any(
+            type(snapshot) not in {MirrorSnapshot, HealthGatedMirrorSnapshot}
+            for snapshot in captured_snapshots.values()
+        ):
+            raise LiveDecisionProgressError(
+                "actionability snapshots must be canonical mirror snapshots"
+            )
+        trigger_by_reason = {
+            LiveInputWaitReason.NO_COMPONENTS: (
+                LiveInputRecheckTrigger.MATCHING_COMPONENT_CHANGE.value
+            ),
+            LiveInputWaitReason.NON_OPEN_STATUS: (
+                LiveInputRecheckTrigger.MARKET_STATUS_CHANGE.value
+            ),
+            LiveInputWaitReason.INVALID_CAUSAL_TIMESTAMP: (
+                LiveInputRecheckTrigger.VALID_CAUSAL_OBSERVATION.value
+            ),
+            LiveInputWaitReason.FUTURE_CAUSALITY: (
+                LiveInputRecheckTrigger.CAUSALLY_ADMISSIBLE_OBSERVATION.value
+            ),
+            LiveInputWaitReason.STALE: (
+                LiveInputRecheckTrigger.FRESH_OBSERVATION.value
+            ),
+        }
+        rows: list[dict[str, object]] = []
+        for input_id in sorted(input_ids):
+            diagnostic = evaluate_registered_input_current_view(
+                updates=self.mirror_updates,
+                dependencies=self.dependencies,
+                input_id=input_id,
                 as_of=as_of,
                 max_age=self.max_quote_age,
             )
-            snapshots[input_id] = snapshot
-            self._input_market_sha256[input_id] = _canonical_json_sha256(
-                [event.to_dict() for event in snapshot.events]
+            captured = captured_snapshots[input_id]
+            structural_reasons = (
+                ()
+                if captured.events
+                else tuple(
+                    reason
+                    for reason in diagnostic.wait_reasons
+                    if reason in trigger_by_reason
+                )
             )
-            self._record_freshness_deadline(input_id, snapshot)
-        return snapshots
+            wait_reasons = {reason.value for reason in structural_reasons}
+            recheck_triggers = {
+                trigger_by_reason[reason] for reason in structural_reasons
+            }
+            provider_rows: list[dict[str, object]] = []
+            if (
+                not structural_reasons
+                and diagnostic.components
+                and self._health_gate is not None
+            ):
+                local_boundaries = {
+                    boundary.source_id: boundary
+                    for boundary in self._input_health_boundaries.get(input_id, ())
+                }
+                source_ids = tuple(sorted(local_boundaries))
+                if not source_ids:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health evidence lacks input horizons"
+                    )
+                component_source_ids = {
+                    component.source_id
+                    for component in diagnostic.components
+                    if not component.wait_reasons
+                }
+                if set(source_ids) != component_source_ids:
+                    raise LiveDecisionProgressError(
+                        "actionability provider-health horizons do not match "
+                        "current-view component sources"
+                    )
+                for source_id in source_ids:
+                    health = self._health_gate.provider_health(
+                        source_id,
+                        as_of=as_of,
+                        replay_boundary=local_boundaries[source_id],
+                    )
+                    provider_rows.append(
+                        {
+                            "source_id": source_id,
+                            "eligibility": health.eligibility.value,
+                            "source_status": health.source_status,
+                            "last_success_at": health.last_success_at,
+                            "replay_boundary": health.replay_boundary.to_dict(),
+                        }
+                    )
+                    if health.eligibility is not ProviderDecisionEligibility.ELIGIBLE:
+                        wait_reasons.add(
+                            f"provider_health:{health.eligibility.value}"
+                        )
+                        recheck_triggers.add("provider_health_transition")
+            if not wait_reasons:
+                continue
+            row_without_hash: dict[str, object] = {
+                "input_id": input_id,
+                "structural_evidence_sha256": diagnostic.evidence_sha256,
+                "wait_reasons": sorted(wait_reasons),
+                "recheck_triggers": sorted(recheck_triggers),
+                "provider_health": provider_rows,
+            }
+            rows.append(
+                {
+                    **row_without_hash,
+                    "evidence_sha256": _canonical_json_sha256(row_without_hash),
+                }
+            )
+        return (
+            self._validated_actionability_wait_evidence(tuple(rows))
+            if rows
+            else ()
+        )
 
     def _refresh_intents_from_snapshots(
         self,
@@ -1554,13 +3074,44 @@ class PersistentLiveDecisionLoop:
     ) -> None:
         for input_id, snapshot in snapshots.items():
             produced = self.intent_factory(input_id, snapshot)
-            self._intent_cache[input_id] = self._validated_intents(produced)
+            intents = self._validated_intents(produced)
+            self._require_intents_bound_to_snapshot(intents, snapshot)
+            self._intent_cache[input_id] = intents
 
     def _all_cached_intents(self) -> tuple[object, ...]:
         flattened: list[object] = []
         for input_id in self.dependencies.input_ids:
             flattened.extend(self._intent_cache.get(input_id, ()))
         return tuple(flattened)
+
+    def _health_eligibility_changed_inputs(
+        self,
+        as_of: datetime,
+    ) -> tuple[str, ...]:
+        if self._health_gate is None:
+            return ()
+        source_inputs: dict[str, set[str]] = {}
+        for input_id in self.dependencies.input_ids:
+            captured = self.dependencies.causal_view(input_id)
+            for event in captured.events:
+                source_inputs.setdefault(event.source_id, set()).add(input_id)
+
+        affected: set[str] = set()
+        for source_id, input_ids in source_inputs.items():
+            health = self._health_gate.provider_health(
+                source_id,
+                as_of=as_of,
+            )
+            current = health.eligibility.value
+            previous = self._health_eligibility_cache.get(source_id)
+            self._health_eligibility_cache[source_id] = current
+            if previous is not None and previous != current:
+                affected.update(input_ids)
+
+        vanished = set(self._health_eligibility_cache).difference(source_inputs)
+        for source_id in vanished:
+            del self._health_eligibility_cache[source_id]
+        return tuple(sorted(affected))
 
     def _record_freshness_deadline(
         self,
@@ -1576,9 +3127,15 @@ class PersistentLiveDecisionLoop:
                 continue
             if timestamp.tzinfo is None or timestamp.utcoffset() is None:
                 continue
-            deadlines.append(
-                timestamp.astimezone(timezone.utc) + self.max_quote_age
-            )
+            source_time = timestamp.astimezone(timezone.utc)
+            try:
+                deadline = source_time + self.max_quote_age
+            except OverflowError:
+                # A saturated/very large economic freshness allowance can extend
+                # beyond datetime.max. There is then no representable decision time
+                # at which this quote expires, so no finite scheduler deadline exists.
+                continue
+            deadlines.append(deadline)
 
         deadline = min(deadlines) if deadlines else None
         generation = self._freshness_generations.get(input_id, 0) + 1
@@ -1589,6 +3146,64 @@ class PersistentLiveDecisionLoop:
                 self._freshness_heap,
                 (deadline, input_id, generation),
             )
+
+    def _set_availability_deadline(
+        self,
+        input_id: str,
+        deadline: datetime | None,
+    ) -> None:
+        generation = self._availability_generations.get(input_id, 0) + 1
+        self._availability_generations[input_id] = generation
+        self._availability_deadlines[input_id] = deadline
+        if deadline is not None:
+            heapq.heappush(
+                self._availability_heap,
+                (deadline, input_id, generation),
+            )
+
+    def _next_availability_deadline(
+        self,
+        input_id: str,
+        as_of: datetime,
+    ) -> datetime | None:
+        """Return when future causal evidence next becomes knowable."""
+
+        boundary = as_of.astimezone(timezone.utc)
+        deadlines: list[datetime] = []
+        causal = self.dependencies.causal_view(input_id)
+        for event in causal.events:
+            causal_times = MarketMirror._event_causal_times(event)
+            if causal_times is None:
+                continue
+            available_at = max(causal_times)
+            if boundary < available_at:
+                deadlines.append(available_at)
+
+        return min(deadlines) if deadlines else None
+
+    def _activate_available_inputs(
+        self,
+        now: datetime,
+    ) -> tuple[str, ...]:
+        """Invalidate inputs exactly when future causal evidence becomes available."""
+
+        activated: list[str] = []
+        while self._availability_heap:
+            deadline, input_id, generation = self._availability_heap[0]
+            current_generation = self._availability_generations.get(input_id)
+            current_deadline = self._availability_deadlines.get(input_id)
+            if (
+                current_generation != generation
+                or current_deadline != deadline
+            ):
+                heapq.heappop(self._availability_heap)
+                continue
+            if now < deadline:
+                break
+            heapq.heappop(self._availability_heap)
+            self._availability_deadlines[input_id] = None
+            activated.append(input_id)
+        return tuple(activated)
 
     def _expire_freshness_inputs(
         self,
@@ -1618,7 +3233,28 @@ class PersistentLiveDecisionLoop:
         exc: Exception,
     ) -> LiveCycleResult:
         decision_ts = now.isoformat()
-        affected = self.dependencies.input_ids
+        registered_dependency_state = self.dependencies.registry_state_snapshot()
+        registered_dependencies = tuple(
+            dependency for dependency, _revision in registered_dependency_state
+        )
+        expected_dependency_revisions = tuple(
+            (dependency.input_id, revision)
+            for dependency, revision in registered_dependency_state
+        )
+        affected = tuple(
+            dependency.input_id for dependency in registered_dependencies
+        )
+        expected_input_specs = tuple(self._input_specs.values())
+        if (
+            tuple(
+                _InputSpec.from_dependency(dependency)
+                for dependency in registered_dependencies
+            )
+            != expected_input_specs
+        ):
+            raise LiveDecisionProgressError(
+                "live dependency registry diverged before provider-gap snapshot capture"
+            )
         self._capture_input_views(affected, now, incremental=False)
         market_sha = self._market_state_sha256()
         self._write_pending(
@@ -1626,6 +3262,8 @@ class PersistentLiveDecisionLoop:
             market_state_sha256=market_sha,
             affected_input_ids=affected,
             gate=_GATE_PROVIDER_GAP,
+            expected_input_specs=expected_input_specs,
+            expected_dependency_revisions=expected_dependency_revisions,
         )
         plan = build_portfolio_plan(
             self.book,
@@ -1654,28 +3292,37 @@ class PersistentLiveDecisionLoop:
             detail=result.detail,
         )
 
-    def _persist_plan(
+    def _decision_identity(
         self,
         *,
         plan: PortfolioPlan,
-        intents: tuple[object, ...],
         market_state_sha256: str,
-        affected_input_ids: tuple[str, ...],
         gate: str,
-        detail: str = "",
-        decision_context_sha256_override: str | None = None,
-    ) -> LiveCycleResult:
-        if decision_context_sha256_override is None:
-            decision_context_sha256 = self._decision_context_sha256()
-        else:
-            decision_context_sha256 = _canonical_sha256(
-                "recovery decision_context_sha256",
-                decision_context_sha256_override,
+        decision_context_sha256: str,
+        actionability_wait_evidence: tuple[dict[str, object], ...] | None = None,
+        bind_actionability_wait_evidence: bool = True,
+    ) -> tuple[str, str]:
+        if type(bind_actionability_wait_evidence) is not bool:
+            raise TypeError("bind_actionability_wait_evidence must be a bool")
+        wait_evidence_sha256 = None
+        if gate == _GATE_ACTIONABILITY_WAIT:
+            if not actionability_wait_evidence:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT identity requires durable evidence"
+                )
+            if bind_actionability_wait_evidence:
+                wait_evidence_sha256 = _canonical_json_sha256(
+                    actionability_wait_evidence
+                )
+        elif actionability_wait_evidence is not None:
+            raise LiveDecisionProgressError(
+                "actionability WAIT identity evidence is forbidden for other gates"
             )
+
         provenance = self.intent_provenance
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": 2,
+            "schema_version": 4 if wait_evidence_sha256 is not None else 3,
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -1686,8 +3333,351 @@ class PersistentLiveDecisionLoop:
             "intent_provenance_sha256": provenance.provenance_sha256,
             "plan_sha256": plan.plan_sha256,
         }
+        if wait_evidence_sha256 is not None:
+            context_payload["actionability_wait_evidence_sha256"] = (
+                wait_evidence_sha256
+            )
         context_hash = _canonical_json_sha256(context_payload)
-        decision_id = f"live-{context_hash}"
+        return context_hash, f"live-{context_hash}"
+
+    def _assert_canonical_persistence_authority(self) -> None:
+        if self.workspace != self._workspace_authority:
+            raise LiveDecisionProgressError(
+                "live workspace persistence authority changed after construction"
+            )
+        if self.loop_id != self._loop_id_authority:
+            raise LiveDecisionProgressError(
+                "live loop identity authority changed after construction"
+            )
+        if self.mode is not self._configured_mode:
+            raise LiveDecisionProgressError(
+                "live decision mode authority changed after decision preparation"
+            )
+        if self.progress_path != self._progress_path_authority:
+            raise LiveDecisionProgressError(
+                "live progress path authority changed after construction"
+            )
+        if self.pre_action_book_path != self._pre_action_book_path_authority:
+            raise LiveDecisionProgressError(
+                "pre-action PaperBook path authority changed after construction"
+            )
+        if self.control_path != self._control_path_authority:
+            raise LiveDecisionProgressError(
+                "live control path authority changed after construction"
+            )
+        if (
+            self._control_authority is not self._control_authority_object
+            or self._control_authority.namespace_sha256
+            != self._control_authority_namespace
+            or self._control_authority.domain != _CONTROL_AUTHORITY_DOMAIN
+            or self._control_authority.key != self._loop_id_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live control monotonic authority changed after construction"
+            )
+        if self.inputs_path != self._inputs_path_authority:
+            raise LiveDecisionProgressError(
+                "live input-registry path authority changed after construction"
+            )
+        if (
+            self._inputs_authority is not self._inputs_authority_object
+            or self._inputs_authority.namespace_sha256
+            != self._inputs_authority_namespace
+            or self._inputs_authority.domain != _INPUTS_AUTHORITY_DOMAIN
+            or self._inputs_authority.key != self._loop_id_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live input-registry monotonic authority changed after construction"
+            )
+        if self.book is not self._book_authority:
+            raise LiveDecisionProgressError(
+                "live PaperBook authority changed after construction"
+            )
+        if self.authority is not self._economic_authority:
+            raise LiveDecisionProgressError(
+                "economic decision authority changed after construction"
+            )
+        if self.authority.contract is not self._economic_contract_authority:
+            raise LiveDecisionProgressError(
+                "economic goal contract authority changed after construction"
+            )
+        if self.authority.risk_policy is not self._risk_policy_authority:
+            raise LiveDecisionProgressError(
+                "risk policy authority changed after construction"
+            )
+        if (
+            provenance_for(self.authority.contract).contract_sha256
+            != self._economic_contract_sha256_authority
+        ):
+            raise LiveDecisionProgressError(
+                "economic goal contract semantics changed after construction"
+            )
+        if (
+            self.authority.risk_policy.provenance_sha256
+            != self._risk_policy_sha256_authority
+        ):
+            raise LiveDecisionProgressError(
+                "risk policy semantics changed after construction"
+            )
+        if self.intent_factory is not self._intent_factory_authority:
+            raise LiveDecisionProgressError(
+                "live intent factory authority changed after construction"
+            )
+        if (
+            getattr(self.intent_factory, "strategy_version_id", None)
+            != self._intent_factory_strategy_version_id_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live intent factory strategy identity changed after construction"
+            )
+        if self.intent_provenance is not self._intent_provenance_authority:
+            raise LiveDecisionProgressError(
+                "live intent provenance authority changed after construction"
+            )
+        if (
+            self.intent_provenance.provenance_sha256
+            != self._intent_provenance_sha256_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live intent provenance semantics changed after construction"
+            )
+        if self.ingestion_policy is not self._ingestion_policy_authority:
+            raise LiveDecisionProgressError(
+                "live ingestion policy authority changed after construction"
+            )
+        ingestion_policy_semantics = (
+            None
+            if self.ingestion_policy is None
+            else (
+                self.ingestion_policy.max_batch_size,
+                self.ingestion_policy.stale_after_seconds,
+                self.ingestion_policy.max_future_skew_seconds,
+            )
+        )
+        if ingestion_policy_semantics != self._ingestion_policy_semantics_authority:
+            raise LiveDecisionProgressError(
+                "live ingestion policy semantics changed after construction"
+            )
+        if self._observe is not self._observe_authority:
+            raise LiveDecisionProgressError(
+                "live observation authority changed after construction"
+            )
+        if self._health_gate is not self._health_gate_authority:
+            raise LiveDecisionProgressError(
+                "live provider-health gate authority changed after construction"
+            )
+        if self._health_gate is not None and (
+            self._default_health_store is not self._health_store_authority
+            or self._health_gate._health_store is not self._health_store_authority
+            or self._health_gate._dependencies is not self.dependencies
+            or self._health_gate._max_health_age != self._health_max_age_authority
+        ):
+            raise LiveDecisionProgressError(
+                "live provider-health gate semantics changed after construction"
+            )
+        if self._default_health_store is not None:
+            try:
+                self._default_health_store.assert_persistence_authority()
+            except RuntimeError as exc:
+                raise LiveDecisionProgressError(
+                    "live source-health persistence authority changed after construction"
+                ) from exc
+        if self._provider_authority is not None:
+            if self.provider is not self._provider_authority:
+                raise LiveDecisionProgressError(
+                    "live market provider authority changed after construction"
+                )
+            if (
+                getattr(self.provider, "source_id", None)
+                != self._provider_source_id_authority
+            ):
+                raise LiveDecisionProgressError(
+                    "live market provider source identity changed after construction"
+                )
+        if self.max_quote_age != self._max_quote_age_authority:
+            raise LiveDecisionProgressError(
+                "live quote-age authority changed after construction"
+            )
+        if self.bounds is not self._bounds_authority:
+            raise LiveDecisionProgressError(
+                "live loop bounds authority changed after construction"
+            )
+        bounds_semantics = (
+            self.bounds.observation_max_items,
+            self.bounds.max_dirty_keys,
+            self.bounds.max_dirty_per_cycle,
+            self.bounds.max_registered_inputs,
+        )
+        if bounds_semantics != self._bounds_semantics_authority:
+            raise LiveDecisionProgressError(
+                "live loop bounds semantics changed after construction"
+            )
+        if self.clock is not self._clock_authority:
+            raise LiveDecisionProgressError(
+                "live clock authority changed after construction"
+            )
+        if self.catalog_lifecycle is not self._catalog_lifecycle_authority:
+            raise LiveDecisionProgressError(
+                "catalog lifecycle authority changed after construction"
+            )
+        if self.catalog_fetch_page is not self._catalog_fetch_page_authority:
+            raise LiveDecisionProgressError(
+                "catalog fetch authority changed after construction"
+            )
+        if self.catalog_source_id != self._catalog_source_id_authority:
+            raise LiveDecisionProgressError(
+                "catalog source authority changed after construction"
+            )
+        if self.catalog_required_history != self._catalog_required_history_authority:
+            raise LiveDecisionProgressError(
+                "catalog history authority changed after construction"
+            )
+        if self.decision_ledger is not self._decision_ledger_authority:
+            raise LiveDecisionProgressError(
+                "live Decision Ledger persistence authority changed after construction"
+            )
+        try:
+            self.decision_ledger.assert_transaction_authority()
+        except DecisionLedgerIntegrityError as exc:
+            raise LiveDecisionProgressError(
+                "live Decision Ledger transaction authority is unavailable"
+            ) from exc
+        canonical_decision_ledger = self._workspace_authority / "decisions.jsonl"
+        if self.decision_ledger.path != canonical_decision_ledger:
+            raise LiveDecisionProgressError(
+                "live Decision Ledger persistence authority changed after construction"
+            )
+        if self.paper_execution is not self._paper_execution_authority:
+            raise LiveDecisionProgressError(
+                "PAPER execution runtime authority changed after construction"
+            )
+        if self.paper_execution is None:
+            return
+        try:
+            self.paper_execution._assert_runtime_authority()
+        except PaperExecutionAdoptionError as exc:
+            raise LiveDecisionProgressError(
+                "PAPER execution runtime authority changed after construction"
+            ) from exc
+        if self.paper_execution.book is not self._book_authority:
+            raise LiveDecisionProgressError(
+                "PAPER execution PaperBook authority changed after construction"
+            )
+        if self.paper_execution.paper_book_path != self._workspace_authority / "paper_book.json":
+            raise LiveDecisionProgressError(
+                "PAPER execution PaperBook path authority changed after construction"
+            )
+        if self.paper_execution.ledger is not self._paper_execution_ledger_authority:
+            raise LiveDecisionProgressError(
+                "PAPER execution ledger authority changed after construction"
+            )
+        if self.paper_execution.ledger.path != self._workspace_authority / "paper-execution.jsonl":
+            raise LiveDecisionProgressError(
+                "PAPER execution ledger authority changed after construction"
+            )
+        if self.paper_execution.config is not self._paper_execution_config_authority:
+            raise LiveDecisionProgressError(
+                "PAPER execution model authority changed after construction"
+            )
+        if (
+            self.paper_execution.config.fingerprint
+            != self._paper_execution_model_fingerprint_authority
+        ):
+            raise LiveDecisionProgressError(
+                "PAPER execution model authority changed after construction"
+            )
+        if (
+            self.paper_execution.max_quote_age
+            != self._paper_execution_max_quote_age_authority
+        ):
+            raise LiveDecisionProgressError(
+                "PAPER execution quote-age authority changed after construction"
+            )
+
+    def _persist_plan(
+        self,
+        *,
+        plan: PortfolioPlan,
+        intents: tuple[object, ...],
+        market_state_sha256: str,
+        affected_input_ids: tuple[str, ...],
+        gate: str,
+        detail: str = "",
+        decision_context_sha256_override: str | None = None,
+        actionability_wait_evidence: tuple[dict[str, object], ...] | None = None,
+    ) -> LiveCycleResult:
+        self._assert_canonical_persistence_authority()
+        canonical_actionability_wait = None
+        if gate == _GATE_ACTIONABILITY_WAIT:
+            if actionability_wait_evidence is None:
+                raise LiveDecisionProgressError(
+                    "actionability WAIT gate requires durable evidence"
+                )
+            canonical_actionability_wait = (
+                self._validated_actionability_wait_evidence(
+                    actionability_wait_evidence
+                )
+            )
+            if intents or any(stake > 0 for stake in plan.stakes):
+                raise LiveDecisionProgressError(
+                    "actionability WAIT cannot carry intents or positive stake"
+                )
+        elif actionability_wait_evidence is not None:
+            raise LiveDecisionProgressError(
+                "actionability WAIT evidence is forbidden for other gates"
+            )
+        if decision_context_sha256_override is None:
+            decision_context_sha256 = self._decision_context_sha256()
+        else:
+            decision_context_sha256 = _canonical_sha256(
+                "recovery decision_context_sha256",
+                decision_context_sha256_override,
+            )
+        provenance = self.intent_provenance
+        decision_health_boundaries = (
+            self._progress.health_boundaries
+            if self._progress is not None
+            else self._health_boundaries_for_progress()
+        )
+        if canonical_actionability_wait is not None:
+            _, wait_decision_time = _canonical_timestamp(
+                "actionability WAIT decision_ts",
+                plan.decision_ts,
+            )
+            self._require_actionability_wait_provider_health_truth(
+                canonical_actionability_wait,
+                as_of=wait_decision_time,
+                health_boundaries=decision_health_boundaries,
+            )
+        bind_actionability_wait_evidence = True
+        if (
+            canonical_actionability_wait is not None
+            and self._progress is not None
+            and self._progress.phase == _PHASE_APPEND_PENDING
+            and self._progress.decision_id is not None
+        ):
+            legacy_wait_decision_id = self._decision_identity(
+                plan=plan,
+                market_state_sha256=market_state_sha256,
+                gate=gate,
+                decision_context_sha256=decision_context_sha256,
+                actionability_wait_evidence=canonical_actionability_wait,
+                bind_actionability_wait_evidence=False,
+            )[1]
+            if self._progress.decision_id == legacy_wait_decision_id:
+                # A pre-v5 crash may already have durably reserved the legacy v4
+                # identity before this process upgraded. Finish that exact reserved
+                # transaction instead of reminting it under the evidence-bound v5 ID.
+                bind_actionability_wait_evidence = False
+
+        context_hash, decision_id = self._decision_identity(
+            plan=plan,
+            market_state_sha256=market_state_sha256,
+            gate=gate,
+            decision_context_sha256=decision_context_sha256,
+            actionability_wait_evidence=canonical_actionability_wait,
+            bind_actionability_wait_evidence=bind_actionability_wait_evidence,
+        )
         prepared_execution: PreparedPaperExecution | None = None
         expected_execution_payload = None
         has_positive_execution_stake = any(stake > 0 for stake in plan.stakes)
@@ -1715,9 +3705,24 @@ class PersistentLiveDecisionLoop:
                     "intent_evidence_json": prepared_execution.intent_evidence_json,
                 }
 
+        self._assert_canonical_persistence_authority()
+
+        progress_market_append_generation = (
+            None
+            if self._progress is None
+            else self._progress.market_append_generation
+        )
         record_payload = {
             "schema": "autosport.persistent_live_decision",
-            "schema_version": 2,
+            "schema_version": (
+                (
+                    5
+                    if bind_actionability_wait_evidence
+                    else 4
+                )
+                if canonical_actionability_wait is not None
+                else 3
+            ),
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": gate,
@@ -1726,15 +3731,26 @@ class PersistentLiveDecisionLoop:
             "intent_strategy_version_id": provenance.strategy_version_id,
             "intent_model_version_id": provenance.model_version_id,
             "intent_provenance_sha256": provenance.provenance_sha256,
+            "health_boundaries": (
+                None
+                if decision_health_boundaries is None
+                else [
+                    ProviderHealthReplayBoundary.to_dict(boundary)
+                    for boundary in decision_health_boundaries
+                ]
+            ),
             "affected_input_ids": list(affected_input_ids),
             "plan_sha256": plan.plan_sha256,
             "plan": plan.to_dict(),
             MATERIAL_ACTION_ID_PAYLOAD_KEY: decision_id,
         }
+        if canonical_actionability_wait is not None:
+            record_payload["actionability_wait_evidence"] = [
+                dict(item) for item in canonical_actionability_wait
+            ]
         if expected_execution_payload is not None:
-            # Keep the established top-level live-decision schema/version so the
-            # decision identity remains stable; execution adoption is additive,
-            # separately versioned evidence.
+            # Execution adoption remains separately versioned evidence inside the
+            # health-aware live-decision schema.
             record_payload["paper_execution"] = expected_execution_payload
 
         record = DecisionRecord(
@@ -1750,15 +3766,51 @@ class PersistentLiveDecisionLoop:
 
         duplicate = False
         execution_result = None
-        with WorkspaceEconomicLock(self.workspace):
+        execution_guard = (
+            nullcontext()
+            if self.paper_execution is None
+            else self.paper_execution.execution_guard()
+        )
+        with (
+            WorkspaceEconomicLock(self.workspace),
+            execution_guard,
+            self.dependencies.registry_mutation_guard(),
+        ):
+            self._assert_canonical_persistence_authority()
+            focused_dependency_state = self.dependencies.registry_state_snapshot()
+            durable_progress = self._load_progress()
             if (
-                decision_context_sha256_override is None
+                durable_progress is not None
+                and durable_progress.phase == _PHASE_PENDING
+                and self._decision_context_sha256_for_book(
+                    self.book,
+                    health_aware=durable_progress.health_boundaries is not None,
+                )
+                != decision_context_sha256
+            ):
+                raise LiveDecisionProgressError(
+                    "PaperBook/runtime context changed before promotion lock"
+                )
+            if (
+                durable_progress is not None
+                and durable_progress.phase == _PHASE_APPEND_PENDING
+                and decision_context_sha256_override is None
                 and self._decision_context_sha256() != decision_context_sha256
             ):
                 raise LiveDecisionProgressError(
                     "PaperBook/runtime context changed before promotion lock"
                 )
-            durable_progress = self._load_progress()
+            durable_input_specs = self._load_input_registry() or ()
+            current_input_specs = tuple(self._input_specs.values())
+            focused_input_specs = tuple(
+                _InputSpec.from_dependency(dependency)
+                for dependency, _revision in focused_dependency_state
+            )
+            focused_dependency_revisions = tuple(
+                (dependency.input_id, revision)
+                for dependency, revision in focused_dependency_state
+            )
+            durable_input_ids = tuple(spec.input_id for spec in durable_input_specs)
             if (
                 durable_progress is None
                 or durable_progress.phase
@@ -1766,15 +3818,34 @@ class PersistentLiveDecisionLoop:
                 or durable_progress.loop_id != self.loop_id
                 or durable_progress.decision_ts != plan.decision_ts
                 or durable_progress.market_state_sha256 != market_state_sha256
+                or durable_progress.market_append_generation
+                != progress_market_append_generation
                 or durable_progress.decision_context_sha256
                 != decision_context_sha256
                 or durable_progress.affected_input_ids != affected_input_ids
-                or durable_progress.registered_input_ids != self.dependencies.input_ids
+                or durable_progress.registered_input_ids != durable_input_ids
+                or current_input_specs != durable_input_specs
+                or focused_input_specs != durable_input_specs
+                or self._pending_dependency_revisions is None
+                or focused_dependency_revisions != self._pending_dependency_revisions
                 or durable_progress.gate != gate
             ):
                 raise LiveDecisionProgressError(
                     "live decision progress changed before durable ledger publication"
                 )
+
+            if (
+                durable_progress.phase == _PHASE_PENDING
+                and prepared_execution is not None
+            ):
+                assert expected_execution_payload is not None
+                orphan_execution_events = self.paper_execution.ledger.events(
+                    expected_execution_payload["run_id"]
+                )
+                if orphan_execution_events:
+                    raise LiveDecisionProgressError(
+                        "pending live decision has orphan #623 execution history"
+                    )
 
             if durable_progress.phase == _PHASE_APPEND_PENDING:
                 if (
@@ -1787,15 +3858,42 @@ class PersistentLiveDecisionLoop:
                     )
                 ledger_offset = durable_progress.ledger_offset
             else:
-                ledger_offset = self._ledger_end_offset()
+                current_ledger_end = self._ledger_end_offset()
+                if (
+                    durable_progress.ledger_offset is not None
+                    and current_ledger_end < durable_progress.ledger_offset
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "pending live decision ledger frontier was truncated"
+                    )
+                last_record = self._verified_latest_ledger_record(
+                    replay_run_id=f"live:{self.loop_id}",
+                )
+                if (
+                    durable_progress.ledger_offset is not None
+                    and last_record is not None
+                    and last_record[0] >= durable_progress.ledger_offset
+                ):
+                    raise LiveDecisionProgressError(
+                        "pending live progress was superseded before ledger publication"
+                    )
+                if (
+                    last_record is not None
+                    and last_record[1].decision_id == decision_id
+                ):
+                    ledger_offset = last_record[0]
+                else:
+                    ledger_offset = current_ledger_end
                 durable_progress = _Progress(
                     loop_id=self.loop_id,
                     phase=_PHASE_APPEND_PENDING,
                     decision_ts=plan.decision_ts,
                     market_state_sha256=market_state_sha256,
+                    market_append_generation=durable_progress.market_append_generation,
+                    health_boundaries=durable_progress.health_boundaries,
                     decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
-                    registered_input_ids=self.dependencies.input_ids,
+                    registered_input_ids=durable_input_ids,
                     decision_id=decision_id,
                     plan_sha256=plan.plan_sha256,
                     ledger_offset=ledger_offset,
@@ -1812,9 +3910,11 @@ class PersistentLiveDecisionLoop:
                     phase=_PHASE_APPEND_PENDING,
                     decision_ts=plan.decision_ts,
                     market_state_sha256=market_state_sha256,
+                    market_append_generation=durable_progress.market_append_generation,
+                    health_boundaries=durable_progress.health_boundaries,
                     decision_context_sha256=decision_context_sha256,
                     affected_input_ids=affected_input_ids,
-                    registered_input_ids=self.dependencies.input_ids,
+                    registered_input_ids=durable_input_ids,
                     decision_id=decision_id,
                     plan_sha256=plan.plan_sha256,
                     ledger_offset=ledger_offset,
@@ -1823,6 +3923,20 @@ class PersistentLiveDecisionLoop:
                 atomic_write_json(self.progress_path, durable_progress.to_dict())
                 self._progress = durable_progress
                 existing = self._verified_ledger_record_at_offset(ledger_offset)
+
+            if (
+                existing is None
+                and prepared_execution is not None
+            ):
+                assert expected_execution_payload is not None
+                orphan_execution_events = self.paper_execution.ledger.events(
+                    expected_execution_payload["run_id"]
+                )
+                if orphan_execution_events:
+                    raise LiveDecisionProgressError(
+                        "append-pending live decision without durable Decision Ledger "
+                        "has orphan #623 execution history"
+                    )
 
             if existing is not None:
                 verify_economic_goal_binding(
@@ -1850,26 +3964,145 @@ class PersistentLiveDecisionLoop:
                     raise DecisionLedgerIntegrityError(
                         "reserved live decision identity conflicts with durable evidence"
                     )
-                if existing.payload.get("paper_execution") != expected_execution_payload:
+                detached_existing_payload = existing.to_dict()["payload"]
+                if (
+                    detached_existing_payload.get("paper_execution")
+                    != expected_execution_payload
+                ):
                     raise DecisionLedgerIntegrityError(
                         "durable live decision execution-adoption evidence changed"
                     )
+                if canonical_actionability_wait is not None and (
+                    detached_existing_payload.get("actionability_wait_evidence")
+                    != [dict(item) for item in canonical_actionability_wait]
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "durable actionability WAIT evidence changed"
+                    )
+                existing_affected_raw = detached_existing_payload.get(
+                    "affected_input_ids"
+                )
+                if (
+                    type(existing_affected_raw) is not list
+                    or any(
+                        type(input_id) is not str
+                        for input_id in existing_affected_raw
+                    )
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision affected-input evidence is invalid"
+                    )
+                try:
+                    existing_affected_input_ids = tuple(
+                        _canonical_text(
+                            "durable affected input id",
+                            input_id,
+                        )
+                        for input_id in existing_affected_raw
+                    )
+                except ValueError as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision affected-input evidence is invalid"
+                    ) from exc
+                existing_affected_set = frozenset(existing_affected_input_ids)
+                if len(existing_affected_set) != len(existing_affected_input_ids):
+                    raise DecisionLedgerIntegrityError(
+                        "durable live decision affected-input evidence is not unique"
+                    )
+                if not existing_affected_set.issubset(durable_input_ids):
+                    raise LiveDecisionProgressError(
+                        "durable duplicate live decision references retired "
+                        "affected input"
+                    )
+                if canonical_actionability_wait is not None and any(
+                    item["input_id"] not in existing_affected_set
+                    for item in canonical_actionability_wait
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "durable actionability WAIT evidence references an "
+                        "unaffected input"
+                    )
+                existing_health_raw = detached_existing_payload.get(
+                    "health_boundaries"
+                )
+                if existing_health_raw is None:
+                    existing_health_boundaries = None
+                else:
+                    if type(existing_health_raw) is not list:
+                        raise DecisionLedgerIntegrityError(
+                            "durable live decision provider-health evidence is invalid"
+                        )
+                    try:
+                        existing_health_boundaries = tuple(
+                            ProviderHealthReplayBoundary.from_dict(value)
+                            for value in existing_health_raw
+                        )
+                    except (TypeError, ValueError) as exc:
+                        raise DecisionLedgerIntegrityError(
+                            "durable live decision provider-health evidence is invalid"
+                        ) from exc
+                if canonical_actionability_wait is not None:
+                    try:
+                        _, existing_wait_time = _canonical_timestamp(
+                            "durable actionability WAIT decision_ts",
+                            plan.decision_ts,
+                        )
+                        self._require_actionability_wait_provider_health_truth(
+                            canonical_actionability_wait,
+                            as_of=existing_wait_time,
+                            health_boundaries=existing_health_boundaries,
+                        )
+                    except (LiveDecisionProgressError, TypeError, ValueError) as exc:
+                        raise DecisionLedgerIntegrityError(
+                            "durable actionability WAIT provider-health horizon changed"
+                        ) from exc
+                if (
+                    existing_health_boundaries != durable_progress.health_boundaries
+                    or existing_affected_input_ids
+                    != durable_progress.affected_input_ids
+                ):
+                    durable_progress = _Progress(
+                        loop_id=durable_progress.loop_id,
+                        phase=durable_progress.phase,
+                        decision_ts=durable_progress.decision_ts,
+                        market_state_sha256=durable_progress.market_state_sha256,
+                        market_append_generation=durable_progress.market_append_generation,
+                        health_boundaries=existing_health_boundaries,
+                        decision_context_sha256=durable_progress.decision_context_sha256,
+                        affected_input_ids=existing_affected_input_ids,
+                        registered_input_ids=durable_progress.registered_input_ids,
+                        decision_id=durable_progress.decision_id,
+                        plan_sha256=durable_progress.plan_sha256,
+                        ledger_offset=durable_progress.ledger_offset,
+                        gate=durable_progress.gate,
+                    )
+                    atomic_write_json(
+                        self.progress_path,
+                        durable_progress.to_dict(),
+                    )
+                    self._progress = durable_progress
                 duplicate = True
             else:
                 self.decision_ledger.append_economic(record, self.authority)
                 if self.post_append_hook is not None:
                     self.post_append_hook()
+                self._assert_canonical_persistence_authority()
+                if self.dependencies.registry_state_snapshot() != focused_dependency_state:
+                    raise LiveDecisionProgressError(
+                        "focused dependency registry changed during durable ledger publication"
+                    )
 
             # Execution attempts are durable before progress becomes COMMITTED.
             # A crash after the #623 attempt but before PaperBook materialization
             # therefore re-enters this same append-pending identity and resumes
             # the exact run instead of fabricating a fresh fill.
             if prepared_execution is not None:
+                self._assert_canonical_persistence_authority()
                 execution_result = self.paper_execution.execute(
                     prepared=prepared_execution,
                     trigger_id=decision_id,
                     started_at=plan.decision_ts,
-                    materialize_exposure=(self.mode is LiveDecisionMode.PAPER),
+                    materialize_exposure=(self._configured_mode is LiveDecisionMode.PAPER),
                 )
                 assert expected_execution_payload is not None
                 if execution_result.run.run_id != expected_execution_payload["run_id"]:
@@ -1877,14 +4110,25 @@ class PersistentLiveDecisionLoop:
                         "durable PAPER execution run identity drifted after decision publication"
                     )
 
+            # Execution is an external side-effect boundary. A runtime/configuration
+            # mutation that happens while #623 adoption is in flight must not be
+            # laundered into a COMMITTED cursor under a different live authority.
+            self._assert_canonical_persistence_authority()
+            if self.dependencies.registry_state_snapshot() != focused_dependency_state:
+                raise LiveDecisionProgressError(
+                    "focused dependency registry changed before committed publication"
+                )
+
             committed = _Progress(
                 loop_id=self.loop_id,
                 phase=_PHASE_COMMITTED,
                 decision_ts=plan.decision_ts,
                 market_state_sha256=market_state_sha256,
+                market_append_generation=durable_progress.market_append_generation,
+                health_boundaries=durable_progress.health_boundaries,
                 decision_context_sha256=decision_context_sha256,
-                affected_input_ids=affected_input_ids,
-                registered_input_ids=self.dependencies.input_ids,
+                affected_input_ids=durable_progress.affected_input_ids,
+                registered_input_ids=durable_input_ids,
                 decision_id=decision_id,
                 plan_sha256=plan.plan_sha256,
                 ledger_offset=ledger_offset,
@@ -1892,6 +4136,7 @@ class PersistentLiveDecisionLoop:
             )
             atomic_write_json(self.progress_path, committed.to_dict())
             self._progress = committed
+            self._pending_dependency_revisions = None
 
         return LiveCycleResult(
             LiveCycleStatus.DUPLICATE_DECISION if duplicate else LiveCycleStatus.DECIDED,
@@ -1918,81 +4163,271 @@ class PersistentLiveDecisionLoop:
         market_state_sha256: str,
         affected_input_ids: tuple[str, ...],
         gate: str,
+        expected_input_specs: tuple[_InputSpec, ...] | None = None,
+        expected_dependency_revisions: tuple[tuple[str, int], ...] | None = None,
     ) -> None:
+        self._assert_canonical_persistence_authority()
         _, decision_time = _canonical_timestamp("decision_ts", decision_ts)
         self.intent_provenance.assert_available_at(decision_time)
-        with WorkspaceEconomicLock(self.workspace):
-            # The snapshot is written before the cursor: a crash before cursor
-            # publication leaves only ignorable stale snapshot bytes, while every
-            # visible PENDING cursor has an exact pre-action portfolio witness.
-            #
-            # The pre-action artifact is recovery evidence, not an alternate
-            # persistence path for the live PaperBook.  In PAPER mode #623 owns
-            # that exact live object at workspace/paper_book.json; publishing the
-            # same object here would either rebind or cross-path-save its durable
-            # generation.  Reuse the canonical risk shadow capability to create
-            # a detached exact semantic clone with product-issued opening/causal
-            # authority but no live generation/path binding.  Its first save
-            # therefore establishes only the dedicated recovery-snapshot lineage.
-            live_context_sha256 = self._decision_context_sha256()
-            snapshot = self.authority.risk_policy._shadow_book_for_allocation(
-                self.book
-            )
-            if (
-                type(snapshot) is not PaperBook
-                or snapshot is self.book
-                or not self._same_book_state(snapshot, self.book)
-            ):
-                raise LiveDecisionProgressError(
-                    "cannot detach exact pre-action PaperBook"
-                )
-            snapshot_context_sha256 = self._decision_context_sha256_for_book(
-                snapshot
-            )
-            if snapshot_context_sha256 != live_context_sha256:
-                raise LiveDecisionProgressError(
-                    "pre-action PaperBook context changed before durability"
-                )
+        market_append_generation = (
+            self._decision_market_append_generation
+            if self._decision_market_frontier_as_of == decision_time
+            else None
+        )
+        store = self._default_market_store
+        owns_store = store is None and market_append_generation is not None
+        if owns_store:
+            store = SQLiteMarketStore(self.workspace / "market.db")
 
-            # A new detached shadow is created for every decision cycle so the live
-            # canonical PaperBook never acquires the recovery-artifact path authority.
-            # When a previous pre-action artifact already exists, explicitly adopt
-            # that artifact's *current* durable generation before replacement.  This
-            # is a product-owned capability resolved from the sealed persistence graph
-            # below; generic PaperBook.save() remains fail-closed for unbound/stale
-            # objects and for cross-path publication.
-            _paperbook_authority._bind_book(snapshot, self.pre_action_book_path)
-            snapshot.save(self.pre_action_book_path)
-            durable_pre_action = PaperBook.load(self.pre_action_book_path)
-            durable_context_sha256 = self._decision_context_sha256_for_book(
-                durable_pre_action
-            )
-            current_context_sha256 = self._decision_context_sha256()
-            if (
-                not self._same_book_state(durable_pre_action, self.book)
-                or durable_context_sha256 != live_context_sha256
-                or current_context_sha256 != live_context_sha256
-            ):
-                raise LiveDecisionProgressError(
-                    "pre-action PaperBook durability verification failed"
-                )
-            pending = _Progress(
-                loop_id=self.loop_id,
-                phase=_PHASE_PENDING,
-                decision_ts=decision_ts,
-                market_state_sha256=market_state_sha256,
-                decision_context_sha256=durable_context_sha256,
-                affected_input_ids=affected_input_ids,
-                registered_input_ids=self.dependencies.input_ids,
-                decision_id=None,
-                plan_sha256=None,
-                ledger_offset=None,
-                gate=gate,
-            )
-            atomic_write_json(self.progress_path, pending.to_dict())
-        self._progress = pending
+        def publish_pending() -> tuple[_Progress, tuple[tuple[str, int], ...]]:
+            with WorkspaceEconomicLock(self.workspace):
+                durable_control = self._load_control()
+                if durable_control is None:
+                    durable_control = _Control(self.loop_id, LiveControlState.RUNNING)
+                if (
+                    durable_control != self._control
+                    or durable_control.state is not LiveControlState.RUNNING
+                ):
+                    raise LiveDecisionProgressError(
+                        "live decision control changed concurrently before pending publication"
+                    )
 
-    def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
+                durable_progress = self._load_progress()
+                if durable_progress != self._progress:
+                    raise LiveDecisionProgressError(
+                        "live decision progress changed concurrently before pending publication"
+                    )
+                current_input_specs = tuple(self._input_specs.values())
+                bound_input_specs = (
+                    current_input_specs
+                    if expected_input_specs is None
+                    else expected_input_specs
+                )
+                if (
+                    expected_input_specs is not None
+                    and current_input_specs != expected_input_specs
+                ):
+                    raise LiveDecisionProgressError(
+                        "live dependency registry changed after snapshot capture"
+                    )
+                expected_input_ids = tuple(
+                    spec.input_id for spec in bound_input_specs
+                )
+                current_dependency_state = self.dependencies.registry_state_snapshot()
+                current_dependencies = tuple(
+                    dependency
+                    for dependency, _revision in current_dependency_state
+                )
+                pending_dependency_revisions = tuple(
+                    (dependency.input_id, revision)
+                    for dependency, revision in current_dependency_state
+                )
+                if (
+                    tuple(
+                        _InputSpec.from_dependency(dependency)
+                        for dependency in current_dependencies
+                    )
+                    != bound_input_specs
+                    or (
+                        expected_dependency_revisions is not None
+                        and pending_dependency_revisions
+                        != expected_dependency_revisions
+                    )
+                ):
+                    raise LiveDecisionProgressError(
+                        "focused dependency registry changed after snapshot capture"
+                    )
+                durable_input_specs = self._load_input_registry() or ()
+                if durable_input_specs != bound_input_specs:
+                    raise LiveDecisionProgressError(
+                        "live dependency registry changed concurrently before pending publication"
+                    )
+
+                # The snapshot is written before the cursor: a crash before cursor
+                # publication leaves only ignorable stale snapshot bytes, while every
+                # visible PENDING cursor has an exact pre-action portfolio witness.
+                #
+                # The pre-action artifact is recovery evidence, not an alternate
+                # persistence path for the live PaperBook.  In PAPER mode #623 owns
+                # that exact live object at workspace/paper_book.json; publishing the
+                # same object here would either rebind or cross-path-save its durable
+                # generation.  Reuse the canonical risk shadow capability to create
+                # a detached exact semantic clone with product-issued opening/causal
+                # authority but no live generation/path binding.  Its first save
+                # therefore establishes only the dedicated recovery-snapshot lineage.
+                live_context_sha256 = self._decision_context_sha256()
+                snapshot = self.authority.risk_policy._shadow_book_for_allocation(
+                    self.book
+                )
+                if (
+                    type(snapshot) is not PaperBook
+                    or snapshot is self.book
+                    or not self._same_book_state(snapshot, self.book)
+                ):
+                    raise LiveDecisionProgressError(
+                        "cannot detach exact pre-action PaperBook"
+                    )
+                snapshot_context_sha256 = self._decision_context_sha256_for_book(
+                    snapshot
+                )
+                if snapshot_context_sha256 != live_context_sha256:
+                    raise LiveDecisionProgressError(
+                        "pre-action PaperBook context changed before durability"
+                    )
+
+                # A new detached shadow is created for every decision cycle so the live
+                # canonical PaperBook never acquires the recovery-artifact path authority.
+                # When a previous pre-action artifact already exists, explicitly adopt
+                # that artifact's *current* durable generation before replacement.  This
+                # is a product-owned capability resolved from the sealed persistence graph
+                # below; generic PaperBook.save() remains fail-closed for unbound/stale
+                # objects and for cross-path publication.
+                _paperbook_authority._bind_book(snapshot, self.pre_action_book_path)
+                snapshot.save(self.pre_action_book_path)
+                durable_pre_action = PaperBook.load(self.pre_action_book_path)
+                durable_context_sha256 = self._decision_context_sha256_for_book(
+                    durable_pre_action
+                )
+                current_context_sha256 = self._decision_context_sha256()
+                if (
+                    not self._same_book_state(durable_pre_action, self.book)
+                    or durable_context_sha256 != live_context_sha256
+                    or current_context_sha256 != live_context_sha256
+                ):
+                    raise LiveDecisionProgressError(
+                        "pre-action PaperBook durability verification failed"
+                    )
+                pending = _Progress(
+                    loop_id=self.loop_id,
+                    phase=_PHASE_PENDING,
+                    decision_ts=decision_ts,
+                    market_state_sha256=market_state_sha256,
+                    market_append_generation=market_append_generation,
+                    health_boundaries=self._health_boundaries_for_progress(),
+                    decision_context_sha256=durable_context_sha256,
+                    affected_input_ids=affected_input_ids,
+                    registered_input_ids=expected_input_ids,
+                    decision_id=None,
+                    plan_sha256=None,
+                    ledger_offset=self._ledger_end_offset(),
+                    gate=gate,
+                )
+                # Seal the focused dependency incarnation across the durable PENDING
+                # publication itself.  The earlier snapshot proves what was captured,
+                # while this final guard prevents a direct index replacement/reincarnation
+                # from crossing the atomic progress commit after validation.
+                with self.dependencies.registry_mutation_guard():
+                    focused_state = self.dependencies.registry_state_snapshot()
+                    guarded_input_specs = tuple(
+                        _InputSpec.from_dependency(dependency)
+                        for dependency, _revision in focused_state
+                    )
+                    guarded_dependency_revisions = tuple(
+                        (dependency.input_id, revision)
+                        for dependency, revision in focused_state
+                    )
+                    if (
+                        guarded_input_specs != bound_input_specs
+                        or guarded_dependency_revisions
+                        != pending_dependency_revisions
+                    ):
+                        raise LiveDecisionProgressError(
+                            "focused dependency registry changed concurrently "
+                            "before pending publication"
+                        )
+                    atomic_write_json(self.progress_path, pending.to_dict())
+                    self._progress = pending
+                    self._pending_dependency_revisions = pending_dependency_revisions
+                return pending, pending_dependency_revisions
+
+        try:
+            if market_append_generation is None:
+                publish_pending()
+            else:
+                assert store is not None
+                # The guard spans both the complete current-tail proof and durable
+                # PENDING publication. No cooperating append or direct SQLite writer
+                # can change canonical market truth inside this interval.
+                with store._guard_current_append_authority_with_boundary(
+                    market_append_generation
+                ) as durable_history:
+                    boundary, age_limit = MarketMirror._decision_boundary(
+                        as_of=decision_time,
+                        max_age=self.max_quote_age,
+                    )
+                    durable_snapshot = (
+                        MarketMirror._decision_view_from_proven_history(
+                            durable_history,
+                            boundary=boundary,
+                            max_age=age_limit,
+                            source_ids=None,
+                            sports=None,
+                            event_ids=None,
+                            market_ids=None,
+                            selection_ids=None,
+                        )
+                    )
+                    durable_market_state_sha256 = (
+                        self._market_state_sha256_for_events(
+                            durable_snapshot.events,
+                            as_of=decision_time,
+                            health_boundaries=self._health_boundaries_for_progress(),
+                        )
+                    )
+                    if durable_market_state_sha256 != market_state_sha256:
+                        raise LiveDecisionProgressError(
+                            "decision-visible market state is not durable at "
+                            "sampled append frontier"
+                        )
+                    publish_pending()
+        finally:
+            if owns_store:
+                assert store is not None
+                store.close()
+
+    def _input_registry_payload(
+        self,
+        specs: tuple[_InputSpec, ...],
+    ) -> dict[str, object]:
+        return {
+            "schema": _INPUTS_SCHEMA,
+            "schema_version": _INPUTS_VERSION,
+            "loop_id": self.loop_id,
+            "inputs": [spec.to_dict() for spec in specs],
+        }
+
+    def _input_registry_state_sha256(
+        self,
+        specs: tuple[_InputSpec, ...] | None,
+    ) -> str | None:
+        if specs is None:
+            return None
+        return _canonical_json_sha256(self._input_registry_payload(specs))
+
+    def _input_registry_transition_binding(
+        self,
+        *,
+        previous_state_sha256: str | None,
+        candidate: tuple[_InputSpec, ...],
+        kind: str,
+    ) -> str:
+        return _canonical_json_sha256(
+            {
+                "schema": "autosport.live_decision_inputs_transition",
+                "schema_version": 1,
+                "kind": kind,
+                "loop_id": self.loop_id,
+                "previous_state_sha256": previous_state_sha256,
+                "intended_state_sha256": self._input_registry_state_sha256(candidate),
+                "input_ids": [spec.input_id for spec in candidate],
+            }
+        )
+
+    @staticmethod
+    def _input_registry_tx_id(binding_sha256: str) -> str:
+        return f"live-inputs-{binding_sha256}"
+
+    def _read_input_registry_file(self) -> tuple[_InputSpec, ...] | None:
         if not self.inputs_path.exists():
             return None
         try:
@@ -2021,45 +4456,174 @@ class PersistentLiveDecisionLoop:
             )
         return specs
 
+    def _load_input_registry(self) -> tuple[_InputSpec, ...] | None:
+        specs = self._read_input_registry_file()
+        observed = self._input_registry_state_sha256(specs)
+        try:
+            history = self._inputs_authority.read_history()
+            if not history:
+                if specs is None:
+                    return None
+                binding = self._input_registry_transition_binding(
+                    previous_state_sha256=None,
+                    candidate=specs,
+                    kind="BOOTSTRAP",
+                )
+                tx_id = self._input_registry_tx_id(binding)
+                assert observed is not None
+                self._inputs_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                self._inputs_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                return specs
+
+            pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+            if pending is not None and observed == pending.intended_state_sha256:
+                if specs is None:
+                    raise LiveDecisionProgressError(
+                        "prepared live input-registry authority has no durable registry bytes"
+                    )
+                matched: tuple[str, str] | None = None
+                for kind in ("TRANSITION", "BOOTSTRAP"):
+                    candidate_binding = self._input_registry_transition_binding(
+                        previous_state_sha256=pending.previous_committed_state_sha256,
+                        candidate=specs,
+                        kind=kind,
+                    )
+                    candidate_tx_id = self._input_registry_tx_id(candidate_binding)
+                    if (
+                        candidate_tx_id == pending.tx_id
+                        and candidate_binding == pending.semantic_binding_sha256
+                    ):
+                        matched = (candidate_tx_id, candidate_binding)
+                        break
+                if matched is None:
+                    raise LiveDecisionProgressError(
+                        "prepared live input-registry authority conflicts with durable registry semantics"
+                    )
+                tx_id, binding = matched
+                self._inputs_authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                self._inputs_authority.recover(
+                    observed_state_sha256=observed,
+                )
+            return specs
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise LiveDecisionProgressError(
+                "live dependency registry failed monotonic rollback/recovery verification"
+            ) from exc
+
     def _persist_input_registry(
         self,
         *,
         expected_previous: tuple[_InputSpec, ...],
     ) -> None:
+        self._assert_canonical_persistence_authority()
         candidate = tuple(self._input_specs.values())
-        payload = {
-            "schema": _INPUTS_SCHEMA,
-            "schema_version": _INPUTS_VERSION,
-            "loop_id": self.loop_id,
-            "inputs": [spec.to_dict() for spec in candidate],
-        }
-        with WorkspaceEconomicLock(self.workspace):
+        payload = self._input_registry_payload(candidate)
+        with WorkspaceEconomicLock(self._workspace_authority):
+            self._assert_canonical_persistence_authority()
+            durable_progress = self._load_progress()
+            if durable_progress != self._progress:
+                raise LiveDecisionProgressError(
+                    "live decision progress changed concurrently before dependency publication"
+                )
+            if (
+                durable_progress is not None
+                and durable_progress.phase in {_PHASE_PENDING, _PHASE_APPEND_PENDING}
+            ):
+                raise LiveDecisionProgressError(
+                    "cannot mutate live dependency registry while a decision is unfinished"
+                )
+
             durable = self._load_input_registry() or ()
             if durable != expected_previous:
                 raise LiveDecisionProgressError(
                     "live dependency registry changed concurrently"
                 )
-            atomic_write_json(self.inputs_path, payload)
+            with self.dependencies.registry_mutation_guard():
+                focused_state = self.dependencies.registry_state_snapshot()
+                focused_candidate = tuple(
+                    _InputSpec.from_dependency(dependency)
+                    for dependency, _revision in focused_state
+                )
+                if focused_candidate != candidate:
+                    raise LiveDecisionProgressError(
+                        "focused dependency registry changed before dependency publication"
+                    )
+                observed = self._input_registry_state_sha256(
+                    None if not self.inputs_path.exists() else durable
+                )
+                intended = self._input_registry_state_sha256(candidate)
+                assert intended is not None
+                binding = self._input_registry_transition_binding(
+                    previous_state_sha256=observed,
+                    candidate=candidate,
+                    kind="TRANSITION",
+                )
+                tx_id = self._input_registry_tx_id(binding)
+                try:
+                    self._inputs_authority.prepare(
+                        tx_id=tx_id,
+                        observed_state_sha256=observed,
+                        intended_state_sha256=intended,
+                        semantic_binding_sha256=binding,
+                    )
+                    atomic_write_json(self.inputs_path, payload)
+                    published = self._read_input_registry_file()
+                    if published != candidate:
+                        raise LiveDecisionProgressError(
+                            "live dependency registry publication changed before monotonic commit"
+                        )
+                    self._inputs_authority.commit(
+                        tx_id=tx_id,
+                        observed_state_sha256=intended,
+                        semantic_binding_sha256=binding,
+                    )
+                except MonotonicWorkspaceAuthorityError as exc:
+                    raise LiveDecisionProgressError(
+                        "live dependency registry monotonic publication failed"
+                    ) from exc
 
     def _ledger_end_offset(self) -> int:
-        path = self.decision_ledger.path
-        try:
-            with path.open("rb") as handle:
-                handle.seek(0, 2)
-                size = handle.tell()
-                if size:
-                    handle.seek(-1, 2)
-                    if handle.read(1) != b"\n":
-                        raise DecisionLedgerIntegrityError(
-                            "Decision Ledger has an unterminated final record"
-                        )
-                return size
-        except FileNotFoundError:
-            return 0
-        except OSError as exc:
-            raise DecisionLedgerIntegrityError(
-                "Decision Ledger end offset is unreadable"
-            ) from exc
+        snapshot = self.decision_ledger.verified_snapshot_if_exists()
+        return len(snapshot.payload)
+
+    def _verified_latest_ledger_record(
+        self,
+        *,
+        replay_run_id: str | None = None,
+    ) -> tuple[int, DecisionRecord] | None:
+        """Read the latest requested lineage from one verified ledger snapshot."""
+
+        if replay_run_id is not None:
+            _canonical_text("replay_run_id", replay_run_id)
+        payload = self.decision_ledger.verified_snapshot_if_exists().payload
+        if not payload:
+            return None
+
+        lines = payload.splitlines(keepends=True)
+        offset = len(payload)
+        for line in reversed(lines):
+            offset -= len(line)
+            envelope = json.loads(line.decode("utf-8"))
+            record = DecisionRecord(
+                **JsonlDecisionLedger._validate_record(envelope["record"])
+            )
+            if replay_run_id is None or record.replay_run_id == replay_run_id:
+                return offset, record
+        return None
 
     def _verified_ledger_record_at_offset(
         self,
@@ -2067,38 +4631,1156 @@ class PersistentLiveDecisionLoop:
     ) -> DecisionRecord | None:
         if isinstance(offset, bool) or not isinstance(offset, int) or offset < 0:
             raise LiveDecisionProgressError("ledger_offset must be a non-negative integer")
-        path = self.decision_ledger.path
-        try:
-            with path.open("rb") as handle:
-                handle.seek(0, 2)
-                size = handle.tell()
-                if offset > size:
-                    raise DecisionLedgerIntegrityError(
-                        "reserved Decision Ledger offset is beyond durable bytes"
-                    )
-                if offset == size:
-                    return None
-                handle.seek(offset)
-                line = handle.readline()
-        except FileNotFoundError:
-            if offset == 0:
-                return None
+        payload = self.decision_ledger.verified_snapshot_if_exists().payload
+        size = len(payload)
+        if offset > size:
             raise DecisionLedgerIntegrityError(
-                "reserved Decision Ledger offset refers to a missing ledger"
+                "reserved Decision Ledger offset is beyond durable bytes"
             )
-        except OSError as exc:
+        if offset == size:
+            return None
+        if offset > 0 and payload[offset - 1 : offset] != b"\n":
             raise DecisionLedgerIntegrityError(
-                "reserved Decision Ledger record is unreadable"
-            ) from exc
-
-        JsonlDecisionLedger._verify_bytes(line)
+                "reserved Decision Ledger offset is not a record boundary"
+            )
+        end = payload.find(b"\n", offset)
+        if end < 0:
+            raise DecisionLedgerIntegrityError(
+                "reserved Decision Ledger record is unterminated"
+            )
+        line = payload[offset : end + 1]
         envelope = json.loads(line.decode("utf-8"))
         record = JsonlDecisionLedger._validate_record(envelope["record"])
         return DecisionRecord(**record)
 
+    def _require_committed_market_state_truth(
+        self,
+        *,
+        progress: _Progress,
+        decision_time: datetime,
+        committed_market_history: tuple[tuple[MarketEvent, int], ...] | None,
+    ) -> MirrorSnapshot | None:
+        if progress.market_append_generation is None:
+            return None
+        if committed_market_history is None:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision lacks proven market prefix"
+            )
+        boundary, age_limit = MarketMirror._decision_boundary(
+            as_of=decision_time,
+            max_age=self.max_quote_age,
+        )
+        try:
+            committed_snapshot = MarketMirror._decision_view_from_proven_history(
+                committed_market_history,
+                boundary=boundary,
+                max_age=age_limit,
+                source_ids=None,
+                sports=None,
+                event_ids=None,
+                market_ids=None,
+                selection_ids=None,
+            )
+            market_state_sha256 = self._market_state_sha256_for_events(
+                committed_snapshot.events,
+                as_of=decision_time,
+                health_boundaries=progress.health_boundaries,
+            )
+        except (LiveDecisionProgressError, TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision market prefix cannot be replayed"
+            ) from exc
+        if market_state_sha256 != progress.market_state_sha256:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision market state conflicts with proven append prefix"
+            )
+        return committed_snapshot
+
+    def _verify_committed_execution_binding(
+        self,
+        *,
+        existing: DecisionRecord,
+        durable_plan: PortfolioPlan,
+        progress: _Progress,
+        committed_market_history: tuple[
+            tuple[MarketEvent, int], ...
+        ]
+        | None = None,
+    ) -> None:
+        has_positive_stake = any(stake > 0 for stake in durable_plan.stakes)
+        execution_payload = existing.to_dict()["payload"].get(
+            "paper_execution"
+        )
+        if not has_positive_stake:
+            if execution_payload is not None:
+                raise DecisionLedgerIntegrityError(
+                    "zero-stake committed live decision carries unexpected "
+                    "execution evidence"
+                )
+            return
+
+        runtime = self.paper_execution
+        if runtime is None:
+            raise DecisionLedgerIntegrityError(
+                "positive committed live decision requires canonical #623 "
+                "execution runtime"
+            )
+        expected_keys = {
+            "schema",
+            "schema_version",
+            "plan_id",
+            "plan_fingerprint",
+            "model_fingerprint",
+            "run_id",
+            "intent_evidence_json",
+        }
+        if (
+            type(execution_payload) is not dict
+            or set(execution_payload) != expected_keys
+            or execution_payload.get("schema")
+            != "autosport.paper_execution_adoption"
+            or execution_payload.get("schema_version") != 1
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution-adoption evidence is invalid"
+            )
+
+        try:
+            plan_id = _canonical_text(
+                "execution-adoption plan_id",
+                execution_payload["plan_id"],
+            )
+            plan_fingerprint = _canonical_text(
+                "execution-adoption plan_fingerprint",
+                execution_payload["plan_fingerprint"],
+            )
+            model_fingerprint = _canonical_text(
+                "execution-adoption model_fingerprint",
+                execution_payload["model_fingerprint"],
+            )
+            run_id = _canonical_text(
+                "execution-adoption run_id",
+                execution_payload["run_id"],
+            )
+            intent_evidence_json = _canonical_text(
+                "execution-adoption intent_evidence_json",
+                execution_payload["intent_evidence_json"],
+            )
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution-adoption identity is invalid"
+            ) from exc
+
+        if model_fingerprint != runtime.config.fingerprint:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution model conflicts with runtime"
+            )
+        try:
+            intent_evidence = strict_json_loads(intent_evidence_json)
+            canonical_intent_evidence = json.dumps(
+                intent_evidence,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent execution evidence is invalid"
+            ) from exc
+        if canonical_intent_evidence != intent_evidence_json:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent execution evidence is not canonical"
+            )
+        if (
+            type(intent_evidence) is not dict
+            or set(intent_evidence) != {"schema", "schema_version", "intents"}
+            or intent_evidence.get("schema")
+            != "autosport.portfolio_plan_intent_evidence"
+            or intent_evidence.get("schema_version") != 1
+            or type(intent_evidence.get("intents")) is not list
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent execution evidence schema is invalid"
+            )
+        intent_items = intent_evidence["intents"]
+        if (
+            tuple(
+                item.get("intent_id") if type(item) is dict else None
+                for item in intent_items
+            )
+            != durable_plan.intent_ids
+            or tuple(
+                item.get("intent_sha256") if type(item) is dict else None
+                for item in intent_items
+            )
+            != durable_plan.intent_sha256s
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision intent execution evidence conflicts with plan"
+            )
+        provenance = self.intent_provenance
+        _, evidence_decision_time = _canonical_timestamp(
+            "committed decision_ts",
+            progress.decision_ts,
+        )
+        expected_intent_keys = {
+            "schema",
+            "schema_version",
+            "intent_id",
+            "intent_sha256",
+            "opportunity_id",
+            "opportunity",
+            "evidence",
+            "evidence_sha256",
+            "candidate_sha256",
+            "signal_strength",
+            "strategy_id",
+            "model_id",
+            "config_sha256",
+            "risk_context",
+        }
+        canonical_opportunities: list[Opportunity] = []
+        for item in intent_items:
+            if (
+                type(item) is not dict
+                or set(item) != expected_intent_keys
+                or item.get("schema")
+                != "autosport.opportunity_intent_evidence"
+                or item.get("schema_version") != 1
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution item is invalid"
+                )
+            if (
+                item.get("strategy_id") != provenance.strategy_version_id
+                or item.get("model_id") != provenance.model_version_id
+                or item.get("config_sha256") != provenance.config_sha256
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution provenance conflicts"
+                )
+            try:
+                opportunity = Opportunity.from_dict(item["opportunity"])
+                evidence = OpportunityEvidence.from_dict(item["evidence"])
+                signal_strength = Decimal(item["signal_strength"])
+                _canonical_sha256(
+                    "intent candidate_sha256",
+                    item["candidate_sha256"],
+                )
+                risk_context = item["risk_context"]
+                if (
+                    type(risk_context) is not dict
+                    or set(risk_context)
+                    != {
+                        "provider_accounts",
+                        "bankroll_id",
+                        "currency",
+                        "measurement_window_start",
+                        "measurement_window_end",
+                        "proposal_ts",
+                    }
+                ):
+                    raise ValueError("risk_context audit fields are invalid")
+                _, evidence_observed = _canonical_timestamp(
+                    "intent evidence observed_at",
+                    evidence.observed_at,
+                )
+                _, evidence_cutoff = _canonical_timestamp(
+                    "intent evidence causal_cutoff",
+                    evidence.causal_cutoff,
+                )
+                if (
+                    evidence_observed > evidence_decision_time
+                    or evidence_cutoff > evidence_decision_time
+                ):
+                    raise ValueError(
+                        "intent evidence is from the future"
+                    )
+
+                measurement_start = risk_context[
+                    "measurement_window_start"
+                ]
+                measurement_end = risk_context[
+                    "measurement_window_end"
+                ]
+                proposal_ts = risk_context["proposal_ts"]
+                if (measurement_start is None) != (
+                    measurement_end is None
+                ):
+                    raise ValueError(
+                        "measurement window bounds disagree"
+                    )
+                proposal_time = None
+                if proposal_ts is not None:
+                    _, proposal_time = _canonical_timestamp(
+                        "intent risk_context proposal_ts",
+                        proposal_ts,
+                    )
+                    if proposal_time > evidence_decision_time:
+                        raise ValueError(
+                            "intent proposal is from the future"
+                        )
+                if measurement_start is not None:
+                    _, window_start = _canonical_timestamp(
+                        "intent risk_context measurement_window_start",
+                        measurement_start,
+                    )
+                    _, window_end = _canonical_timestamp(
+                        "intent risk_context measurement_window_end",
+                        measurement_end,
+                    )
+                    if (
+                        window_start > window_end
+                        or (
+                            proposal_time is not None
+                            and window_end > proposal_time
+                        )
+                    ):
+                        raise ValueError(
+                            "intent measurement window is invalid"
+                        )
+            except (
+                InvalidOperation,
+                OpportunityContractError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution item is invalid"
+                ) from exc
+            if (
+                not signal_strength.is_finite()
+                or opportunity.to_dict() != item["opportunity"]
+                or opportunity.opportunity_id != item["opportunity_id"]
+                or evidence.to_dict() != item["evidence"]
+                or evidence.evidence_sha256 != item["evidence_sha256"]
+                or risk_context["bankroll_id"]
+                != self.authority.contract.bankroll_id
+                or risk_context["currency"] != self.authority.contract.currency
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution item conflicts "
+                    "with canonical evidence"
+                )
+            recomputed_intent_sha256 = _canonical_json_sha256(
+                {
+                    "schema": "autosport.opportunity_intent",
+                    "schema_version": 2,
+                    "intent_id": item["intent_id"],
+                    "opportunity_id": opportunity.opportunity_id,
+                    "opportunity_class": opportunity.strategy_class.value,
+                    "opportunity_decision": opportunity.decision.value,
+                    "evidence_sha256": evidence.evidence_sha256,
+                    "candidate_sha256": item["candidate_sha256"],
+                    "signal_strength": str(signal_strength),
+                    "strategy_id": item["strategy_id"],
+                    "model_id": item["model_id"],
+                    "config_sha256": item["config_sha256"],
+                }
+            )
+            if recomputed_intent_sha256 != item["intent_sha256"]:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision intent execution hash is invalid"
+                )
+            canonical_opportunities.append(opportunity)
+
+        if tuple(
+            opportunity.strategy_class.value
+            for opportunity in canonical_opportunities
+        ) != durable_plan.opportunity_classes:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision opportunity classes conflict with plan"
+            )
+        if (
+            durable_plan.dependency_graph is not None
+            and tuple(
+                item["candidate_sha256"] for item in intent_items
+            )
+            != durable_plan.dependency_graph.candidate_sha256s
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision candidate identities conflict with "
+                "portfolio dependency graph"
+            )
+
+        proven_market_events_by_intent: dict[
+            str, tuple[MarketEvent, ...]
+        ] = {}
+        if progress.market_append_generation is not None:
+            if committed_market_history is None:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision lacks proven market prefix"
+                )
+            boundary, age_limit = MarketMirror._decision_boundary(
+                as_of=evidence_decision_time,
+                max_age=self.max_quote_age,
+            )
+            committed_snapshot = (
+                MarketMirror._decision_view_from_proven_history(
+                    committed_market_history,
+                    boundary=boundary,
+                    max_age=age_limit,
+                    source_ids=None,
+                    sports=None,
+                    event_ids=None,
+                    market_ids=None,
+                    selection_ids=None,
+                )
+            )
+            if (
+                self._market_state_sha256_for_events(
+                    committed_snapshot.events,
+                    as_of=evidence_decision_time,
+                    health_boundaries=progress.health_boundaries,
+                )
+                != progress.market_state_sha256
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision market state conflicts with "
+                    "proven append prefix"
+                )
+
+            verified_snapshot: MirrorSnapshot = committed_snapshot
+            if (
+                self._health_gate is not None
+                and progress.health_boundaries is not None
+            ):
+                boundary_map = {
+                    item.source_id: item
+                    for item in progress.health_boundaries
+                }
+                source_ids = {
+                    event.source_id for event in committed_snapshot.events
+                }
+                if not source_ids.issubset(boundary_map):
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision lacks provider-health replay horizons"
+                    )
+                try:
+                    verified_snapshot = self._health_gate.gate_snapshot(
+                        committed_snapshot,
+                        as_of=evidence_decision_time,
+                        health_boundaries={
+                            source_id: boundary_map[source_id]
+                            for source_id in source_ids
+                        },
+                    )
+                except (TypeError, ValueError) as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-health replay evidence is invalid"
+                    ) from exc
+            decision_visible_events = verified_snapshot.events
+            for item, opportunity in zip(
+                intent_items,
+                canonical_opportunities,
+                strict=True,
+            ):
+                matched_events: list[MarketEvent] = []
+                for quote in opportunity.quotes:
+                    matching_events = tuple(
+                        event
+                        for event in decision_visible_events
+                        if QuoteRef.from_market_event(
+                            event,
+                            market_snapshot_hash=(
+                                quote.market_snapshot_hash
+                            ),
+                        )
+                        == quote
+                    )
+                    if len(matching_events) != 1:
+                        raise DecisionLedgerIntegrityError(
+                            "committed live decision quote is not bound to "
+                            "proven market history"
+                        )
+                    matched_events.append(matching_events[0])
+                proven_market_events_by_intent[item["intent_id"]] = tuple(
+                    matched_events
+                )
+
+                risk_context = item["risk_context"]
+                provider_accounts_raw = risk_context["provider_accounts"]
+                if type(provider_accounts_raw) is not list:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-account evidence is invalid"
+                    )
+                provider_accounts: list[tuple[str, str]] = []
+                try:
+                    for binding_raw in provider_accounts_raw:
+                        if (
+                            type(binding_raw) is not list
+                            or len(binding_raw) != 2
+                        ):
+                            raise ValueError(
+                                "provider account binding is not canonical"
+                            )
+                        provider_accounts.append(
+                            (
+                                _canonical_text(
+                                    "provider account source_id",
+                                    binding_raw[0],
+                                ),
+                                _canonical_text(
+                                    "provider account_id",
+                                    binding_raw[1],
+                                ),
+                            )
+                        )
+                except (TypeError, ValueError) as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-account evidence is invalid"
+                    ) from exc
+                canonical_accounts = tuple(provider_accounts)
+                source_ids = tuple(
+                    source_id for source_id, _ in canonical_accounts
+                )
+                if (
+                    canonical_accounts != tuple(sorted(canonical_accounts))
+                    or len(canonical_accounts) != len(set(canonical_accounts))
+                    or len(source_ids) != len(set(source_ids))
+                    or (
+                        canonical_accounts
+                        and frozenset(source_ids)
+                        != frozenset(
+                            event.source_id for event in matched_events
+                        )
+                    )
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-account evidence is noncanonical"
+                    )
+
+                candidate_payload = {
+                    "schema": "autosport.risk-candidate.v2",
+                    "legs": [
+                        {
+                            "event_id": quote.event_id,
+                            "market_id": quote.market_id,
+                            "selection_id": quote.selection_id,
+                            "locked_odds": str(quote.decimal_odds),
+                        }
+                        for quote in sorted(
+                            opportunity.quotes,
+                            key=lambda value: value.quote_key,
+                        )
+                    ],
+                    "quotes": [
+                        event.to_dict()
+                        for event in sorted(
+                            matched_events,
+                            key=lambda value: value.quote_key,
+                        )
+                    ],
+                    "provider_accounts": [
+                        {
+                            "source_id": source_id,
+                            "account_id": account_id,
+                        }
+                        for source_id, account_id in canonical_accounts
+                    ],
+                    "bankroll_id": risk_context["bankroll_id"],
+                    "currency": risk_context["currency"],
+                    "measurement_window_start": risk_context[
+                        "measurement_window_start"
+                    ],
+                    "measurement_window_end": risk_context[
+                        "measurement_window_end"
+                    ],
+                    "proposal_ts": risk_context["proposal_ts"],
+                }
+                if (
+                    _canonical_json_sha256(candidate_payload)
+                    != item["candidate_sha256"]
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision risk candidate conflicts with "
+                        "proven market/economic evidence"
+                    )
+        elif committed_market_history is not None:
+            raise DecisionLedgerIntegrityError(
+                "legacy committed decision unexpectedly supplied market prefix"
+            )
+
+        try:
+            execution_events = runtime.ledger.events(run_id)
+        except PaperExecutionIntegrityError as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution ledger is invalid"
+            ) from exc
+        reservations = tuple(
+            event
+            for event in execution_events
+            if event.get("event_type") == "RUN_RESERVED"
+        )
+        scopes = tuple(
+            event
+            for event in execution_events
+            if event.get("event_type")
+            == PaperExecutionAdoptionRuntime._EXPOSURE_SCOPE_EVENT_TYPE
+        )
+        if len(reservations) != 1 or len(scopes) != 1:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision lacks exact #623 reservation/scope evidence"
+            )
+
+        reservation_event = reservations[0]
+        scope_event = scopes[0]
+        reservation = reservation_event.get("payload")
+        expected_reservation_keys = {
+            "trigger_id",
+            "plan_id",
+            "plan_fingerprint",
+            "model_fingerprint",
+            "started_at",
+            "action_ids",
+            "observation_evidence_ids",
+        }
+        if (
+            type(reservation) is not dict
+            or set(reservation) != expected_reservation_keys
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 reservation is invalid"
+            )
+        scope_sequence = scope_event.get("sequence")
+        reservation_sequence = reservation_event.get("sequence")
+        if (
+            type(scope_sequence) is not int
+            or type(reservation_sequence) is not int
+            or scope_sequence >= reservation_sequence
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 scope/reservation chronology is invalid"
+            )
+        action_ids = reservation.get("action_ids")
+        positive_count = sum(stake > 0 for stake in durable_plan.stakes)
+        if (
+            reservation.get("trigger_id") != progress.decision_id
+            or reservation.get("plan_id") != plan_id
+            or reservation.get("plan_fingerprint") != plan_fingerprint
+            or reservation.get("model_fingerprint") != model_fingerprint
+            or reservation.get("started_at") != progress.decision_ts
+            or reservation.get("observation_evidence_ids") != {}
+            or type(action_ids) is not list
+            or len(action_ids) != positive_count
+            or len(action_ids) != len(set(action_ids))
+            or any(
+                type(action_id) is not str or not action_id
+                for action_id in action_ids
+            )
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 reservation conflicts with "
+                "decision evidence"
+            )
+
+        attempt_events = tuple(
+            event
+            for event in execution_events
+            if event.get("event_type") == "ATTEMPT_RECORDED"
+        )
+        completions = tuple(
+            event
+            for event in execution_events
+            if event.get("event_type") == "RUN_COMPLETED"
+        )
+        allowed_execution_event_types = {
+            PaperExecutionAdoptionRuntime._EXPOSURE_SCOPE_EVENT_TYPE,
+            "RUN_RESERVED",
+            "ATTEMPT_RECORDED",
+            "RUN_COMPLETED",
+        }
+        if (
+            len(execution_events) != len(attempt_events) + 3
+            or any(
+                event.get("event_type") not in allowed_execution_event_types
+                for event in execution_events
+            )
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 run contains noncanonical events"
+            )
+        try:
+            attempts = tuple(
+                PaperLegAttempt.from_dict(event.get("payload"))
+                for event in attempt_events
+            )
+            if tuple(
+                attempt.sequence for attempt in attempts
+            ) != tuple(range(len(attempts))):
+                raise PaperExecutionIntegrityError(
+                    "durable attempt events are not in canonical sequence order"
+                )
+            derived = _derive_run_economics(
+                tuple(action_ids),
+                attempts,
+            )
+        except (TypeError, ValueError, PaperExecutionIntegrityError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 attempts are invalid"
+            ) from exc
+        if len(completions) != 1 or not derived.can_complete:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision lacks terminal #623 completion"
+            )
+        completion = completions[0]
+        completion_sequence = completion.get("sequence")
+        if (
+            type(completion_sequence) is not int
+            or completion_sequence <= reservation_sequence
+            or any(
+                type(event.get("sequence")) is not int
+                or event["sequence"] <= reservation_sequence
+                or event["sequence"] >= completion_sequence
+                for event in attempt_events
+            )
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 event chronology is invalid"
+            )
+        completion_payload = completion.get("payload")
+        if (
+            type(completion_payload) is not dict
+            or set(completion_payload)
+            != {
+                "pending_action_ids",
+                "recovery_decision",
+                "worst_case_exposure",
+            }
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 completion payload is invalid"
+            )
+        try:
+            pending_action_ids = tuple(
+                completion_payload["pending_action_ids"]
+            )
+            recovery_decision = RecoveryDecision(
+                completion_payload["recovery_decision"]
+            )
+            worst_case_exposure = Decimal(
+                completion_payload["worst_case_exposure"]
+            )
+        except (
+            KeyError,
+            TypeError,
+            ValueError,
+            InvalidOperation,
+        ) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 completion economics are invalid"
+            ) from exc
+        if (
+            not worst_case_exposure.is_finite()
+            or worst_case_exposure < 0
+            or pending_action_ids != derived.pending_action_ids
+            or recovery_decision is not derived.recovery_decision
+            or worst_case_exposure != derived.worst_case_exposure
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 completion conflicts with "
+                "durable attempt economics"
+            )
+
+        scope = scopes[0].get("payload")
+        if (
+            type(scope) is not dict
+            or set(scope)
+            != {
+                "schema",
+                "schema_version",
+                "plan_id",
+                "plan_fingerprint",
+                "intent_evidence_sha256",
+                "bindings",
+                "binding_sha256",
+            }
+            or scope.get("schema")
+            != PaperExecutionAdoptionRuntime._EXPOSURE_SCOPE_SCHEMA
+            or scope.get("schema_version") != 1
+            or scope.get("plan_id") != plan_id
+            or scope.get("plan_fingerprint") != plan_fingerprint
+            or scope.get("intent_evidence_sha256")
+            != hashlib.sha256(intent_evidence_json.encode("utf-8")).hexdigest()
+            or type(scope.get("bindings")) is not list
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 exposure scope conflicts with "
+                "decision evidence"
+            )
+        bindings = scope["bindings"]
+        if tuple(
+            binding.get("action_id") if type(binding) is dict else None
+            for binding in bindings
+        ) != tuple(action_ids):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 exposure bindings conflict with "
+                "reservation"
+            )
+        scope_body = dict(scope)
+        binding_sha256 = scope_body.pop("binding_sha256")
+        if binding_sha256 != _canonical_json_sha256(scope_body):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 exposure scope digest is invalid"
+            )
+
+        positive_inputs = tuple(
+            (index, item, opportunity, stake)
+            for index, (item, opportunity, stake) in enumerate(
+                zip(
+                    intent_items,
+                    canonical_opportunities,
+                    durable_plan.stakes,
+                    strict=True,
+                )
+            )
+            if stake > 0
+        )
+        if len(positive_inputs) != len(action_ids):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution inputs conflict with plan"
+            )
+
+        actions: list[ExecutionAction] = []
+        canonical_bindings: list[PaperExposureBinding] = []
+        attempt_by_action = {
+            attempt.action_id: attempt for attempt in attempts
+        }
+        for position, (
+            original_index,
+            intent_item,
+            opportunity,
+            stake,
+        ) in enumerate(positive_inputs):
+            action_id = action_ids[position]
+            binding_raw = bindings[position]
+            if len(opportunity.quotes) != 1:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision positive execution intent is "
+                    "not exactly single-leg"
+                )
+            proven_events = proven_market_events_by_intent.get(
+                intent_item["intent_id"],
+            )
+            if proven_events is not None:
+                if len(proven_events) != 1:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision execution quote proof is ambiguous"
+                    )
+                try:
+                    runtime._require_back_compatible_exchange_side(
+                        proven_events[0].exchange_side
+                    )
+                except PaperExecutionAdoptionError as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision execution side lacks "
+                        "canonical PAPER authority"
+                    ) from exc
+            if (
+                type(intent_item) is not dict
+                or type(binding_raw) is not dict
+                or set(binding_raw)
+                != {"action_id", "sport", "bankroll_id", "currency"}
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision execution input binding is invalid"
+                )
+            risk_context = intent_item["risk_context"]
+            candidate_quotes = tuple(
+                quote
+                for quote in opportunity.quotes
+                if (
+                    "paper-action-v1-"
+                    + _canonical_json_sha256(
+                        {
+                            "decision_id": progress.decision_id,
+                            "intent_id": intent_item["intent_id"],
+                            "intent_sha256": intent_item["intent_sha256"],
+                            "quote_market_event_hash": quote.market_event_hash,
+                            "stake": str(stake),
+                            "index": original_index,
+                        }
+                    )
+                    == action_id
+                )
+            )
+            if len(candidate_quotes) != 1:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 action identity is invalid"
+                )
+            quote = candidate_quotes[0]
+
+            provider_accounts = risk_context.get("provider_accounts")
+            if (
+                type(provider_accounts) is not list
+                or len(provider_accounts) != 1
+                or type(provider_accounts[0]) is not list
+                or len(provider_accounts[0]) != 2
+                or provider_accounts[0][0] != quote.source_id
+                or type(provider_accounts[0][1]) is not str
+                or not provider_accounts[0][1]
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision execution account evidence is invalid"
+                )
+            account_id = provider_accounts[0][1]
+
+            try:
+                quote_clock = quote.source_ts or quote.observed_ts
+                _, quote_time = _canonical_timestamp(
+                    "execution quote observed time",
+                    quote_clock,
+                )
+                action = ExecutionAction(
+                    action_id=action_id,
+                    bookmaker_id=quote.source_id,
+                    account_id=account_id,
+                    event_id=quote.event_id,
+                    market_id=quote.market_id,
+                    selection_id=quote.selection_id,
+                    side="BACK",
+                    requested_odds=quote.decimal_odds,
+                    requested_stake=stake,
+                    quote_id=quote.market_event_hash,
+                    quote_observed_at=quote_time.isoformat(
+                        timespec="microseconds"
+                    ),
+                    expires_at=(
+                        quote_time + runtime.max_quote_age
+                    ).isoformat(timespec="microseconds"),
+                )
+                binding = PaperExposureBinding(
+                    action_id=action_id,
+                    sport=quote.sport,
+                    bankroll_id=risk_context.get("bankroll_id"),
+                    currency=risk_context.get("currency"),
+                )
+            except (TypeError, ValueError) as exc:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision execution action is invalid"
+                ) from exc
+
+            attempt = attempt_by_action.get(action_id)
+            if attempt is not None and (
+                attempt.bookmaker_id != action.bookmaker_id
+                or attempt.account_id != action.account_id
+                or attempt.event_id != action.event_id
+                or attempt.market_id != action.market_id
+                or attempt.selection_id != action.selection_id
+                or attempt.side != action.side
+                or attempt.decision_quote_id != action.quote_id
+                or attempt.decision_odds != action.requested_odds
+                or attempt.requested_stake != action.requested_stake
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 attempt conflicts with "
+                    "canonical intent evidence"
+                )
+
+            if binding_raw != {
+                "action_id": binding.action_id,
+                "sport": binding.sport,
+                "bankroll_id": binding.bankroll_id,
+                "currency": binding.currency,
+            }:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 exposure binding conflicts "
+                    "with canonical intent evidence"
+                )
+            actions.append(action)
+            canonical_bindings.append(binding)
+
+        expected_plan_id = "paper-plan-v1-" + _canonical_json_sha256(
+            {
+                "decision_id": progress.decision_id,
+                "portfolio_plan_sha256": durable_plan.plan_sha256,
+                "intent_evidence_json": intent_evidence_json,
+                "model_fingerprint": runtime.config.fingerprint,
+                "action_ids": action_ids,
+            }
+        )
+        try:
+            reconstructed_plan = ExecutionPlan(
+                plan_id=expected_plan_id,
+                bookmaker_profile_version=(
+                    "paper-execution-reality:"
+                    f"{runtime.config.model_id}:"
+                    f"{runtime.config.model_version}"
+                ),
+                decision_id=progress.decision_id,
+                approval_id="paper-only-no-real-money",
+                created_at=durable_plan.decision_ts,
+                actions=tuple(actions),
+            )
+        except (TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution plan is invalid"
+            ) from exc
+        if (
+            plan_id != expected_plan_id
+            or plan_fingerprint != reconstructed_plan.fingerprint
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision execution plan conflicts with "
+                "canonical plan/evidence"
+            )
+
+        expected_run_id = "paper-exec-v2-" + _canonical_json_sha256(
+            {
+                "plan_fingerprint": reconstructed_plan.fingerprint,
+                "trigger_id": progress.decision_id,
+                "model_fingerprint": runtime.config.fingerprint,
+            }
+        )
+        if run_id != expected_run_id:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 run identity is invalid"
+            )
+        if (
+            scope_event.get("event_key") != f"{run_id}:exposure-scope"
+            or reservation_event.get("event_key") != f"{run_id}:reserve"
+            or completion.get("event_key") != f"{run_id}:complete"
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision #623 event identity is invalid"
+            )
+        for event, attempt in zip(
+            attempt_events,
+            attempts,
+            strict=True,
+        ):
+            if event.get("event_key") != (
+                f"{run_id}:attempt:{attempt.sequence}"
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 attempt event identity is invalid"
+                )
+            expected_attempt = _synthetic_attempt(
+                run_id=run_id,
+                plan=reconstructed_plan,
+                action=reconstructed_plan.actions[attempt.sequence],
+                sequence=attempt.sequence,
+                config=runtime.config,
+                started_at=progress.decision_ts,
+                suspended=False,
+            )
+            if attempt != expected_attempt:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision #623 attempt conflicts with "
+                    "canonical synthetic execution"
+                )
+
+        action_by_id = {
+            action.action_id: action for action in actions
+        }
+        binding_by_id = {
+            binding.action_id: binding
+            for binding in canonical_bindings
+        }
+        ticket_reason_prefix = (
+            "paper execution adoption; "
+            f"decision_id={progress.decision_id}; "
+            f"run_id={run_id}; "
+            f"{PaperExecutionAdoptionRuntime._TICKET_MARKER}"
+        )
+        claimed_tickets: dict[str, list[object]] = {}
+        for ticket in runtime.book.tickets.values():
+            if not ticket.strategy_reason.startswith(ticket_reason_prefix):
+                continue
+            attempt_id = ticket.strategy_reason[
+                len(ticket_reason_prefix) :
+            ]
+            if not attempt_id:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision PaperBook has empty #623 "
+                    "attempt marker"
+                )
+            claimed_tickets.setdefault(attempt_id, []).append(ticket)
+
+        expected_ticket_attempt_ids = {
+            attempt.attempt_id
+            for attempt in attempts
+            if (
+                self.mode is LiveDecisionMode.PAPER
+                and attempt.outcome
+                in {
+                    PaperAttemptOutcome.ACCEPTED,
+                    PaperAttemptOutcome.PARTIAL,
+                }
+            )
+        }
+        if (
+            set(claimed_tickets) != expected_ticket_attempt_ids
+            or any(
+                len(values) != 1
+                for values in claimed_tickets.values()
+            )
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision PaperBook #623 marker set "
+                "conflicts with terminal attempts"
+            )
+
+        for attempt in attempts:
+            marker = (
+                f"{PaperExecutionAdoptionRuntime._TICKET_MARKER}"
+                f"{attempt.attempt_id}"
+            )
+            matches = tuple(
+                claimed_tickets.get(attempt.attempt_id, ())
+            )
+            should_materialize = (
+                self.mode is LiveDecisionMode.PAPER
+                and attempt.outcome
+                in {
+                    PaperAttemptOutcome.ACCEPTED,
+                    PaperAttemptOutcome.PARTIAL,
+                }
+            )
+            if not should_materialize:
+                if matches:
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision materialized unauthorized "
+                        "#623 exposure"
+                    )
+                continue
+            action = action_by_id.get(attempt.action_id)
+            binding = binding_by_id.get(attempt.action_id)
+            if (
+                action is None
+                or binding is None
+                or len(matches) != 1
+                or not runtime._ticket_matches_attempt(
+                    ticket=matches[0],
+                    attempt=attempt,
+                    action=action,
+                    binding=binding,
+                )
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision PaperBook does not bind exact "
+                    "#623 execution attempt"
+                )
+            expected_reason = (
+                "paper execution adoption; "
+                f"decision_id={progress.decision_id}; "
+                f"run_id={run_id}; {marker}"
+            )
+            if matches[0].strategy_reason != expected_reason:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision PaperBook execution reason "
+                    "is not canonical"
+                )
+
     def _verify_committed_progress_ledger_binding(
         self,
         progress: _Progress,
+        *,
+        committed_market_history: tuple[
+            tuple[MarketEvent, int], ...
+        ]
+        | None = None,
     ) -> None:
         if progress.phase != _PHASE_COMMITTED:
             raise LiveDecisionProgressError(
@@ -2118,15 +5800,78 @@ class PersistentLiveDecisionLoop:
             self.authority.contract,
             self.authority.risk_policy,
         )
+        try:
+            detached_payload = existing.to_dict()["payload"]
+            durable_plan = PortfolioPlan.from_dict(detached_payload.get("plan"))
+        except (KeyError, TypeError, ValueError) as exc:
+            raise DecisionLedgerIntegrityError(
+                "committed live decision PortfolioPlan is invalid"
+            ) from exc
+        if (
+            durable_plan.plan_sha256 != progress.plan_sha256
+            or durable_plan.decision_ts != progress.decision_ts
+            or existing.action != f"LIVE_{durable_plan.action.value.upper()}"
+        ):
+            raise DecisionLedgerIntegrityError(
+                "committed live decision PortfolioPlan conflicts with progress"
+            )
+        _, committed_market_time = _canonical_timestamp(
+            "committed market decision_ts",
+            progress.decision_ts,
+        )
+        self._require_committed_market_state_truth(
+            progress=progress,
+            decision_time=committed_market_time,
+            committed_market_history=committed_market_history,
+        )
+        self._verify_committed_execution_binding(
+            existing=existing,
+            durable_plan=durable_plan,
+            progress=progress,
+            committed_market_history=committed_market_history,
+        )
         payload_version = existing.payload.get("schema_version")
-        if payload_version not in {1, 2}:
+        if payload_version not in {1, 2, 3, 4, 5}:
             raise DecisionLedgerIntegrityError(
                 "committed live decision has unsupported schema_version"
             )
+        if payload_version in {2, 3, 4, 5}:
+            expected_payload_keys = {
+                "schema",
+                "schema_version",
+                "loop_id",
+                "mode",
+                "gate",
+                "market_state_sha256",
+                "decision_context_sha256",
+                "intent_strategy_version_id",
+                "intent_model_version_id",
+                "intent_provenance_sha256",
+                "affected_input_ids",
+                "plan_sha256",
+                "plan",
+                MATERIAL_ACTION_ID_PAYLOAD_KEY,
+                ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY,
+                RISK_POLICY_PROVENANCE_PAYLOAD_KEY,
+            }
+            if payload_version in {3, 4, 5}:
+                expected_payload_keys.add("health_boundaries")
+            if payload_version in {4, 5}:
+                expected_payload_keys.add("actionability_wait_evidence")
+            if any(stake > 0 for stake in durable_plan.stakes):
+                expected_payload_keys.add("paper_execution")
+            if set(existing.payload) != expected_payload_keys:
+                raise DecisionLedgerIntegrityError(
+                    "committed live decision payload schema is noncanonical"
+                )
 
         context_payload = {
             "schema": "autosport.live_decision_context",
-            "schema_version": payload_version,
+            "schema_version": (
+                4
+                if payload_version == 5
+                else 3 if payload_version == 4 else payload_version
+            ),
             "loop_id": self.loop_id,
             "mode": self.mode.value,
             "gate": progress.gate,
@@ -2134,7 +5879,7 @@ class PersistentLiveDecisionLoop:
             "decision_context_sha256": progress.decision_context_sha256,
             "plan_sha256": progress.plan_sha256,
         }
-        if payload_version == 2:
+        if payload_version in {2, 3, 4, 5}:
             _, committed_decision_time = _canonical_timestamp(
                 "committed decision_ts",
                 progress.decision_ts,
@@ -2165,6 +5910,55 @@ class PersistentLiveDecisionLoop:
                     "intent_provenance_sha256": provenance.provenance_sha256,
                 }
             )
+            if payload_version in {3, 4, 5}:
+                expected_health_boundaries = (
+                    None
+                    if progress.health_boundaries is None
+                    else [
+                        ProviderHealthReplayBoundary.to_dict(boundary)
+                        for boundary in progress.health_boundaries
+                    ]
+                )
+                if (
+                    detached_payload.get("health_boundaries")
+                    != expected_health_boundaries
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "committed live decision provider-health evidence conflicts "
+                        "with durable progress"
+                    )
+
+        if payload_version in {4, 5}:
+            if progress.gate != _GATE_ACTIONABILITY_WAIT:
+                raise DecisionLedgerIntegrityError(
+                    "schema v4/v5 live decision must be an actionability WAIT"
+                )
+            if durable_plan.intent_ids or any(stake > 0 for stake in durable_plan.stakes):
+                raise DecisionLedgerIntegrityError(
+                    "actionability WAIT durable plan must be zero/no-intent"
+                )
+            try:
+                wait_evidence = self._validated_actionability_wait_evidence(
+                    detached_payload.get("actionability_wait_evidence")
+                )
+                self._require_actionability_wait_provider_health_truth(
+                    wait_evidence,
+                    as_of=committed_decision_time,
+                    health_boundaries=progress.health_boundaries,
+                )
+            except (LiveDecisionProgressError, TypeError, ValueError) as exc:
+                raise DecisionLedgerIntegrityError(
+                    "committed actionability WAIT evidence is invalid"
+                ) from exc
+            affected = frozenset(progress.affected_input_ids)
+            if any(item["input_id"] not in affected for item in wait_evidence):
+                raise DecisionLedgerIntegrityError(
+                    "actionability WAIT evidence references an unaffected input"
+                )
+            if payload_version == 5:
+                context_payload["actionability_wait_evidence_sha256"] = (
+                    _canonical_json_sha256(wait_evidence)
+                )
 
         expected_context_hash = _canonical_json_sha256(context_payload)
         expected_decision_id = f"live-{expected_context_hash}"
@@ -2189,8 +5983,8 @@ class PersistentLiveDecisionLoop:
             != progress.market_state_sha256
             or existing.payload.get("decision_context_sha256")
             != progress.decision_context_sha256
-            or existing.payload.get("affected_input_ids")
-            != progress.affected_input_ids
+            or detached_payload.get("affected_input_ids")
+            != list(progress.affected_input_ids)
             or existing.payload.get("plan_sha256") != progress.plan_sha256
             or existing.payload.get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
             != progress.decision_id
@@ -2199,9 +5993,131 @@ class PersistentLiveDecisionLoop:
                 "committed live progress conflicts with Decision Ledger record"
             )
 
+        latest_live = self._verified_latest_ledger_record(
+            replay_run_id=f"live:{self.loop_id}",
+        )
+        if latest_live is None or latest_live[1].decision_id != progress.decision_id:
+            raise DecisionLedgerIntegrityError(
+                "committed live progress is not the latest durable live decision"
+            )
+
+    @staticmethod
+    def _control_state_sha256(control: _Control | None) -> str | None:
+        if control is None:
+            return None
+        return _canonical_json_sha256(control.to_dict())
+
+    def _control_transition_binding(
+        self,
+        *,
+        previous_state_sha256: str | None,
+        candidate: _Control,
+        kind: str,
+    ) -> str:
+        return _canonical_json_sha256(
+            {
+                "schema": "autosport.live_decision_control_transition",
+                "schema_version": 1,
+                "kind": kind,
+                "loop_id": self.loop_id,
+                "previous_state_sha256": previous_state_sha256,
+                "intended_state_sha256": self._control_state_sha256(candidate),
+                "state": candidate.state.value,
+            }
+        )
+
+    @staticmethod
+    def _control_tx_id(binding_sha256: str) -> str:
+        return f"live-control-{binding_sha256}"
+
+    def _read_control_file(self) -> _Control | None:
+        if not self.control_path.exists():
+            return None
+        try:
+            text = self.control_path.read_text(encoding="utf-8")
+            raw = strict_json_loads(text)
+            return _Control.from_dict(raw)
+        except (OSError, TypeError, ValueError) as exc:
+            raise LiveDecisionProgressError(
+                "cannot verify persisted live decision control"
+            ) from exc
+
+    def _load_control(self) -> _Control | None:
+        control = self._read_control_file()
+        if control is not None and control.loop_id != self.loop_id:
+            raise LiveDecisionProgressError(
+                "persisted live control belongs to a different loop_id"
+            )
+        observed = self._control_state_sha256(control)
+        try:
+            history = self._control_authority.read_history()
+            if not history:
+                if control is None:
+                    return None
+                binding = self._control_transition_binding(
+                    previous_state_sha256=None,
+                    candidate=control,
+                    kind="BOOTSTRAP",
+                )
+                tx_id = self._control_tx_id(binding)
+                self._control_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                self._control_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    semantic_binding_sha256=binding,
+                )
+                return control
+
+            pending = history[-1] if history[-1].phase is AuthorityPhase.PREPARE else None
+            if pending is not None and observed == pending.intended_state_sha256:
+                if control is None:
+                    raise LiveDecisionProgressError(
+                        "prepared live control authority has no durable control bytes"
+                    )
+                matched: tuple[str, str] | None = None
+                for kind in ("TRANSITION", "BOOTSTRAP"):
+                    candidate_binding = self._control_transition_binding(
+                        previous_state_sha256=pending.previous_committed_state_sha256,
+                        candidate=control,
+                        kind=kind,
+                    )
+                    candidate_tx_id = self._control_tx_id(candidate_binding)
+                    if (
+                        candidate_tx_id == pending.tx_id
+                        and candidate_binding == pending.semantic_binding_sha256
+                    ):
+                        matched = (candidate_tx_id, candidate_binding)
+                        break
+                if matched is None:
+                    raise LiveDecisionProgressError(
+                        "prepared live control authority conflicts with durable control semantics"
+                    )
+                tx_id, binding = matched
+                self._control_authority.recover(
+                    observed_state_sha256=observed,
+                    tx_id=tx_id,
+                    semantic_binding_sha256=binding,
+                )
+            else:
+                self._control_authority.recover(
+                    observed_state_sha256=observed,
+                )
+            return control
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise LiveDecisionProgressError(
+                "live decision control failed monotonic rollback/recovery verification"
+            ) from exc
+
     def _persist_control(self, state: LiveControlState) -> None:
+        self._assert_canonical_persistence_authority()
         candidate = _Control(self.loop_id, state)
-        with WorkspaceEconomicLock(self.workspace):
+        with WorkspaceEconomicLock(self._workspace_authority):
+            self._assert_canonical_persistence_authority()
             durable = self._load_control()
             if durable is not None:
                 if durable.loop_id != self.loop_id:
@@ -2213,20 +6129,42 @@ class PersistentLiveDecisionLoop:
                     and state is not LiveControlState.STOPPED
                 ):
                     raise RuntimeError("durable STOP cannot be cleared by this loop")
-            atomic_write_json(self.control_path, candidate.to_dict())
-        self._control = candidate
+            if durable == candidate:
+                self._control = candidate
+                return
 
-    def _load_control(self) -> _Control | None:
-        if not self.control_path.exists():
-            return None
-        try:
-            text = self.control_path.read_text(encoding="utf-8")
-            raw = strict_json_loads(text)
-            return _Control.from_dict(raw)
-        except (OSError, TypeError, ValueError) as exc:
-            raise LiveDecisionProgressError(
-                "cannot verify persisted live decision control"
-            ) from exc
+            observed = self._control_state_sha256(durable)
+            intended = self._control_state_sha256(candidate)
+            assert intended is not None
+            binding = self._control_transition_binding(
+                previous_state_sha256=observed,
+                candidate=candidate,
+                kind="TRANSITION",
+            )
+            tx_id = self._control_tx_id(binding)
+            try:
+                self._control_authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed,
+                    intended_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+                atomic_write_json(self.control_path, candidate.to_dict())
+                published = self._read_control_file()
+                if published != candidate:
+                    raise LiveDecisionProgressError(
+                        "live control publication changed before monotonic commit"
+                    )
+                self._control_authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=intended,
+                    semantic_binding_sha256=binding,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise LiveDecisionProgressError(
+                    "live decision control monotonic publication failed"
+                ) from exc
+        self._control = candidate
 
     def _load_progress(self) -> _Progress | None:
         if not self.progress_path.exists():
@@ -2240,6 +6178,38 @@ class PersistentLiveDecisionLoop:
                 "cannot verify persisted live decision progress"
             ) from exc
 
+    @staticmethod
+    def _snapshot_state_sha256(snapshot: MirrorSnapshot) -> str:
+        # Provider-health horizons are durable replay evidence in _Progress, while
+        # economic market identity changes only when health eligibility changes the
+        # decision-visible event set. Repeated equally-healthy polls therefore do
+        # not manufacture fresh economic decisions.
+        return _canonical_json_sha256(
+            [event.to_dict() for event in snapshot.events]
+        )
+
+    def _health_boundaries_for_progress(
+        self,
+    ) -> tuple[ProviderHealthReplayBoundary, ...]:
+        by_source: dict[str, ProviderHealthReplayBoundary] = {}
+        for boundaries in self._input_health_boundaries.values():
+            if type(boundaries) is not tuple:
+                raise LiveDecisionProgressError(
+                    "focused provider-health horizons must be exact tuples"
+                )
+            for boundary in boundaries:
+                if type(boundary) is not ProviderHealthReplayBoundary:
+                    raise LiveDecisionProgressError(
+                        "focused provider-health horizon must be an exact replay boundary"
+                    )
+                previous = by_source.get(boundary.source_id)
+                if previous is not None and previous != boundary:
+                    raise LiveDecisionProgressError(
+                        "provider-health horizon diverged across focused inputs"
+                    )
+                by_source[boundary.source_id] = boundary
+        return tuple(by_source[source_id] for source_id in sorted(by_source))
+
     def _market_state_sha256(self) -> str:
         payload: list[dict[str, str]] = []
         for input_id in self.dependencies.input_ids:
@@ -2252,12 +6222,25 @@ class PersistentLiveDecisionLoop:
             payload.append({"input_id": input_id, "sha256": digest})
         return _canonical_json_sha256(payload)
 
-    def _market_state_sha256_for_events(self, events) -> str:
+    def _market_state_sha256_for_events(
+        self,
+        events,
+        *,
+        as_of: datetime | None = None,
+        health_boundaries: tuple[ProviderHealthReplayBoundary, ...] | None = None,
+    ) -> str:
         event_tuple = tuple(events)
+        boundary_map = (
+            {}
+            if health_boundaries is None
+            else {
+                boundary.source_id: boundary for boundary in health_boundaries
+            }
+        )
         input_hashes: dict[str, str] = {}
         for input_id, spec in self._input_specs.items():
-            payload = [
-                event.to_dict()
+            selected = tuple(
+                event
                 for event in event_tuple
                 if (
                     (spec.source_ids is None or event.source_id in spec.source_ids)
@@ -2269,8 +6252,30 @@ class PersistentLiveDecisionLoop:
                         or event.selection_id in spec.selection_ids
                     )
                 )
-            ]
-            input_hashes[input_id] = _canonical_json_sha256(payload)
+            )
+            snapshot: MirrorSnapshot = MirrorSnapshot(
+                revision=0,
+                events=selected,
+            )
+            if self._health_gate is not None and health_boundaries is not None:
+                if as_of is None:
+                    raise LiveDecisionProgressError(
+                        "health-gated market reconstruction requires decision time"
+                    )
+                source_ids = {event.source_id for event in selected}
+                if not source_ids.issubset(boundary_map):
+                    raise LiveDecisionProgressError(
+                        "health-gated market reconstruction lacks replay horizons"
+                    )
+                snapshot = self._health_gate.gate_snapshot(
+                    snapshot,
+                    as_of=as_of,
+                    health_boundaries={
+                        source_id: boundary_map[source_id]
+                        for source_id in source_ids
+                    },
+                )
+            input_hashes[input_id] = self._snapshot_state_sha256(snapshot)
         return _canonical_json_sha256(
             [
                 {"input_id": input_id, "sha256": input_hashes[input_id]}

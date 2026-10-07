@@ -13,7 +13,8 @@ from .ingestion_health import (
     parse_source_timestamp,
 )
 from .market_bus import MarketEventBus, MarketEventDeliveryError
-from .providers import CanonicalNormalizer, MarketProvider, ProviderUnavailableError
+from .providers import CanonicalNormalizer, MarketProvider, ProviderBatch, ProviderUnavailableError
+from .storage import _timezone_aware_instant
 
 
 Clock = Callable[[], str]
@@ -29,6 +30,57 @@ class IngestionStats:
     cursor: str | None
     quality_flags: tuple[str, ...] = ()
     health_status: str = "unknown"
+
+    def __post_init__(self) -> None:
+        self.validate()
+
+    def validate(self) -> None:
+        if (
+            type(self.source_id) is not str
+            or not self.source_id
+            or self.source_id.strip() != self.source_id
+            or "|" in self.source_id
+            or any(ord(ch) < 32 or ord(ch) == 127 for ch in self.source_id)
+        ):
+            raise ValueError("source_id must be a canonical exact string")
+        for name in ("received", "accepted", "rejected"):
+            value = getattr(self, name)
+            if type(value) is not int or value < 0:
+                raise ValueError(f"{name} must be a non-negative integer")
+        if self.accepted + self.rejected > self.received:
+            raise ValueError("accepted and rejected cannot exceed received")
+        if (
+            type(self.elapsed_seconds) not in {int, float}
+            or not isfinite(self.elapsed_seconds)
+            or self.elapsed_seconds < 0
+        ):
+            raise ValueError("elapsed_seconds must be a finite non-negative number")
+        if self.cursor is not None:
+            if type(self.cursor) is not str:
+                raise TypeError("cursor must be an exact string or None")
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in self.cursor):
+                raise ValueError("cursor must not contain control characters")
+        if type(self.quality_flags) is not tuple:
+            raise TypeError("quality_flags must be an exact tuple")
+        seen_flags: set[str] = set()
+        for flag in self.quality_flags:
+            if (
+                type(flag) is not str
+                or not flag
+                or flag.strip() != flag
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in flag)
+            ):
+                raise ValueError(
+                    "quality_flags must contain canonical non-empty strings"
+                )
+            if flag in seen_flags:
+                raise ValueError("quality_flags must not contain duplicates")
+            seen_flags.add(flag)
+        if (
+            type(self.health_status) is not str
+            or self.health_status not in {"unknown", "healthy", "degraded", "failed"}
+        ):
+            raise ValueError("health_status must be a canonical health state")
 
     @property
     def accepted_per_second(self) -> float:
@@ -110,13 +162,19 @@ class _SourceHealthSnapshot:
         self, outcome: "CommittedIngestionOutcome"
     ) -> "_SourceHealthSnapshot":
         latest_source_ts = self.latest_source_ts
+        effective_flags = set(outcome.quality_flags)
         if outcome.latest_source_ts is not None:
+            if latest_source_ts is not None and (
+                parse_source_timestamp(outcome.latest_source_ts)
+                < parse_source_timestamp(latest_source_ts)
+            ):
+                effective_flags.add("SOURCE_TIME_REGRESSION")
             if latest_source_ts is None or (
                 parse_source_timestamp(outcome.latest_source_ts)
                 >= parse_source_timestamp(latest_source_ts)
             ):
                 latest_source_ts = outcome.latest_source_ts
-        quality_flags = tuple(sorted(outcome.quality_flags))
+        quality_flags = tuple(sorted(effective_flags))
         return _SourceHealthSnapshot(
             source_id=self.source_id,
             status="degraded" if quality_flags else "healthy",
@@ -217,6 +275,32 @@ class CommittedIngestionHealthError(RuntimeError):
 class IngestionEngine:
     """Deterministic provider -> quality -> normalize -> transactional persistence -> subscriber pipeline."""
 
+    @staticmethod
+    def _abandon_uncommitted_provider_batch(
+        provider: MarketProvider,
+        primary_error: BaseException,
+    ) -> None:
+        """Release provider-local pending state only before market publication begins."""
+
+        abandon = getattr(provider, "abandon_uncommitted", None)
+        has_inflight = getattr(provider, "has_inflight", False)
+        if not callable(abandon) or has_inflight is not True:
+            return
+        try:
+            abandon()
+        except BaseException as cleanup_error:
+            try:
+                try:
+                    detail = str(cleanup_error)
+                except BaseException:
+                    detail = "<unprintable exception>"
+                primary_error.add_note(
+                    "pre-commit provider cleanup also failed: "
+                    f"{type(cleanup_error).__name__}: {detail}"
+                )
+            except BaseException:
+                pass
+
     def __init__(
         self,
         bus: MarketEventBus,
@@ -226,14 +310,24 @@ class IngestionEngine:
         health_store: SourceHealthStore | None = None,
         clock: Clock | None = None,
     ) -> None:
+        if type(bus) is not MarketEventBus:
+            raise TypeError("bus must be an exact MarketEventBus")
+        if normalizer is not None and type(normalizer) is not CanonicalNormalizer:
+            raise TypeError("normalizer must be an exact CanonicalNormalizer or null")
+        if policy is not None and type(policy) is not IngestionPolicy:
+            raise TypeError("policy must be an exact IngestionPolicy or null")
+        if health_store is not None and type(health_store) is not SourceHealthStore:
+            raise TypeError("health_store must be an exact SourceHealthStore or null")
+        if clock is not None and not callable(clock):
+            raise TypeError("clock must be callable or null")
         self.bus = bus
-        self.normalizer = normalizer or CanonicalNormalizer()
-        self.policy = policy or IngestionPolicy()
+        self.normalizer = normalizer if normalizer is not None else CanonicalNormalizer()
+        self.policy = policy if policy is not None else IngestionPolicy()
         self.health_store = health_store
-        self.clock = clock or _utc_now_iso
+        self.clock = clock if clock is not None else _utc_now_iso
 
     def poll_once(self, provider: MarketProvider, max_items: int = 1000) -> IngestionStats:
-        if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
+        if type(max_items) is not int or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
         if max_items > self.policy.max_batch_size:
             raise ValueError(
@@ -247,14 +341,31 @@ class IngestionEngine:
         provider_source_id: str | None = None
         try:
             provider_source_id = provider.source_id
+            if type(provider_source_id) is not str:
+                raise TypeError("provider source_id must be an exact string")
+            if (
+                not provider_source_id
+                or provider_source_id.strip() != provider_source_id
+                or "|" in provider_source_id
+            ):
+                raise ValueError("provider source_id must be canonical")
             batch = provider.read_batch(max_items=max_items)
+            post_read_source_id = provider.source_id
+            if type(post_read_source_id) is not str:
+                raise TypeError("provider source_id must remain an exact string")
+            if post_read_source_id != provider_source_id:
+                raise ValueError("provider source_id changed during batch acquisition")
+            if type(batch) is not ProviderBatch:
+                raise TypeError("provider must return an exact ProviderBatch")
+            if type(batch.source_id) is not str:
+                raise TypeError("provider batch source_id must be an exact string")
             if batch.source_id != provider_source_id:
                 raise ValueError("provider returned mismatched source_id")
             if len(batch.quotes) > max_items:
                 raise ValueError(
                     f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
                 )
-        except Exception as exc:
+        except BaseException as exc:
             if self.health_store is not None and provider_source_id is not None:
                 try:
                     self.health_store.record_failure(
@@ -267,62 +378,105 @@ class IngestionEngine:
                             else "provider_or_validation"
                         ),
                     )
-                except Exception as health_error:
-                    exc.add_note(
-                        "source health failure persistence also failed: "
-                        f"{type(health_error).__name__}: {health_error}"
-                    )
+                except BaseException as health_error:
+                    try:
+                        try:
+                            health_detail = str(health_error)
+                        except BaseException:
+                            health_detail = "<unprintable exception>"
+                        exc.add_note(
+                            "source health failure persistence also failed: "
+                            f"{type(health_error).__name__}: {health_detail}"
+                        )
+                    except BaseException:
+                        pass
                     raise exc from health_error
             raise
 
         # One post-acquisition evidence instant governs both quote-age truth and this
         # poll's health transition. Equal instants remain distinct via durable
         # transition_order; genuinely older direct evidence still fails closed.
-        now = self.clock()
+        #
+        # Everything through ordered_flags is still strictly pre-publication. If one
+        # of these local evidence/normalization steps fails, a stateful provider may
+        # already have advanced its pending snapshot even though market state is not
+        # durable. Release only that proven-uncommitted provider state before the
+        # MarketEventBus boundary; never perform this cleanup after publish_many starts.
+        try:
+            now = self.clock()
 
-        health_before = None
-        previous_source_ts = None
-        if self.health_store is not None:
-            health_before = _SourceHealthSnapshot.from_state(
-                self.health_store.get(batch.source_id)
-            )
-            previous_source_ts = health_before.latest_source_ts
+            health_before = None
+            previous_source_ts = None
+            if self.health_store is not None:
+                health_before = _SourceHealthSnapshot.from_state(
+                    self.health_store.get(batch.source_id)
+                )
+                previous_source_ts = health_before.latest_source_ts
 
-        flags = set(batch.quality_flags)
-        normalized = []
-        rejected = 0
-        latest_source: datetime | None = None
-        now_point = parse_source_timestamp(now)
-        for quote in batch.quotes:
-            source_point: datetime | None = None
-            if quote.source_ts is not None:
+            flags = set(batch.quality_flags)
+            normalized = []
+            rejected = 0
+            latest_source: datetime | None = None
+            now_point = parse_source_timestamp(now)
+            for quote in batch.quotes:
                 try:
-                    source_point = parse_source_timestamp(quote.source_ts)
+                    observed_point = _timezone_aware_instant(
+                        quote.observed_ts,
+                        "observed_ts",
+                    ).astimezone(timezone.utc)
                 except (AttributeError, TypeError, ValueError):
-                    flags.add("INVALID_SOURCE_TIMESTAMP")
+                    flags.add("INVALID_QUOTE")
                     rejected += 1
                     continue
-                age_seconds = (now_point - source_point).total_seconds()
+                if observed_point > now_point:
+                    # observed_ts is local receipt evidence, not provider clock truth.
+                    # A receipt claimed after this already-completed acquisition instant
+                    # cannot be causally true for the current poll.
+                    flags.add("FUTURE_OBSERVATION_TIMESTAMP")
+                    rejected += 1
+                    continue
+
+                source_point: datetime | None = None
+                freshness_point = observed_point
+                if quote.source_ts is not None:
+                    try:
+                        source_point = _timezone_aware_instant(
+                            quote.source_ts,
+                            "source_ts",
+                        ).astimezone(timezone.utc)
+                    except (AttributeError, TypeError, ValueError):
+                        flags.add("INVALID_SOURCE_TIMESTAMP")
+                        rejected += 1
+                        continue
+                    freshness_point = source_point
+
+                age_seconds = (now_point - freshness_point).total_seconds()
                 if age_seconds > self.policy.stale_after_seconds:
                     flags.add("STALE_SOURCE")
-                if age_seconds < -self.policy.max_future_skew_seconds:
+                if source_point is not None and (
+                    age_seconds < -self.policy.max_future_skew_seconds
+                ):
                     flags.add("FUTURE_CLOCK_SKEW")
-            try:
-                event = self.normalizer.normalize(batch.source_id, quote)
-            except (TypeError, ValueError):
-                flags.add("INVALID_QUOTE")
-                rejected += 1
-                continue
-            normalized.append(event)
-            if source_point is not None and (
-                latest_source is None or source_point > latest_source
-            ):
-                latest_source = source_point
+                try:
+                    event = self.normalizer.normalize(batch.source_id, quote)
+                except (TypeError, ValueError):
+                    flags.add("INVALID_QUOTE")
+                    rejected += 1
+                    continue
+                normalized.append(event)
+                if source_point is not None and (
+                    latest_source is None or source_point > latest_source
+                ):
+                    latest_source = source_point
 
-        latest_source_ts = latest_source.isoformat() if latest_source is not None else None
-        if previous_source_ts is not None and latest_source is not None:
-            if latest_source < parse_source_timestamp(previous_source_ts):
-                flags.add("SOURCE_TIME_REGRESSION")
+            latest_source_ts = latest_source.isoformat() if latest_source is not None else None
+            if previous_source_ts is not None and latest_source is not None:
+                if latest_source < parse_source_timestamp(previous_source_ts):
+                    flags.add("SOURCE_TIME_REGRESSION")
+
+        except BaseException as exc:
+            self._abandon_uncommitted_provider_batch(provider, exc)
+            raise
 
         # Persistence and subscriber delivery are local pipeline stages. A failure here
         # must still propagate, but it must not be attributed to provider health after
@@ -349,7 +503,10 @@ class IngestionEngine:
             if self.health_store is not None:
                 try:
                     outcome._record_health_once(self.health_store)
-                except Exception as health_error:
+                except BaseException as health_error:
+                    # Market persistence already committed. Preserve that typed
+                    # disposition even if health publication is interrupted by a
+                    # BaseException so live retry logic cannot replay durable events.
                     raise CommittedIngestionHealthError(
                         outcome,
                         delivery_error=delivery_error,
@@ -369,13 +526,26 @@ class IngestionEngine:
             health_before=health_before,
         )
         health_status = "degraded" if ordered_flags else "healthy"
+        final_quality_flags = ordered_flags
         if self.health_store is not None:
             try:
                 state = outcome._record_health_once(self.health_store)
-            except Exception as health_error:
+            except BaseException as health_error:
+                # The market transaction is already durable at this point. Always
+                # surface the committed-outcome wrapper, including interrupts.
                 raise CommittedIngestionHealthError(outcome) from health_error
             health_status = state.status
-        return outcome.stats(health_status=health_status)
+            final_quality_flags = state.quality_flags
+        return IngestionStats(
+            outcome.source_id,
+            outcome.received,
+            outcome.accepted,
+            outcome.rejected,
+            outcome.elapsed_seconds,
+            outcome.cursor,
+            final_quality_flags,
+            health_status,
+        )
 
 
 def _utc_now_iso() -> str:

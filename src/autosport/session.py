@@ -20,6 +20,7 @@ from .ingestion import IngestionEngine, IngestionStats
 from .ingestion_health import IngestionPolicy, SourceHealthState, SourceHealthStore
 from .integrity import ensure_durable_file, sha256_file
 from .market_bus import MarketEventBus
+from .market_mirror import MarketMirror
 from .outcome_trust import (
     OutcomeLineageBinding,
     outcome_lineage_binding_from_dataset,
@@ -164,6 +165,96 @@ class ObservationResult:
     health: SourceHealthState
     current_quotes: tuple[MarketEvent, ...]
 
+    def __post_init__(self) -> None:
+        if type(self.stats) is not IngestionStats:
+            raise TypeError("observation stats must be an exact IngestionStats")
+        self.stats.validate()
+        if type(self.health) is not SourceHealthState:
+            raise TypeError("observation health must be an exact SourceHealthState")
+        if type(self.current_quotes) is not tuple:
+            raise TypeError("observation current_quotes must be an exact tuple")
+        if any(type(event) is not MarketEvent for event in self.current_quotes):
+            raise TypeError(
+                "observation current_quotes must contain exact MarketEvent values"
+            )
+        stats_snapshot = IngestionStats(
+            self.stats.source_id,
+            self.stats.received,
+            self.stats.accepted,
+            self.stats.rejected,
+            self.stats.elapsed_seconds,
+            self.stats.cursor,
+            self.stats.quality_flags,
+            self.stats.health_status,
+        )
+        health_snapshot = SourceHealthState(**asdict(self.health))
+        quote_snapshots = tuple(
+            MarketEvent.from_dict(event.to_dict())
+            for event in self.current_quotes
+        )
+        object.__setattr__(self, "stats", stats_snapshot)
+        object.__setattr__(self, "health", health_snapshot)
+        object.__setattr__(self, "current_quotes", quote_snapshots)
+        self.validate()
+
+    def validate(self) -> None:
+        if type(self.stats) is not IngestionStats:
+            raise TypeError("observation stats must be an exact IngestionStats")
+        self.stats.validate()
+        if type(self.health) is not SourceHealthState:
+            raise TypeError("observation health must be an exact SourceHealthState")
+        self.health.validate()
+        if type(self.current_quotes) is not tuple:
+            raise TypeError("observation current_quotes must be an exact tuple")
+        if any(type(event) is not MarketEvent for event in self.current_quotes):
+            raise TypeError(
+                "observation current_quotes must contain exact MarketEvent values"
+            )
+        for event in self.current_quotes:
+            if MarketEvent.from_dict(event.to_dict()) != event:
+                raise ValueError(
+                    "observation current quote must retain canonical MarketEvent semantics"
+                )
+        if self.stats.source_id != self.health.source_id:
+            raise ValueError(
+                "observation stats and health must belong to the same source"
+            )
+        if self.stats.health_status != self.health.status:
+            raise ValueError(
+                "observation stats health status must match durable source health"
+            )
+        if self.stats.cursor != self.health.last_cursor:
+            raise ValueError(
+                "observation stats cursor must match durable source health"
+            )
+        if self.stats.quality_flags != self.health.quality_flags:
+            raise ValueError(
+                "observation stats quality flags must match durable source health"
+            )
+        if (
+            self.stats.received > self.health.total_received
+            or self.stats.accepted > self.health.total_accepted
+            or self.stats.rejected > self.health.total_rejected
+        ):
+            raise ValueError(
+                "observation stats cannot exceed durable source health totals"
+            )
+        if any(event.source_id != self.stats.source_id for event in self.current_quotes):
+            raise ValueError(
+                "observation current quotes must belong to the observed source"
+            )
+        quote_keys = tuple(event.quote_key for event in self.current_quotes)
+        if len(set(quote_keys)) != len(quote_keys):
+            raise ValueError("observation current quotes must have unique quote keys")
+        canonical_order = tuple(
+            sorted(
+                self.current_quotes,
+                key=lambda event: event.quote_key,
+            )
+        )
+        if self.current_quotes != canonical_order:
+            raise ValueError("observation current quotes must use canonical order")
+
 
 class AutosportSession(metaclass=_AutosportSessionMeta):
     """V1 runtime for causal replay, paper simulation and read-only market observation."""
@@ -243,12 +334,9 @@ class AutosportSession(metaclass=_AutosportSessionMeta):
         )
         stats = engine.poll_once(provider, max_items=max_items)
         source_id = stats.source_id
-        current = tuple(
-            sorted(
-                (event for event in self.store.current().values() if event.source_id == source_id),
-                key=lambda event: (event.event_id, event.market_id, event.selection_id),
-            )
-        )
+        current = MarketMirror.from_store(self.store).causal_view(
+            source_ids=source_id,
+        ).events
         return ObservationResult(stats, self.source_health.get(source_id), current)
 
     def _capture_economic_authority(

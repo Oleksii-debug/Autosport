@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from typing import get_type_hints
 
 from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
@@ -132,6 +133,61 @@ class ProviderHealthReplayBoundaryTests(unittest.TestCase):
             self.assertEqual(health.eligibility, ProviderDecisionEligibility.UNKNOWN)
             self.assertEqual(health.replay_boundary.transition_order, 0)
             self.assertIsNone(health.replay_boundary.recorded_at)
+
+
+    def test_health_gate_type_hints_resolve_runtime_mapping_contract(self) -> None:
+        hints = get_type_hints(HealthGatedMirrorDecisionIndex.gate_snapshot)
+        self.assertIn("health_boundaries", hints)
+
+    def test_health_boundary_round_trip_is_canonical(self) -> None:
+        boundary = ProviderHealthReplayBoundary(
+            source_id="provider-a",
+            recorded_at="2026-09-17T12:00:03+00:00",
+            transition_order=1,
+        )
+        self.assertEqual(
+            ProviderHealthReplayBoundary.from_dict(boundary.to_dict()),
+            boundary,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "zero health replay boundary cannot carry recorded_at",
+        ):
+            ProviderHealthReplayBoundary(
+                source_id="provider-a",
+                recorded_at="2026-09-17T12:00:03+00:00",
+                transition_order=0,
+            )
+
+    def test_gate_snapshot_replays_exact_health_horizon_over_proven_market_view(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            gate, store = self._gate(directory)
+            self._record_success(store, now="2026-09-17T12:00:03+00:00")
+            as_of = datetime(2026, 9, 17, 12, 0, 5, tzinfo=timezone.utc)
+            fresh = gate.decision_view(
+                "decision",
+                as_of=as_of,
+                max_age=timedelta(minutes=1),
+            )
+            store.record_failure(
+                "provider-a",
+                now="2026-09-17T12:00:03+00:00",
+                error=ConnectionError("equal-time later health transition"),
+            )
+            proven_market = MirrorSnapshot(
+                revision=fresh.revision,
+                events=(self._event(),),
+            )
+            replayed = gate.gate_snapshot(
+                proven_market,
+                as_of=as_of,
+                health_boundaries={
+                    boundary.source_id: boundary
+                    for boundary in fresh.health_boundaries
+                },
+            )
+            self.assertEqual(replayed.events, fresh.events)
+            self.assertEqual(replayed.health_boundaries, fresh.health_boundaries)
 
 
 if __name__ == "__main__":

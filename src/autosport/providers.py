@@ -16,22 +16,26 @@ _EXCHANGE_SIDES = frozenset({"back", "lay"})
 
 
 def _validate_source_id(source_id: object) -> str:
-    if not isinstance(source_id, str):
-        raise TypeError("source_id must be str")
+    if type(source_id) is not str:
+        raise TypeError("source_id must be an exact str")
     if not source_id or source_id != source_id.strip():
         raise ValueError("source_id must be non-empty and trimmed")
     if "|" in source_id:
         raise ValueError("source_id must not contain reserved identity delimiter '|'")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in source_id):
+        raise ValueError("source_id must not contain control characters")
     return source_id
 
 
 def _validate_provider_component(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be str")
+    if type(value) is not str:
+        raise TypeError(f"{name} must be an exact str")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty and trimmed")
     if "|" in value:
         raise ValueError(f"{name} must not contain reserved identity delimiter '|'")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{name} must not contain control characters")
     return value
 
 
@@ -53,10 +57,12 @@ def _validate_sequence(value: object) -> int:
 
 
 def _validate_provider_text(value: object, name: str) -> str:
-    if not isinstance(value, str):
-        raise TypeError(f"{name} must be str")
+    if type(value) is not str:
+        raise TypeError(f"{name} must be an exact str")
     if not value or value != value.strip():
         raise ValueError(f"{name} must be non-empty and trimmed")
+    if any(ord(ch) < 32 or ord(ch) == 127 for ch in value):
+        raise ValueError(f"{name} must not contain control characters")
     return value
 
 
@@ -96,13 +102,15 @@ def _snapshot_json_value(value: object, field: str) -> Any:
     active_containers: set[int] = set()
 
     def snapshot(current: object, path: str, depth: int) -> Any:
-        if current is None or isinstance(current, (str, bool, int)):
+        if current is None:
+            return None
+        if type(current) in {str, bool, int}:
             return current
-        if isinstance(current, float):
+        if type(current) is float:
             if not math.isfinite(current):
                 raise ValueError(f"{path} contains non-finite JSON number")
             return current
-        if isinstance(current, (list, dict)):
+        if type(current) in {list, dict}:
             if depth > _MAX_PROVIDER_METADATA_NESTING:
                 raise ValueError(
                     f"{field} exceeds maximum JSON nesting depth "
@@ -113,7 +121,7 @@ def _snapshot_json_value(value: object, field: str) -> Any:
                 raise ValueError(f"{path} contains cyclic JSON container")
             active_containers.add(container_id)
             try:
-                if isinstance(current, list):
+                if type(current) is list:
                     return [
                         snapshot(item, f"{path}[{index}]", depth + 1)
                         for index, item in enumerate(current)
@@ -121,8 +129,8 @@ def _snapshot_json_value(value: object, field: str) -> Any:
 
                 result: dict[str, Any] = {}
                 for key, item in current.items():
-                    if not isinstance(key, str):
-                        raise TypeError(f"{path} contains non-string JSON object key")
+                    if type(key) is not str:
+                        raise TypeError(f"{path} contains non-canonical JSON object key")
                     result[key] = snapshot(item, f"{path}.{key}", depth + 1)
                 return result
             finally:
@@ -189,15 +197,22 @@ class ProviderBatch:
         for quote in self.quotes:
             if type(quote) is not ProviderQuote:
                 raise TypeError("provider batch quote must be ProviderQuote")
-        if self.cursor is not None and not isinstance(self.cursor, str):
-            raise TypeError("provider batch cursor must be str or None")
+        if self.cursor is not None:
+            if type(self.cursor) is not str:
+                raise TypeError("provider batch cursor must be an exact str or None")
+            if any(ord(ch) < 32 or ord(ch) == 127 for ch in self.cursor):
+                raise ValueError("provider batch cursor must not contain control characters")
         if type(self.quality_flags) is not tuple:
             raise TypeError("provider batch quality_flags must be a tuple of strings")
         for flag in self.quality_flags:
             if type(flag) is not str:
                 raise TypeError("provider batch quality flag must be str")
-            if not flag or flag != flag.strip():
-                raise ValueError("provider batch quality flag must be non-empty and trimmed")
+            if (
+                not flag
+                or flag != flag.strip()
+                or any(ord(ch) < 32 or ord(ch) == 127 for ch in flag)
+            ):
+                raise ValueError("provider batch quality flag must be canonical text")
         if len(set(self.quality_flags)) != len(self.quality_flags):
             raise ValueError("duplicate provider batch quality flag")
 
@@ -222,8 +237,8 @@ class CanonicalNormalizer:
 
     def normalize(self, source_id: str, quote: ProviderQuote) -> MarketEvent:
         source_id = _validate_source_id(source_id)
-        if not isinstance(quote.decimal_odds, Decimal):
-            raise TypeError("decimal odds must be Decimal")
+        if type(quote.decimal_odds) is not Decimal:
+            raise TypeError("decimal odds must be an exact Decimal")
         if not quote.decimal_odds.is_finite():
             raise ValueError("decimal odds must be finite")
         if quote.decimal_odds <= 1:
@@ -238,8 +253,8 @@ class CanonicalNormalizer:
         score_state = quote.score_state
         if score_state is not None:
             score_state = _validate_provider_text(score_state, "score_state")
-        if not isinstance(quote.metadata, dict):
-            raise TypeError("metadata must be dict")
+        if type(quote.metadata) is not dict:
+            raise TypeError("metadata must be an exact dict")
         metadata = _snapshot_json_value(quote.metadata, "metadata")
         if not isinstance(metadata, dict):
             raise TypeError("metadata must be dict")

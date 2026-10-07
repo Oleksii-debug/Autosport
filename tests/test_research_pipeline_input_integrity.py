@@ -1,5 +1,6 @@
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -80,6 +81,18 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
                 ):
                     ResearchEvidence(**kwargs)
 
+
+    def test_research_evidence_rejects_uppercase_digest_aliases(self):
+        for field in ("content_sha256", "market_snapshot_hash"):
+            with self.subTest(field=field):
+                kwargs = self._evidence_kwargs()
+                kwargs[field] = str(kwargs[field]).upper()
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "lowercase 64-character SHA-256",
+                ):
+                    ResearchEvidence(**kwargs)
+
     def test_research_evidence_requires_canonical_string_identity_and_timestamps(self):
         for field, value in (
             ("evidence_id", " evidence-1"),
@@ -93,6 +106,30 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
                 kwargs[field] = value
                 with self.assertRaisesRegex(ValueError, field):
                     ResearchEvidence(**kwargs)
+
+
+    def test_research_evidence_rejects_nonzero_submicrosecond_causal_timestamps(self):
+        for field in ("observed_at", "available_at"):
+            with self.subTest(field=field):
+                kwargs = self._evidence_kwargs()
+                kwargs[field] = "2026-09-14T10:00:00.0000001+00:00"
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    ResearchEvidence(**kwargs)
+
+    def test_research_evidence_accepts_zero_only_excess_fractional_precision(self):
+        kwargs = self._evidence_kwargs()
+        kwargs["observed_at"] = "2026-09-14T10:00:00.123456000+00:00"
+        kwargs["available_at"] = "2026-09-14T10:00:01.123456000+00:00"
+
+        evidence = ResearchEvidence(**kwargs)
+
+        self.assertEqual(
+            evidence.available_at,
+            "2026-09-14T10:00:01.123456000+00:00",
+        )
 
     def test_research_evidence_rejects_non_utf8_hash_relevant_text(self):
         for field in ("evidence_id", "quote_key", "source_id"):
@@ -206,6 +243,33 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
                 self.assertEqual(book.tickets, {})
                 self.assertFalse(ledger.path.exists())
 
+
+    def test_pipeline_rejects_lossy_submicrosecond_decision_time_before_economic_work(self):
+        pipeline = ResearchDecisionPipeline()
+        book = PaperBook("100")
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "precision finer than microseconds is unsupported",
+            ):
+                pipeline.decide_and_open(
+                    book=book,
+                    candidate=None,
+                    groups=[],
+                    forecasts={},
+                    evidence=(),
+                    stake="1",
+                    decision_ts="2026-09-14T10:00:00.0000001+00:00",
+                    decision_ledger=ledger,
+                    replay_run_id="research-run",
+                )
+
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse(ledger.path.exists())
+
     def test_pipeline_rejects_noncanonical_audit_identity_before_economic_work(self):
         pipeline = ResearchDecisionPipeline()
         book = PaperBook("100")
@@ -286,6 +350,66 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
 
             self.assertEqual(HostileString.strip_calls, 0)
             self.assertEqual(HostileString.encode_calls, 0)
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse(ledger.path.exists())
+
+
+    def test_pipeline_rejects_duplicate_evidence_ids_before_economic_work(self):
+        pipeline = ResearchDecisionPipeline()
+        book = PaperBook("100")
+        candidate, groups, forecasts, evidence = self._approved_inputs()
+        duplicate = replace(
+            evidence[0],
+            content_sha256="c" * 64,
+            available_at="2026-09-14T10:00:02+00:00",
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "research evidence_id values must be unique",
+            ):
+                pipeline.decide_and_open(
+                    book=book,
+                    candidate=candidate,
+                    groups=groups,
+                    forecasts=forecasts,
+                    evidence=(evidence[0], duplicate),
+                    stake="10",
+                    decision_ts="2026-09-14T10:00:03+00:00",
+                    decision_ledger=ledger,
+                    replay_run_id="research-run",
+                )
+
+            self.assertEqual(book.balance, Decimal("100"))
+            self.assertEqual(book.tickets, {})
+            self.assertFalse(ledger.path.exists())
+
+    def test_pipeline_rejects_non_evidence_items_before_economic_work(self):
+        pipeline = ResearchDecisionPipeline()
+        book = PaperBook("100")
+        candidate, groups, forecasts, _evidence = self._approved_inputs()
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = JsonlDecisionLedger(Path(tmp) / "decisions.jsonl")
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "evidence must contain ResearchEvidence items",
+            ):
+                pipeline.decide_and_open(
+                    book=book,
+                    candidate=candidate,
+                    groups=groups,
+                    forecasts=forecasts,
+                    evidence=({"forged": True},),
+                    stake="10",
+                    decision_ts="2026-09-14T10:00:03+00:00",
+                    decision_ledger=ledger,
+                    replay_run_id="research-run",
+                )
+
             self.assertEqual(book.balance, Decimal("100"))
             self.assertEqual(book.tickets, {})
             self.assertFalse(ledger.path.exists())

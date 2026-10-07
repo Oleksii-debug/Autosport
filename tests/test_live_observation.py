@@ -1,12 +1,17 @@
+import sqlite3
 import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
-from autosport.ingestion_health import SourceHealthStore
+import autosport.live_observation as live_observation_module
+import autosport.storage as storage_module
+from autosport.domain import MarketEvent
+from autosport.ingestion_health import IngestionPolicy, SourceHealthStore
 from autosport.live_observation import (
     OneShotObservationWorker,
     observe_workspace_once,
@@ -14,7 +19,8 @@ from autosport.live_observation import (
 )
 from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
-from autosport.providers import InMemoryProvider, ProviderQuote
+from autosport.providers import InMemoryProvider, ProviderBatch, ProviderQuote
+from autosport.session import ObservationResult
 from autosport.storage import SQLiteMarketStore
 from autosport.ui_model import observation_quote_lines, observation_summary
 
@@ -68,6 +74,23 @@ class LiveObservationTests(unittest.TestCase):
             time.sleep(0.01)
         raise AssertionError("worker did not publish terminal message")
 
+    def test_workspace_observer_rejects_noncallable_provider_before_workspace_creation(self):
+        class Provider:
+            source_id = "live-fixture"
+            read_batch = object()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "read_batch must be callable"):
+                observe_workspace_once(
+                    workspace,
+                    Provider(),
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(workspace.exists())
+
     def test_workspace_observer_uses_short_lived_market_and_health_stores_only(self):
         with tempfile.TemporaryDirectory() as tmp:
             result = self._observe(tmp)
@@ -94,6 +117,1128 @@ class LiveObservationTests(unittest.TestCase):
                         )
 
             store_type.return_value.close.assert_called_once_with()
+
+    def test_live_observation_rejects_substituted_authority_types_before_provider_read(self):
+        class Store(SQLiteMarketStore):
+            pass
+
+        class HealthStore(SourceHealthStore):
+            pass
+
+        class Updates(BoundedMirrorInvalidationBuffer):
+            pass
+
+        class ExplosiveProvider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            health_store = SourceHealthStore(root / "source_health.json")
+            updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+            hostile_store = Store(root / "other-market.db")
+            hostile_health = HealthStore(root / "other-health.json")
+            hostile_updates = Updates(MarketMirror())
+            try:
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    poll_open_market_store_once(
+                        hostile_store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                    )
+                with self.assertRaisesRegex(TypeError, "exact SourceHealthStore"):
+                    poll_open_market_store_once(
+                        store,
+                        hostile_health,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                    )
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "exact BoundedMirrorInvalidationBuffer",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=hostile_updates,
+                    )
+                observer_root = root / "workspace-observer"
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "exact BoundedMirrorInvalidationBuffer",
+                ):
+                    observe_workspace_once(
+                        observer_root,
+                        ExplosiveProvider(),
+                        mirror_updates=hostile_updates,
+                    )
+                self.assertFalse(observer_root.exists())
+            finally:
+                hostile_store.close()
+                store.close()
+
+    def test_workspace_observer_rejects_invalid_max_items_before_workspace_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-max-items"
+
+            with self.assertRaisesRegex(ValueError, "positive integer"):
+                observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=0,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_policy_subclass_before_workspace_creation(self):
+        class Policy(IngestionPolicy):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-policy"
+
+            with self.assertRaisesRegex(TypeError, "exact IngestionPolicy"):
+                observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=10,
+                    policy=Policy(),
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_noncallable_clock_before_workspace_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-clock"
+
+            with self.assertRaisesRegex(TypeError, "clock must be callable"):
+                observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=10,
+                    clock="not-a-clock",
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_provider_identity_before_workspace_creation(self):
+        class Text(str):
+            pass
+
+        class Provider:
+            source_id = Text("live-fixture")
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-provider"
+
+            with self.assertRaisesRegex(TypeError, "exact string"):
+                observe_workspace_once(
+                    root,
+                    Provider(),
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_generic_betfair_stream_spoof_before_workspace_creation(self):
+        class Provider:
+            source_id = "betfair_exchange_stream"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "spoofed-betfair"
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "requires the canonical authenticated stream-to-provider bridge",
+            ):
+                observe_workspace_once(
+                    root,
+                    Provider(),
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_workspace_observer_rejects_backpressure_overflow_before_workspace_creation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "invalid-backpressure"
+            policy = IngestionPolicy(max_batch_size=1)
+
+            with self.assertRaisesRegex(ValueError, "exceeds backpressure limit"):
+                observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=2,
+                    policy=policy,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+            self.assertFalse(root.exists())
+
+    def test_open_store_poll_rejects_invalid_controls_before_provider_read(self):
+        class ExplosiveProvider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(ValueError, "positive integer"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                        max_items=0,
+                    )
+                with self.assertRaisesRegex(TypeError, "clock must be callable"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                        max_items=1,
+                        clock="not-a-clock",
+                    )
+                class Policy(IngestionPolicy):
+                    pass
+                with self.assertRaisesRegex(TypeError, "exact IngestionPolicy"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                        max_items=1,
+                        policy=Policy(),
+                    )
+                with self.assertRaisesRegex(ValueError, "exceeds backpressure limit"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        ExplosiveProvider(),
+                        mirror_updates=updates,
+                        max_items=2,
+                        policy=IngestionPolicy(max_batch_size=1),
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_open_store_poll_rejects_generic_betfair_stream_spoof_before_read(self):
+        class Provider:
+            source_id = "betfair_exchange_stream"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(
+                    MarketMirror.from_store(store)
+                )
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "requires the canonical authenticated stream-to-provider bridge",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        Provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_open_store_poll_rejects_batch_source_identity_mismatch_before_persistence(self):
+        class MismatchedBatchProvider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return ProviderBatch(
+                    source_id="foreign-source",
+                    quotes=(
+                        ProviderQuote(
+                            provider_event_id="match-1",
+                            provider_market_id="winner",
+                            provider_selection_id="player-a",
+                            decimal_odds=Decimal("1.80"),
+                            observed_ts="2026-09-12T20:00:00+00:00",
+                            sequence=1,
+                            source_ts="2026-09-12T19:59:59+00:00",
+                        ),
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "batch source identity conflicts",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        MismatchedBatchProvider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_open_store_poll_rejects_provider_source_id_subclass_before_read(self):
+        class Text(str):
+            pass
+
+        class Provider:
+            source_id = Text("live-fixture")
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider read executed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(TypeError, "exact string"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        Provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_open_store_poll_rejects_substituted_batch_before_batch_property_access(self):
+        class HostileBatch:
+            @property
+            def source_id(self):
+                raise AssertionError("hostile batch source_id accessed")
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                return HostileBatch()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(TypeError, "exact ProviderBatch"):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        Provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_rejected_mismatched_batch_resets_same_authority_provider_snapshot(self):
+        class Provider:
+            source_id = "live-fixture"
+
+            def __init__(self) -> None:
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return ProviderBatch(
+                    source_id="foreign-source",
+                    quotes=(),
+                    cursor="bad-source",
+                )
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(RuntimeError, "batch source identity conflicts"):
+            wrapped.read_batch(max_items=1)
+
+        self.assertEqual(provider.reset_calls, 1)
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_rejected_noncanonical_batch_type_resets_provider_snapshot(self):
+        class Provider:
+            source_id = "live-fixture"
+
+            def __init__(self) -> None:
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000):
+                return object()
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(TypeError, "exact ProviderBatch"):
+            wrapped.read_batch(max_items=1)
+
+        self.assertEqual(provider.reset_calls, 1)
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_rejected_read_reset_failure_preserves_primary_validation_error(self):
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                return object()
+
+            def reset_pending_snapshot(self) -> None:
+                raise RuntimeError("reset failed")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(TypeError, "exact ProviderBatch") as raised:
+            wrapped.read_batch(max_items=1)
+
+        self.assertTrue(
+            any(
+                "provider rejected-read snapshot reset also failed: RuntimeError: reset failed"
+                in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_replayable_provider_rejects_equal_string_subclass_before_read(self):
+        class SourceId(str):
+            pass
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.calls += 1
+                return ProviderBatch(
+                    source_id="live-fixture",
+                    quotes=(),
+                    cursor="cursor-1",
+                )
+
+        provider = Provider()
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        provider.source_id = SourceId("live-fixture")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "source identity changed before live batch read",
+        ):
+            wrapped.read_batch(max_items=1)
+
+        self.assertEqual(provider.calls, 0)
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_open_store_poll_rejects_equal_string_subclass_source_substitution(self):
+        class SourceId(str):
+            pass
+
+        class MutatingProvider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.source_id = SourceId("live-fixture")
+                return ProviderBatch(
+                    source_id="live-fixture",
+                    quotes=(),
+                    cursor="cursor-1",
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "source identity changed during live batch read",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        MutatingProvider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_open_store_poll_rejects_provider_source_mutation_during_read_before_persistence(self):
+        class MutatingProvider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.source_id = "mutated-source"
+                return ProviderBatch(
+                    source_id="live-fixture",
+                    quotes=(
+                        ProviderQuote(
+                            provider_event_id="match-1",
+                            provider_market_id="winner",
+                            provider_selection_id="player-a",
+                            decimal_odds=Decimal("1.80"),
+                            observed_ts="2026-09-12T20:00:00+00:00",
+                            sequence=1,
+                            source_ts="2026-09-12T19:59:59+00:00",
+                        ),
+                    ),
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+                health_store = SourceHealthStore(root / "source_health.json")
+                with self.assertRaisesRegex(
+                    RuntimeError,
+                    "source identity changed during live batch read",
+                ):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        MutatingProvider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: _RECEIVE_TIME,
+                    )
+                self.assertEqual(store.events(), ())
+                self.assertEqual(updates.mirror.view().events, ())
+            finally:
+                store.close()
+
+    def test_precommit_clock_failure_resets_stateful_provider_snapshot(self):
+        batch = self._provider().read_batch(max_items=10)
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def __init__(self) -> None:
+                self.read_calls = 0
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.read_calls += 1
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health_store = SourceHealthStore(root / "source_health.json")
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+
+                with self.assertRaises(ValueError):
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        provider,
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: "not-a-timestamp",
+                    )
+
+                self.assertEqual(provider.read_calls, 1)
+                self.assertEqual(provider.reset_calls, 1)
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_precommit_health_read_failure_resets_stateful_provider_snapshot(self):
+        batch = self._provider().read_batch(max_items=10)
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def __init__(self) -> None:
+                self.read_calls = 0
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.read_calls += 1
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health_store = SourceHealthStore(root / "source_health.json")
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+
+                with patch.object(
+                    health_store,
+                    "get",
+                    side_effect=OSError("health read unavailable"),
+                ):
+                    with self.assertRaisesRegex(OSError, "health read unavailable"):
+                        poll_open_market_store_once(
+                            store,
+                            health_store,
+                            provider,
+                            mirror_updates=updates,
+                            max_items=10,
+                            clock=lambda: _RECEIVE_TIME,
+                        )
+
+                self.assertEqual(provider.read_calls, 1)
+                self.assertEqual(provider.reset_calls, 1)
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_precommit_cleanup_failure_preserves_primary_clock_error(self):
+        batch = self._provider().read_batch(max_items=10)
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                raise RuntimeError("reset failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health_store = SourceHealthStore(root / "source_health.json")
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror.from_store(store))
+
+                with self.assertRaises(ValueError) as raised:
+                    poll_open_market_store_once(
+                        store,
+                        health_store,
+                        Provider(),
+                        mirror_updates=updates,
+                        max_items=10,
+                        clock=lambda: "not-a-timestamp",
+                    )
+
+                self.assertTrue(
+                    any(
+                        "pre-commit provider cleanup also failed: RuntimeError: reset failed"
+                        in note
+                        for note in getattr(raised.exception, "__notes__", ())
+                    )
+                )
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_sqlite_retry_revalidates_provider_source_identity_before_cached_batch_reuse(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.read_count = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                self.read_count += 1
+                return batch
+
+        provider = Provider()
+
+        class Engine:
+            def __init__(self) -> None:
+                self.attempt = 0
+
+            def poll_once(self, wrapped, max_items: int = 1000):
+                self.attempt += 1
+                wrapped.read_batch(max_items=max_items)
+                if self.attempt == 1:
+                    provider.source_id = "mutated-source"
+                    raise sqlite3.OperationalError("database-locked")
+                raise AssertionError("cached batch was reused after authority drift")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "source identity changed before live batch retry",
+        ):
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertEqual(provider.read_count, 1)
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_final_sqlite_failure_does_not_reset_after_provider_source_drift(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+
+        class Engine:
+            def __init__(self) -> None:
+                self.attempt = 0
+
+            def poll_once(self, wrapped, max_items: int = 1000):
+                self.attempt += 1
+                wrapped.read_batch(max_items=max_items)
+                if self.attempt == 1:
+                    raise sqlite3.OperationalError("database-locked")
+                provider.source_id = "mutated-source"
+                raise sqlite3.OperationalError("database-still-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(
+            sqlite3.OperationalError,
+            "database-still-locked",
+        ) as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertEqual(provider.reset_calls, 0)
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider source identity changed before pending-snapshot reset"
+                in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_abandon_uncommitted_rejects_equal_string_subclass_source_identity(self):
+        class SourceId(str):
+            pass
+
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+
+        provider = Provider()
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        self.assertIs(wrapped.read_batch(max_items=1), batch)
+        provider.source_id = SourceId("live-fixture")
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "source identity changed before pending-snapshot reset",
+        ):
+            wrapped.abandon_uncommitted()
+
+        self.assertEqual(provider.reset_calls, 0)
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_source_drift_clears_cached_batch_without_dispatching_foreign_reset(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            def __init__(self) -> None:
+                self.source_id = "live-fixture"
+                self.reset_calls = 0
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                self.reset_calls += 1
+                raise AssertionError("foreign-authority reset must not run")
+
+        provider = Provider()
+
+        class Engine:
+            def __init__(self) -> None:
+                self.attempt = 0
+
+            def poll_once(self, wrapped, max_items: int = 1000):
+                self.attempt += 1
+                wrapped.read_batch(max_items=max_items)
+                if self.attempt == 1:
+                    provider.source_id = "mutated-source"
+                    raise sqlite3.OperationalError("database-locked")
+                raise AssertionError("cached batch was reused after authority drift")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(provider)
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "source identity changed before live batch retry",
+        ) as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertEqual(provider.reset_calls, 0)
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider source identity changed before pending-snapshot reset"
+                in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_sqlite_retry_clears_inflight_when_reset_descriptor_lookup_fails(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+        )
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            @property
+            def reset_pending_snapshot(self):
+                raise RuntimeError("reset descriptor failed")
+
+        class Engine:
+            def poll_once(self, provider, max_items: int = 1000):
+                provider.read_batch(max_items=max_items)
+                raise sqlite3.OperationalError("database-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "database-locked") as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider pending-snapshot reset also failed: "
+                "RuntimeError: reset descriptor failed" in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_rejected_read_reset_descriptor_failure_preserves_primary_error(self):
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                return object()
+
+            @property
+            def reset_pending_snapshot(self):
+                raise RuntimeError("reset descriptor failed")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(TypeError, "exact ProviderBatch") as raised:
+            wrapped.read_batch(max_items=1)
+
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider rejected-read snapshot reset lookup also failed: "
+                "RuntimeError: reset descriptor failed" in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_sqlite_retry_preserves_primary_failure_when_provider_reset_fails(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                raise RuntimeError("reset-failed")
+
+        class Engine:
+            def poll_once(self, provider, max_items: int = 1000):
+                provider.read_batch(max_items=max_items)
+                raise sqlite3.OperationalError("database-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "database-locked") as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider pending-snapshot reset also failed: RuntimeError: reset-failed"
+                in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_sqlite_retry_preserves_primary_failure_when_provider_reset_is_unprintable(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+
+        class UnprintableResetError(RuntimeError):
+            def __str__(self) -> str:
+                raise RuntimeError("stringification-failed")
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                raise UnprintableResetError()
+
+        class Engine:
+            def poll_once(self, provider, max_items: int = 1000):
+                provider.read_batch(max_items=max_items)
+                raise sqlite3.OperationalError("database-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "database-locked") as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider pending-snapshot reset also failed: "
+                "UnprintableResetError: <unprintable exception>" in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_sqlite_retry_preserves_primary_failure_when_provider_reset_raises_base_exception(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                raise SystemExit("reset-stop")
+
+        class Engine:
+            def poll_once(self, provider, max_items: int = 1000):
+                provider.read_batch(max_items=max_items)
+                raise sqlite3.OperationalError("database-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(sqlite3.OperationalError, "database-locked") as raised:
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertFalse(wrapped.has_inflight)
+        self.assertTrue(
+            any(
+                "provider pending-snapshot reset also failed: SystemExit: reset-stop"
+                in note
+                for note in getattr(raised.exception, "__notes__", ())
+            )
+        )
+
+    def test_sqlite_primary_failure_survives_hostile_diagnostic_annotation(self):
+        batch = ProviderBatch(
+            source_id="live-fixture",
+            quotes=(),
+            cursor="cursor-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+
+        class HostileOperationalError(sqlite3.OperationalError):
+            def add_note(self, note: str) -> None:
+                raise RuntimeError("note-rejected")
+
+        class Provider:
+            source_id = "live-fixture"
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                return batch
+
+            def reset_pending_snapshot(self) -> None:
+                raise RuntimeError("reset-failed")
+
+        class Engine:
+            def poll_once(self, provider, max_items: int = 1000):
+                provider.read_batch(max_items=max_items)
+                raise HostileOperationalError("database-locked")
+
+        wrapped = live_observation_module._ReplayableBatchProvider(Provider())
+        with self.assertRaisesRegex(
+            HostileOperationalError,
+            "database-locked",
+        ):
+            live_observation_module._poll_acknowledged(
+                Engine(),
+                wrapped,
+                max_items=1,
+            )
+
+        self.assertFalse(wrapped.has_inflight)
+
+    def test_live_acknowledges_durable_batch_after_subscriber_interrupt(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                health = SourceHealthStore(root / "source_health.json")
+                bus = live_observation_module.MarketEventBus(store)
+
+                def interrupt(_event):
+                    raise SystemExit("subscriber-stop")
+
+                bus.subscribe(interrupt)
+                engine = live_observation_module.IngestionEngine(
+                    bus,
+                    health_store=health,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+                wrapped = live_observation_module._ReplayableBatchProvider(
+                    self._provider()
+                )
+
+                with self.assertRaises(
+                    live_observation_module.MarketEventDeliveryError
+                ):
+                    live_observation_module._poll_acknowledged(
+                        engine,
+                        wrapped,
+                        max_items=10,
+                    )
+
+                self.assertFalse(wrapped.has_inflight)
+                self.assertEqual(len(store.events()), 2)
+                state = health.get("live-fixture")
+                self.assertEqual(state.total_received, 2)
+                self.assertEqual(state.total_accepted, 2)
+                self.assertEqual(state.total_failures, 0)
+            finally:
+                store.close()
 
     def test_open_store_poll_does_not_rescan_append_only_history(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -124,6 +1269,528 @@ class LiveObservationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_long_lived_mirror_rejects_foreign_workspace_state_before_provider_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            source_workspace = base / "source"
+            foreign = observe_workspace_once(
+                source_workspace,
+                self._provider(),
+                max_items=10,
+                clock=lambda: _RECEIVE_TIME,
+            ).current_quotes[0]
+
+            mirror = MarketMirror()
+            mirror._apply_with_causal_authority(
+                foreign,
+                decision_causal=True,
+            )
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+
+            class Provider:
+                source_id = "live-fixture"
+
+                def __init__(self) -> None:
+                    self.calls = 0
+
+                def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                    self.calls += 1
+                    raise AssertionError("provider I/O must not run")
+
+            provider = Provider()
+            target_workspace = base / "target"
+            with self.assertRaisesRegex(
+                ValueError,
+                "outside current workspace history",
+            ):
+                observe_workspace_once(
+                    target_workspace,
+                    provider,
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                    mirror_updates=updates,
+                )
+
+            self.assertEqual(provider.calls, 0)
+            target_store = SQLiteMarketStore(target_workspace / "market.db")
+            try:
+                self.assertEqual(target_store.events(), ())
+            finally:
+                target_store.close()
+
+    def test_long_lived_reconciliation_invalidates_preexisting_positive_history(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._observe(tmp)
+            self.assertEqual(first.stats.accepted, 2)
+
+            mirror = MarketMirror()
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+            repeated = observe_workspace_once(
+                tmp,
+                self._provider(),
+                max_items=10,
+                clock=lambda: _RECEIVE_TIME,
+                mirror_updates=updates,
+            )
+
+            self.assertEqual(repeated.stats.accepted, 0)
+            active = mirror.active_view(
+                as_of=datetime.fromisoformat(_RECEIVE_TIME),
+                max_age=timedelta(minutes=2),
+                source_ids="live-fixture",
+            )
+            self.assertEqual(len(active.events), 2)
+
+            batch = updates.drain(max_items=10)
+            self.assertFalse(batch.full_refresh_required)
+            self.assertFalse(batch.has_more)
+            self.assertEqual(
+                set(batch.changed_keys),
+                {
+                    (event.source_id, event.quote_key)
+                    for event in active.events
+                },
+            )
+
+    def test_long_lived_reconciliation_promotes_same_sequence_positive_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first = self._observe(tmp)
+            self.assertEqual(first.stats.accepted, 2)
+            promoted = first.current_quotes[0]
+
+            mirror = MarketMirror()
+            mirror._apply_with_causal_authority(
+                promoted,
+                decision_causal=False,
+            )
+            self.assertEqual(mirror.causal_view().events, ())
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+
+            repeated = observe_workspace_once(
+                tmp,
+                self._provider(),
+                max_items=10,
+                clock=lambda: _RECEIVE_TIME,
+                mirror_updates=updates,
+            )
+
+            causal = mirror.causal_view(
+                source_ids=promoted.source_id,
+                selection_ids=promoted.selection_id,
+            )
+            self.assertEqual(
+                tuple(event.dedupe_key for event in causal.events),
+                (promoted.dedupe_key,),
+            )
+            invalidations = updates.drain(max_items=10)
+            self.assertIn(
+                (promoted.source_id, promoted.quote_key),
+                invalidations.changed_keys,
+            )
+            self.assertEqual(repeated.stats.accepted, 0)
+
+    def test_long_lived_reconciliation_preserves_generation_zero_as_noncausal(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "market.db"
+            legacy = MarketEvent(
+                event_id="legacy-event",
+                market_id="winner",
+                selection_id="legacy-selection",
+                decimal_odds=Decimal("2.20"),
+                observed_ts="2026-09-12T20:00:00+00:00",
+                ingest_ts="2026-09-12T20:00:00+00:00",
+                source_id="live-fixture",
+                sequence=3,
+                status="open",
+                source_ts="2026-09-12T19:59:59+00:00",
+            )
+            payload = storage_module._canonical_payload(legacy)
+
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute(
+                    """CREATE TABLE market_events (
+                        dedupe_key TEXT PRIMARY KEY,
+                        quote_key TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        selection_id TEXT NOT NULL,
+                        decimal_odds TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )"""
+                )
+                raw.execute(
+                    """CREATE TABLE current_quotes (
+                        source_id TEXT NOT NULL,
+                        quote_key TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (source_id, quote_key)
+                    )"""
+                )
+                raw.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        legacy.dedupe_key,
+                        legacy.quote_key,
+                        legacy.event_id,
+                        legacy.market_id,
+                        legacy.selection_id,
+                        str(legacy.decimal_odds),
+                        legacy.observed_ts,
+                        legacy.source_id,
+                        legacy.sequence,
+                        payload,
+                    ),
+                )
+                raw.execute(
+                    """INSERT INTO current_quotes
+                       (source_id,quote_key,observed_ts,sequence,payload_json)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        legacy.source_id,
+                        legacy.quote_key,
+                        legacy.observed_ts,
+                        legacy.sequence,
+                        payload,
+                    ),
+                )
+                raw.commit()
+            finally:
+                raw.close()
+
+            mirror = MarketMirror()
+            # Seed an intentionally wrong in-memory provenance claim for the exact
+            # generation-zero value. Canonical reconciliation must revoke causal
+            # authority even though provider sequence/payload are unchanged.
+            mirror.apply(legacy)
+            self.assertEqual(
+                tuple(event.dedupe_key for event in mirror.causal_view().events),
+                (legacy.dedupe_key,),
+            )
+            updates = BoundedMirrorInvalidationBuffer(mirror)
+            result = observe_workspace_once(
+                root,
+                self._provider(),
+                max_items=10,
+                clock=lambda: _RECEIVE_TIME,
+                mirror_updates=updates,
+            )
+
+            self.assertEqual(result.stats.accepted, 2)
+            self.assertIn(
+                legacy.dedupe_key,
+                {
+                    event.dedupe_key
+                    for event in mirror.view(source_ids="live-fixture").events
+                },
+            )
+            self.assertEqual(
+                mirror.active_view(
+                    as_of=datetime.fromisoformat(_RECEIVE_TIME),
+                    max_age=timedelta(minutes=2),
+                    event_ids="legacy-event",
+                ).events,
+                (),
+            )
+            active_live = mirror.active_view(
+                as_of=datetime.fromisoformat(_RECEIVE_TIME),
+                max_age=timedelta(minutes=2),
+                source_ids="live-fixture",
+            )
+            self.assertEqual(len(active_live.events), 2)
+            self.assertEqual(len(result.current_quotes), 2)
+            self.assertNotIn(
+                legacy.dedupe_key,
+                {event.dedupe_key for event in result.current_quotes},
+            )
+            invalidations = updates.drain(max_items=10)
+            self.assertFalse(invalidations.full_refresh_required)
+            self.assertFalse(invalidations.has_more)
+            self.assertIn(
+                (legacy.source_id, legacy.quote_key),
+                invalidations.changed_keys,
+            )
+            self.assertEqual(len(invalidations.changed_keys), 3)
+
+    def test_observation_result_rejects_substituted_components(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        class Stats(type(canonical.stats)):
+            pass
+
+        class Health(type(canonical.health)):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact IngestionStats"):
+            ObservationResult(
+                Stats(
+                    canonical.stats.source_id,
+                    canonical.stats.received,
+                    canonical.stats.accepted,
+                    canonical.stats.rejected,
+                    canonical.stats.elapsed_seconds,
+                    canonical.stats.cursor,
+                    canonical.stats.quality_flags,
+                    canonical.stats.health_status,
+                ),
+                canonical.health,
+                canonical.current_quotes,
+            )
+        with self.assertRaisesRegex(TypeError, "exact SourceHealthState"):
+            ObservationResult(
+                canonical.stats,
+                Health(**{
+                    name: getattr(canonical.health, name)
+                    for name in canonical.health.__dataclass_fields__
+                }),
+                canonical.current_quotes,
+            )
+        with self.assertRaisesRegex(TypeError, "exact tuple"):
+            ObservationResult(
+                canonical.stats,
+                canonical.health,
+                list(canonical.current_quotes),
+            )
+
+    def test_observation_result_revalidates_tampered_exact_stats(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        stats_type = type(canonical.stats)
+        tampered = stats_type(
+            canonical.stats.source_id,
+            canonical.stats.received,
+            canonical.stats.accepted,
+            canonical.stats.rejected,
+            canonical.stats.elapsed_seconds,
+            canonical.stats.cursor,
+            canonical.stats.quality_flags,
+            canonical.stats.health_status,
+        )
+        object.__setattr__(tampered, "received", -1)
+
+        with self.assertRaisesRegex(ValueError, "received must be a non-negative integer"):
+            ObservationResult(
+                tampered,
+                canonical.health,
+                canonical.current_quotes,
+            )
+
+    def test_observation_result_owns_stats_snapshot_after_construction(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        stats_type = type(canonical.stats)
+        caller_stats = stats_type(
+            canonical.stats.source_id,
+            canonical.stats.received,
+            canonical.stats.accepted,
+            canonical.stats.rejected,
+            canonical.stats.elapsed_seconds,
+            canonical.stats.cursor,
+            canonical.stats.quality_flags,
+            canonical.stats.health_status,
+        )
+        result = ObservationResult(
+            caller_stats,
+            canonical.health,
+            canonical.current_quotes,
+        )
+
+        object.__setattr__(caller_stats, "received", -1)
+
+        self.assertEqual(result.stats.received, canonical.stats.received)
+        result.validate()
+
+    def test_observation_result_binds_stats_to_durable_health_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        health_type = type(canonical.health)
+        stats_type = type(canonical.stats)
+
+        def health(**overrides):
+            values = {
+                name: getattr(canonical.health, name)
+                for name in canonical.health.__dataclass_fields__
+            }
+            values.update(overrides)
+            return health_type(**values)
+
+        with self.assertRaisesRegex(ValueError, "cursor must match"):
+            ObservationResult(
+                canonical.stats,
+                health(last_cursor="different-cursor"),
+                canonical.current_quotes,
+            )
+        with self.assertRaisesRegex(ValueError, "quality flags must match"):
+            ObservationResult(
+                canonical.stats,
+                health(quality_flags=("STALE_SOURCE",)),
+                canonical.current_quotes,
+            )
+
+        oversized_stats = stats_type(
+            canonical.stats.source_id,
+            canonical.health.total_received + 1,
+            0,
+            0,
+            canonical.stats.elapsed_seconds,
+            canonical.stats.cursor,
+            canonical.stats.quality_flags,
+            canonical.stats.health_status,
+        )
+        with self.assertRaisesRegex(ValueError, "cannot exceed durable source health totals"):
+            ObservationResult(
+                oversized_stats,
+                canonical.health,
+                canonical.current_quotes,
+            )
+
+    def test_observation_result_rejects_noncanonical_snapshot_shape(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        self.assertGreaterEqual(len(canonical.current_quotes), 2)
+        with self.assertRaisesRegex(ValueError, "unique quote keys"):
+            ObservationResult(
+                canonical.stats,
+                canonical.health,
+                (canonical.current_quotes[0], canonical.current_quotes[0]),
+            )
+        with self.assertRaisesRegex(ValueError, "canonical order"):
+            ObservationResult(
+                canonical.stats,
+                canonical.health,
+                tuple(reversed(canonical.current_quotes)),
+            )
+
+    def test_observation_result_orders_full_quote_identity_dimensions(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        base = canonical.current_quotes[0].to_dict()
+        first_payload = dict(base)
+        first_payload["sport"] = "basketball"
+        first_payload["exchange_side"] = "back"
+        second_payload = dict(base)
+        second_payload["sport"] = "tennis"
+        second_payload["exchange_side"] = "lay"
+        first = MarketEvent.from_dict(first_payload)
+        second = MarketEvent.from_dict(second_payload)
+        ordered = tuple(sorted((first, second), key=lambda event: event.quote_key))
+        self.assertNotEqual(ordered[0].quote_key, ordered[1].quote_key)
+
+        with self.assertRaisesRegex(ValueError, "canonical order"):
+            ObservationResult(
+                canonical.stats,
+                canonical.health,
+                tuple(reversed(ordered)),
+            )
+
+    def test_observation_result_snapshots_mutable_quote_metadata(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        original = canonical.current_quotes[0]
+        payload = original.to_dict()
+        payload["metadata"] = {"nested": {"origin": "caller"}}
+        mutable = MarketEvent.from_dict(payload)
+        result = ObservationResult(
+            canonical.stats,
+            canonical.health,
+            (mutable,),
+        )
+
+        mutable.metadata["nested"]["origin"] = "mutated-after-result"
+        mutable.metadata["caller_only"] = True
+
+        self.assertEqual(
+            result.current_quotes[0].metadata,
+            {"nested": {"origin": "caller"}},
+        )
+        self.assertNotIn("caller_only", result.current_quotes[0].metadata)
+
+    def test_worker_rejects_noncallable_task_before_claiming_slot(self):
+        worker = OneShotObservationWorker()
+
+        with self.assertRaisesRegex(TypeError, "task must be callable"):
+            worker.start(None)
+
+        self.assertFalse(worker.busy)
+        self.assertIsNone(worker._thread)
+        self.assertIsNone(worker.poll())
+
+    def test_worker_message_rejects_substituted_terminal_payload_types(self):
+        class ErrorText(str):
+            pass
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "worker message error must be an exact string",
+        ):
+            live_observation_module.ObservationWorkerMessage(
+                error=ErrorText("boom"),
+            )
+        with self.assertRaisesRegex(
+            TypeError,
+            "worker message result must be an exact ObservationResult",
+        ):
+            live_observation_module.ObservationWorkerMessage(
+                result=object(),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "worker message error must be non-empty",
+        ):
+            live_observation_module.ObservationWorkerMessage(error="")
+
+    def test_worker_rejects_non_observation_result_as_terminal_error(self):
+        worker = OneShotObservationWorker()
+
+        self.assertTrue(worker.start(lambda: object()))
+
+        message = self._wait_for_message(worker)
+        self.assertIsNone(message.result)
+        self.assertEqual(
+            message.error,
+            "TypeError: observation task must return an exact ObservationResult",
+        )
+        self.assertFalse(worker.busy)
+
+    def test_worker_rejects_observation_result_subclass_as_terminal_error(self):
+        class SubstitutedResult(live_observation_module.ObservationResult):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            expected = self._observe(tmp)
+        substituted = SubstitutedResult(
+            expected.stats,
+            expected.health,
+            expected.current_quotes,
+        )
+        worker = OneShotObservationWorker()
+
+        self.assertTrue(worker.start(lambda: substituted))
+
+        message = self._wait_for_message(worker)
+        self.assertIsNone(message.result)
+        self.assertEqual(
+            message.error,
+            "TypeError: observation task must return an exact ObservationResult",
+        )
+        self.assertFalse(worker.busy)
+
     def test_worker_refuses_second_start_until_terminal_message_is_consumed(self):
         # Build the real observation result outside the worker timing window. This
         # test owns the worker single-flight/message-consumption contract; SQLite
@@ -147,7 +1814,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertFalse(worker.start(slow_task))
         release.set()
         message = self._wait_for_message(worker)
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
@@ -171,7 +1839,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertFalse(worker._thread.daemon)
         release.set()
         message = self._wait_for_message(worker)
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertFalse(worker.busy)
 
     def test_worker_thread_start_failure_publishes_terminal_error_and_allows_retry(self):
@@ -204,7 +1873,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         message = self._wait_for_message(worker)
         self.assertTrue(task_ran.is_set())
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
@@ -237,7 +1907,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         message = self._wait_for_message(worker)
         self.assertTrue(task_ran.is_set())
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
@@ -271,7 +1942,8 @@ class LiveObservationTests(unittest.TestCase):
         self.assertTrue(worker.start(task))
         message = self._wait_for_message(worker)
         self.assertTrue(task_ran.is_set())
-        self.assertIs(message.result, expected)
+        self.assertEqual(message.result, expected)
+        self.assertIsNot(message.result, expected)
         self.assertIsNone(message.error)
         self.assertFalse(worker.busy)
 
@@ -281,6 +1953,101 @@ class LiveObservationTests(unittest.TestCase):
         message = self._wait_for_message(worker)
         self.assertIsNone(message.result)
         self.assertEqual(message.error, "RuntimeError: network-test")
+        self.assertFalse(worker.busy)
+
+    def test_observation_result_snapshots_mutable_health_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        original_health = canonical.health
+        result = ObservationResult(
+            canonical.stats,
+            original_health,
+            canonical.current_quotes,
+        )
+        self.assertIsNot(result.health, original_health)
+        original_health.status = "failed"
+        self.assertEqual(result.health.status, canonical.stats.health_status)
+        result.validate()
+
+    def test_worker_publishes_owned_observation_result_snapshot(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            caller_result = self._observe(tmp)
+
+        original_received = caller_result.stats.received
+        worker = OneShotObservationWorker()
+        self.assertTrue(worker.start(lambda: caller_result))
+
+        message = self._wait_for_message(worker)
+        self.assertIsNotNone(message.result)
+        self.assertIsNot(message.result, caller_result)
+        self.assertIsNot(message.result.stats, caller_result.stats)
+
+        object.__setattr__(caller_result.stats, "received", -1)
+
+        self.assertEqual(message.result.stats.received, original_received)
+        message.result.validate()
+        self.assertFalse(worker.busy)
+
+    def test_worker_revalidates_mutated_observation_quote_before_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._observe(tmp)
+
+        object.__setattr__(result.current_quotes[0], "event_id", "")
+
+        worker = OneShotObservationWorker()
+        self.assertTrue(worker.start(lambda: result))
+        message = self._wait_for_message(worker)
+        self.assertIsNone(message.result)
+        self.assertIsNotNone(message.error)
+        self.assertIn("ValueError", message.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_revalidates_mutated_observation_stats_before_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._observe(tmp)
+
+        object.__setattr__(result.stats, "received", -1)
+
+        worker = OneShotObservationWorker()
+        self.assertTrue(worker.start(lambda: result))
+        message = self._wait_for_message(worker)
+        self.assertIsNone(message.result)
+        self.assertIsNotNone(message.error)
+        self.assertIn("ValueError", message.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_revalidates_mutated_observation_health_before_success(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._observe(tmp)
+
+        result.health.status = "failed"
+
+        worker = OneShotObservationWorker()
+        self.assertTrue(worker.start(lambda: result))
+        message = self._wait_for_message(worker)
+        self.assertIsNone(message.result)
+        self.assertIsNotNone(message.error)
+        self.assertIn("ValueError", message.error)
+        self.assertFalse(worker.busy)
+
+    def test_worker_unprintable_exception_still_publishes_terminal_error(self):
+        class UnprintableError(RuntimeError):
+            def __str__(self) -> str:
+                raise RuntimeError("stringification-failed")
+
+        worker = OneShotObservationWorker()
+
+        def task():
+            raise UnprintableError()
+
+        self.assertTrue(worker.start(task))
+        failed = self._wait_for_message(worker)
+        self.assertIsNone(failed.result)
+        self.assertEqual(
+            failed.error,
+            "UnprintableError: <unprintable exception>",
+        )
         self.assertFalse(worker.busy)
 
     def test_worker_converts_system_exit_to_terminal_error_and_allows_retry(self):
@@ -300,9 +2067,45 @@ class LiveObservationTests(unittest.TestCase):
 
         self.assertTrue(worker.start(lambda: expected))
         completed = self._wait_for_message(worker)
-        self.assertIs(completed.result, expected)
+        self.assertEqual(completed.result, expected)
+        self.assertIsNot(completed.result, expected)
         self.assertIsNone(completed.error)
         self.assertFalse(worker.busy)
+
+    def test_presentation_rejects_mutated_observation_health_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._observe(tmp)
+
+        result.health.status = "failed"
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "health status must match durable source health",
+        ):
+            observation_summary(result)
+        with self.assertRaisesRegex(
+            ValueError,
+            "health status must match durable source health",
+        ):
+            observation_quote_lines(result)
+
+    def test_presentation_rejects_observation_result_subclass(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        class Result(ObservationResult):
+            pass
+
+        substituted = Result(
+            canonical.stats,
+            canonical.health,
+            canonical.current_quotes,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact ObservationResult"):
+            observation_summary(substituted)
+        with self.assertRaisesRegex(TypeError, "exact ObservationResult"):
+            observation_quote_lines(substituted)
 
     def test_presentation_is_deterministic_text_for_screen_reader_surface(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -313,8 +2116,30 @@ class LiveObservationTests(unittest.TestCase):
             self.assertIn("поточних=2", summary)
             self.assertEqual(len(lines), 2)
             self.assertIn("player-a", lines[0])
+            self.assertIn("спорт не вказано", lines[0])
+            self.assertIn("сторона не вказано", lines[0])
             self.assertIn("коефіцієнт 1.80", lines[0])
             self.assertIn("час джерела 2026-09-12T19:59:59+00:00", lines[0])
+
+    def test_presentation_announces_full_canonical_quote_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            canonical = self._observe(tmp)
+
+        payload = canonical.current_quotes[0].to_dict()
+        payload["sport"] = "tennis"
+        payload["exchange_side"] = "lay"
+        quote = MarketEvent.from_dict(payload)
+        result = ObservationResult(
+            canonical.stats,
+            canonical.health,
+            (quote,),
+        )
+
+        lines = observation_quote_lines(result)
+
+        self.assertEqual(len(lines), 1)
+        self.assertIn("спорт tennis", lines[0])
+        self.assertIn("сторона lay", lines[0])
 
 
 if __name__ == "__main__":

@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import stat
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -284,6 +285,120 @@ class VerifiedDecisionLedgerSnapshot:
     record_count: int
 
 
+class _DecisionLedgerPathLock:
+    """Persistent OS-backed lock whose ownership is released automatically on crash."""
+
+    def __init__(self, path: Path, *, blocking: bool) -> None:
+        self.path = path
+        self.blocking = blocking
+        self._handle = None
+
+    def _assert_open_path_identity(self, handle) -> None:
+        try:
+            opened = os.fstat(handle.fileno())
+            current = os.lstat(self.path)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path changed during acquisition"
+            ) from exc
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or stat.S_ISLNK(current.st_mode)
+            or getattr(opened, "st_nlink", 1) != 1
+            or getattr(current, "st_nlink", 1) != 1
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path changed during acquisition"
+            )
+
+    def __enter__(self) -> "_DecisionLedgerPathLock":
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            existing = os.lstat(self.path)
+        except FileNotFoundError:
+            existing = None
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path is unavailable"
+            ) from exc
+        if existing is not None and (
+            stat.S_ISLNK(existing.st_mode)
+            or not stat.S_ISREG(existing.st_mode)
+            or getattr(existing, "st_nlink", 1) != 1
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path must be one regular non-symlink file"
+            )
+
+        flags = os.O_CREAT | os.O_RDWR
+        flags |= getattr(os, "O_NOFOLLOW", 0)
+        try:
+            fd = os.open(self.path, flags, 0o600)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger writer-lock path is unavailable"
+            ) from exc
+        handle = os.fdopen(fd, "a+b", closefd=True)
+        try:
+            self._assert_open_path_identity(handle)
+            handle.seek(0, os.SEEK_END)
+            if handle.tell() == 0:
+                handle.write(b"\0")
+                handle.flush()
+                os.fsync(handle.fileno())
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                mode = msvcrt.LK_LOCK if self.blocking else msvcrt.LK_NBLCK
+                try:
+                    msvcrt.locking(handle.fileno(), mode, 1)
+                except OSError as exc:
+                    if not self.blocking:
+                        raise DecisionLedgerIntegrityError(
+                            "Decision Ledger writer is active"
+                        ) from exc
+                    raise
+            else:
+                import fcntl
+
+                flags = fcntl.LOCK_EX
+                if not self.blocking:
+                    flags |= fcntl.LOCK_NB
+                try:
+                    fcntl.flock(handle.fileno(), flags)
+                except BlockingIOError as exc:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger writer is active"
+                    ) from exc
+            self._assert_open_path_identity(handle)
+        except BaseException:
+            handle.close()
+            raise
+        self._handle = handle
+        return self
+
+    def __exit__(self, exc_type, exc_value, traceback) -> None:
+        handle = self._handle
+        if handle is None:
+            return
+        try:
+            handle.seek(0)
+            if os.name == "nt":
+                import msvcrt
+
+                msvcrt.locking(handle.fileno(), msvcrt.LK_UNLCK, 1)
+            else:
+                import fcntl
+
+                fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+        finally:
+            handle.close()
+            self._handle = None
+
+
 class JsonlDecisionLedger:
     """Append-only causal decision ledger. Result/outcome fields do not belong here."""
 
@@ -314,6 +429,138 @@ class JsonlDecisionLedger:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._path_authority = self.path
+        self._absolute_path_authority = self.path.resolve(strict=False)
+        self._writer_lock_path_authority = self._absolute_path_authority.with_name(
+            self._absolute_path_authority.name + ".writer.lock"
+        )
+        self._file_identity_authority: tuple[int, int] | None = None
+        if self._absolute_path_authority.exists():
+            self._file_identity_authority = self._read_file_identity()
+
+    def _assert_persistence_authority(self) -> None:
+        if (
+            self.path != self._path_authority
+            or self.path.resolve(strict=False) != self._absolute_path_authority
+            or self._writer_lock_path_authority
+            != self._absolute_path_authority.with_name(
+                self._absolute_path_authority.name + ".writer.lock"
+            )
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger persistence authority changed after construction"
+            )
+
+    def _read_file_identity(self) -> tuple[int, int]:
+        try:
+            info = os.lstat(self._absolute_path_authority)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path identity is unavailable"
+            ) from exc
+        if (
+            stat.S_ISLNK(info.st_mode)
+            or not stat.S_ISREG(info.st_mode)
+            or getattr(info, "st_nlink", 1) != 1
+        ):
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path must be one regular non-linked file"
+            )
+        return (info.st_dev, info.st_ino)
+
+    def _assert_file_identity(self, fd: int | None = None) -> None:
+        identity = self._file_identity_authority
+        if identity is None:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file identity is not bound"
+            )
+        if self._read_file_identity() != identity:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger file identity changed after construction"
+            )
+        if fd is not None:
+            try:
+                opened = os.fstat(fd)
+            except OSError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger opened file identity is unavailable"
+                ) from exc
+            if (
+                not stat.S_ISREG(opened.st_mode)
+                or getattr(opened, "st_nlink", 1) != 1
+                or (opened.st_dev, opened.st_ino) != identity
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger opened file identity changed"
+                )
+
+    def _sync_parent_directory(self) -> None:
+        if os.name == "nt":
+            return
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        try:
+            directory_fd = os.open(self._absolute_path_authority.parent, flags)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger parent-directory durability barrier failed"
+            ) from exc
+        try:
+            os.fsync(directory_fd)
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger parent-directory durability barrier failed"
+            ) from exc
+        finally:
+            os.close(directory_fd)
+
+    def _ensure_path_durable(self) -> None:
+        if self._absolute_path_authority.exists():
+            if self._file_identity_authority is None:
+                self._file_identity_authority = self._read_file_identity()
+            self._assert_file_identity()
+            return
+        try:
+            with self._absolute_path_authority.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                handle.flush()
+                os.fsync(handle.fileno())
+            self._sync_parent_directory()
+            self._file_identity_authority = self._read_file_identity()
+        except DecisionLedgerIntegrityError:
+            raise
+        except OSError as exc:
+            raise DecisionLedgerIntegrityError(
+                "Decision Ledger path durability barrier failed"
+            ) from exc
+
+    def _writer_guard(self, *, blocking: bool = True) -> _DecisionLedgerPathLock:
+        self._assert_persistence_authority()
+        return _DecisionLedgerPathLock(
+            self._writer_lock_path_authority,
+            blocking=blocking,
+        )
+
+    def assert_transaction_authority(self) -> None:
+        """Fail closed before external I/O if durable decision publication is unavailable."""
+
+        self._assert_persistence_authority()
+        try:
+            with self._writer_guard(blocking=False):
+                if self._file_identity_authority is not None:
+                    self._assert_file_identity()
+                elif self._absolute_path_authority.exists():
+                    # A peer-created ledger is not silently adopted as this
+                    # instance's durable authority.
+                    self._read_file_identity()
+        except DecisionLedgerIntegrityError as exc:
+            if "writer is active" in str(exc):
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger transaction authority is unavailable"
+                ) from exc
+            raise
 
     @staticmethod
     def _require_utf8_text(value: str, *, path: str) -> None:
@@ -412,6 +659,16 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger payload contains future-result fields{location}"
             )
+        if MATERIAL_ACTION_ID_PAYLOAD_KEY in payload:
+            material_action_id = payload[MATERIAL_ACTION_ID_PAYLOAD_KEY]
+            if (
+                not isinstance(material_action_id, str)
+                or not material_action_id.strip()
+                or material_action_id != material_action_id.strip()
+            ):
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger material_action_id is invalid{location}"
+                )
         if (
             "decision_kind" in record
             and ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY not in payload
@@ -439,6 +696,7 @@ class JsonlDecisionLedger:
         )
 
     def _append_validated(self, record: DecisionRecord) -> str:
+        self._assert_persistence_authority()
         payload = self._validate_record(record.to_dict())
         canonical = self._canonical_record(payload)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
@@ -448,11 +706,59 @@ class JsonlDecisionLedger:
             sort_keys=True,
             allow_nan=False,
         )
-        with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-            handle.write(envelope + "\n")
-            handle.flush()
-            os.fsync(handle.fileno())
-        return digest
+
+        with self._writer_guard():
+            self._assert_persistence_authority()
+            try:
+                existing = self._absolute_path_authority.read_bytes()
+            except FileNotFoundError:
+                existing = b""
+            except OSError as exc:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger file is unreadable before append"
+                ) from exc
+
+            self._verify_bytes(existing)
+            self._ensure_path_durable()
+            material_action_id = payload["payload"].get(
+                MATERIAL_ACTION_ID_PAYLOAD_KEY
+            )
+            if material_action_id is not None and (
+                not isinstance(material_action_id, str)
+                or not material_action_id.strip()
+            ):
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger material_action_id is invalid"
+                )
+            for line in existing.decode("utf-8").splitlines():
+                prior = json.loads(line)
+                prior_record = prior["record"]
+                if prior_record["decision_id"] == payload["decision_id"]:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger decision_id already exists"
+                    )
+                if (
+                    material_action_id is not None
+                    and prior_record["payload"].get(MATERIAL_ACTION_ID_PAYLOAD_KEY)
+                    == material_action_id
+                ):
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger material_action_id already exists"
+                    )
+
+            with self._absolute_path_authority.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
+                self._assert_file_identity(handle.fileno())
+                handle.write(envelope + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+                self._assert_file_identity(handle.fileno())
+            self._assert_persistence_authority()
+            self._assert_file_identity()
+            return digest
 
     def append(self, record: DecisionRecord) -> str:
         """Persist a non-economic decision only."""
@@ -573,19 +879,52 @@ class JsonlDecisionLedger:
 
         return line_count
 
-    def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
+    def _verified_snapshot_locked(self) -> VerifiedDecisionLedgerSnapshot:
+        self._assert_persistence_authority()
+        self._assert_file_identity()
         try:
-            raw = self.path.read_bytes()
+            with self._absolute_path_authority.open("rb") as handle:
+                self._assert_file_identity(handle.fileno())
+                raw = handle.read()
+                self._assert_file_identity(handle.fileno())
         except OSError as exc:
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger file is missing or unreadable"
             ) from exc
+        self._assert_persistence_authority()
+        self._assert_file_identity()
         record_count = self._verify_bytes(raw)
         return VerifiedDecisionLedgerSnapshot(
             payload=raw,
             sha256=hashlib.sha256(raw).hexdigest(),
             record_count=record_count,
         )
+
+    def verified_snapshot_if_exists(self) -> VerifiedDecisionLedgerSnapshot:
+        """Return an empty verified snapshot only before this authority has a ledger file."""
+
+        self._assert_persistence_authority()
+        with self._writer_guard():
+            if not self._absolute_path_authority.exists():
+                if self._file_identity_authority is not None:
+                    raise DecisionLedgerIntegrityError(
+                        "Decision Ledger bound file is missing"
+                    )
+                return VerifiedDecisionLedgerSnapshot(
+                    payload=b"",
+                    sha256=hashlib.sha256(b"").hexdigest(),
+                    record_count=0,
+                )
+            if self._file_identity_authority is None:
+                raise DecisionLedgerIntegrityError(
+                    "Decision Ledger file appeared outside this persistence authority"
+                )
+            return self._verified_snapshot_locked()
+
+    def verified_snapshot(self) -> VerifiedDecisionLedgerSnapshot:
+        self._assert_persistence_authority()
+        with self._writer_guard():
+            return self._verified_snapshot_locked()
 
     def verified_records(self) -> tuple[DecisionRecord, ...]:
         snapshot = self.verified_snapshot()

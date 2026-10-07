@@ -1,11 +1,14 @@
 from __future__ import annotations
 
+import os
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, RLock, Thread
 
-from autosport.domain import MarketEvent
+from autosport.domain import MarketEvent, TicketLeg
 from autosport.paper import PaperBook
 from autosport.paper_execution_adoption import (
     PaperExecutionAdoptionError,
@@ -20,6 +23,7 @@ from autosport.paper_execution_reality import (
     PaperExecutionEvidenceRegistry,
     PaperExecutionLedger,
     PaperExecutionModelConfig,
+    PaperExecutionStateError,
 )
 from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 
@@ -153,6 +157,61 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             paper_book_path=Path(tmp) / "paper-book.json",
         )
         return book, ledger, runtime
+
+    def test_prepared_scope_inputs_are_canonical_before_mint(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "bankroll_id and currency must be supplied together",
+        ):
+            PaperExposureBinding(
+                action_id="a1",
+                sport="soccer",
+                bankroll_id="paper-bankroll",
+                currency=None,
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "currency must be three-letter uppercase ASCII",
+        ):
+            PaperExposureBinding(
+                action_id="a1",
+                sport="soccer",
+                bankroll_id="paper-bankroll",
+                currency="eur",
+            )
+
+        binding = PaperExposureBinding(
+            action_id="a1",
+            sport="soccer",
+            bankroll_id="paper-bankroll",
+            currency="EUR",
+        )
+        execution_plan = ExecutionPlan(
+            plan_id="adoption-plan-canonical-json",
+            bookmaker_profile_version="paper-profile-v1",
+            decision_id="decision-canonical-json",
+            approval_id="paper-only-no-real-money",
+            created_at=QUOTE_AT,
+            actions=(action("a1"),),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical JSON object",
+        ):
+            PreparedPaperExecution(
+                execution_plan=execution_plan,
+                exposure_bindings=(binding,),
+                intent_evidence_json='{ "schema": "noncanonical" }',
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "valid canonical JSON",
+        ):
+            PreparedPaperExecution(
+                execution_plan=execution_plan,
+                exposure_bindings=(binding,),
+                intent_evidence_json="{not-json",
+            )
 
     def test_paper_value_lay_fails_before_execution_or_book_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -299,6 +358,258 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertEqual(str(ticket.stake), "4.00")
             self.assertEqual(str(ticket.legs[0].locked_odds), "2.40")
             self.assertEqual(book.balance, __import__("decimal").Decimal("96.00"))
+
+    def test_observed_materialized_book_state_is_recoverable_from_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            pre_action_book = PaperBook("100.00")
+            current_action = action("a1", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current_action)
+            registered = evidence(
+                current_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.25",
+                stake="10.00",
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-observed-recovery",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+            self.assertEqual(len(book.tickets), 1)
+
+            restarted_book = PaperBook.load(Path(tmp) / "paper-book.json")
+            restarted = PaperExecutionAdoptionRuntime(
+                book=restarted_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=Path(tmp) / "paper-book.json",
+            )
+            restarted_prepared = prepared(restarted, current_action)
+            restarted.assert_recoverable_book_state(
+                pre_action_book=pre_action_book,
+                prepared=restarted_prepared,
+                trigger_id="trigger-observed-recovery",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+    def test_exposure_scope_cannot_be_retrofitted_after_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-retro-scope"
+            run_id = runtime.expected_run_id(
+                current_prepared,
+                trigger_id,
+            )
+            ledger.reserve_run(
+                run_id=run_id,
+                trigger_id=trigger_id,
+                plan=current_prepared.execution_plan,
+                config=runtime.config,
+                started_at=STARTED_AT,
+                observation_evidence_ids={},
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "cannot be retroactively published",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id=trigger_id,
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+            self.assertEqual(len(ledger.events()), event_count)
+            self.assertEqual(book.tickets, {})
+
+    def test_exposure_scope_publication_serializes_against_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            entered = Event()
+            release = Event()
+
+            class PausingLedger(PaperExecutionLedger):
+                def __init__(self, ledger_path):
+                    super().__init__(ledger_path)
+                    self.pause_next_load = False
+
+                def _load_unlocked(self):
+                    events = super()._load_unlocked()
+                    if self.pause_next_load:
+                        self.pause_next_load = False
+                        entered.set()
+                        if not release.wait(5):
+                            raise AssertionError(
+                                "timed out waiting to release scope publication"
+                            )
+                    return events
+
+            ledger = PausingLedger(path)
+            book = PaperBook("100.00")
+            runtime = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "paper-book.json",
+            )
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-scope-reservation-race"
+            run_id = runtime.expected_run_id(
+                current_prepared,
+                trigger_id,
+            )
+            ledger.pause_next_load = True
+            failures = []
+
+            def publish_scope():
+                try:
+                    runtime._publish_exposure_scope(
+                        prepared=current_prepared,
+                        run_id=run_id,
+                    )
+                except BaseException as exc:
+                    failures.append(exc)
+
+            worker = Thread(target=publish_scope)
+            worker.start()
+            self.assertTrue(
+                entered.wait(2),
+                "scope publication did not enter ledger critical section",
+            )
+
+            competing = PaperExecutionLedger(path)
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "writer lock exists",
+            ):
+                competing.reserve_run(
+                    run_id=run_id,
+                    trigger_id=trigger_id,
+                    plan=current_prepared.execution_plan,
+                    config=runtime.config,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+
+            release.set()
+            worker.join(5)
+            self.assertFalse(worker.is_alive())
+            self.assertEqual(failures, [])
+
+            competing.reserve_run(
+                run_id=run_id,
+                trigger_id=trigger_id,
+                plan=current_prepared.execution_plan,
+                config=runtime.config,
+                started_at=STARTED_AT,
+                observation_evidence_ids={},
+            )
+            self.assertEqual(
+                [
+                    event["event_type"]
+                    for event in ledger.events(run_id)
+                ],
+                [
+                    "PAPER_EXPOSURE_SCOPE_BOUND",
+                    "RUN_RESERVED",
+                ],
+            )
+
+    def test_observed_attempt_restart_recovers_inputs_without_caller_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
+            current_action = action("a1", odds="2.50", stake="10.00")
+            current_prepared = prepared(runtime, current_action)
+            registered = evidence(
+                current_action,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.25",
+                stake="10.00",
+            )
+            registry = PaperExecutionEvidenceRegistry(ledger)
+            registry.register(registered)
+            shadow = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-observed-crash-window",
+                started_at=STARTED_AT,
+                materialize_exposure=False,
+                observations={"a1": registered.as_observation()},
+                evidence_registry=registry,
+            )
+            self.assertEqual(book.tickets, {})
+
+            reloaded_book = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            restarted_prepared = prepared(restarted, current_action)
+            resumed = restarted.execute(
+                prepared=restarted_prepared,
+                trigger_id="trigger-observed-crash-window",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(resumed.run, shadow.run)
+            self.assertEqual(len(reloaded_book.tickets), 1)
+            ticket = next(iter(reloaded_book.tickets.values()))
+            self.assertEqual(ticket.stake, Decimal("10.00"))
+            self.assertEqual(
+                ticket.legs[0].locked_odds,
+                Decimal("2.25"),
+            )
+
+    def test_suspended_attempt_restart_recovers_durable_input(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            book_path = Path(tmp) / "paper-book.json"
+            current_action = action("a1")
+            current_prepared = prepared(runtime, current_action)
+            shadow = runtime.execute(
+                prepared=current_prepared,
+                trigger_id="trigger-suspended-crash-window",
+                started_at=STARTED_AT,
+                materialize_exposure=False,
+                suspended_action_ids=frozenset({"a1"}),
+            )
+            self.assertTrue(shadow.run.attempts[0].suspended)
+            self.assertEqual(book.tickets, {})
+
+            reloaded_book = PaperBook.load(book_path)
+            restarted = PaperExecutionAdoptionRuntime(
+                book=reloaded_book,
+                ledger=ledger,
+                config=runtime.config,
+                max_quote_age=runtime.max_quote_age,
+                paper_book_path=book_path,
+            )
+            restarted_prepared = prepared(restarted, current_action)
+            resumed = restarted.execute(
+                prepared=restarted_prepared,
+                trigger_id="trigger-suspended-crash-window",
+                started_at=STARTED_AT,
+                materialize_exposure=True,
+            )
+
+            self.assertEqual(resumed.run, shadow.run)
+            self.assertTrue(resumed.run.attempts[0].suspended)
+            self.assertEqual(reloaded_book.tickets, {})
 
     def test_attempt_before_ticket_restart_materializes_same_attempt(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -486,6 +797,478 @@ class PaperExecutionAdoptionTests(unittest.TestCase):
             self.assertTrue(result.run.completed)
             self.assertEqual(result.ticket_ids, ())
             self.assertEqual(book.tickets, {})
+
+
+
+
+    def test_same_paper_book_path_shares_execution_lock_across_runtimes(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, first = self.runtime(tmp)
+            second = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "." / "paper-book.json",
+            )
+            self.assertIs(first._execution_lock, second._execution_lock)
+
+    def test_execution_guard_serializes_distinct_runtimes_for_same_book(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, first = self.runtime(tmp)
+            second = PaperExecutionAdoptionRuntime(
+                book=book,
+                ledger=ledger,
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "paper-book.json",
+            )
+            entered = Event()
+            release = Event()
+            second_entered = Event()
+
+            def hold_first():
+                with first.execution_guard():
+                    entered.set()
+                    self.assertTrue(release.wait(timeout=2))
+
+            def enter_second():
+                with second.execution_guard():
+                    second_entered.set()
+
+            first_thread = Thread(target=hold_first)
+            second_thread = Thread(target=enter_second)
+            first_thread.start()
+            self.assertTrue(entered.wait(timeout=2))
+            second_thread.start()
+            self.assertFalse(second_entered.wait(timeout=0.05))
+            release.set()
+            first_thread.join(timeout=2)
+            second_thread.join(timeout=2)
+
+            self.assertFalse(first_thread.is_alive())
+            self.assertFalse(second_thread.is_alive())
+            self.assertTrue(second_entered.is_set())
+
+    def test_different_paper_book_paths_do_not_share_execution_lock(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            first_book = PaperBook("100.00")
+            first = PaperExecutionAdoptionRuntime(
+                book=first_book,
+                ledger=PaperExecutionLedger(Path(tmp) / "first-execution.jsonl"),
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "first-paper-book.json",
+            )
+            second_book = PaperBook("100.00")
+            second = PaperExecutionAdoptionRuntime(
+                book=second_book,
+                ledger=PaperExecutionLedger(Path(tmp) / "second-execution.jsonl"),
+                config=config(),
+                max_quote_age=__import__("datetime").timedelta(seconds=5),
+                paper_book_path=Path(tmp) / "second-paper-book.json",
+            )
+            self.assertIsNot(first._execution_lock, second._execution_lock)
+
+
+
+
+    def test_fresh_execution_rejects_paperbook_change_after_prepare(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-stale-prepared"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+
+            book.open_ticket(
+                (
+                    TicketLeg(
+                        "event-concurrent",
+                        "market-concurrent",
+                        "selection-concurrent",
+                        Decimal("2.00"),
+                    ),
+                ),
+                Decimal("1.00"),
+                reason="concurrent paper mutation",
+                placed_at=QUOTE_AT,
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "PaperBook changed after execution preparation",
+            ):
+                runtime.execute(
+                    prepared=current_prepared,
+                    trigger_id=trigger_id,
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+            self.assertEqual(ledger.events(run_id), ())
+            self.assertEqual(len(book.tickets), 1)
+
+    def test_fresh_execution_rechecks_paperbook_before_materialization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, ledger, runtime = self.runtime(tmp)
+            current_prepared = prepared(runtime, action("a1"))
+            trigger_id = "trigger-mid-run-paperbook-race"
+            run_id = runtime.expected_run_id(current_prepared, trigger_id)
+
+            import autosport.paper_execution_adoption as adoption_module
+
+            real_execute = adoption_module.execute_paper_plan
+            mutated = {"value": False}
+
+            def execute_then_mutate(**kwargs):
+                run = real_execute(**kwargs)
+                if not mutated["value"]:
+                    mutated["value"] = True
+                    book.open_ticket(
+                        (
+                            TicketLeg(
+                                "event-concurrent",
+                                "market-concurrent",
+                                "selection-concurrent",
+                                Decimal("2.00"),
+                            ),
+                        ),
+                        Decimal("1.00"),
+                        reason="concurrent paper mutation during execution",
+                        placed_at=QUOTE_AT,
+                    )
+                return run
+
+            with patch(
+                "autosport.paper_execution_adoption.execute_paper_plan",
+                side_effect=execute_then_mutate,
+            ):
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "PaperBook changed after execution preparation",
+                ):
+                    runtime.execute(
+                        prepared=current_prepared,
+                        trigger_id=trigger_id,
+                        started_at=STARTED_AT,
+                        materialize_exposure=True,
+                    )
+
+            self.assertTrue(mutated["value"])
+            self.assertTrue(ledger.events(run_id))
+            self.assertEqual(len(book.tickets), 1)
+            self.assertNotIn(
+                "paper_execution_attempt_id=",
+                next(iter(book.tickets.values())).strategy_reason,
+            )
+
+
+
+    def test_execution_guard_rejects_serialization_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            runtime._execution_lock = RLock()
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "serialization authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound serialization authority must not be entered")
+
+    def test_execution_guard_rejects_quote_age_authority_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            runtime.max_quote_age = __import__("datetime").timedelta(seconds=500)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "quote-age authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("mutated quote-age authority must not be entered")
+
+    def test_execution_guard_rejects_same_fingerprint_config_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            replacement = config()
+            self.assertEqual(replacement.fingerprint, runtime.config.fingerprint)
+            runtime.config = replacement
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "model authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("replacement execution model must not be entered")
+
+    def test_execution_guard_rejects_same_path_ledger_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            runtime.ledger = PaperExecutionLedger(ledger.path)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("replacement execution ledger must not be entered")
+
+    def test_execution_guard_rejects_paper_book_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            replacement = PaperBook(str(book.initial_bankroll))
+            runtime.book = replacement
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "PaperBook authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("replacement PaperBook must not be entered")
+
+
+
+    def test_minted_execution_rejects_in_place_intent_evidence_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            object.__setattr__(
+                capability,
+                "intent_evidence_json",
+                '{"schema":"tampered-intent-evidence"}',
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+    def test_minted_execution_rejects_in_place_exposure_binding_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            object.__setattr__(
+                capability,
+                "exposure_bindings",
+                (
+                    PaperExposureBinding(
+                        action_id="a1",
+                        sport="soccer",
+                        bankroll_id="other-bankroll",
+                        currency="EUR",
+                    ),
+                ),
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+    def test_minted_execution_rejects_in_place_execution_plan_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            original = capability.execution_plan
+            replacement = ExecutionPlan(
+                plan_id=original.plan_id,
+                bookmaker_profile_version=original.bookmaker_profile_version,
+                decision_id=original.decision_id,
+                approval_id=original.approval_id,
+                created_at=original.created_at,
+                actions=(action("a1", stake="99.00"),),
+            )
+            object.__setattr__(capability, "execution_plan", replacement)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+
+
+    def test_expected_run_id_rejects_runtime_authority_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            runtime.config = config()
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "model authority changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+    def test_recovery_book_check_rejects_runtime_authority_drift(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            pre_action = PaperBook(str(book.initial_bankroll))
+            runtime.max_quote_age = __import__("datetime").timedelta(seconds=500)
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "quote-age authority changed",
+            ):
+                runtime.assert_recoverable_book_state(
+                    pre_action_book=pre_action,
+                    prepared=capability,
+                    trigger_id="trigger-1",
+                    started_at=STARTED_AT,
+                    materialize_exposure=True,
+                )
+
+
+
+    def test_execution_guard_rejects_ledger_path_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger.path = Path(tmp) / "foreign-paper-execution.jsonl"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger path must not be entered")
+
+    def test_execution_guard_rejects_ledger_writer_lock_path_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._lock_path = Path(tmp) / "foreign-writer.lock"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger writer lock must not be entered")
+
+    def test_execution_guard_rejects_ledger_anchor_path_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._anchor_path = Path(tmp) / "foreign-anchor.json"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger anchor must not be entered")
+
+    def test_execution_guard_rejects_ledger_process_lock_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._lock = RLock()
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger process lock must not be entered")
+
+
+
+    def test_execution_guard_rejects_relative_persistence_path_cwd_drift(self):
+        original_cwd = Path.cwd()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            first = root / "first"
+            second = root / "second"
+            first.mkdir()
+            second.mkdir()
+            try:
+                os.chdir(first)
+                book = PaperBook("1000")
+                ledger = PaperExecutionLedger("paper-execution.jsonl")
+                runtime = PaperExecutionAdoptionRuntime(
+                    book=book,
+                    ledger=ledger,
+                    config=config(),
+                    max_quote_age=__import__("datetime").timedelta(seconds=5),
+                    paper_book_path="paper_book.json",
+                )
+                os.chdir(second)
+
+                with self.assertRaisesRegex(
+                    PaperExecutionAdoptionError,
+                    "persistence authority changed|path resolution changed",
+                ):
+                    with runtime.execution_guard():
+                        self.fail("CWD drift must not retarget durable execution authority")
+            finally:
+                os.chdir(original_cwd)
+
+
+
+    def test_execution_guard_rejects_ledger_path_authority_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger.path = Path(tmp) / "alternate-execution.jsonl"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("mutated ledger path authority must not be entered")
+
+    def test_execution_guard_rejects_ledger_lock_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._lock = RLock()
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("rebound ledger lock authority must not be entered")
+
+    def test_execution_guard_rejects_ledger_anchor_path_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, runtime = self.runtime(tmp)
+            ledger._anchor_path = Path(tmp) / "alternate-anchor.json"
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "ledger persistence authority changed",
+            ):
+                with runtime.execution_guard():
+                    self.fail("mutated ledger anchor authority must not be entered")
+
+
+
+    def test_minted_execution_rejects_nested_action_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            nested_action = capability.execution_plan.actions[0]
+            object.__setattr__(nested_action, "requested_stake", Decimal("99.00"))
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
+
+    def test_minted_execution_rejects_nested_exposure_binding_mutation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, runtime = self.runtime(tmp)
+            capability = prepared(runtime, action("a1"))
+            nested_binding = capability.exposure_bindings[0]
+            object.__setattr__(nested_binding, "bankroll_id", "other-bankroll")
+
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "prepared execution semantics changed",
+            ):
+                runtime.expected_run_id(capability, "trigger-1")
 
 
 if __name__ == "__main__":

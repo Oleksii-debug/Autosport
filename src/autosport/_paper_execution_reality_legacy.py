@@ -659,23 +659,46 @@ class PaperExecutionLedger:
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
         self._anchor_path = self.path.with_name(self.path.name + ".anchor.json")
         self._lock = threading.RLock()
+        self._path_authority = self.path
+        self._absolute_path_authority = self.path.absolute()
+        self._lock_path_authority = self._lock_path
+        self._absolute_lock_path_authority = self._lock_path.absolute()
+        self._anchor_path_authority = self._anchor_path
+        self._absolute_anchor_path_authority = self._anchor_path.absolute()
+        self._lock_authority = self._lock
         self._path_durable = False
+
+    def _assert_persistence_authority(self) -> None:
+        if (
+            self.path != self._path_authority
+            or self.path.absolute() != self._absolute_path_authority
+            or self._lock_path != self._lock_path_authority
+            or self._anchor_path != self._anchor_path_authority
+            or self._lock is not self._lock_authority
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER execution ledger persistence authority changed after construction"
+            )
 
     def _sync_parent_directory(self) -> None:
         if os.name == "nt":
             return
         flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        directory_fd = os.open(self.path.parent, flags)
+        directory_fd = os.open(self._absolute_path_authority.parent, flags)
         try:
             os.fsync(directory_fd)
         finally:
             os.close(directory_fd)
 
     def _ensure_existing_path_durable(self) -> None:
-        if self._path_durable or not self.path.exists():
+        if self._path_durable or not self._absolute_path_authority.exists():
             return
         try:
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+            with self._absolute_path_authority.open(
+                "a",
+                encoding="utf-8",
+                newline="\n",
+            ) as handle:
                 handle.flush()
                 os.fsync(handle.fileno())
             self._sync_parent_directory()
@@ -687,10 +710,13 @@ class PaperExecutionLedger:
         self._path_durable = True
 
     def _with_writer_lock(self, operation):
-        with self._lock:
+        self._assert_persistence_authority()
+        lock = self._lock_authority
+        with lock:
+            self._assert_persistence_authority()
             try:
                 fd = os.open(
-                    self._lock_path,
+                    self._absolute_lock_path_authority,
                     os.O_CREAT | os.O_EXCL | os.O_WRONLY,
                     0o600,
                 )
@@ -700,11 +726,13 @@ class PaperExecutionLedger:
                     "writer/crash ownership is resolved"
                 ) from exc
             try:
-                return operation()
+                result = operation()
+                self._assert_persistence_authority()
+                return result
             finally:
                 os.close(fd)
                 try:
-                    self._lock_path.unlink()
+                    self._absolute_lock_path_authority.unlink()
                 except FileNotFoundError:
                     pass
 
@@ -730,10 +758,10 @@ class PaperExecutionLedger:
         return {**body, "event_sha256": _digest(body)}
 
     def _read_anchor_unlocked(self) -> dict[str, Any] | None:
-        if not self._anchor_path.exists():
+        if not self._absolute_anchor_path_authority.exists():
             return None
         try:
-            raw = self._anchor_path.read_text(encoding="utf-8")
+            raw = self._absolute_anchor_path_authority.read_text(encoding="utf-8")
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution anchor") from exc
         anchor = _parse_json_object(raw, what="ledger anchor")
@@ -757,15 +785,16 @@ class PaperExecutionLedger:
             "ledger_root_sha256": root,
         }
         anchor = {**body, "anchor_sha256": _digest(body)}
-        tmp = self._anchor_path.with_name(
-            self._anchor_path.name + f".tmp-{os.getpid()}-{threading.get_ident()}"
+        tmp = self._absolute_anchor_path_authority.with_name(
+            self._absolute_anchor_path_authority.name
+            + f".tmp-{os.getpid()}-{threading.get_ident()}"
         )
         try:
             with tmp.open("w", encoding="utf-8", newline="\n") as handle:
                 handle.write(_canonical(anchor) + "\n")
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(tmp, self._anchor_path)
+            os.replace(tmp, self._absolute_anchor_path_authority)
             self._sync_parent_directory()
         except OSError as exc:
             try:
@@ -777,14 +806,17 @@ class PaperExecutionLedger:
             ) from exc
 
     def _load_unlocked(self) -> list[dict[str, Any]]:
-        if not self.path.exists():
-            if self._anchor_path.exists():
+        self._assert_persistence_authority()
+        if not self._absolute_path_authority.exists():
+            if self._absolute_anchor_path_authority.exists():
                 anchor = self._read_anchor_unlocked()
                 if anchor is None or anchor["event_count"] != 0:
                     raise PaperExecutionIntegrityError("ledger is missing but anchor claims history")
             return []
         try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
+            lines = self._absolute_path_authority.read_text(
+                encoding="utf-8"
+            ).splitlines()
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution ledger") from exc
 
@@ -833,7 +865,10 @@ class PaperExecutionLedger:
         return events
 
     def events(self, run_id: str | None = None) -> tuple[dict[str, Any], ...]:
-        with self._lock:
+        self._assert_persistence_authority()
+        lock = self._lock_authority
+        with lock:
+            self._assert_persistence_authority()
             events = self._load_unlocked()
             if run_id is None:
                 return tuple(events)
@@ -878,9 +913,13 @@ class PaperExecutionLedger:
                     )
                 return
             encoded = _canonical(event) + "\n"
-            path_existed_before = self.path.exists()
+            path_existed_before = self._absolute_path_authority.exists()
             try:
-                with self.path.open("a", encoding="utf-8", newline="\n") as handle:
+                with self._absolute_path_authority.open(
+                    "a",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
                     handle.write(encoded)
                     handle.flush()
                     os.fsync(handle.fileno())

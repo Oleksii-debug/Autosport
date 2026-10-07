@@ -1,10 +1,12 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from threading import RLock
 
 from autosport.paper_execution_reality import (
     EvidenceGrade,
@@ -25,6 +27,40 @@ from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
 QUOTE_AT = "2026-09-20T03:00:00+00:00"
 STARTED_AT = "2026-09-20T03:00:00.100000+00:00"
 EXPIRES_AT = "2026-09-20T03:01:00+00:00"
+
+
+def rewrite_rehashed_events(
+    ledger: PaperExecutionLedger,
+    events: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    rewritten: list[dict[str, object]] = []
+    previous_sha256 = None
+    for sequence, item in enumerate(events):
+        event = ledger._event(
+            event_type=item["event_type"],
+            run_id=item["run_id"],
+            key=item["event_key"],
+            payload=item["payload"],
+            sequence=sequence,
+            previous_sha256=previous_sha256,
+        )
+        rewritten.append(event)
+        previous_sha256 = event["event_sha256"]
+    ledger.path.write_text(
+        "".join(
+            json.dumps(
+                item,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+            )
+            + "\n"
+            for item in rewritten
+        ),
+        encoding="utf-8",
+    )
+    ledger._write_anchor_unlocked(rewritten)
+    return rewritten
 
 
 def action(
@@ -242,6 +278,117 @@ class PaperExecutionRealityTests(unittest.TestCase):
             self.assertTrue(result.attempts[1].suspended)
             self.assertEqual(result.pending_action_ids, ("a3",))
 
+    def test_suspension_set_is_durable_run_identity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            current = plan(action("a1"), action("a2"), action("a3"))
+            suspended = frozenset({"a2"})
+            first = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-suspend-identity",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=suspended,
+            )
+            restarted = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-suspend-identity",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                suspended_action_ids=suspended,
+            )
+            self.assertEqual(restarted, first)
+            reserve = next(
+                event
+                for event in ledger.events()
+                if event["event_type"] == "RUN_RESERVED"
+            )
+            self.assertEqual(
+                reserve["payload"]["suspended_action_ids"],
+                ["a2"],
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "event_key already has different payload",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-suspend-identity",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+
+    def test_observed_suspension_evidence_remains_valid(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(
+                Path(tmp) / "paper-execution.jsonl"
+            )
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.REJECTED,
+                suspended=True,
+            )
+            first = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-observed-suspension",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            second = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-observed-suspension",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            self.assertEqual(first, second)
+            self.assertTrue(first.attempts[0].suspended)
+            self.assertEqual(
+                first.attempts[0].evidence_grade,
+                EvidenceGrade.EMPIRICAL,
+            )
+
+    def test_observation_and_suspension_cannot_claim_same_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            current = plan(action("a1"))
+            obs, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+            )
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "both observed and synthetically suspended",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-observed-suspended",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={"a1": obs},
+                    evidence_registry=registry,
+                    suspended_action_ids=frozenset({"a1"}),
+                )
+            self.assertFalse(
+                any(
+                    event["event_type"] == "RUN_RESERVED"
+                    for event in ledger.events()
+                )
+            )
+
     def test_stale_quote_fails_closed_without_claiming_a_fill(self):
         with tempfile.TemporaryDirectory() as tmp:
             ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
@@ -277,6 +424,41 @@ class PaperExecutionRealityTests(unittest.TestCase):
             self.assertEqual(attempt.evidence_grade, EvidenceGrade.EMPIRICAL)
             self.assertEqual(attempt.evidence_id, obs.evidence_id)
             self.assertEqual(attempt.evidence_sha256, obs.evidence_sha256)
+
+    def test_invalid_observed_timing_does_not_reserve_run(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(
+                Path(tmp) / "paper-execution.jsonl"
+            )
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.REJECTED,
+                at=EXPIRES_AT,
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "at/after action expiry",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-observed-expired",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={"a1": observation},
+                    evidence_registry=registry,
+                )
+            self.assertEqual(len(ledger.events()), event_count)
+            self.assertFalse(
+                any(
+                    event["event_type"] == "RUN_RESERVED"
+                    for event in ledger.events()
+                )
+            )
 
     def test_submillisecond_timestamp_precision_is_accepted_and_floored(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -325,6 +507,902 @@ class PaperExecutionRealityTests(unittest.TestCase):
             with self.assertRaisesRegex(PaperExecutionIntegrityError, "digest mismatch"):
                 PaperExecutionLedger(path).events()
 
+    def test_rehashed_unknown_event_type_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-unknown-event",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            forged = ledger._event(
+                event_type="FORGED_EXECUTION_EVENT",
+                run_id=events[-1]["run_id"],
+                key=f'{events[-1]["run_id"]}:forged',
+                payload={},
+                sequence=len(events),
+                previous_sha256=events[-1]["event_sha256"],
+            )
+            rewritten = [*events, forged]
+            path.write_text(
+                "".join(
+                    json.dumps(
+                        item,
+                        ensure_ascii=False,
+                        sort_keys=True,
+                        separators=(",", ":"),
+                    )
+                    + "\n"
+                    for item in rewritten
+                ),
+                encoding="utf-8",
+            )
+            ledger._write_anchor_unlocked(rewritten)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "unsupported event_type",
+            ):
+                PaperExecutionLedger(path).events()
+
+    def test_rehashed_synthetic_attempt_semantics_fail_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            model = config()
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-rehashed-attempt",
+                config=model,
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            attempt = next(
+                item
+                for item in events
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            )
+            attempt["payload"]["reason"] = "forged but fully rehashed"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "synthetic attempt is not reproducible",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-rehashed-attempt",
+                    config=model,
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+
+    def test_rehashed_attempt_event_reordering_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"), action("a2"))
+            model = config()
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-reordered-attempts",
+                config=model,
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            indexes = [
+                index
+                for index, item in enumerate(events)
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            ]
+            self.assertEqual(len(indexes), 2)
+            events[indexes[0]], events[indexes[1]] = (
+                events[indexes[1]],
+                events[indexes[0]],
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "canonical sequence order",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-reordered-attempts",
+                    config=model,
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                )
+
+    def test_rehashed_observed_attempt_must_reproduce_registered_evidence(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-observed-rehash",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            events = list(ledger.events())
+            attempt = next(
+                item
+                for item in events
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            )
+            attempt["payload"]["reason"] = "forged observed execution reason"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "observed attempt is not reproducible",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-observed-rehash",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={"a1": observation},
+                    evidence_registry=registry,
+                )
+
+    def test_rehashed_evidence_event_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = action("a1")
+            observation, _registry = registered_observation(
+                ledger,
+                current,
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            events = list(ledger.events())
+            evidence_event = next(
+                item
+                for item in events
+                if item["event_type"]
+                == "OBSERVATION_EVIDENCE_REGISTERED"
+            )
+            evidence_event["event_key"] = (
+                "evidence:forged-" + observation.evidence_id
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "evidence event identity is invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
+    def test_rehashed_reservation_event_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-reservation-key",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            reservation = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reservation["event_key"] = (
+                reservation["run_id"] + ":forged-reserve"
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reservation event identity is invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
+    def test_rehashed_reservation_payload_extension_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-reservation-schema",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            reservation = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reservation["payload"]["alternate_authority"] = "forged"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reservation payload is invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
+    def test_rehashed_completion_payload_extension_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-completion-schema",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            completion = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_COMPLETED"
+            )
+            completion["payload"]["alternate_economics"] = "forged"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "completion payload is invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
+    def test_invalid_reservation_inputs_leave_no_durable_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            model = config()
+            run_id = "paper-exec-v2-" + "1" * 64
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "supports BACK only",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=plan(action("a1", side="LAY")),
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+            self.assertFalse(path.exists())
+
+            for invalid_started_at in (
+                "not-a-timestamp",
+                "2026-09-20T06:00:00",
+            ):
+                with self.subTest(
+                    invalid_started_at=invalid_started_at
+                ), self.assertRaisesRegex(
+                    PaperExecutionStateError,
+                    "reservation identity fields are invalid",
+                ):
+                    ledger.reserve_run(
+                        run_id=run_id,
+                        trigger_id="trigger-invalid-reservation",
+                        plan=current,
+                        config=model,
+                        started_at=invalid_started_at,
+                        observation_evidence_ids={},
+                    )
+                self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "reservation identity fields are invalid",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id=" trigger-invalid-reservation ",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "run_id does not match canonical",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "both observed and synthetically suspended",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={"a1": "evidence-a1"},
+                    suspended_action_ids=frozenset({"a1"}),
+                )
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "invalid execution evidence",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={
+                        "outside-plan": "evidence-outside"
+                    },
+                )
+            self.assertFalse(path.exists())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "not durably registered",
+            ):
+                ledger.reserve_run(
+                    run_id=run_id,
+                    trigger_id="trigger-invalid-reservation",
+                    plan=current,
+                    config=model,
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={
+                        "a1": "paper-exec-evidence-v1-" + "a" * 64
+                    },
+                )
+            self.assertFalse(path.exists())
+
+    def test_invalid_exposure_scope_inputs_leave_no_durable_event(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            body = {
+                "schema": (
+                    "autosport.paper_execution.exposure_scope_binding"
+                ),
+                "schema_version": 1,
+                "plan_id": current.plan_id,
+                "plan_fingerprint": current.fingerprint,
+                "intent_evidence_sha256": "a" * 64,
+                "bindings": [
+                    {
+                        "action_id": "a1",
+                        "sport": None,
+                        "bankroll_id": None,
+                        "currency": None,
+                    }
+                ],
+            }
+            canonical = json.dumps(
+                body,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            payload = {
+                **body,
+                "binding_sha256": hashlib.sha256(
+                    canonical.encode("utf-8")
+                ).hexdigest(),
+            }
+            run_id = "paper-exec-v2-" + "1" * 64
+
+            invalid_cases = (
+                (
+                    "not-a-run-id",
+                    payload,
+                    "exposure scope run_id is invalid",
+                ),
+                (
+                    run_id,
+                    {key: value for key, value in payload.items()
+                     if key != "binding_sha256"},
+                    "exposure scope payload schema is invalid",
+                ),
+                (
+                    run_id,
+                    {**payload, "binding_sha256": "b" * 64},
+                    "exposure scope binding digest is invalid",
+                ),
+                (
+                    run_id,
+                    {
+                        **payload,
+                        "bindings": [
+                            {
+                                "action_id": "a1",
+                                "sport": None,
+                                "bankroll_id": "bankroll-1",
+                                "currency": "usd",
+                            }
+                        ],
+                    },
+                    "exposure scope bindings are invalid",
+                ),
+            )
+            for invalid_run_id, invalid_payload, message in invalid_cases:
+                with self.subTest(message=message), self.assertRaisesRegex(
+                    PaperExecutionStateError,
+                    message,
+                ):
+                    ledger.publish_exposure_scope(
+                        run_id=invalid_run_id,
+                        payload=invalid_payload,
+                    )
+                self.assertFalse(path.exists())
+
+            ledger.publish_exposure_scope(
+                run_id=run_id,
+                payload=payload,
+            )
+            events = ledger.events(run_id)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["event_type"],
+                "PAPER_EXPOSURE_SCOPE_BOUND",
+            )
+
+    def test_direct_reservation_rejects_invalid_observed_timing(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            observation, _registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.REJECTED,
+                at=EXPIRES_AT,
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "at/after action expiry",
+            ):
+                ledger.reserve_run(
+                    run_id="paper-exec-v2-" + "3" * 64,
+                    trigger_id="trigger-direct-expired-evidence",
+                    plan=current,
+                    config=config(),
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={
+                        "a1": observation.evidence_id
+                    },
+                )
+            self.assertEqual(len(ledger.events()), event_count)
+            self.assertFalse(
+                any(
+                    event["event_type"] == "RUN_RESERVED"
+                    for event in ledger.events()
+                )
+            )
+
+    def test_reservation_evidence_must_bind_exact_action(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            foreign_action = action("foreign")
+            observation, _registry = registered_observation(
+                ledger,
+                foreign_action,
+                PaperAttemptOutcome.REJECTED,
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "does not bind exact action",
+            ):
+                ledger.reserve_run(
+                    run_id="paper-exec-v2-" + "2" * 64,
+                    trigger_id="trigger-evidence-binding",
+                    plan=current,
+                    config=config(),
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={
+                        "a1": observation.evidence_id
+                    },
+                )
+            self.assertEqual(len(ledger.events()), event_count)
+
+    def test_observed_evidence_must_predate_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            result = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-evidence-chronology",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            events = list(ledger.events())
+            evidence_index = next(
+                index
+                for index, item in enumerate(events)
+                if item["event_type"]
+                == "OBSERVATION_EVIDENCE_REGISTERED"
+            )
+            reservation_index = next(
+                index
+                for index, item in enumerate(events)
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            events[evidence_index], events[reservation_index] = (
+                events[reservation_index],
+                events[evidence_index],
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "evidence was not durable before RUN_RESERVED",
+            ):
+                ledger.record_attempt(result.attempts[0])
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "evidence was not durable before RUN_RESERVED",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-evidence-chronology",
+                    config=config(),
+                    ledger=ledger,
+                    started_at=STARTED_AT,
+                    observations={"a1": observation},
+                    evidence_registry=registry,
+                )
+
+    def test_attempt_transition_requires_reservation_before_side_effect(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            source = PaperExecutionLedger(
+                Path(tmp) / "source-execution.jsonl"
+            )
+            current = plan(action("a1"))
+            result = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-attempt-source",
+                config=config(),
+                ledger=source,
+                started_at=STARTED_AT,
+            )
+            attempt = result.attempts[0]
+
+            target_path = Path(tmp) / "target-execution.jsonl"
+            target = PaperExecutionLedger(target_path)
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "requires exactly one durable reservation",
+            ):
+                target.record_attempt(attempt)
+            self.assertFalse(target_path.exists())
+
+            target._append_event(
+                event_type="ATTEMPT_RECORDED",
+                run_id=attempt.run_id,
+                key=f"{attempt.run_id}:attempt:{attempt.sequence}",
+                payload=attempt.to_dict(),
+            )
+            event_count = len(target.events())
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "cannot be retroactively appended",
+            ):
+                target.reserve_run(
+                    run_id=result.run_id,
+                    trigger_id="trigger-attempt-source",
+                    plan=current,
+                    config=config(),
+                    started_at=STARTED_AT,
+                    observation_evidence_ids={},
+                )
+            self.assertEqual(len(target.events()), event_count)
+
+    def test_exact_attempt_retry_is_idempotent_after_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(
+                Path(tmp) / "paper-execution.jsonl"
+            )
+            result = execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-attempt-idempotency",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            event_count = len(ledger.events())
+            ledger.record_attempt(result.attempts[0])
+            self.assertEqual(len(ledger.events()), event_count)
+
+    def test_attempt_write_cannot_switch_reserved_evidence_class(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = plan(action("a1"))
+            model = config()
+            source = PaperExecutionLedger(
+                Path(tmp) / "source-observed.jsonl"
+            )
+            observation, registry = registered_observation(
+                source,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            observed = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-evidence-class",
+                config=model,
+                ledger=source,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+
+            target = PaperExecutionLedger(
+                Path(tmp) / "target-synthetic.jsonl"
+            )
+            target.reserve_run(
+                run_id=observed.run_id,
+                trigger_id="trigger-evidence-class",
+                plan=current,
+                config=model,
+                started_at=STARTED_AT,
+                observation_evidence_ids={},
+            )
+            event_count = len(target.events())
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "reserved synthetic authority",
+            ):
+                target.record_attempt(observed.attempts[0])
+            self.assertEqual(len(target.events()), event_count)
+
+    def test_exact_attempt_retry_reverifies_rehashed_reservation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            result = execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-retry-reservation-proof",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            reservation = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reservation["payload"]["plan_id"] = "forged-plan-id"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "reserved plan/model identity",
+            ):
+                ledger.record_attempt(result.attempts[0])
+
+    def test_exposure_scope_must_bind_exact_execution_plan(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            current = plan(action("a1"))
+            model = config()
+            source = PaperExecutionLedger(
+                Path(tmp) / "source-plan-scope.jsonl"
+            )
+            source_run = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-plan-scope",
+                config=model,
+                ledger=source,
+                started_at=STARTED_AT,
+            )
+
+            target = PaperExecutionLedger(
+                Path(tmp) / "target-plan-scope.jsonl"
+            )
+            scope_body = {
+                "schema": (
+                    "autosport.paper_execution.exposure_scope_binding"
+                ),
+                "schema_version": 1,
+                "plan_id": "forged-plan-id",
+                "plan_fingerprint": current.fingerprint,
+                "intent_evidence_sha256": "a" * 64,
+                "bindings": [
+                    {
+                        "action_id": "a1",
+                        "sport": None,
+                        "bankroll_id": None,
+                        "currency": None,
+                    }
+                ],
+            }
+            binding_sha256 = __import__("hashlib").sha256(
+                json.dumps(
+                    scope_body,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+            ).hexdigest()
+            target._append_event(
+                event_type="PAPER_EXPOSURE_SCOPE_BOUND",
+                run_id=source_run.run_id,
+                key=f"{source_run.run_id}:exposure-scope",
+                payload={
+                    **scope_body,
+                    "binding_sha256": binding_sha256,
+                },
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "exposure scope conflicts with execution plan",
+            ):
+                execute_paper_plan(
+                    plan=current,
+                    trigger_id="trigger-plan-scope",
+                    config=model,
+                    ledger=target,
+                    started_at=STARTED_AT,
+                )
+
+    def test_rehashed_noncanonical_crypto_identity_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-bad-crypto-id",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            reservation = next(
+                item
+                for item in events
+                if item["event_type"] == "RUN_RESERVED"
+            )
+            reservation["payload"]["model_fingerprint"] = "not-a-sha256"
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reservation identity fields are invalid",
+            ):
+                PaperExecutionLedger(path).events()
+
+    def test_completion_retry_rejects_rehashed_attempt_after_completion(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(path)
+            result = execute_paper_plan(
+                plan=plan(action("a1")),
+                trigger_id="trigger-completion-order",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+            )
+            events = list(ledger.events())
+            attempt_index = next(
+                index
+                for index, item in enumerate(events)
+                if item["event_type"] == "ATTEMPT_RECORDED"
+            )
+            completion_index = next(
+                index
+                for index, item in enumerate(events)
+                if item["event_type"] == "RUN_COMPLETED"
+            )
+            events[attempt_index], events[completion_index] = (
+                events[completion_index],
+                events[attempt_index],
+            )
+            rewrite_rehashed_events(ledger, events)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "completion chronology is invalid",
+            ):
+                ledger.complete_run(
+                    run_id=result.run_id,
+                    pending_action_ids=result.pending_action_ids,
+                    recovery_decision=result.recovery_decision,
+                    worst_case_exposure=result.worst_case_exposure,
+                )
+
+    def test_observed_attempt_retry_reproves_registered_record(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(
+                Path(tmp) / "paper-execution.jsonl"
+            )
+            current = plan(action("a1"))
+            observation, registry = registered_observation(
+                ledger,
+                current.actions[0],
+                PaperAttemptOutcome.ACCEPTED,
+                odds="2.40",
+                stake="10.00",
+            )
+            result = execute_paper_plan(
+                plan=current,
+                trigger_id="trigger-observed-record-proof",
+                config=config(),
+                ledger=ledger,
+                started_at=STARTED_AT,
+                observations={"a1": observation},
+                evidence_registry=registry,
+            )
+            forged_payload = result.attempts[0].to_dict()
+            forged_payload["reason"] = "forged observed retry"
+            forged = type(result.attempts[0]).from_dict(
+                forged_payload
+            )
+            event_count = len(ledger.events())
+
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "conflicts with durable observed evidence",
+            ):
+                ledger.record_attempt(forged)
+            self.assertEqual(len(ledger.events()), event_count)
+
     def test_writer_lock_fails_closed_instead_of_creating_parallel_history(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "paper-execution.jsonl"
@@ -341,14 +1419,19 @@ class PaperExecutionRealityTests(unittest.TestCase):
 
     def test_non_back_plan_fails_closed_until_liability_authority_exists(self):
         with tempfile.TemporaryDirectory() as tmp:
-            with self.assertRaisesRegex(PaperExecutionStateError, "supports BACK only"):
+            path = Path(tmp) / "paper-execution.jsonl"
+            with self.assertRaisesRegex(
+                PaperExecutionStateError,
+                "supports BACK only",
+            ):
                 execute_paper_plan(
                     plan=plan(action("a1", side="LAY")),
                     trigger_id="trigger-lay",
                     config=config(),
-                    ledger=PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl"),
+                    ledger=PaperExecutionLedger(path),
                     started_at=STARTED_AT,
                 )
+            self.assertFalse(path.exists())
 
     def test_per_leg_market_identity_survives_for_external_settlement(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -455,6 +1538,69 @@ class PaperExecutionRealityTests(unittest.TestCase):
                     ledger=ledger, started_at=STARTED_AT,
                     observations={"a1": obs}, evidence_registry=registry,
                 )
+
+
+
+    def test_ledger_read_rejects_path_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger.path = Path(tmp) / "alternate-execution.jsonl"
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.events()
+
+    def test_ledger_read_rejects_lock_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger._lock = RLock()
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.events()
+
+    def test_ledger_write_rejects_writer_lock_path_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger._lock_path = Path(tmp) / "alternate.writer.lock"
+            current = action("a1")
+            record = PaperExecutionEvidenceRecord(
+                action_id=current.action_id,
+                bookmaker_id=current.bookmaker_id,
+                account_id=current.account_id,
+                event_id=current.event_id,
+                market_id=current.market_id,
+                selection_id=current.selection_id,
+                side=current.side,
+                quote_id=current.quote_id,
+                outcome=PaperAttemptOutcome.ACCEPTED,
+                observed_at=STARTED_AT,
+                evidence_grade=EvidenceGrade.EMPIRICAL,
+                evidence_source="authority-drift-test",
+                accepted_odds="2.50",
+                accepted_stake="10.00",
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.register_observation_evidence(record)
+
+    def test_ledger_read_rejects_anchor_path_authority_rebinding(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger._anchor_path = Path(tmp) / "alternate.anchor.json"
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "persistence authority changed",
+            ):
+                ledger.events()
 
 
 if __name__ == "__main__":

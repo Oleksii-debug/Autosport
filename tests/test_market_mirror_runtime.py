@@ -3,14 +3,17 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import Event, Thread
 from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.market_mirror_runtime import (
     BoundedMirrorInvalidationBuffer,
     FocusedMirrorDependencyIndex,
+    MirrorInvalidationBatch,
 )
 from autosport.storage import SQLiteMarketStore
 
@@ -39,6 +42,743 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             source_ts=timestamp,
             ingest_ts=timestamp,
         )
+
+
+    @staticmethod
+    def prophetx_refresh_event(*, sequence: int, odds: str = "2.00") -> MarketEvent:
+        timestamp = f"2026-09-16T19:00:{sequence:02d}+00:00"
+        return MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal(odds),
+            observed_ts=timestamp,
+            source_id="prophetx:sandbox",
+            sequence=sequence,
+            status="open",
+            ingest_ts=timestamp,
+            metadata={
+                "provider": "prophetx",
+                "environment": "sandbox",
+                "transport_surface": "v3_affiliate_get_markets",
+                "request_fingerprint_sha256": "a" * 64,
+                "product_acquisition_sequence": sequence,
+                "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                "snapshot_fingerprint_sha256": (
+                    f"{sequence + 100:x}".rjust(64, "0")
+                ),
+                "sequence_authority_id": "prophetx-rest-test-authority",
+                "sequence_source_id": (
+                    "prophetx:sandbox:rest:v3-affiliate-get-markets"
+                ),
+                "semantic_state_contract": PROPHETX_REST_MARKET_STATE_CONTRACT,
+            },
+        )
+
+    def test_semantic_refresh_keeps_conservative_downstream_invalidation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        self.assertEqual(runtime.accept_persisted(first).status, MirrorUpdate.APPLIED)
+        runtime.drain()
+        result = runtime.accept_persisted(refresh)
+
+        self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
+        self.assertEqual(runtime.pending_count, 1)
+        batch = runtime.drain()
+        expected_key = ("prophetx:sandbox", refresh.quote_key)
+        self.assertEqual(batch.changed_keys, (expected_key,))
+        self.assertEqual(batch.semantic_refresh_keys, (expected_key,))
+        self.assertEqual(
+            batch.semantic_refresh_identities,
+            ((expected_key, refresh.sequence),),
+        )
+        self.assertEqual(mirror.snapshot(), (refresh,))
+
+    def test_material_update_is_not_classified_as_semantic_refresh(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        material = self.prophetx_refresh_event(sequence=1)
+
+        self.assertEqual(runtime.accept_persisted(material).status, MirrorUpdate.APPLIED)
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
+            (("prophetx:sandbox", material.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+
+    def test_material_update_dominates_earlier_coalesced_refresh(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+        material = self.prophetx_refresh_event(sequence=3, odds="2.20")
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        self.assertEqual(runtime.accept_persisted(material).status, MirrorUpdate.APPLIED)
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
+            (("prophetx:sandbox", material.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+
+    def test_later_refresh_cannot_downgrade_coalesced_material_update(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        material = self.prophetx_refresh_event(sequence=2, odds="2.20")
+        refresh = self.prophetx_refresh_event(sequence=3, odds="2.20")
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(runtime.accept_persisted(material).status, MirrorUpdate.APPLIED)
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
+            (("prophetx:sandbox", refresh.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+
+    def test_overflow_discards_incomplete_semantic_refresh_classification(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        runtime.accept_persisted(
+            self.event(
+                source_id="provider-b",
+                selection="selection-b",
+                sequence=1,
+            )
+        )
+
+        batch = runtime.drain()
+        self.assertTrue(batch.full_refresh_required)
+        self.assertEqual(batch.changed_keys, ())
+        self.assertEqual(batch.semantic_refresh_keys, ())
+
+    def test_view_for_keys_is_bounded_and_revision_coherent(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        second = self.event(
+            source_id="provider-b",
+            selection="selection-b",
+            sequence=1,
+        )
+        mirror.apply(first)
+        mirror.apply(second)
+
+        with (
+            patch.object(
+                mirror,
+                "snapshot",
+                side_effect=AssertionError("whole snapshot is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view",
+                side_effect=AssertionError("whole view is forbidden"),
+            ),
+        ):
+            captured = mirror.view_for_keys(
+                (
+                    ("provider-b", second.quote_key),
+                    ("provider-a", first.quote_key),
+                )
+            )
+
+        self.assertEqual(captured.revision, 2)
+        self.assertEqual(
+            tuple((event.source_id, event.quote_key) for event in captured.events),
+            (
+                ("provider-a", first.quote_key),
+                ("provider-b", second.quote_key),
+            ),
+        )
+
+    def test_view_for_keys_causal_fence_excludes_generation_zero_truth(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        event = self.event(sequence=1)
+
+        runtime.reconcile_persisted(event, append_generation=0)
+        key = ((event.source_id, event.quote_key),)
+
+        raw = mirror.view_for_keys(key)
+        causal = mirror.view_for_keys(key, _causal_only=True)
+
+        self.assertEqual(raw.events, (event,))
+        self.assertEqual(causal.events, ())
+        self.assertEqual(raw.revision, causal.revision)
+
+    def test_view_for_keys_rejects_non_boolean_causal_fence(self) -> None:
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "_causal_only must be a bool"):
+            mirror.view_for_keys((), _causal_only=1)
+
+    def test_affected_routing_uses_one_bounded_mirror_capture(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision")
+        first = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        second = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        runtime.accept_persisted(first)
+        runtime.accept_persisted(second)
+        batch = runtime.drain()
+
+        with (
+            patch.object(
+                mirror,
+                "event_for_quote_key",
+                side_effect=AssertionError("per-key reads are forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "snapshot",
+                side_effect=AssertionError("whole snapshot is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view_for_keys",
+                wraps=mirror.view_for_keys,
+            ) as bounded,
+        ):
+            self.assertEqual(dependencies.affected_inputs(batch), ("decision",))
+
+        bounded.assert_called_once_with(frozenset(batch.changed_keys))
+
+    def test_affected_routing_missing_key_fails_safe_to_all_inputs(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("provider-a", source_ids="provider-a")
+        dependencies.register("provider-b", source_ids="provider-b")
+        batch = MirrorInvalidationBatch(
+            changed_keys=(
+                (event.source_id, event.quote_key),
+                ("missing-provider", "missing-quote"),
+            ),
+            full_refresh_required=False,
+            has_more=False,
+        )
+
+        self.assertEqual(
+            dependencies.affected_inputs(batch),
+            ("provider-a", "provider-b"),
+        )
+    def test_refresh_only_routing_uses_one_bounded_mirror_capture(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        runtime.accept_persisted(refresh)
+        batch = runtime.drain()
+
+        with (
+            patch.object(
+                mirror,
+                "event_for_quote_key",
+                side_effect=AssertionError("per-key reads are forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "snapshot",
+                side_effect=AssertionError("whole snapshot is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view",
+                side_effect=AssertionError("whole view is forbidden"),
+            ),
+            patch.object(
+                mirror,
+                "view_for_keys",
+                wraps=mirror.view_for_keys,
+            ) as bounded,
+        ):
+            self.assertEqual(
+                dependencies.semantic_refresh_only_inputs(batch),
+                ("decision",),
+            )
+
+        bounded.assert_called_once_with(
+            frozenset(batch.changed_keys),
+            _causal_only=True,
+        )
+
+    def test_refresh_only_routing_fails_closed_on_registry_race(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        runtime.accept_persisted(refresh)
+        batch = runtime.drain()
+
+        original = mirror.view_for_keys
+
+        def race_registry(keys, **kwargs):
+            captured = original(keys, **kwargs)
+            self.assertTrue(dependencies.unregister("decision"))
+            dependencies.register("replacement", source_ids="prophetx:sandbox")
+            return captured
+
+        with patch.object(mirror, "view_for_keys", side_effect=race_registry):
+            self.assertEqual(
+                dependencies.semantic_refresh_only_inputs(batch),
+                (),
+            )
+
+    def test_refresh_only_routing_requires_current_causal_truth(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.reconcile_persisted(first, append_generation=1)
+        runtime.drain()
+        runtime.reconcile_persisted(refresh, append_generation=2)
+        batch = runtime.drain()
+
+        # Simulate a conservative authority-loss observation after the batch by
+        # advancing the same quote to a later generation-zero semantic refresh.
+        noncausal = self.prophetx_refresh_event(sequence=3)
+        result = runtime.reconcile_persisted(noncausal, append_generation=0)
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
+        self.assertEqual(
+            dependencies.semantic_refresh_only_inputs(batch),
+            (),
+        )
+
+    def test_refresh_only_routing_fails_closed_on_missing_changed_key(self) -> None:
+        mirror = MarketMirror()
+        event = self.prophetx_refresh_event(sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision")
+
+        batch = MirrorInvalidationBatch(
+            changed_keys=(
+                ("prophetx:sandbox", event.quote_key),
+                ("provider-missing", "missing-quote"),
+            ),
+            full_refresh_required=False,
+            has_more=False,
+            semantic_refresh_keys=(("prophetx:sandbox", event.quote_key),),
+            semantic_refresh_identities=(
+                (("prophetx:sandbox", event.quote_key), event.sequence),
+            ),
+        )
+
+        self.assertEqual(dependencies.semantic_refresh_only_inputs(batch), ())
+
+    def test_repeated_refresh_coalescing_tracks_latest_acquisition_sequence(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh_two = self.prophetx_refresh_event(sequence=2)
+        refresh_three = self.prophetx_refresh_event(sequence=3)
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh_two).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        self.assertEqual(
+            runtime.accept_persisted(refresh_three).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+
+        batch = runtime.drain()
+        key = ("prophetx:sandbox", refresh_three.quote_key)
+        self.assertEqual(batch.changed_keys, (key,))
+        self.assertEqual(batch.semantic_refresh_keys, (key,))
+        self.assertEqual(batch.semantic_refresh_identities, ((key, 3),))
+
+    def test_noncausal_semantic_refresh_is_material_for_decision_routing(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        noncausal_refresh = self.prophetx_refresh_event(sequence=2)
+
+        runtime.reconcile_persisted(first, append_generation=1)
+        runtime.drain()
+        result = runtime.reconcile_persisted(
+            noncausal_refresh,
+            append_generation=0,
+        )
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
+            (("prophetx:sandbox", noncausal_refresh.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+        self.assertEqual(batch.semantic_refresh_identities, ())
+        self.assertEqual(
+            dependencies.semantic_refresh_only_inputs(batch),
+            (),
+        )
+        self.assertEqual(dependencies.affected_inputs(batch), ("decision",))
+        decision = dependencies.decision_view(
+            "decision",
+            as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=5),
+        )
+        self.assertEqual(decision.events, ())
+
+    def test_noncausal_refresh_dominates_coalesced_causal_refresh(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.prophetx_refresh_event(sequence=1)
+        causal_refresh = self.prophetx_refresh_event(sequence=2)
+        noncausal_refresh = self.prophetx_refresh_event(sequence=3)
+        later_causal_refresh = self.prophetx_refresh_event(sequence=4)
+
+        runtime.reconcile_persisted(first, append_generation=1)
+        runtime.drain()
+        self.assertEqual(
+            runtime.reconcile_persisted(
+                causal_refresh,
+                append_generation=2,
+            ).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        self.assertEqual(
+            runtime.reconcile_persisted(
+                noncausal_refresh,
+                append_generation=0,
+            ).status,
+            MirrorUpdate.APPLIED,
+        )
+        self.assertEqual(
+            runtime.reconcile_persisted(
+                later_causal_refresh,
+                append_generation=3,
+            ).status,
+            MirrorUpdate.APPLIED,
+        )
+
+        batch = runtime.drain()
+        self.assertEqual(
+            batch.changed_keys,
+            (("prophetx:sandbox", later_causal_refresh.quote_key),),
+        )
+        self.assertEqual(batch.semantic_refresh_keys, ())
+        self.assertEqual(batch.semantic_refresh_identities, ())
+
+    def test_stale_refresh_batch_cannot_classify_newer_material_state(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="prophetx:sandbox")
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+        material = self.prophetx_refresh_event(sequence=3, odds="2.20")
+
+        runtime.accept_persisted(first)
+        runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(refresh).status,
+            MirrorUpdate.SEMANTIC_REFRESH,
+        )
+        stale_batch = runtime.drain()
+        self.assertEqual(
+            runtime.accept_persisted(material).status,
+            MirrorUpdate.APPLIED,
+        )
+
+        self.assertEqual(
+            dependencies.semantic_refresh_only_inputs(stale_batch),
+            (),
+        )
+        self.assertEqual(
+            dependencies.affected_inputs(stale_batch),
+            ("decision",),
+        )
+
+    def test_refresh_only_routing_excludes_inputs_with_material_changes(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("refresh-only", source_ids="prophetx:sandbox")
+        dependencies.register("material-only", source_ids="provider-b")
+        dependencies.register("mixed")
+
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+        runtime.accept_persisted(first)
+        runtime.drain()
+
+        runtime.accept_persisted(refresh)
+        runtime.accept_persisted(
+            self.event(
+                source_id="provider-b",
+                selection="selection-b",
+                sequence=1,
+            )
+        )
+        batch = runtime.drain()
+
+        self.assertEqual(
+            dependencies.semantic_refresh_only_inputs(batch),
+            ("refresh-only",),
+        )
+        self.assertEqual(
+            dependencies.affected_inputs(batch),
+            ("refresh-only", "material-only", "mixed"),
+        )
+
+    def test_invalidation_batch_rejects_non_subset_refresh_metadata(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh keys must be a subset",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(("provider-a", "quote-a"),),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(("provider-b", "quote-b"),),
+                semantic_refresh_identities=((("provider-b", "quote-b"), 1),),
+            )
+
+    def test_invalidation_batch_requires_exact_refresh_sequence_binding(self) -> None:
+        key = ("provider-a", "quote-a")
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh identities must exactly bind",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(key,),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(key,),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh identity must bind",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(key,),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(key,),
+                semantic_refresh_identities=((key, 0),),
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh identities must have unique keys",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(key,),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(key,),
+                semantic_refresh_identities=((key, 1), (key, 2)),
+            )
+
+    def test_invalidation_batch_rejects_malformed_key_collections(self) -> None:
+        malformed = (
+            {
+                "changed_keys": [("provider-a", "quote-a")],
+                "semantic_refresh_keys": (),
+            },
+            {
+                "changed_keys": (),
+                "semantic_refresh_keys": [("provider-a", "quote-a")],
+            },
+        )
+        for state in malformed:
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(
+                    TypeError,
+                    "invalidation key collections must be tuples",
+                ):
+                    MirrorInvalidationBatch(
+                        changed_keys=state["changed_keys"],
+                        full_refresh_required=False,
+                        has_more=False,
+                        semantic_refresh_keys=state["semantic_refresh_keys"],
+                        semantic_refresh_identities=state.get(
+                            "semantic_refresh_identities",
+                            (),
+                        ),
+                    )
+
+    def test_invalidation_batch_rejects_malformed_quote_keys(self) -> None:
+        malformed = (
+            ((),),
+            (("provider-a",),),
+            (("provider-a", "quote-a", "extra"),),
+            (("", "quote-a"),),
+            (("provider-a", ""),),
+            ((1, "quote-a"),),
+            (("provider-a", 1),),
+        )
+        for keys in malformed:
+            with self.subTest(keys=keys):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "invalidation keys must be non-empty",
+                ):
+                    MirrorInvalidationBatch(
+                        changed_keys=keys,
+                        full_refresh_required=False,
+                        has_more=False,
+                    )
+
+    def test_invalidation_batch_rejects_duplicate_key_metadata(self) -> None:
+        duplicate = ("provider-a", "quote-a")
+        with self.assertRaisesRegex(
+            ValueError,
+            "changed invalidation keys must be unique",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(duplicate, duplicate),
+                full_refresh_required=False,
+                has_more=False,
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "semantic refresh keys must be unique",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(duplicate,),
+                full_refresh_required=False,
+                has_more=False,
+                semantic_refresh_keys=(duplicate, duplicate),
+            )
+
+    def test_invalidation_batch_validates_optional_mirror_revision(self) -> None:
+        accepted = MirrorInvalidationBatch(
+            changed_keys=(),
+            full_refresh_required=False,
+            has_more=False,
+            mirror_revision=0,
+        )
+        self.assertEqual(accepted.mirror_revision, 0)
+        for value in (True, -1, 1.5, "1"):
+            with self.subTest(mirror_revision=value):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "mirror_revision must be a non-negative int or None",
+                ):
+                    MirrorInvalidationBatch(
+                        changed_keys=(),
+                        full_refresh_required=False,
+                        has_more=False,
+                        mirror_revision=value,
+                    )
+    def test_invalidation_batch_rejects_non_boolean_flags(self) -> None:
+        with self.assertRaisesRegex(
+            TypeError,
+            "invalidation batch flags must be booleans",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=1,
+                has_more=False,
+            )
+        with self.assertRaisesRegex(
+            TypeError,
+            "invalidation batch flags must be booleans",
+        ):
+            MirrorInvalidationBatch(
+                changed_keys=(),
+                full_refresh_required=False,
+                has_more=0,
+            )
+
+    def test_full_refresh_batch_rejects_bounded_key_state(self) -> None:
+        contradictory = (
+            {
+                "changed_keys": (("provider-a", "quote-a"),),
+                "semantic_refresh_keys": (),
+                "semantic_refresh_identities": (),
+                "has_more": False,
+            },
+            {
+                "changed_keys": (("provider-a", "quote-a"),),
+                "semantic_refresh_keys": (("provider-a", "quote-a"),),
+                "semantic_refresh_identities": (
+                    (("provider-a", "quote-a"), 1),
+                ),
+                "has_more": False,
+            },
+            {
+                "changed_keys": (),
+                "semantic_refresh_keys": (),
+                "semantic_refresh_identities": (),
+                "has_more": True,
+            },
+        )
+        for state in contradictory:
+            with self.subTest(state=state):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "full-refresh invalidation must not carry bounded key state",
+                ):
+                    MirrorInvalidationBatch(
+                        changed_keys=state["changed_keys"],
+                        full_refresh_required=True,
+                        has_more=state["has_more"],
+                        semantic_refresh_keys=state["semantic_refresh_keys"],
+                    )
+
+    def test_full_refresh_batch_accepts_only_unbounded_fence(self) -> None:
+        batch = MirrorInvalidationBatch(
+            changed_keys=(),
+            full_refresh_required=True,
+            has_more=False,
+        )
+        self.assertEqual(batch.changed_keys, ())
+        self.assertEqual(batch.semantic_refresh_keys, ())
+        self.assertEqual(batch.semantic_refresh_identities, ())
+        self.assertFalse(batch.has_more)
 
     def test_market_bus_persists_before_mirror_subscriber_runs(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -166,6 +906,235 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
         self.assertEqual(runtime.pending_count, 0)
         self.assertEqual(runtime.drain().changed_keys, ())
 
+    def test_restart_reconciliation_does_not_promote_noncausal_sequence_fence(self) -> None:
+        mirror = MarketMirror()
+        baseline = self.event(sequence=3, odds="2.30")
+        mirror._apply_with_causal_authority(
+            baseline,
+            decision_causal=False,
+        )
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+
+        duplicate = runtime.accept_persisted(baseline)
+        stale = runtime.accept_persisted(self.event(sequence=2, odds="2.10"))
+
+        self.assertEqual(duplicate.status, MirrorUpdate.DUPLICATE)
+        self.assertEqual(stale.status, MirrorUpdate.STALE)
+        self.assertEqual(runtime.pending_count, 0)
+        self.assertEqual(
+            mirror.active_snapshot(
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            ),
+            (),
+        )
+
+    def test_reconcile_persisted_preserves_provenance_and_publishes_material_changes(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=4)
+        baseline = self.event(sequence=3, odds="2.30")
+
+        applied = runtime.reconcile_persisted(
+            baseline,
+            append_generation=0,
+        )
+
+        self.assertEqual(applied.status, MirrorUpdate.APPLIED)
+        self.assertEqual(runtime.pending_count, 1)
+        self.assertEqual(
+            runtime.drain().changed_keys,
+            (("provider-a", baseline.quote_key),),
+        )
+        self.assertEqual(
+            mirror.active_snapshot(
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            ),
+            (),
+        )
+
+        positive = self.event(sequence=4, odds="2.40")
+        applied_positive = runtime.reconcile_persisted(
+            positive,
+            append_generation=1,
+        )
+
+        self.assertEqual(applied_positive.status, MirrorUpdate.APPLIED)
+        self.assertEqual(
+            runtime.drain().changed_keys,
+            (("provider-a", positive.quote_key),),
+        )
+        self.assertEqual(
+            mirror.active_snapshot(
+                as_of=datetime(2026, 9, 16, 19, 0, 10, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=1),
+            ),
+            (positive,),
+        )
+
+    def test_reconcile_persisted_rejects_invalid_generation_before_mutation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        event = self.event(sequence=1)
+
+        for invalid in (-1, True, 1.0):
+            with self.subTest(append_generation=invalid):
+                with self.assertRaises(ValueError):
+                    runtime.reconcile_persisted(
+                        event,
+                        append_generation=invalid,
+                    )
+
+        self.assertEqual(mirror.snapshot(), ())
+        self.assertEqual(runtime.pending_count, 0)
+
+    def test_runtime_authorities_reject_market_mirror_subclasses(self) -> None:
+        class HostileMirror(MarketMirror):
+            def view(self):
+                raise AssertionError("hostile mirror view executed")
+
+        hostile = HostileMirror()
+
+        with self.assertRaisesRegex(TypeError, "exact MarketMirror"):
+            FocusedMirrorDependencyIndex(hostile)
+        with self.assertRaisesRegex(TypeError, "exact MarketMirror"):
+            BoundedMirrorInvalidationBuffer(hostile)
+
+    def test_dependency_routing_rejects_invalidation_batch_subclasses(self) -> None:
+        class Batch(MirrorInvalidationBatch):
+            pass
+
+        index = FocusedMirrorDependencyIndex(MarketMirror())
+        index.register("input-a")
+        hostile = Batch(
+            changed_keys=(),
+            full_refresh_required=False,
+            has_more=False,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact MirrorInvalidationBatch"):
+            index.affected_inputs(hostile)
+        with self.assertRaisesRegex(TypeError, "exact MirrorInvalidationBatch"):
+            index.semantic_refresh_only_inputs(hostile)
+
+    def test_registry_mutation_guard_blocks_direct_mutation_but_not_reads(self) -> None:
+        mirror = MarketMirror()
+        index = FocusedMirrorDependencyIndex(mirror)
+        started = Event()
+        finished = Event()
+
+        def register_in_peer() -> None:
+            started.set()
+            index.register("input-a", selection_ids="selection-1")
+            finished.set()
+
+        with index.registry_mutation_guard():
+            peer = Thread(target=register_in_peer)
+            peer.start()
+            self.assertTrue(started.wait(1))
+            self.assertEqual(index.registry_snapshot(), ())
+            self.assertFalse(finished.wait(0.05))
+
+        self.assertTrue(finished.wait(1))
+        peer.join(timeout=1)
+        self.assertFalse(peer.is_alive())
+        self.assertEqual(index.input_ids, ("input-a",))
+
+    def test_registry_state_guard_uses_mutation_lock_order(self) -> None:
+        mirror = MarketMirror()
+        index = FocusedMirrorDependencyIndex(mirror)
+        index.register("input-a", selection_ids="selection-1")
+        started = Event()
+        finished = Event()
+
+        def replace_in_peer() -> None:
+            started.set()
+            self.assertTrue(index.unregister("input-a"))
+            index.register("input-a", selection_ids="selection-2")
+            finished.set()
+
+        with index.registry_state_guard() as guarded:
+            self.assertEqual(len(guarded), 1)
+            peer = Thread(target=replace_in_peer)
+            peer.start()
+            self.assertTrue(started.wait(1))
+            self.assertFalse(finished.wait(0.05))
+            self.assertEqual(
+                guarded[0][0].selection_ids,
+                frozenset({"selection-1"}),
+            )
+
+        self.assertTrue(finished.wait(1))
+        peer.join(timeout=1)
+        self.assertFalse(peer.is_alive())
+        self.assertEqual(
+            index.registry_snapshot()[0].selection_ids,
+            frozenset({"selection-2"}),
+        )
+
+    def test_dependency_revision_changes_across_same_selector_reregistration(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        first_revision = dependencies.dependency_revision("decision")
+
+        self.assertTrue(dependencies.unregister("decision"))
+        dependencies.register("decision", source_ids="provider-a")
+        second_revision = dependencies.dependency_revision("decision")
+
+        self.assertGreater(second_revision, first_revision)
+
+    def test_focused_causal_view_excludes_generation_zero_audit_state(self) -> None:
+        mirror = MarketMirror()
+        legacy = self.event(sequence=1, odds="2.00")
+        positive = MarketEvent.from_dict(
+            {
+                **self.event(sequence=1, odds="1.90").to_dict(),
+                "source_id": "provider-b",
+            }
+        )
+        mirror._apply_with_causal_authority(legacy, decision_causal=False)
+        mirror._apply_with_causal_authority(positive, decision_causal=True)
+
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("all")
+        snapshot = dependencies.causal_view("all")
+
+        self.assertEqual(snapshot.events, (positive,))
+        self.assertEqual(
+            {event.dedupe_key for event in mirror.snapshot()},
+            {legacy.dedupe_key, positive.dedupe_key},
+        )
+
+    def test_focused_causal_view_retries_dependency_replacement_during_read(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror._apply_with_causal_authority(provider_a, decision_causal=True)
+        mirror._apply_with_causal_authority(provider_b, decision_causal=True)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_causal = mirror.causal_view
+        reads = [0]
+
+        def replace_dependency(*args, **kwargs):
+            snapshot = original_causal(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "causal_view",
+            side_effect=replace_dependency,
+        ):
+            snapshot = dependencies.causal_view("decision")
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_b,))
+
     def test_focused_dependencies_route_only_affected_provider_and_selection(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror)
@@ -291,6 +1260,415 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             dependencies.all_matching_keys(),
         )
 
+    def test_batch_revision_does_not_certify_unrouted_later_update(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        first = self.event(selection="selection-a", sequence=1)
+        second = self.event(selection="selection-b", sequence=1)
+
+        runtime.accept_persisted(first)
+        first_batch = runtime.drain()
+        self.assertEqual(first_batch.mirror_revision, 1)
+
+        runtime.accept_persisted(second)
+        self.assertEqual(dependencies.affected_inputs(first_batch), ("decision",))
+
+        with patch.object(mirror, "active_view", wraps=mirror.active_view) as full_view:
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(
+            tuple(sorted(event.quote_key for event in snapshot.events)),
+            tuple(sorted((first.quote_key, second.quote_key))),
+        )
+        full_view.assert_called_once()
+    def test_incremental_view_falls_back_when_key_index_revision_is_stale(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        first = self.event(selection="selection-a", sequence=1)
+        runtime.accept_persisted(first)
+        runtime.drain()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+
+        second = self.event(selection="selection-b", sequence=1)
+        mirror.apply(second)
+
+        with patch.object(mirror, "active_view", wraps=mirror.active_view) as full_view:
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(
+            tuple(sorted(event.quote_key for event in snapshot.events)),
+            tuple(sorted((first.quote_key, second.quote_key))),
+        )
+        full_view.assert_called_once()
+
+    def test_stale_index_fallback_retries_dependency_replacement_during_full_read(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        second = self.event(source_id="provider-a", selection="selection-b", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-c", sequence=1)
+        mirror.apply(first)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        # Advance mirror truth without routing the dependency index so the bounded
+        # read must take the stale-index selector fallback.
+        mirror.apply(second)
+        mirror.apply(provider_b)
+        original_full = mirror.active_view
+        reads = [0]
+
+        def replace_dependency(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=replace_dependency,
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(len(snapshot.events), 1)
+        self.assertEqual(snapshot.events[0].source_id, "provider-b")
+
+    def test_incremental_view_stays_bounded_across_unrelated_registry_churn(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        dependencies.register("other", source_ids="provider-b")
+        original_bounded = mirror.active_view_for_keys
+
+        def mutate_unrelated_dependency(*args, **kwargs):
+            snapshot = original_bounded(*args, **kwargs)
+            self.assertTrue(dependencies.unregister("other"))
+            dependencies.register("other", source_ids="provider-c")
+            return snapshot
+
+        with (
+            patch.object(
+                mirror,
+                "active_view_for_keys",
+                side_effect=mutate_unrelated_dependency,
+            ),
+            patch.object(
+                mirror,
+                "active_view",
+                side_effect=AssertionError("unrelated churn must stay bounded"),
+            ),
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(snapshot.events, (event,))
+
+    def test_incremental_view_uses_replacement_dependency_after_registry_race(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_bounded = mirror.active_view_for_keys
+        raced = [False]
+
+        def replace_dependency(*args, **kwargs):
+            snapshot = original_bounded(*args, **kwargs)
+            if not raced[0]:
+                raced[0] = True
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view_for_keys",
+            side_effect=replace_dependency,
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(len(snapshot.events), 1)
+        self.assertEqual(snapshot.events[0].source_id, "provider-b")
+
+    def test_incremental_view_retries_if_fallback_dependency_changes_again(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        provider_c = self.event(source_id="provider-c", selection="selection-c", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        mirror.apply(provider_c)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_bounded = mirror.active_view_for_keys
+        original_full = mirror.active_view
+        fallback_reads = [0]
+
+        def replace_before_fallback(*args, **kwargs):
+            snapshot = original_bounded(*args, **kwargs)
+            self.assertTrue(dependencies.unregister("decision"))
+            dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        def replace_during_first_fallback(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            fallback_reads[0] += 1
+            if fallback_reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-c")
+            return snapshot
+
+        with (
+            patch.object(
+                mirror,
+                "active_view_for_keys",
+                side_effect=replace_before_fallback,
+            ),
+            patch.object(
+                mirror,
+                "active_view",
+                side_effect=replace_during_first_fallback,
+            ),
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(fallback_reads[0], 2)
+        self.assertEqual(len(snapshot.events), 1)
+        self.assertEqual(snapshot.events[0].source_id, "provider-c")
+
+    def test_current_history_view_retries_dependency_replacement(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        reads = [0]
+
+        def fake_history(_store, **kwargs):
+            snapshot = mirror.active_view(**kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            MarketMirror,
+            "current_history_view_from_store",
+            side_effect=fake_history,
+        ):
+            snapshot = dependencies.current_history_view(
+                "decision",
+                object(),
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_b,))
+
+    def test_replay_view_retries_dependency_replacement(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        reads = [0]
+
+        def fake_replay(_store, **kwargs):
+            snapshot = mirror.active_view(**kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            MarketMirror,
+            "replay_view_from_store",
+            side_effect=fake_replay,
+        ):
+            snapshot = dependencies.replay_view(
+                "decision",
+                object(),
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_b,))
+
+    def test_decision_view_retries_dependency_replacement_during_read(self) -> None:
+        mirror = MarketMirror()
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        mirror.apply(provider_a)
+        mirror.apply(provider_b)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_full = mirror.active_view
+        reads = [0]
+
+        def replace_dependency(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=replace_dependency,
+        ):
+            snapshot = dependencies.decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(len(snapshot.events), 1)
+        self.assertEqual(snapshot.events[0].source_id, "provider-b")
+
+    def test_decision_view_ignores_unrelated_registry_churn(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        dependencies.register("other", source_ids="provider-b")
+        original_full = mirror.active_view
+        reads = [0]
+
+        def mutate_unrelated_dependency(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            reads[0] += 1
+            self.assertTrue(dependencies.unregister("other"))
+            dependencies.register("other", source_ids="provider-c")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=mutate_unrelated_dependency,
+        ):
+            snapshot = dependencies.decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 1)
+        self.assertEqual(snapshot.events, (event,))
+
+    def test_decision_view_fails_closed_if_dependency_removed_during_read(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_full = mirror.active_view
+
+        def remove_dependency(*args, **kwargs):
+            snapshot = original_full(*args, **kwargs)
+            dependencies.unregister("decision")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=remove_dependency,
+        ):
+            with self.assertRaisesRegex(KeyError, "unknown focused mirror input"):
+                dependencies.decision_view(
+                    "decision",
+                    as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                    max_age=timedelta(minutes=5),
+                )
+
+    def test_incremental_view_fails_closed_if_dependency_is_removed_mid_read(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(sequence=1)
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_bounded = mirror.active_view_for_keys
+
+        def remove_dependency(*args, **kwargs):
+            snapshot = original_bounded(*args, **kwargs)
+            dependencies.unregister("decision")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "active_view_for_keys",
+            side_effect=remove_dependency,
+        ):
+            with self.assertRaisesRegex(KeyError, "unknown focused mirror input"):
+                dependencies.incremental_decision_view(
+                    "decision",
+                    as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                    max_age=timedelta(minutes=5),
+                )
+    def test_incremental_view_stays_bounded_after_routed_revision(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        event = self.event(sequence=1)
+        runtime.accept_persisted(event)
+        dependencies.affected_inputs(runtime.drain())
+
+        with patch.object(
+            mirror,
+            "active_view",
+            side_effect=AssertionError("full focused fallback is forbidden"),
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(snapshot.events, (event,))
     def test_focused_dependency_overflow_fails_safe_to_all_registered_inputs(self) -> None:
         mirror = MarketMirror()
         runtime = BoundedMirrorInvalidationBuffer(mirror, max_dirty_keys=1)
@@ -308,6 +1686,227 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             dependencies.affected_inputs(batch),
             ("selection-a", "selection-b", "unrelated"),
         )
+
+    def test_full_refresh_routing_returns_live_dependency_registry(self) -> None:
+        mirror = MarketMirror()
+        mirror.apply(self.event(sequence=1))
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("old", source_ids="provider-a")
+        batch = MirrorInvalidationBatch(
+            changed_keys=(),
+            full_refresh_required=True,
+            has_more=False,
+        )
+        original_view = mirror.view
+        raced = [False]
+
+        def race_registry(*args, **kwargs):
+            snapshot = original_view(*args, **kwargs)
+            if not raced[0]:
+                raced[0] = True
+                self.assertTrue(dependencies.unregister("old"))
+                dependencies.register("new", source_ids="provider-a")
+            return snapshot
+
+        with patch.object(mirror, "view", side_effect=race_registry):
+            affected = dependencies.affected_inputs(batch)
+
+        self.assertEqual(affected, ("new",))
+        self.assertEqual(dependencies.input_ids, ("new",))
+    def test_history_transition_deadline_ignores_future_expired_state_without_predecessor(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                mirror = MarketMirror()
+                dependencies = FocusedMirrorDependencyIndex(mirror)
+                dependencies.register(
+                    "decision",
+                    source_ids="provider-a",
+                    selection_ids="selection-1",
+                )
+                expired_future = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.00"),
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    source_id="provider-a",
+                    sequence=1,
+                    status="open",
+                    source_ts="2026-09-16T18:59:50+00:00",
+                    ingest_ts="2026-09-16T19:00:05+00:00",
+                )
+                self.assertTrue(store.append(expired_future))
+
+                snapshot, deadline = dependencies.current_history_decision_state(
+                    "decision",
+                    store,
+                    as_of=datetime(
+                        2026, 9, 16, 19, 0, 2, tzinfo=timezone.utc
+                    ),
+                    max_age=timedelta(seconds=5),
+                )
+
+                self.assertEqual(snapshot.events, ())
+                self.assertIsNone(deadline)
+            finally:
+                store.close()
+
+    def test_history_transition_deadline_ignores_future_stale_lower_sequence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                mirror = MarketMirror()
+                dependencies = FocusedMirrorDependencyIndex(mirror)
+                dependencies.register(
+                    "decision",
+                    source_ids="provider-a",
+                    selection_ids="selection-1",
+                )
+                current = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.30"),
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    source_id="provider-a",
+                    sequence=3,
+                    status="open",
+                    source_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:01+00:00",
+                )
+                stale_future = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.20"),
+                    observed_ts="2026-09-16T19:00:02+00:00",
+                    source_id="provider-a",
+                    sequence=2,
+                    status="open",
+                    source_ts="2026-09-16T19:00:02+00:00",
+                    ingest_ts="2026-09-16T19:00:04+00:00",
+                )
+                advancing_future = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    decimal_odds=Decimal("2.40"),
+                    observed_ts="2026-09-16T19:00:03+00:00",
+                    source_id="provider-a",
+                    sequence=4,
+                    status="open",
+                    source_ts="2026-09-16T19:00:03+00:00",
+                    ingest_ts="2026-09-16T19:00:06+00:00",
+                )
+                for event in (current, stale_future, advancing_future):
+                    self.assertTrue(store.append(event))
+
+                snapshot, deadline = dependencies.current_history_decision_state(
+                    "decision",
+                    store,
+                    as_of=datetime(
+                        2026, 9, 16, 19, 0, 3, tzinfo=timezone.utc
+                    ),
+                    max_age=timedelta(minutes=1),
+                )
+
+                self.assertEqual(len(snapshot.events), 1)
+                self.assertEqual(snapshot.events[0].sequence, 3)
+                self.assertEqual(
+                    deadline,
+                    datetime(2026, 9, 16, 19, 0, 6, tzinfo=timezone.utc),
+                )
+            finally:
+                store.close()
+
+    def test_history_transition_deadline_is_scoped_to_registered_dependency(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                mirror = MarketMirror()
+                dependencies = FocusedMirrorDependencyIndex(mirror)
+                dependencies.register(
+                    "decision-a",
+                    source_ids="provider-a",
+                    selection_ids="selection-a",
+                )
+                selected = MarketEvent(
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-a",
+                    decimal_odds=Decimal("2.00"),
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    source_id="provider-a",
+                    sequence=1,
+                    status="open",
+                    source_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:05+00:00",
+                )
+                unrelated = MarketEvent(
+                    event_id="event-2",
+                    market_id="market-2",
+                    selection_id="selection-z",
+                    decimal_odds=Decimal("3.00"),
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    source_id="provider-b",
+                    sequence=1,
+                    status="open",
+                    source_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:03+00:00",
+                )
+                self.assertTrue(store.append(selected))
+                self.assertTrue(store.append(unrelated))
+
+                snapshot, deadline = dependencies.current_history_decision_state(
+                    "decision-a",
+                    store,
+                    as_of=datetime(
+                        2026, 9, 16, 19, 0, 2, tzinfo=timezone.utc
+                    ),
+                    max_age=timedelta(minutes=1),
+                )
+
+                self.assertEqual(snapshot.events, ())
+                self.assertEqual(
+                    deadline,
+                    datetime(2026, 9, 16, 19, 0, 5, tzinfo=timezone.utc),
+                )
+            finally:
+                store.close()
+
+    def test_proven_history_decision_state_retries_dependency_replacement(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        provider_a = self.event(source_id="provider-a", selection="selection-a", sequence=1)
+        provider_b = self.event(source_id="provider-b", selection="selection-b", sequence=1)
+        history = ((provider_a, 1), (provider_b, 2))
+        original_resolve = dependencies._decision_state_for_dependency
+        reads = [0]
+
+        def replace_dependency(*args, **kwargs):
+            result = original_resolve(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-b")
+            return result
+
+        with patch.object(
+            dependencies,
+            "_decision_state_for_dependency",
+            side_effect=replace_dependency,
+        ):
+            snapshot, _deadline = dependencies.decision_state_from_proven_history(
+                "decision",
+                history,
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_b,))
 
     def test_focused_replay_uses_same_selectors_without_future_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -367,6 +1966,42 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_focused_dependency_registration_catches_mirror_advance_window(self) -> None:
+        mirror = MarketMirror()
+        first = self.event(selection="selection-1", sequence=1)
+        second = self.event(selection="selection-2", sequence=1)
+        mirror.apply(first)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+
+        original_view = mirror.view
+        calls = [0]
+
+        def racing_view(*args, **kwargs):
+            snapshot = original_view(*args, **kwargs)
+            calls[0] += 1
+            if calls[0] == 1:
+                mirror.apply(second)
+            return snapshot
+
+        with patch.object(mirror, "view", side_effect=racing_view):
+            dependencies.register("decision", source_ids="provider-a")
+
+        self.assertEqual(
+            dependencies.matching_keys("decision"),
+            tuple(sorted((
+                (first.source_id, first.quote_key),
+                (second.source_id, second.quote_key),
+            ))),
+        )
+        snapshot = dependencies.incremental_decision_view(
+            "decision",
+            as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=5),
+        )
+        self.assertEqual(
+            tuple(event.quote_key for event in snapshot.events),
+            tuple(sorted((first.quote_key, second.quote_key))),
+        )
     def test_focused_dependency_registration_is_explicit_and_non_overwriting(self) -> None:
         mirror = MarketMirror()
         dependencies = FocusedMirrorDependencyIndex(mirror)
@@ -398,6 +2033,183 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
             with self.subTest(max_items=value):
                 with self.assertRaises(ValueError):
                     runtime.drain(max_items=value)
+
+
+    def test_proven_history_decision_state_retries_same_selector_reincarnation(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        provider_a = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        history = ((provider_a, 1),)
+        original_resolve = dependencies._decision_state_for_dependency
+        reads = [0]
+
+        def reincarnate_same_dependency(*args, **kwargs):
+            result = original_resolve(*args, **kwargs)
+            reads[0] += 1
+            if reads[0] == 1:
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-a")
+            return result
+
+        with patch.object(
+            dependencies,
+            "_decision_state_for_dependency",
+            side_effect=reincarnate_same_dependency,
+        ):
+            snapshot, _deadline = dependencies.decision_state_from_proven_history(
+                "decision",
+                history,
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertEqual(reads[0], 2)
+        self.assertEqual(snapshot.events, (provider_a,))
+
+
+    def test_affected_inputs_fails_safe_on_same_selector_reincarnation(self) -> None:
+        mirror = MarketMirror()
+        runtime = BoundedMirrorInvalidationBuffer(mirror)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        event = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        runtime.accept_persisted(event)
+        batch = runtime.drain()
+        original_view_for_keys = mirror.view_for_keys
+        raced = [False]
+
+        def reincarnate_during_route(*args, **kwargs):
+            snapshot = original_view_for_keys(*args, **kwargs)
+            if not raced[0]:
+                raced[0] = True
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-a")
+            return snapshot
+
+        with patch.object(
+            mirror,
+            "view_for_keys",
+            side_effect=reincarnate_during_route,
+        ):
+            affected = dependencies.affected_inputs(batch)
+
+        self.assertTrue(raced[0])
+        self.assertEqual(affected, ("decision",))
+
+    def test_incremental_view_falls_back_on_same_selector_reincarnation(self) -> None:
+        mirror = MarketMirror()
+        event = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        mirror.apply(event)
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        original_bounded = mirror.active_view_for_keys
+        raced = [False]
+
+        def reincarnate_during_bounded_read(*args, **kwargs):
+            snapshot = original_bounded(*args, **kwargs)
+            if not raced[0]:
+                raced[0] = True
+                self.assertTrue(dependencies.unregister("decision"))
+                dependencies.register("decision", source_ids="provider-a")
+            return snapshot
+
+        with (
+            patch.object(
+                mirror,
+                "active_view_for_keys",
+                side_effect=reincarnate_during_bounded_read,
+            ),
+            patch.object(
+                mirror,
+                "active_view",
+                wraps=mirror.active_view,
+            ) as full_view,
+        ):
+            snapshot = dependencies.incremental_decision_view(
+                "decision",
+                as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
+        self.assertTrue(raced[0])
+        self.assertEqual(snapshot.events, (event,))
+        full_view.assert_called_once()
+
+
+    def test_stable_dependency_read_fails_closed_on_continuous_reincarnation(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        dependencies.register("decision", source_ids="provider-a")
+        event = self.event(
+            source_id="provider-a",
+            selection="selection-a",
+            sequence=1,
+        )
+        history = ((event, 1),)
+        original_resolve = dependencies._decision_state_for_dependency
+        reads = [0]
+
+        def reincarnate_every_read(*args, **kwargs):
+            result = original_resolve(*args, **kwargs)
+            reads[0] += 1
+            self.assertTrue(dependencies.unregister("decision"))
+            dependencies.register("decision", source_ids="provider-a")
+            return result
+
+        with patch.object(
+            dependencies,
+            "_decision_state_for_dependency",
+            side_effect=reincarnate_every_read,
+        ):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "changed continuously during stable read",
+            ):
+                dependencies.decision_state_from_proven_history(
+                    "decision",
+                    history,
+                    as_of=datetime(2026, 9, 16, 19, 1, tzinfo=timezone.utc),
+                    max_age=timedelta(minutes=5),
+                )
+
+        self.assertEqual(reads[0], 8)
+
+
+    def test_registration_catch_up_failure_rolls_back_exact_incarnation(self) -> None:
+        mirror = MarketMirror()
+        dependencies = FocusedMirrorDependencyIndex(mirror)
+        original_view = mirror.view
+        calls = [0]
+
+        def fail_second_view(*args, **kwargs):
+            calls[0] += 1
+            if calls[0] == 2:
+                raise RuntimeError("simulated registration catch-up failure")
+            return original_view(*args, **kwargs)
+
+        with patch.object(mirror, "view", side_effect=fail_second_view):
+            with self.assertRaisesRegex(
+                RuntimeError,
+                "simulated registration catch-up failure",
+            ):
+                dependencies.register("decision", source_ids="provider-a")
+
+        self.assertEqual(calls[0], 2)
+        self.assertEqual(dependencies.input_ids, ())
+        self.assertEqual(dependencies.registry_snapshot(), ())
 
 
 if __name__ == "__main__":

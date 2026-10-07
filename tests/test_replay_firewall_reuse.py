@@ -2,6 +2,7 @@ import threading
 import unittest
 
 from autosport.domain import MarketEvent
+from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.replay import FutureLeakageError, ReplayEngine, ReplayLeakageFirewall
 
 
@@ -19,6 +20,132 @@ class ReplayFirewallReuseTests(unittest.TestCase):
                 "sequence": 1,
             }
         )
+
+    @staticmethod
+    def _semantic_refresh_event(sequence: int) -> MarketEvent:
+        timestamp = f"2026-01-01T00:00:0{sequence}+00:00"
+        return MarketEvent.from_dict(
+            {
+                "event_id": "event-1",
+                "market_id": "winner",
+                "selection_id": "alice",
+                "decimal_odds": "2.0",
+                "observed_ts": timestamp,
+                "ingest_ts": timestamp,
+                "source_id": "prophetx:sandbox",
+                "sequence": sequence,
+                "status": "open",
+                "metadata": {
+                    "provider": "prophetx",
+                    "environment": "sandbox",
+                    "transport_surface": "v3_affiliate_get_markets",
+                    "request_fingerprint_sha256": "a" * 64,
+                    "product_acquisition_sequence": sequence,
+                    "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                    "snapshot_fingerprint_sha256": f"{sequence + 10:x}".rjust(64, "0"),
+                    "sequence_authority_id": "prophetx-rest-test-authority",
+                    "sequence_source_id": "prophetx:sandbox:rest:v3-affiliate-get-markets",
+                    "semantic_state_contract": PROPHETX_REST_MARKET_STATE_CONTRACT,
+                },
+            }
+        )
+
+    def test_semantic_refresh_remains_strategy_visible_in_replay(self) -> None:
+        first = self._semantic_refresh_event(1)
+        refresh = self._semantic_refresh_event(2)
+        seen: list[int] = []
+
+        run = ReplayEngine([first, refresh]).run(
+            lambda event: seen.append(event.sequence),
+            run_id="semantic-refresh",
+        )
+
+        self.assertEqual(run.event_count, 2)
+        self.assertEqual(seen, [1, 2])
+
+    def test_replay_engine_rejects_market_event_subclasses(self) -> None:
+        class Event(MarketEvent):
+            pass
+
+        hostile = Event.from_dict(self._event().to_dict())
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            ReplayEngine([hostile])
+
+    def test_replay_engine_rejects_firewall_subclasses_before_event_iteration(self) -> None:
+        class Firewall(ReplayLeakageFirewall):
+            pass
+
+        class ExplosiveEvents:
+            def __iter__(self):
+                raise AssertionError("event iteration executed")
+
+        with self.assertRaisesRegex(TypeError, "exact ReplayLeakageFirewall"):
+            ReplayEngine(ExplosiveEvents(), Firewall())
+
+    def test_completion_capability_rejects_bytes_subclasses(self) -> None:
+        class Capability(bytes):
+            pass
+
+        firewall = ReplayLeakageFirewall({"event-1": "alice"})
+        capability = firewall._claim_for_replay()
+
+        with self.assertRaisesRegex(
+            FutureLeakageError,
+            "invalid replay completion capability",
+        ):
+            firewall._complete_replay(Capability(capability))
+        with self.assertRaisesRegex(FutureLeakageError, "sealed"):
+            firewall.result_for("event-1")
+
+        firewall._complete_replay(capability)
+        self.assertEqual(firewall.result_for("event-1"), "alice")
+
+    def test_invalid_run_controls_do_not_retire_firewall(self) -> None:
+        firewall = ReplayLeakageFirewall({"event-1": "alice"})
+        engine = ReplayEngine([self._event()], firewall)
+
+        invalid_calls = (
+            {"speed": True},
+            {"speed": -1},
+            {"speed": float("nan")},
+            {"speed": float("inf")},
+            {"run_id": ""},
+            {"run_id": " spaced "},
+        )
+        for kwargs in invalid_calls:
+            with self.subTest(kwargs=kwargs):
+                with self.assertRaises((TypeError, ValueError)):
+                    engine.run(lambda _event: None, **kwargs)
+                with self.assertRaisesRegex(FutureLeakageError, "sealed"):
+                    firewall.result_for("event-1")
+
+        run = engine.run(lambda _event: None, run_id="valid")
+        self.assertEqual(run.run_id, "valid")
+        self.assertEqual(firewall.result_for("event-1"), "alice")
+
+    def test_firewall_rejects_substituted_result_containers_and_values(self) -> None:
+        class Results(dict):
+            pass
+
+        class Text(str):
+            pass
+
+        with self.assertRaisesRegex(TypeError, "exact dict"):
+            ReplayLeakageFirewall(Results({"event-1": "alice"}))
+        with self.assertRaisesRegex(TypeError, "event ids must be exact strings"):
+            ReplayLeakageFirewall({Text("event-1"): "alice"})
+        with self.assertRaisesRegex(TypeError, "result values must be exact strings"):
+            ReplayLeakageFirewall({"event-1": Text("alice")})
+
+    def test_result_lookup_rejects_event_id_subclass(self) -> None:
+        class Text(str):
+            pass
+
+        firewall = ReplayLeakageFirewall({"event-1": "alice"})
+        ReplayEngine([self._event()], firewall).run(lambda _event: None, run_id="done")
+
+        with self.assertRaisesRegex(TypeError, "event_id must be an exact string"):
+            firewall.result_for(Text("event-1"))
 
     def test_completed_engine_rejects_second_run_before_callback(self) -> None:
         firewall = ReplayLeakageFirewall({"event-1": "alice"})

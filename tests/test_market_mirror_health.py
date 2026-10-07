@@ -6,10 +6,11 @@ from pathlib import Path
 
 from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
-from autosport.market_mirror import MarketMirror
+from autosport.market_mirror import MarketMirror, MirrorSnapshot
 from autosport.market_mirror_health import (
     HealthGatedMirrorDecisionIndex,
     ProviderDecisionEligibility,
+    ProviderHealthReplayBoundary,
 )
 from autosport.market_mirror_runtime import FocusedMirrorDependencyIndex
 
@@ -335,6 +336,242 @@ class HealthGatedMirrorDecisionIndexTests(unittest.TestCase):
                 ).events,
                 (),
             )
+
+
+    def test_replay_boundary_rejects_hostile_text_subclasses(self) -> None:
+        class Text(str):
+            pass
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_id must be a non-empty trimmed string",
+        ):
+            ProviderHealthReplayBoundary(
+                source_id=Text("provider-a"),
+                recorded_at=None,
+                transition_order=0,
+            )
+        with self.assertRaisesRegex(
+            ValueError,
+            "positive health replay boundary requires recorded_at",
+        ):
+            ProviderHealthReplayBoundary(
+                source_id="provider-a",
+                recorded_at=Text("2026-09-17T12:00:05+00:00"),
+                transition_order=1,
+            )
+
+
+    def test_replay_boundary_rejects_hostile_transition_order_subclass(self) -> None:
+        class Order(int):
+            def __sub__(self, other):
+                raise AssertionError("hostile order arithmetic executed")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "transition_order must be a non-negative integer",
+        ):
+            ProviderHealthReplayBoundary(
+                source_id="provider-a",
+                recorded_at="2026-09-17T12:00:05+00:00",
+                transition_order=Order(1),
+            )
+
+    def test_provider_health_rejects_boundary_subclass_before_history_indexing(self) -> None:
+        class Boundary(ProviderHealthReplayBoundary):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, health_store, gate = self.build_gate(directory)
+            self.record_healthy(
+                health_store,
+                "provider-a",
+                now="2026-09-17T12:00:05+00:00",
+            )
+            hostile = Boundary(
+                source_id="provider-a",
+                recorded_at="2026-09-17T12:00:05+00:00",
+                transition_order=1,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact ProviderHealthReplayBoundary",
+            ):
+                gate.provider_health(
+                    "provider-a",
+                    as_of=datetime(
+                        2026,
+                        9,
+                        17,
+                        12,
+                        0,
+                        10,
+                        tzinfo=timezone.utc,
+                    ),
+                    replay_boundary=hostile,
+                )
+
+    def test_health_gate_rejects_hostile_datetime_and_timedelta_subclasses(self) -> None:
+        class HostileDateTime(datetime):
+            pass
+
+        class HostileTimedelta(timedelta):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            mirror = MarketMirror()
+            dependencies = FocusedMirrorDependencyIndex(mirror)
+            health_store = SourceHealthStore(Path(directory) / "source_health.json")
+            with self.assertRaisesRegex(TypeError, "exact timedelta"):
+                HealthGatedMirrorDecisionIndex(
+                    dependencies,
+                    health_store,
+                    max_health_age=HostileTimedelta(seconds=30),
+                )
+
+            gate = HealthGatedMirrorDecisionIndex(
+                dependencies,
+                health_store,
+                max_health_age=timedelta(seconds=30),
+            )
+            with self.assertRaisesRegex(TypeError, "exact datetime"):
+                gate.provider_health(
+                    "provider-a",
+                    as_of=HostileDateTime(
+                        2026,
+                        9,
+                        17,
+                        12,
+                        0,
+                        10,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+
+    def test_provider_health_rejects_hostile_source_id_subclass(self) -> None:
+        class Text(str):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            _, _, _, gate = self.build_gate(directory)
+            with self.assertRaisesRegex(
+                ValueError,
+                "source_id must be a non-empty trimmed string",
+            ):
+                gate.provider_health(
+                    Text("provider-a"),
+                    as_of=datetime(
+                        2026,
+                        9,
+                        17,
+                        12,
+                        0,
+                        10,
+                        tzinfo=timezone.utc,
+                    ),
+                )
+
+    def test_health_gate_rejects_authority_subclasses(self) -> None:
+        class DependencyIndex(FocusedMirrorDependencyIndex):
+            pass
+
+        class HealthStore(SourceHealthStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            mirror = MarketMirror()
+            dependencies = FocusedMirrorDependencyIndex(mirror)
+            health_store = SourceHealthStore(Path(directory) / "source_health.json")
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "exact FocusedMirrorDependencyIndex",
+            ):
+                HealthGatedMirrorDecisionIndex(
+                    DependencyIndex(mirror),
+                    health_store,
+                    max_health_age=timedelta(seconds=30),
+                )
+            with self.assertRaisesRegex(TypeError, "exact SourceHealthStore"):
+                HealthGatedMirrorDecisionIndex(
+                    dependencies,
+                    HealthStore(Path(directory) / "other_health.json"),
+                    max_health_age=timedelta(seconds=30),
+                )
+
+    def test_gate_snapshot_rejects_mapping_subclass_before_replay_lookup(self) -> None:
+        class Boundaries(dict):
+            def __getitem__(self, key):
+                raise AssertionError("hostile mapping lookup executed")
+
+        with tempfile.TemporaryDirectory() as directory:
+            mirror, _, health_store, gate = self.build_gate(directory)
+            mirror.apply(self.event("provider-a"))
+            self.record_healthy(
+                health_store,
+                "provider-a",
+                now="2026-09-17T12:00:05+00:00",
+            )
+            as_of = datetime(2026, 9, 17, 12, 0, 10, tzinfo=timezone.utc)
+            captured = MirrorSnapshot(revision=1, events=(self.event("provider-a"),))
+            boundary = gate.provider_health(
+                "provider-a",
+                as_of=as_of,
+            ).replay_boundary
+            with self.assertRaisesRegex(TypeError, "exact dict"):
+                gate.gate_snapshot(
+                    captured,
+                    as_of=as_of,
+                    health_boundaries=Boundaries({"provider-a": boundary}),
+                )
+
+    def test_gate_snapshot_rejects_snapshot_subclass_and_hostile_boundary_mapping(self) -> None:
+        class Snapshot(MirrorSnapshot):
+            pass
+
+        class Text(str):
+            pass
+
+        class Boundary(ProviderHealthReplayBoundary):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            mirror, _, health_store, gate = self.build_gate(directory)
+            mirror.apply(self.event("provider-a"))
+            self.record_healthy(
+                health_store,
+                "provider-a",
+                now="2026-09-17T12:00:05+00:00",
+            )
+            as_of = datetime(2026, 9, 17, 12, 0, 10, tzinfo=timezone.utc)
+            captured = MirrorSnapshot(revision=1, events=(self.event("provider-a"),))
+            boundary = gate.provider_health(
+                "provider-a",
+                as_of=as_of,
+            ).replay_boundary
+
+            with self.assertRaisesRegex(TypeError, "exact MirrorSnapshot"):
+                gate.gate_snapshot(
+                    Snapshot(revision=captured.revision, events=captured.events),
+                    as_of=as_of,
+                )
+            with self.assertRaisesRegex(TypeError, "mapping keys must be exact strings"):
+                gate.gate_snapshot(
+                    captured,
+                    as_of=as_of,
+                    health_boundaries={Text("provider-a"): boundary},
+                )
+            hostile_boundary = Boundary(
+                source_id=boundary.source_id,
+                recorded_at=boundary.recorded_at,
+                transition_order=boundary.transition_order,
+            )
+            with self.assertRaisesRegex(TypeError, "mapping values must be exact boundaries"):
+                gate.gate_snapshot(
+                    captured,
+                    as_of=as_of,
+                    health_boundaries={"provider-a": hostile_boundary},
+                )
 
 
 if __name__ == "__main__":

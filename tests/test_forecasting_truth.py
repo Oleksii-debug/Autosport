@@ -77,6 +77,33 @@ class ForecastTruthTests(unittest.TestCase):
                 generated_at="2026-02-10T12:00:00+00:00",
             )
 
+
+    def test_forecast_rejects_nonzero_submicrosecond_causal_timestamps(self):
+        for field, value in (
+            ("training_cutoff", "2026-01-31T23:59:59.0000001+00:00"),
+            ("input_cutoff", "2026-02-10T11:59:00.0000001+00:00"),
+            ("generated_at", "2026-02-10T12:00:00.0000001+00:00"),
+        ):
+            with self.subTest(field=field):
+                kwargs = {field: value}
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    self._record(**kwargs)
+
+    def test_forecast_accepts_zero_only_excess_fractional_precision(self):
+        record = self._record(
+            training_cutoff="2026-01-31T23:59:59.123456000+00:00",
+            input_cutoff="2026-02-10T11:59:00.123456000+00:00",
+            generated_at="2026-02-10T12:00:00.123456000+00:00",
+        )
+
+        self.assertEqual(
+            record.generated_at,
+            "2026-02-10T12:00:00.123456000+00:00",
+        )
+
     def test_forecast_ledger_is_pre_outcome_and_hashes_record(self):
         record = self._record()
         with tempfile.TemporaryDirectory() as tmp:
@@ -87,6 +114,31 @@ class ForecastTruthTests(unittest.TestCase):
             self.assertEqual(envelope["sha256"], record.canonical_hash)
             self.assertEqual(envelope["record"]["forecast_id"], "f-1")
             self.assertNotIn("outcome", envelope["record"])
+
+
+    def test_outcome_and_evaluation_windows_reject_lossy_submicrosecond_times(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "precision finer than microseconds is unsupported",
+        ):
+            ForecastOutcomeFact(
+                "f-1",
+                1,
+                "2026-02-10T14:00:00.0000001+00:00",
+            )
+
+        for field, value in (
+            ("training_end", "2026-01-31T23:59:59.0000001+00:00"),
+            ("start", "2026-02-01T00:00:00.0000001+00:00"),
+            ("end", "2026-02-28T23:59:59.0000001+00:00"),
+        ):
+            with self.subTest(field=field):
+                kwargs = {field: value}
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "precision finer than microseconds is unsupported",
+                ):
+                    self._window(**kwargs)
 
     def test_holdout_metrics_and_calibration_are_evaluated_post_outcome(self):
         records = [
@@ -224,6 +276,35 @@ class ForecastTruthTests(unittest.TestCase):
         context = AgentContext(book, replay_run_id="causal-run")
         PaperValueAgent({event.quote_key: future}).on_market_event(event, context)
         self.assertEqual(len(book.tickets), 0)
+        self.assertEqual(context.notes, [])
+
+
+    def test_paper_agent_rejects_forecast_generated_after_event_even_with_old_input_cutoff(self):
+        event = MarketEvent.from_dict(
+            {
+                "event_id": "e",
+                "market_id": "winner",
+                "selection_id": "a",
+                "decimal_odds": "2.0",
+                "observed_ts": "2026-02-10T12:00:00+00:00",
+                "source_id": "fixture",
+                "sequence": 1,
+            }
+        )
+        future_generated = self._record(
+            input_cutoff="2026-02-10T11:59:59+00:00",
+            generated_at="2026-02-10T12:00:00.000001+00:00",
+        )
+        book = PaperBook("10000")
+        context = AgentContext(book, replay_run_id="generation-causal-run")
+
+        PaperValueAgent({event.quote_key: future_generated}).on_market_event(
+            event,
+            context,
+        )
+
+        self.assertEqual(len(book.tickets), 0)
+        self.assertEqual(context.notes, [])
 
 
 if __name__ == "__main__":

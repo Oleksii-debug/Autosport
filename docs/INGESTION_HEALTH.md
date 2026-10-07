@@ -12,14 +12,25 @@ A provider must also respect the requested `max_items`. Returning more quotes th
 
 This is the current V1 backpressure boundary. It is synchronous and bounded; it does not claim an unbounded queue can safely absorb arbitrary producer throughput.
 
-## Source-time quality
+## Causal clock and source-time quality
 
-When a quote supplies `source_ts`, ingestion compares it with the local poll clock and can emit:
+The post-acquisition local poll clock is the causal ceiling for the batch. A quote's
+`observed_ts` is local receipt evidence: it must be an exactly representable,
+timezone-aware instant no later than that poll clock. A future local observation is
+rejected with `FUTURE_OBSERVATION_TIMESTAMP`; malformed or unsupported-precision
+local observation evidence is rejected as `INVALID_QUOTE`.
 
-- `STALE_SOURCE` when source data is older than the configured stale threshold;
-- `FUTURE_CLOCK_SKEW` when provider time is too far ahead of local receive time;
-- `INVALID_SOURCE_TIMESTAMP` when a supplied timestamp is malformed; that quote is rejected;
-- `SOURCE_TIME_REGRESSION` when the newest source timestamp moves behind the durable high-water mark.
+Freshness uses the same clock hierarchy as the decision mirror: `source_ts` when the
+provider supplies it, otherwise `observed_ts`. Ingestion can emit:
+
+- `STALE_SOURCE` when that freshness clock is older than the configured stale threshold;
+- `FUTURE_CLOCK_SKEW` when a provider `source_ts` is too far ahead of local receive time;
+- `INVALID_SOURCE_TIMESTAMP` when a supplied provider timestamp is malformed or cannot be represented without precision loss; that quote is rejected;
+- `SOURCE_TIME_REGRESSION` when the newest accepted provider source timestamp moves behind the durable high-water mark.
+
+Non-zero timestamp precision finer than microseconds is never silently rounded into
+causal authority. Zero-only excess fractional digits remain admissible because they do
+not change the represented instant.
 
 The durable `latest_source_ts` is monotonic and is not moved backward by a regressed batch.
 
@@ -41,6 +52,10 @@ For each `source_id`, `SourceHealthStore` persists:
 - monotonic latest source timestamp;
 - current quality flags.
 
-A provider exception is recorded as a failure and then re-raised. Health tracking does not hide acquisition or persistence errors.
+A provider exception is recorded as a failure and then re-raised. Health tracking does not hide acquisition or persistence errors. If recording provider-failure health itself fails, the original provider/validation exception remains primary and the health-persistence failure is secondary diagnostic/cause evidence.
+
+Market persistence and health persistence are separate commit boundaries. Once a market batch has committed, a later source-health publication failure is surfaced as `CommittedIngestionHealthError`, including interrupt-class failures. Live observation treats that type as already-durable market truth: it retires the in-flight batch and never replays committed events merely to repair health publication.
+
+For an actual SQLite market-transaction failure before commit, the bounded live wrapper may retry the same cached provider batch. Provider source identity is revalidated before cached reuse. If identity changed, cached local state is cleared fail-closed and provider reset hooks are not dispatched under the foreign identity.
 
 This layer is deterministic and contains no LLM. It creates no real-money execution capability.

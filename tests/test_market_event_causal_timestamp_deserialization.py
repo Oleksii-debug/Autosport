@@ -125,6 +125,30 @@ def test_direct_construction_round_trip_preserves_valid_timestamp_lexemes() -> N
 
 
 
+@pytest.mark.parametrize("field_name", ("observed_ts", "ingest_ts", "source_ts"))
+def test_market_event_rejects_nonzero_submicrosecond_causal_precision(
+    field_name: str,
+) -> None:
+    with pytest.raises(
+        ValueError,
+        match=rf"{field_name} precision finer than microseconds is unsupported",
+    ):
+        _direct_event(
+            **{field_name: "2026-09-23T10:00:00.0000001+00:00"}
+        )
+
+
+@pytest.mark.parametrize("field_name", ("observed_ts", "ingest_ts", "source_ts"))
+def test_market_event_accepts_zero_only_excess_fractional_precision(
+    field_name: str,
+) -> None:
+    event = _direct_event(
+        **{field_name: "2026-09-23T10:00:00.123456000+00:00"}
+    )
+
+    assert getattr(event, field_name) == "2026-09-23T10:00:00.123456000+00:00"
+
+
 @pytest.mark.parametrize(
     "invalid_metadata",
     [

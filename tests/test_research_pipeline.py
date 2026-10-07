@@ -208,6 +208,78 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 envelope["record"]["action"], "REJECT_PAPER_RESEARCH_CANDIDATE"
             )
 
+
+    def test_default_policy_blocks_causal_invalid_ingestion_evidence(self):
+        for flag in (
+            "FUTURE_OBSERVATION_TIMESTAMP",
+            "INVALID_SOURCE_TIMESTAMP",
+            "INVALID_QUOTE",
+        ):
+            with self.subTest(flag=flag), tempfile.TemporaryDirectory() as tmp:
+                book = self._book()
+                before = set(book.tickets)
+                book, ledger, decision = self._decide(
+                    tmp,
+                    book=book,
+                    evidence=[self._evidence(quality_flags=(flag,))],
+                )
+
+                self.assertFalse(decision.approved)
+                self.assertEqual(set(book.tickets), before)
+                self.assertTrue(any(flag in reason for reason in decision.reasons))
+                envelope = json.loads(
+                    ledger.path.read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    envelope["record"]["action"],
+                    "REJECT_PAPER_RESEARCH_CANDIDATE",
+                )
+
+
+    def test_forecast_is_rejected_when_any_included_evidence_is_quality_blocked(self):
+        bad_hash = "c" * 64
+        old_bad = self._evidence(
+            content_hash=bad_hash,
+            available_at="2026-09-13T10:00:00+00:00",
+            quality_flags=("STALE_SOURCE",),
+            evidence_id="evidence-b-old-bad",
+        )
+        latest_clean = self._evidence(
+            content_hash=EVIDENCE_HASH,
+            available_at="2026-09-13T10:00:01+00:00",
+            quality_flags=(),
+            evidence_id="evidence-b-latest-clean",
+        )
+        forecast = self._forecast(
+            evidence_hashes=(bad_hash, EVIDENCE_HASH),
+            input_cutoff="2026-09-13T10:00:01+00:00",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = self._book()
+            before = set(book.tickets)
+            book, ledger, decision = self._decide(
+                tmp,
+                book=book,
+                forecast=forecast,
+                evidence=[old_bad, latest_clean],
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertEqual(set(book.tickets), before)
+            self.assertTrue(
+                any(
+                    "blocked data-quality flags in forecast evidence: STALE_SOURCE"
+                    in reason
+                    for reason in decision.reasons
+                )
+            )
+            envelope = json.loads(ledger.path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                envelope["record"]["action"],
+                "REJECT_PAPER_RESEARCH_CANDIDATE",
+            )
+
     def test_future_forecast_is_rejected(self):
         with tempfile.TemporaryDirectory() as tmp:
             _book, _ledger, decision = self._decide(
@@ -231,6 +303,100 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             self.assertFalse(decision.approved)
             self.assertTrue(
                 any("probability does not match" in reason for reason in decision.reasons)
+            )
+
+
+
+    def test_minimum_evidence_counts_unique_hashes_not_duplicate_rows(self):
+        duplicate_a = self._evidence(
+            evidence_id="evidence-b-1",
+            content_hash=EVIDENCE_HASH,
+        )
+        duplicate_b = self._evidence(
+            evidence_id="evidence-b-2",
+            content_hash=EVIDENCE_HASH,
+        )
+        pipeline = ResearchDecisionPipeline(
+            critic=DeterministicResearchCritic(
+                ResearchDecisionPolicy(minimum_evidence_per_leg=2)
+            )
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, decision = self._decide(
+                tmp,
+                pipeline=pipeline,
+                evidence=[duplicate_a, duplicate_b],
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertTrue(
+                any(
+                    "insufficient unique causal evidence linked by forecast hash"
+                    in reason
+                    for reason in decision.reasons
+                )
+            )
+
+    def test_forecast_rejects_unknown_declared_evidence_hash_even_with_valid_minimum(self):
+        unknown_hash = "c" * 64
+        forecast = self._forecast(
+            evidence_hashes=(EVIDENCE_HASH, unknown_hash),
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = self._book()
+            before = set(book.tickets)
+            book, ledger, decision = self._decide(
+                tmp,
+                book=book,
+                forecast=forecast,
+                evidence=[self._evidence()],
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertEqual(set(book.tickets), before)
+            self.assertTrue(
+                any(
+                    "declares evidence without typed causal coverage" in reason
+                    and unknown_hash in reason
+                    for reason in decision.reasons
+                )
+            )
+            envelope = json.loads(ledger.path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                envelope["record"]["action"],
+                "REJECT_PAPER_RESEARCH_CANDIDATE",
+            )
+
+    def test_forecast_rejects_declared_evidence_that_arrives_after_input_cutoff(self):
+        late_hash = "d" * 64
+        late = self._evidence(
+            content_hash=late_hash,
+            available_at="2026-09-13T10:00:02+00:00",
+            evidence_id="evidence-b-late",
+        )
+        forecast = self._forecast(
+            evidence_hashes=(EVIDENCE_HASH, late_hash),
+            input_cutoff="2026-09-13T10:00:01+00:00",
+            generated_at="2026-09-13T10:00:02+00:00",
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, _ledger, decision = self._decide(
+                tmp,
+                forecast=forecast,
+                evidence=[self._evidence(), late],
+                decision_ts="2026-09-13T10:00:03+00:00",
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertTrue(
+                any(
+                    "declares evidence without typed causal coverage" in reason
+                    and late_hash in reason
+                    for reason in decision.reasons
+                )
             )
 
     def test_forecast_must_link_latest_evidence_hash(self):

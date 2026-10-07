@@ -34,6 +34,9 @@ _DEFAULT_BLOCKED_QUALITY_FLAGS = frozenset(
     {
         "STALE_SOURCE",
         "FUTURE_CLOCK_SKEW",
+        "FUTURE_OBSERVATION_TIMESTAMP",
+        "INVALID_SOURCE_TIMESTAMP",
+        "INVALID_QUOTE",
         "SOURCE_TIME_REGRESSION",
         "TRUNCATED_BATCH",
         "GAP_DETECTED",
@@ -65,13 +68,16 @@ class ResearchDecisionAlreadyCommitted(RuntimeError):
 
 
 def _validate_sha256(value: str, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64:
-        raise ValueError(f"{label} must be a 64-character SHA-256 hex string")
-    try:
-        int(value, 16)
-    except ValueError as exc:
-        raise ValueError(f"{label} must be hexadecimal") from exc
-    return value.lower()
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or value != value.lower()
+        or any(ch not in "0123456789abcdef" for ch in value)
+    ):
+        raise ValueError(
+            f"{label} must be a lowercase 64-character SHA-256 hex string"
+        )
+    return value
 
 
 def _validate_canonical_string(
@@ -625,9 +631,7 @@ class DeterministicResearchCritic:
                 if forecast.uncertainty > self.policy.max_forecast_uncertainty:
                     reasons.append("forecast uncertainty exceeds policy")
 
-                forecast_evidence_hashes = {
-                    str(value).lower() for value in forecast.evidence_hashes
-                }
+                forecast_evidence_hashes = set(forecast.evidence_hashes)
                 included = [
                     item
                     for item in available
@@ -637,8 +641,32 @@ class DeterministicResearchCritic:
                 ]
                 selected_ids = tuple(item.evidence_id for item in included)
                 selected_hashes = tuple(item.content_sha256 for item in included)
-                if len(included) < self.policy.minimum_evidence_per_leg:
-                    reasons.append("insufficient causal evidence linked by forecast hash")
+                included_hashes = {item.content_sha256 for item in included}
+                if len(included_hashes) < self.policy.minimum_evidence_per_leg:
+                    reasons.append(
+                        "insufficient unique causal evidence linked by forecast hash"
+                    )
+                missing_declared_hashes = sorted(
+                    forecast_evidence_hashes.difference(included_hashes)
+                )
+                if missing_declared_hashes:
+                    reasons.append(
+                        "ForecastRecord declares evidence without typed causal coverage: "
+                        + ",".join(missing_declared_hashes)
+                    )
+                blocked_included = sorted(
+                    {
+                        flag
+                        for item in included
+                        for flag in item.quality_flags
+                        if flag in self.policy.blocked_quality_flags
+                    }
+                )
+                if blocked_included:
+                    reasons.append(
+                        "blocked data-quality flags in forecast evidence: "
+                        + ",".join(blocked_included)
+                    )
 
                 if not available:
                     reasons.append("no evidence was available by decision time")
@@ -652,24 +680,12 @@ class DeterministicResearchCritic:
                         reasons.append("latest evidence hash is absent from ForecastRecord")
                     if latest.decimal_odds != leg.decimal_odds:
                         reasons.append("candidate odds do not match latest evidence")
-                    blocked = sorted(
-                        set(latest.quality_flags).intersection(
-                            self.policy.blocked_quality_flags
-                        )
-                    )
-                    if blocked:
-                        reasons.append(
-                            "blocked data-quality flags: " + ",".join(blocked)
-                        )
                     if self.policy.require_market_snapshot_hash:
                         if forecast.market_snapshot_hash is None:
                             reasons.append("ForecastRecord lacks market snapshot hash")
                         elif latest.market_snapshot_hash is None:
                             reasons.append("latest evidence lacks market snapshot hash")
-                        elif (
-                            forecast.market_snapshot_hash.lower()
-                            != latest.market_snapshot_hash.lower()
-                        ):
+                        elif forecast.market_snapshot_hash != latest.market_snapshot_hash:
                             reasons.append("market snapshot hash mismatch")
 
             review = ResearchLegReview(
@@ -729,6 +745,11 @@ class ResearchDecisionPipeline:
         _validate_canonical_string(decision_ts, "decision_ts")
         parse_iso_timestamp(decision_ts)
         evidence_items = tuple(evidence)
+        if any(not isinstance(item, ResearchEvidence) for item in evidence_items):
+            raise TypeError("evidence must contain ResearchEvidence items")
+        evidence_ids = [item.evidence_id for item in evidence_items]
+        if len(evidence_ids) != len(set(evidence_ids)):
+            raise ValueError("research evidence_id values must be unique")
         goal = self.risk_policy.economic_goal
         quote_items = tuple(market_quotes or ())
         proposal_context: ProposedTicketRiskContext | None = None

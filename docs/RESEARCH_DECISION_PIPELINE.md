@@ -42,13 +42,14 @@ A future generic opportunity path must not synthesize a `ForecastRecord` merely 
 - input cutoff is no later than decision time;
 - candidate probability exactly matches ForecastRecord probability;
 - uncertainty is within configured policy;
-- a minimum number of evidence hashes used by the forecast were already available by its input cutoff;
+- every evidence hash declared by the forecast has a typed `ResearchEvidence` record for that leg that was causally available by the forecast input cutoff;
+- the configured minimum counts unique causal evidence hashes, not duplicate rows or aliases;
 - the forecast covers the latest evidence available at decision time;
 - candidate odds match the latest evidence;
-- blocked data-quality flags are absent;
+- blocked data-quality flags are absent from every causal evidence record whose hash the forecast actually includes;
 - optional market snapshot hash matches forecast and latest evidence.
 
-The default blocked flags include stale source, future clock skew, source-time regression, truncated batch and explicit gap detection.
+The default blocked flags include stale source, future provider clock skew, impossible future local observation, invalid source timestamp, invalid quote, source-time regression, truncated batch and explicit gap detection. A later clean evidence record does not launder an earlier blocked record that remains part of the forecast's declared evidence set. Forecasts with hidden/unknown hashes or hashes whose typed evidence becomes available only after the forecast input cutoff fail closed. Duplicate evidence rows cannot inflate the minimum-evidence threshold, and evidence IDs are unique within one decision input.
 
 ### Portfolio / Risk
 
@@ -77,6 +78,37 @@ Both approvals and rejections are written as `DecisionRecord` entries with:
 - `real_money_execution=false`.
 
 The later generic contract must preserve equivalent auditability while binding strategy class, exact event/market/selection/provider identities, source/receive timestamps, quote freshness, evidence/provenance hashes, portfolio identity, decision timestamp, strategy/model/config identity, exact/approximate/completeness truth and risk-policy result.
+
+## Replay market truth
+
+Generic `ReplayEngine` delivery follows the same three-clock boundary: a replay event
+cannot become strategy-visible before the latest of provider/source time (falling back
+to observation time when source time is absent), local `observed_ts`, and local
+`ingest_ts`. Provider-local sequence is then applied in that causal delivery order.
+This preserves live/replay parity when a newer sequence is observed early but received
+late, or when provider time is later than the local clocks. Canonical `MarketEvent`
+construction rejects non-zero timestamp precision finer than microseconds rather than
+allowing `datetime` parsing to round a future instant backward.
+
+
+Research replay uses the same causal market boundary as the canonical Market Mirror.
+A quote is decision-visible only when its provider/source clock (or local observation
+fallback), local `observed_ts`, and local `ingest_ts` are all no later than the
+decision cutoff. A quote that was observed but not yet locally ingested is not evidence
+available to that historical decision. Market-derived `ResearchEvidence.available_at`
+must be no earlier than this full causal market-availability instant; an evidence record
+cannot backdate itself to the provider/observation clock while local receipt happened
+later.
+
+Provider-local `sequence` is the latest-state authority; later wall-clock observation
+does not allow a lower sequence to replace a newer quote. Reusing one sequence with a
+different payload fails closed. Because the research candidate quote identity does not
+independently carry provider identity, the same `quote_key` appearing from multiple
+`source_id` values is treated as ambiguous rather than silently collapsed.
+
+Legacy evidence hashes remain stable when `ingest_ts == observed_ts`. A material local
+receipt delay is identity-bearing and is included in the research event/snapshot hash,
+so changing historical availability changes the bound evidence identity.
 
 ## Transaction boundary
 

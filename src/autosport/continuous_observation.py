@@ -21,6 +21,10 @@ from .integrity import atomic_write_json
 from .live_observation import poll_open_market_store_once
 from .market_mirror import MarketMirror
 from .market_mirror_runtime import BoundedMirrorInvalidationBuffer
+from .monotonic_workspace_authority import (
+    MonotonicAuthorityConfigurationError,
+    resolve_monotonic_authority_root,
+)
 from .parlayapi_provider import ParlayApiTableTennisProvider, ProviderPayloadError
 from .providers import MarketProvider, ProviderUnavailableError
 from .storage import SQLiteMarketStore
@@ -129,7 +133,10 @@ class _LoopState:
 
 
 def _redacted_error(exc: BaseException, secrets: Sequence[str]) -> str:
-    message = f"{type(exc).__name__}: {exc}"
+    try:
+        message = f"{type(exc).__name__}: {exc}"
+    except BaseException:
+        message = f"{type(exc).__name__}: exception details unavailable"
     for secret in secrets:
         if isinstance(secret, str) and secret:
             message = message.replace(secret, "[REDACTED]")
@@ -223,9 +230,10 @@ def _publish_status(
     if reporter is not None:
         try:
             reporter(_format_status(payload))
-        except (BrokenPipeError, OSError):
-            # Console output is observability only. Durable status and market/source
-            # stores remain authoritative and must not be rolled back by a closed pipe.
+        except Exception:
+            # Reporting is a non-authoritative projection. Once durable status is
+            # published, an ordinary reporter failure must never abort ingestion or
+            # misclassify already-durable market/source state.
             pass
 
 
@@ -287,32 +295,157 @@ def run_continuous_observation(
     only after bounded backoff. Local durability or ambiguous committed-health errors
     stop the run immediately rather than replaying an uncertain durable boundary.
     """
-    if not hasattr(provider, "read_batch") or not isinstance(getattr(provider, "source_id", None), str):
-        raise TypeError("provider must satisfy MarketProvider")
-    if not provider.source_id or provider.source_id != provider.source_id.strip():
-        raise ValueError("provider source_id must be non-empty and trimmed")
+    if not callable(getattr(provider, "read_batch", None)):
+        raise TypeError("provider read_batch must be callable")
+    provider_source_id = getattr(provider, "source_id", None)
+    if type(provider_source_id) is not str:
+        raise TypeError("provider source_id must be an exact string")
+    if (
+        not provider_source_id
+        or provider_source_id != provider_source_id.strip()
+        or "|" in provider_source_id
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in provider_source_id)
+    ):
+        raise ValueError("provider source_id must be canonical")
+
+    if run_id is not None and (
+        type(run_id) is not str
+        or not run_id
+        or run_id != run_id.strip()
+        or any(ord(ch) < 32 or ord(ch) == 127 for ch in run_id)
+    ):
+        raise ValueError("run_id must be a canonical non-empty exact string")
+    if isinstance(redact_values, (str, bytes, bytearray)):
+        raise TypeError("redact_values must be a sequence of exact strings")
+    try:
+        redaction_secrets = tuple(redact_values)
+    except (TypeError, RuntimeError) as exc:
+        raise TypeError("redact_values must be a finite sequence of exact strings") from exc
+    if any(type(secret) is not str for secret in redaction_secrets):
+        raise TypeError("redact_values must contain exact strings")
+    if not callable(monotonic):
+        raise TypeError("monotonic must be callable")
+    if not callable(wall_clock):
+        raise TypeError("wall_clock must be callable")
+    if waiter is not None and not callable(waiter):
+        raise TypeError("waiter must be callable")
+    if reporter is not None and not callable(reporter):
+        raise TypeError("reporter must be callable")
+    if stop_event is not None:
+        if not callable(getattr(stop_event, "is_set", None)):
+            raise TypeError("stop_event is_set must be callable")
+        if waiter is None and not callable(getattr(stop_event, "wait", None)):
+            raise TypeError("stop_event wait must be callable when waiter is omitted")
+
+    def read_wall_clock() -> str:
+        value = wall_clock()
+        if type(value) is not str:
+            raise TypeError("wall_clock must return an exact timestamp string")
+        try:
+            parse_source_timestamp(value)
+        except (TypeError, ValueError) as exc:
+            raise ValueError("wall_clock must return a valid source timestamp") from exc
+        return value
+
+    last_monotonic: float | None = None
+
+    def read_monotonic() -> float:
+        nonlocal last_monotonic
+        value = monotonic()
+        if (
+            isinstance(value, bool)
+            or not isinstance(value, (int, float))
+            or not math.isfinite(float(value))
+        ):
+            raise ValueError("monotonic must return a finite number")
+        numeric = float(value)
+        if last_monotonic is not None and numeric < last_monotonic:
+            raise ValueError("monotonic clock must not regress")
+        last_monotonic = numeric
+        return numeric
+
+    current_run_id = run_id or uuid.uuid4().hex
+    started_at = read_wall_clock()
+    started_monotonic = read_monotonic()
 
     root = config.workspace
-    root.mkdir(parents=True, exist_ok=True)
     status_path = config.resolved_status_path
+
+    def canonical_path_key(path: Path) -> str:
+        return os.path.normcase(os.path.realpath(os.path.abspath(os.fspath(path))))
+
+    status_key = canonical_path_key(status_path)
+    status_canonical = Path(status_key)
+    root_canonical = Path(canonical_path_key(root))
+    market_path = root / "market.db"
+    health_path = root / "source_health.json"
+    protected_paths = (
+        market_path,
+        Path(os.fspath(market_path) + "-wal"),
+        Path(os.fspath(market_path) + "-shm"),
+        Path(os.fspath(market_path) + "-journal"),
+        health_path,
+        health_path.with_name(health_path.name + ".lock"),
+        health_path.with_suffix(health_path.suffix + ".tmp"),
+    )
+
+    def paths_overlap(left: Path, right: Path) -> bool:
+        return left == right or left.is_relative_to(right) or right.is_relative_to(left)
+
+    if status_canonical == root_canonical or any(
+        paths_overlap(status_canonical, Path(canonical_path_key(path)))
+        for path in protected_paths
+    ):
+        raise ValueError("status_path must not overlap authoritative storage")
+
+    try:
+        authority_root = resolve_monotonic_authority_root(
+            Path(canonical_path_key(root))
+        )
+    except MonotonicAuthorityConfigurationError as exc:
+        raise ValueError("continuous observation authority root is unsafe") from exc
+    authority_root_key = canonical_path_key(authority_root)
+    if paths_overlap(status_canonical, Path(authority_root_key)):
+        raise ValueError("status_path must not overlap monotonic authority root")
+
+    state = _LoopState(current_run_id, provider_source_id, started_at)
+    stopper = stop_event if stop_event is not None else threading.Event()
+    wait = waiter if waiter is not None else stopper.wait
+
+    def stop_is_set() -> bool:
+        value = stopper.is_set()
+        if type(value) is not bool:
+            raise TypeError("stop_event is_set must return bool")
+        return value
+
+    def wait_once(seconds: float) -> bool:
+        value = wait(seconds)
+        if type(value) is not bool:
+            raise TypeError("waiter must return bool")
+        return value
+
+    def wait_delay(seconds: float) -> bool:
+        """Enforce elapsed-time authority for every non-stopping wait."""
+        before = read_monotonic()
+        stopped = wait_once(seconds)
+        if stopped:
+            return True
+        after = read_monotonic()
+        if after - before < seconds:
+            raise ValueError("waiter returned before requested delay elapsed")
+        return False
+
+    root.mkdir(parents=True, exist_ok=True)
     previous = _read_previous_status(status_path)
     previous_run_id = previous.get("run_id") if previous else None
     previous_state = previous.get("state") if previous else None
     previous_unclean = previous_state in {"starting", "running", "attempting", "provider_unavailable"}
 
-    current_run_id = run_id or uuid.uuid4().hex
-    if not isinstance(current_run_id, str) or not current_run_id or current_run_id != current_run_id.strip():
-        raise ValueError("run_id must be a non-empty trimmed string")
-    started_at = wall_clock()
-    state = _LoopState(current_run_id, provider.source_id, started_at)
-    stopper = stop_event or threading.Event()
-    wait = waiter or stopper.wait
-
     def publish(lifecycle_state: str, *, stop_reason: str | None = None, full_refresh: bool = False) -> None:
         payload = _status_payload(
             state,
             lifecycle_state=lifecycle_state,
-            updated_at=wall_clock(),
+            updated_at=read_wall_clock(),
             stop_reason=stop_reason,
             previous_run_id=previous_run_id if isinstance(previous_run_id, str) else None,
             previous_state=previous_state if isinstance(previous_state, str) else None,
@@ -322,7 +455,6 @@ def run_continuous_observation(
         _publish_status(status_path, payload, reporter=reporter)
 
     publish("starting")
-    started_monotonic = monotonic()
     terminal_reason = "max_cycles"
     terminal_exit = 0
 
@@ -370,12 +502,12 @@ def run_continuous_observation(
 
         enter_loop = True
         if restart_backoff_remaining > 0:
-            if stopper.is_set():
+            if stop_is_set():
                 terminal_reason = "operator_stop"
                 enter_loop = False
             else:
                 remaining_runtime = config.max_runtime_seconds - (
-                    monotonic() - started_monotonic
+                    read_monotonic() - started_monotonic
                 )
                 if remaining_runtime <= 0:
                     terminal_reason = "max_runtime"
@@ -385,7 +517,7 @@ def run_continuous_observation(
                         restart_backoff_remaining,
                         remaining_runtime,
                     )
-                    if wait(startup_wait):
+                    if wait_delay(startup_wait):
                         terminal_reason = "operator_stop"
                         enter_loop = False
                     elif startup_wait >= remaining_runtime:
@@ -395,8 +527,8 @@ def run_continuous_observation(
                         enter_loop = False
 
         while enter_loop:
-            elapsed = monotonic() - started_monotonic
-            if stopper.is_set():
+            elapsed = read_monotonic() - started_monotonic
+            if stop_is_set():
                 terminal_reason = "operator_stop"
                 break
             if state.attempted_cycles >= config.max_cycles:
@@ -424,12 +556,25 @@ def run_continuous_observation(
                 if _has_health_persistence_failure_note(exc):
                     state.health_status = "unknown"
                     state.last_error_kind = "local_health_failure_while_recording_provider_error"
-                    state.last_error = _redacted_error(exc, redact_values)
+                    state.last_error = _redacted_error(exc, redaction_secrets)
                     terminal_reason = state.last_error_kind
                     terminal_exit = 5
                     publish("failed", stop_reason=terminal_reason)
                     break
-                durable_health = health_store.get(state.source_id)
+                try:
+                    durable_health = health_store.get(state.source_id)
+                except Exception as health_error:
+                    state.health_status = "unknown"
+                    state.last_error_kind = "local_health_read_failure_after_provider_error"
+                    primary = _redacted_error(exc, redaction_secrets)
+                    secondary = _redacted_error(health_error, redaction_secrets)
+                    state.last_error = (
+                        f"{primary}; secondary source-health read failure: {secondary}"
+                    )
+                    terminal_reason = state.last_error_kind
+                    terminal_exit = 5
+                    publish("failed", stop_reason=terminal_reason)
+                    break
                 if (
                     durable_health.status != "failed"
                     or durable_health.last_failure_kind != "provider_unavailable"
@@ -439,7 +584,7 @@ def run_continuous_observation(
                     state.last_error_kind = (
                         "local_health_failure_while_recording_provider_error"
                     )
-                    state.last_error = _redacted_error(exc, redact_values)
+                    state.last_error = _redacted_error(exc, redaction_secrets)
                     terminal_reason = state.last_error_kind
                     terminal_exit = 5
                     publish("failed", stop_reason=terminal_reason)
@@ -449,13 +594,13 @@ def run_continuous_observation(
                 )
                 state.health_status = durable_health.status
                 state.last_error_kind = "provider_unavailable"
-                state.last_error = _redacted_error(exc, redact_values)
+                state.last_error = _redacted_error(exc, redaction_secrets)
                 publish("provider_unavailable")
                 if state.attempted_cycles >= config.max_cycles:
                     terminal_reason = "max_cycles_after_provider_unavailable"
                     terminal_exit = 4 if state.successful_cycles == 0 else 0
                     break
-                remaining = config.max_runtime_seconds - (monotonic() - started_monotonic)
+                remaining = config.max_runtime_seconds - (read_monotonic() - started_monotonic)
                 if remaining <= 0:
                     terminal_reason = "max_runtime_after_provider_unavailable"
                     terminal_exit = 4 if state.successful_cycles == 0 else 0
@@ -467,14 +612,14 @@ def run_continuous_observation(
                     ),
                     remaining,
                 )
-                if wait(backoff):
+                if wait_delay(backoff):
                     terminal_reason = "operator_stop"
                     break
                 continue
             except CommittedIngestionHealthError as exc:
                 state.health_status = "unknown"
                 state.last_error_kind = "local_health_publication_failure_after_market_commit"
-                state.last_error = _redacted_error(exc, redact_values)
+                state.last_error = _redacted_error(exc, redaction_secrets)
                 terminal_reason = state.last_error_kind
                 terminal_exit = 5
                 publish("failed", stop_reason=terminal_reason)
@@ -482,7 +627,7 @@ def run_continuous_observation(
             except (sqlite3.Error, OSError) as exc:
                 state.health_status = _safe_health_status(health_store, state.source_id, "unknown")
                 state.last_error_kind = "local_durable_failure"
-                state.last_error = _redacted_error(exc, redact_values)
+                state.last_error = _redacted_error(exc, redaction_secrets)
                 terminal_reason = state.last_error_kind
                 terminal_exit = 5
                 publish("failed", stop_reason=terminal_reason)
@@ -490,7 +635,7 @@ def run_continuous_observation(
             except Exception as exc:
                 state.health_status = _safe_health_status(health_store, state.source_id, "failed")
                 state.last_error_kind = "fail_closed_provider_or_validation_error"
-                state.last_error = _redacted_error(exc, redact_values)
+                state.last_error = _redacted_error(exc, redaction_secrets)
                 terminal_reason = state.last_error_kind
                 terminal_exit = 3
                 publish("failed", stop_reason=terminal_reason)
@@ -510,17 +655,17 @@ def run_continuous_observation(
             if state.attempted_cycles >= config.max_cycles:
                 terminal_reason = "max_cycles"
                 break
-            remaining = config.max_runtime_seconds - (monotonic() - started_monotonic)
+            remaining = config.max_runtime_seconds - (read_monotonic() - started_monotonic)
             if remaining <= 0:
                 terminal_reason = "max_runtime"
                 break
-            if wait(min(config.interval_seconds, remaining)):
+            if wait_delay(min(config.interval_seconds, remaining)):
                 terminal_reason = "operator_stop"
                 break
     except Exception as exc:
         if state.last_error_kind is None:
             state.last_error_kind = "local_startup_or_status_failure"
-            state.last_error = _redacted_error(exc, redact_values)
+            state.last_error = _redacted_error(exc, redaction_secrets)
         # If status publication itself is broken, a second write may fail too. Preserve
         # the original exception and never proceed to provider I/O after that failure.
         try:
@@ -620,7 +765,7 @@ def main(
 
     try:
         provider = provider_factory(api_key, public_preview=args.public_preview)
-    except (ProviderPayloadError, ValueError) as exc:
+    except (ProviderPayloadError, TypeError, ValueError) as exc:
         redacted_error = _redacted_error(exc, (api_key,) if api_key else ())
         print(f"continuous_observation=CONFIG_ERROR error={redacted_error}")
         return 2
@@ -646,7 +791,7 @@ def main(
             stop_event=stop_event,
             redact_values=(api_key,) if api_key else (),
         )
-    except (OSError, sqlite3.Error, ValueError) as exc:
+    except (OSError, sqlite3.Error, TypeError, ValueError) as exc:
         print(f"continuous_observation=FAIL_CLOSED error={_redacted_error(exc, (api_key,) if api_key else ())}")
         return 5
     finally:

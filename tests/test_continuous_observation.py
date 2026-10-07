@@ -74,15 +74,388 @@ class ContinuousObservationTests(unittest.TestCase):
 
     @staticmethod
     def _run(provider, config, **kwargs):
-        return run_continuous_observation(
-            provider,
-            config,
-            ingestion_clock=lambda: _NOW,
-            monotonic=lambda: 0.0,
-            waiter=lambda _seconds: False,
-            reporter=None,
-            **kwargs,
+        now = [0.0]
+
+        def monotonic():
+            return now[0]
+
+        def waiter(seconds):
+            now[0] += seconds
+            return False
+
+        options = {
+            "ingestion_clock": lambda: _NOW,
+            "monotonic": monotonic,
+            "waiter": waiter,
+            "reporter": None,
+        }
+        options.update(kwargs)
+        return run_continuous_observation(provider, config, **options)
+
+    def test_noncallable_provider_read_fails_before_workspace_creation(self):
+        class Provider:
+            source_id = "continuous-fixture"
+            read_batch = object()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "read_batch must be callable"):
+                self._run(Provider(), self._config(workspace, max_cycles=1))
+
+            self.assertFalse(workspace.exists())
+
+    def test_provider_source_id_control_character_fails_before_workspace_creation(self):
+        class Provider:
+            source_id = "continuous\nforged-status"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider I/O must not run")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "source_id must be canonical"):
+                self._run(Provider(), self._config(workspace, max_cycles=1))
+
+            self.assertFalse(workspace.exists())
+
+    def test_run_id_control_character_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "run_id must be a canonical"):
+                self._run(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    run_id="run\rforged",
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_string_redaction_config_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "redact_values must be a sequence"):
+                self._run(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    redact_values="secret",
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_redaction_values_are_frozen_before_provider_failure(self):
+        secrets = ["first-secret"]
+
+        class MutatingProvider:
+            source_id = "continuous-fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                secrets[0] = "replacement-secret"
+                raise ProviderUnavailableError("token=first-secret")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            result = self._run(
+                MutatingProvider(),
+                self._config(workspace, max_cycles=1),
+                redact_values=secrets,
+            )
+
+            self.assertEqual(result.exit_code, 4)
+            raw = (workspace / "continuous_observation_status.json").read_text("utf-8")
+            self.assertNotIn("first-secret", raw)
+            self.assertIn("[REDACTED]", raw)
+
+    def test_invalid_run_id_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "run_id"):
+                self._run(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    run_id=" invalid ",
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_noncallable_runtime_hook_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "waiter must be callable"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=object(),
+                    reporter=None,
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_invalid_wall_clock_output_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "wall_clock must return"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: object(),
+                    reporter=None,
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_nonfinite_monotonic_fails_before_workspace_creation(self):
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "monotonic must return a finite number"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: float("nan"),
+                    reporter=None,
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_late_invalid_wall_clock_never_enters_status_payload(self):
+        samples = iter([_NOW, object()])
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(TypeError, "wall_clock must return"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: next(samples),
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(
+                (workspace / "continuous_observation_status.json").exists()
+            )
+
+    def test_monotonic_regression_fails_closed_after_committed_cycle(self):
+        samples = iter([0.0, 1.0, 0.5])
+        provider = SequenceProvider([_batch(_quote(), cursor="first")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(ValueError, "monotonic clock must not regress"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=2),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: next(samples),
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+            status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(status["state"], "failed")
+            self.assertEqual(
+                status["last_error_kind"],
+                "local_startup_or_status_failure",
+            )
+
+    def test_invalid_stop_event_contract_fails_before_workspace_creation(self):
+        class InvalidStopEvent:
+            is_set = object()
+            wait = object()
+
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "stop_event is_set must be callable"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    stop_event=InvalidStopEvent(),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    reporter=None,
+                )
+
+            self.assertFalse(workspace.exists())
+            self.assertEqual(provider.calls, 0)
+
+    def test_falsy_stop_event_is_not_replaced_by_default_event(self):
+        class FalsyStopEvent:
+            def __bool__(self):
+                return False
+
+            def is_set(self):
+                return True
+
+            def wait(self, _seconds):
+                raise AssertionError("wait must not run when stop is already requested")
+
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=1),
+                stop_event=FalsyStopEvent(),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                reporter=None,
+            )
+
+            self.assertEqual(result.stop_reason, "operator_stop")
+            self.assertEqual(provider.calls, 0)
+
+    def test_falsy_waiter_is_not_replaced_by_stop_event_wait(self):
+        calls = []
+
+        class FalsyWaiter:
+            def __bool__(self):
+                return False
+
+            def __call__(self, seconds):
+                calls.append(seconds)
+                return True
+
+        provider = SequenceProvider(
+            [
+                _batch(_quote(), cursor="first"),
+                _batch(_quote(sequence=2), cursor="must-not-run"),
+            ]
         )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=2),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                waiter=FalsyWaiter(),
+                reporter=None,
+            )
+
+            self.assertEqual(result.stop_reason, "operator_stop")
+            self.assertEqual(provider.calls, 1)
+            self.assertEqual(calls, [1.0])
+
+    def test_nonboolean_stop_state_fails_closed_before_provider_io(self):
+        class InvalidStopEvent:
+            def is_set(self):
+                return object()
+
+            def wait(self, _seconds):
+                return False
+
+        provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(TypeError, "is_set must return bool"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=1),
+                    stop_event=InvalidStopEvent(),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 0)
+            status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(status["state"], "failed")
+
+    def test_nonboolean_waiter_result_fails_closed_after_committed_cycle(self):
+        provider = SequenceProvider(
+            [
+                _batch(_quote(), cursor="first"),
+                _batch(_quote(sequence=2), cursor="must-not-run"),
+            ]
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            with self.assertRaisesRegex(TypeError, "waiter must return bool"):
+                run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=2),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=lambda _seconds: object(),
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
+    def test_provider_identity_substitution_fails_before_workspace_creation(self):
+        class SourceId(str):
+            pass
+
+        class Provider:
+            source_id = SourceId("continuous-fixture")
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider I/O must not run")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(TypeError, "source_id must be an exact string"):
+                self._run(Provider(), self._config(workspace, max_cycles=1))
+
+            self.assertFalse(workspace.exists())
+
+    def test_provider_reserved_source_identity_fails_before_workspace_creation(self):
+        class Provider:
+            source_id = "continuous|fixture"
+
+            def read_batch(self, max_items: int = 1000):
+                raise AssertionError("provider I/O must not run")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+            with self.assertRaisesRegex(ValueError, "source_id must be canonical"):
+                self._run(Provider(), self._config(workspace, max_cycles=1))
+
+            self.assertFalse(workspace.exists())
 
     def test_repeated_snapshot_is_deduplicated_without_duplicate_market_history(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -122,6 +495,149 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(result.total_accepted, 2)
             self.assertEqual(provider.calls, 2)
 
+    def test_restart_backoff_rejects_regressing_monotonic_before_provider_io(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = SequenceProvider(
+                [ProviderUnavailableError("temporary outage")]
+            )
+            first = self._run(
+                first_provider,
+                self._config(workspace, max_cycles=1),
+                run_id="first-run",
+            )
+            self.assertEqual(first.exit_code, 4)
+
+            second_provider = SequenceProvider(
+                [_batch(_quote(), cursor="must-not-run")]
+            )
+            samples = iter([0.0, -1.0])
+            with self.assertRaisesRegex(ValueError, "monotonic clock must not regress"):
+                run_continuous_observation(
+                    second_provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: next(samples),
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                    run_id="second-run",
+                )
+
+            self.assertEqual(second_provider.calls, 0)
+
+    def test_restart_backoff_rejects_waiter_that_skips_durable_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            first_provider = SequenceProvider(
+                [ProviderUnavailableError("temporary outage")]
+            )
+            first = self._run(
+                first_provider,
+                self._config(workspace, max_cycles=1),
+                run_id="first-run",
+            )
+            self.assertEqual(first.exit_code, 4)
+
+            second_provider = SequenceProvider(
+                [_batch(_quote(), cursor="must-not-run")]
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "waiter returned before requested delay elapsed",
+            ):
+                run_continuous_observation(
+                    second_provider,
+                    self._config(workspace, max_cycles=1),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    wall_clock=lambda: _NOW,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                    run_id="second-run",
+                )
+
+            self.assertEqual(second_provider.calls, 0)
+
+    def test_provider_backoff_stop_signal_does_not_require_elapsed_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    ProviderUnavailableError("temporary outage"),
+                    _batch(_quote(), cursor="must-not-run"),
+                ]
+            )
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=2),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                waiter=lambda _seconds: True,
+                reporter=None,
+            )
+
+            self.assertEqual(result.stop_reason, "operator_stop")
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.successful_cycles, 0)
+            self.assertEqual(provider.calls, 1)
+
+    def test_provider_unavailable_health_reread_failure_is_terminal_and_preserves_primary(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            secret = "provider-secret"
+            provider = SequenceProvider(
+                [
+                    ProviderUnavailableError(
+                        f"temporary outage token={secret}"
+                    ),
+                    _batch(_quote(), cursor="must-not-run"),
+                ]
+            )
+            original_get = SourceHealthStore.get
+            get_calls = [0]
+
+            def fail_third_get(store, source_id):
+                get_calls[0] += 1
+                if get_calls[0] == 3:
+                    raise OSError(f"health read failed token={secret}")
+                return original_get(store, source_id)
+
+            with patch.object(
+                SourceHealthStore,
+                "get",
+                autospec=True,
+                side_effect=fail_third_get,
+            ):
+                result = run_continuous_observation(
+                    provider,
+                    self._config(workspace, max_cycles=2),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                    redact_values=(secret,),
+                )
+
+            self.assertEqual(result.exit_code, 5)
+            self.assertEqual(
+                result.stop_reason,
+                "local_health_read_failure_after_provider_error",
+            )
+            self.assertEqual(result.attempted_cycles, 1)
+            self.assertEqual(result.successful_cycles, 0)
+            self.assertEqual(provider.calls, 1)
+            self.assertIn("ProviderUnavailableError: temporary outage", result.last_error)
+            self.assertIn("secondary source-health read failure", result.last_error)
+            self.assertNotIn(secret, result.last_error)
+            status_text = (
+                workspace / "continuous_observation_status.json"
+            ).read_text("utf-8")
+            self.assertNotIn(secret, status_text)
+            self.assertIn(
+                "local_health_read_failure_after_provider_error",
+                status_text,
+            )
+
     def test_provider_unavailable_uses_bounded_retry_and_can_recover(self):
         with tempfile.TemporaryDirectory() as tmp:
             provider = SequenceProvider(
@@ -131,12 +647,19 @@ class ContinuousObservationTests(unittest.TestCase):
                 ]
             )
             waits = []
+            now = [0.0]
+
+            def wait_and_advance(seconds: float) -> bool:
+                waits.append(seconds)
+                now[0] += seconds
+                return False
+
             result = run_continuous_observation(
                 provider,
                 self._config(Path(tmp)),
                 ingestion_clock=lambda: _NOW,
-                monotonic=lambda: 0.0,
-                waiter=lambda seconds: waits.append(seconds) or False,
+                monotonic=lambda: now[0],
+                waiter=wait_and_advance,
                 reporter=None,
             )
 
@@ -148,6 +671,29 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(status["state"], "stopped")
             self.assertEqual(status["health_status"], "healthy")
             self.assertIsNone(status["last_error"])
+
+    def test_provider_unavailable_rejects_waiter_that_skips_backoff(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    ProviderUnavailableError("temporary outage"),
+                    _batch(_quote(), cursor="must-not-run"),
+                ]
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "waiter returned before requested delay elapsed",
+            ):
+                run_continuous_observation(
+                    provider,
+                    self._config(Path(tmp)),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
 
     def test_provider_unavailable_respects_attempt_budget_and_backoff_cap(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -163,12 +709,19 @@ class ContinuousObservationTests(unittest.TestCase):
                 max_backoff_seconds=2,
                 max_items=10,
             )
+            now = [0.0]
+
+            def wait_and_advance(seconds: float) -> bool:
+                waits.append(seconds)
+                now[0] += seconds
+                return False
+
             result = run_continuous_observation(
                 provider,
                 config,
                 ingestion_clock=lambda: _NOW,
-                monotonic=lambda: 0.0,
-                waiter=lambda seconds: waits.append(seconds) or False,
+                monotonic=lambda: now[0],
+                waiter=wait_and_advance,
                 reporter=None,
             )
 
@@ -193,6 +746,86 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(result.attempted_cycles, 1)
             self.assertEqual(result.successful_cycles, 0)
             poll.assert_called_once()
+
+    def test_regular_interval_rejects_waiter_that_skips_elapsed_delay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    _batch(_quote(), cursor="first"),
+                    _batch(_quote(sequence=2), cursor="must-not-run"),
+                ]
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "waiter returned before requested delay elapsed",
+            ):
+                run_continuous_observation(
+                    provider,
+                    self._config(Path(tmp), max_cycles=2),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    waiter=lambda _seconds: False,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
+
+    def test_regular_interval_accepts_waiter_with_elapsed_monotonic_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    _batch(_quote(), cursor="first"),
+                    _batch(_quote(sequence=2, odds="1.81"), cursor="second"),
+                ]
+            )
+            now = [0.0]
+
+            def wait_and_advance(seconds: float) -> bool:
+                now[0] += seconds
+                return False
+
+            result = run_continuous_observation(
+                provider,
+                self._config(Path(tmp), max_cycles=2),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: now[0],
+                waiter=wait_and_advance,
+                reporter=None,
+            )
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.successful_cycles, 2)
+            self.assertEqual(provider.calls, 2)
+
+    def test_custom_stop_event_wait_cannot_skip_regular_interval(self):
+        class NonWaitingStopEvent:
+            def is_set(self):
+                return False
+
+            def wait(self, _seconds):
+                return False
+
+        with tempfile.TemporaryDirectory() as tmp:
+            provider = SequenceProvider(
+                [
+                    _batch(_quote(), cursor="first"),
+                    _batch(_quote(sequence=2), cursor="must-not-run"),
+                ]
+            )
+            with self.assertRaisesRegex(
+                ValueError,
+                "waiter returned before requested delay elapsed",
+            ):
+                run_continuous_observation(
+                    provider,
+                    self._config(Path(tmp), max_cycles=2),
+                    stop_event=NonWaitingStopEvent(),
+                    ingestion_clock=lambda: _NOW,
+                    monotonic=lambda: 0.0,
+                    reporter=None,
+                )
+
+            self.assertEqual(provider.calls, 1)
 
     def test_operator_stop_during_wait_prevents_second_provider_cycle(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -282,6 +915,208 @@ class ContinuousObservationTests(unittest.TestCase):
             self.assertEqual(health.total_received, 2)
             self.assertEqual(health.total_accepted, 1)
 
+    def test_status_path_cannot_overwrite_market_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            market_path = workspace / "market.db"
+            sentinel = b"canonical-market-sentinel"
+            market_path.write_bytes(sentinel)
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=market_path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertEqual(market_path.read_bytes(), sentinel)
+
+    def test_status_path_cannot_descend_from_market_authority_path(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            status_path = workspace / "market.db" / "status.json"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=status_path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse((workspace / "market.db").exists())
+            self.assertFalse(status_path.exists())
+
+    def test_status_path_cannot_be_workspace_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=workspace,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(workspace.exists())
+
+    def test_status_path_symlink_alias_cannot_overwrite_health_authority(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            health_path = workspace / "source_health.json"
+            health_path.write_text('{"sentinel": true}', encoding="utf-8")
+            alias = workspace / "status-alias.json"
+            try:
+                alias.symlink_to(health_path.name)
+            except (OSError, NotImplementedError):
+                self.skipTest("symlinks unavailable on this platform")
+
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=alias,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertEqual(
+                health_path.read_text(encoding="utf-8"),
+                '{"sentinel": true}',
+            )
+
+    def test_status_path_cannot_use_source_health_lock_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            lock_path = workspace / "source_health.json.lock"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=lock_path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(lock_path.exists())
+
+    def test_status_path_cannot_use_sqlite_wal_sidecar(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            wal_path = workspace / "market.db-wal"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=wal_path,
+            )
+
+            with self.assertRaisesRegex(ValueError, "status_path must not overlap"):
+                self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(wal_path.exists())
+
+    def test_status_path_cannot_enter_monotonic_authority_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            workspace = base / "workspace"
+            authority_root = base / "machine-authority"
+            status_path = authority_root / "operator-status.json"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=status_path,
+            )
+
+            with patch.dict(
+                "os.environ",
+                {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(authority_root)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "status_path must not overlap monotonic authority root",
+                ):
+                    self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(status_path.exists())
+            self.assertFalse(workspace.exists())
+
+    def test_status_path_cannot_be_ancestor_of_monotonic_authority_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            base = Path(tmp)
+            status_path = base / "operator-state"
+            workspace = base / "workspace"
+            authority_root = status_path / "machine-authority"
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            config = ContinuousObservationConfig(
+                workspace=workspace,
+                max_cycles=1,
+                max_runtime_seconds=120,
+                interval_seconds=1,
+                max_backoff_seconds=4,
+                max_items=10,
+                status_path=status_path,
+            )
+
+            with patch.dict(
+                "os.environ",
+                {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(authority_root)},
+                clear=False,
+            ):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "status_path must not overlap monotonic authority root",
+                ):
+                    self._run(provider, config)
+
+            self.assertEqual(provider.calls, 0)
+            self.assertFalse(status_path.exists())
+            self.assertFalse(workspace.exists())
+
     def test_invalid_previous_status_fails_before_any_provider_io(self):
         with tempfile.TemporaryDirectory() as tmp:
             workspace = Path(tmp)
@@ -291,6 +1126,31 @@ class ContinuousObservationTests(unittest.TestCase):
             with self.assertRaisesRegex(ValueError, "status is unreadable"):
                 self._run(provider, self._config(workspace, max_cycles=1))
             self.assertEqual(provider.calls, 0)
+
+    def test_unprintable_cycle_error_preserves_terminal_status(self):
+        class UnprintableError(Exception):
+            def __str__(self):
+                raise RuntimeError("stringification must not mask primary failure")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            provider = SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+            with patch(
+                "autosport.continuous_observation.poll_open_market_store_once",
+                side_effect=UnprintableError(),
+            ):
+                result = self._run(provider, self._config(workspace, max_cycles=1))
+
+            self.assertEqual(result.exit_code, 3)
+            self.assertEqual(result.stop_reason, "fail_closed_provider_or_validation_error")
+            status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(status["state"], "failed")
+            self.assertEqual(
+                status["last_error"],
+                "UnprintableError: exception details unavailable",
+            )
 
     def test_provider_error_status_redacts_configured_secret(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -307,6 +1167,39 @@ class ContinuousObservationTests(unittest.TestCase):
             raw = (workspace / "continuous_observation_status.json").read_text("utf-8")
             self.assertNotIn(secret, raw)
             self.assertIn("[REDACTED]", raw)
+
+    def test_reporter_runtime_failure_cannot_abort_durable_observation(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp)
+            provider = SequenceProvider([_batch(_quote(), cursor="first")])
+            calls = []
+
+            def broken_reporter(message):
+                calls.append(message)
+                raise RuntimeError("display backend unavailable")
+
+            result = run_continuous_observation(
+                provider,
+                self._config(workspace, max_cycles=1),
+                ingestion_clock=lambda: _NOW,
+                monotonic=lambda: 0.0,
+                waiter=lambda _seconds: False,
+                reporter=broken_reporter,
+            )
+
+            self.assertEqual(result.exit_code, 0)
+            self.assertEqual(result.successful_cycles, 1)
+            self.assertEqual(provider.calls, 1)
+            self.assertGreaterEqual(len(calls), 3)
+            store = SQLiteMarketStore(workspace / "market.db")
+            try:
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+            status = json.loads(
+                (workspace / "continuous_observation_status.json").read_text("utf-8")
+            )
+            self.assertEqual(status["state"], "stopped")
 
     def test_status_publication_failure_happens_before_provider_network_io(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -330,6 +1223,83 @@ class ContinuousObservationTests(unittest.TestCase):
             code = main([tmp, "--public-preview"], provider_factory=provider_factory)
             self.assertEqual(code, 2)
             self.assertEqual(calls, [])
+
+    def test_cli_contains_malformed_provider_contract_without_workspace_side_effect(self):
+        class MalformedProvider:
+            source_id = "continuous-fixture"
+            read_batch = object()
+
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "not-created"
+
+            def provider_factory(*_args, **_kwargs):
+                return MalformedProvider()
+
+            with patch("builtins.print") as print_mock:
+                code = main(
+                    [str(workspace), "--enable-network-observation", "--public-preview"],
+                    provider_factory=provider_factory,
+                )
+
+            self.assertEqual(code, 5)
+            self.assertFalse(workspace.exists())
+            rendered = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            )
+            self.assertIn("continuous_observation=FAIL_CLOSED", rendered)
+            self.assertIn("read_batch must be callable", rendered)
+
+    def test_cli_contains_provider_factory_type_error(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            def provider_factory(*_args, **_kwargs):
+                raise TypeError("provider construction type failure")
+
+            with patch("builtins.print") as print_mock:
+                code = main(
+                    [tmp, "--enable-network-observation", "--public-preview"],
+                    provider_factory=provider_factory,
+                )
+
+            self.assertEqual(code, 2)
+            rendered = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            )
+            self.assertIn("continuous_observation=CONFIG_ERROR", rendered)
+            self.assertIn("provider construction type failure", rendered)
+
+    def test_cli_fails_closed_on_authority_root_inside_workspace(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            workspace = Path(tmp) / "workspace"
+            unsafe_root = workspace / "machine-authority"
+
+            def provider_factory(*_args, **_kwargs):
+                return SequenceProvider([_batch(_quote(), cursor="must-not-run")])
+
+            with patch.dict(
+                "os.environ",
+                {"AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(unsafe_root)},
+                clear=False,
+            ):
+                with patch("builtins.print") as print_mock:
+                    code = main(
+                        [
+                            str(workspace),
+                            "--enable-network-observation",
+                            "--public-preview",
+                        ],
+                        provider_factory=provider_factory,
+                    )
+
+            self.assertEqual(code, 5)
+            self.assertFalse(workspace.exists())
+            rendered = "\n".join(
+                " ".join(str(arg) for arg in call.args)
+                for call in print_mock.call_args_list
+            )
+            self.assertIn("continuous_observation=FAIL_CLOSED", rendered)
+            self.assertIn("authority root is unsafe", rendered)
 
     def test_cli_provider_factory_error_redacts_configured_secret(self):
         with tempfile.TemporaryDirectory() as tmp:

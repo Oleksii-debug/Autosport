@@ -6,6 +6,7 @@ import unittest
 
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror, MirrorUpdate
+from autosport.market_state_identity import PROPHETX_REST_MARKET_STATE_CONTRACT
 from autosport.storage import SQLiteMarketStore
 
 
@@ -38,6 +39,257 @@ class MarketMirrorTests(unittest.TestCase):
             ingest_ts=ingest_ts or observed_ts,
             sport=sport,
         )
+
+
+    @staticmethod
+    def prophetx_refresh_event(*, sequence: int, odds: str = "2.00") -> MarketEvent:
+        timestamp = f"2026-09-16T19:00:{sequence:02d}+00:00"
+        return MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal(odds),
+            observed_ts=timestamp,
+            source_id="prophetx:sandbox",
+            sequence=sequence,
+            status="open",
+            ingest_ts=timestamp,
+            metadata={
+                "provider": "prophetx",
+                "environment": "sandbox",
+                "transport_surface": "v3_affiliate_get_markets",
+                "request_fingerprint_sha256": "a" * 64,
+                "product_acquisition_sequence": sequence,
+                "response_sha256": f"{sequence:x}".rjust(64, "0"),
+                "snapshot_fingerprint_sha256": (
+                    f"{sequence + 100:x}".rjust(64, "0")
+                ),
+                "sequence_authority_id": "prophetx-rest-test-authority",
+                "sequence_source_id": (
+                    "prophetx:sandbox:rest:v3-affiliate-get-markets"
+                ),
+                "semantic_state_contract": PROPHETX_REST_MARKET_STATE_CONTRACT,
+            },
+        )
+
+    def test_higher_acquisition_with_same_semantic_state_is_classified_refresh(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        self.assertEqual(mirror.apply(first).status, MirrorUpdate.APPLIED)
+        result = mirror.apply(refresh)
+
+        self.assertEqual(result.status, MirrorUpdate.SEMANTIC_REFRESH)
+        self.assertEqual(result.previous_sequence, 1)
+        self.assertEqual(result.current_sequence, 2)
+        self.assertEqual(mirror.snapshot(), (refresh,))
+
+
+
+    def test_semantic_identity_does_not_hide_causal_authority_promotion(self) -> None:
+        mirror = MarketMirror()
+        legacy = self.prophetx_refresh_event(sequence=1)
+        promoted = self.prophetx_refresh_event(sequence=2)
+
+        baseline = mirror._apply_with_causal_authority(
+            legacy,
+            decision_causal=False,
+        )
+        self.assertEqual(baseline.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, ())
+
+        promotion = mirror._apply_with_causal_authority(
+            promoted,
+            decision_causal=True,
+        )
+        self.assertEqual(promotion.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, (promoted,))
+
+    def test_semantic_identity_does_not_hide_causal_authority_loss(self) -> None:
+        mirror = MarketMirror()
+        causal = self.prophetx_refresh_event(sequence=1)
+        audit_only = self.prophetx_refresh_event(sequence=2)
+
+        self.assertEqual(
+            mirror._apply_with_causal_authority(
+                causal,
+                decision_causal=True,
+            ).status,
+            MirrorUpdate.APPLIED,
+        )
+        loss = mirror._apply_with_causal_authority(
+            audit_only,
+            decision_causal=False,
+        )
+
+        self.assertEqual(loss.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, ())
+
+    def test_semantic_refresh_advances_live_liveness_without_changing_price_state(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1)
+        refresh = self.prophetx_refresh_event(sequence=2)
+
+        mirror.apply(first)
+        self.assertEqual(mirror.apply(refresh).status, MirrorUpdate.SEMANTIC_REFRESH)
+
+        before_refresh = mirror.active_view(
+            as_of=datetime(2026, 9, 16, 19, 0, 1, 500000, tzinfo=timezone.utc),
+            max_age=timedelta(milliseconds=750),
+        )
+        after_refresh = mirror.active_view(
+            as_of=datetime(2026, 9, 16, 19, 0, 2, 500000, tzinfo=timezone.utc),
+            max_age=timedelta(milliseconds=750),
+        )
+
+        self.assertEqual(before_refresh.events, ())
+        self.assertEqual(after_refresh.events, (refresh,))
+        self.assertEqual(after_refresh.events[0].decimal_odds, first.decimal_odds)
+
+    def test_malformed_semantic_contract_degrades_to_material_update(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1)
+        malformed_payload = self.prophetx_refresh_event(sequence=2).to_dict()
+        malformed_payload["metadata"]["semantic_state_contract"] = (
+            "autosport.prophetx-rest-market-state.v999"
+        )
+        malformed = MarketEvent.from_dict(malformed_payload)
+
+        self.assertEqual(mirror.apply(first).status, MirrorUpdate.APPLIED)
+        result = mirror.apply(malformed)
+
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.snapshot(), (malformed,))
+
+    def test_semantic_contract_still_reports_economic_change_as_applied(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1, odds="2.00")
+        changed = self.prophetx_refresh_event(sequence=2, odds="2.10")
+
+        self.assertEqual(mirror.apply(first).status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.apply(changed).status, MirrorUpdate.APPLIED)
+
+    def test_store_backed_mirror_entry_points_reject_store_subclasses(self) -> None:
+        class Store(SQLiteMarketStore):
+            pass
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = Store(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            event = self.event()
+            try:
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    mirror.persist_and_apply(store, event)
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketMirror.current_history_view_from_store(
+                        store,
+                        as_of=datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                        max_age=timedelta(seconds=30),
+                    )
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketMirror.replay_view_from_store(
+                        store,
+                        as_of=datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                        max_age=timedelta(seconds=30),
+                    )
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketMirror.from_store(store)
+            finally:
+                store.close()
+
+    def test_store_rejects_market_event_subclasses_before_durable_write(self) -> None:
+        class Event(MarketEvent):
+            pass
+
+        canonical = self.event()
+        hostile = Event.from_dict(canonical.to_dict())
+        self.assertIs(type(hostile), Event)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    store.append_batch_accepted((hostile,))
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
+    def test_market_mirror_rejects_market_event_subclasses(self) -> None:
+        class Event(MarketEvent):
+            pass
+
+        canonical = self.event()
+        hostile = Event.from_dict(canonical.to_dict())
+        self.assertIs(type(hostile), Event)
+
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            mirror.apply(hostile)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    mirror.persist_and_apply(store, hostile)
+            finally:
+                store.close()
+
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            MarketMirror._from_proven_history(((hostile, 1),))
+
+    def test_decision_boundary_rejects_datetime_and_timedelta_subclasses(self) -> None:
+        class Instant(datetime):
+            pass
+
+        class Age(timedelta):
+            pass
+
+        mirror = MarketMirror()
+        mirror.apply(self.event())
+
+        with self.assertRaisesRegex(TypeError, "exact datetime"):
+            mirror.active_view(
+                as_of=Instant(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                max_age=timedelta(seconds=30),
+            )
+        with self.assertRaisesRegex(TypeError, "exact timedelta"):
+            mirror.active_view(
+                as_of=datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                max_age=Age(seconds=30),
+            )
+
+    def test_focused_selectors_reject_string_subclasses(self) -> None:
+        class Text(str):
+            pass
+
+        mirror = MarketMirror()
+        mirror.apply(self.event())
+
+        with self.assertRaisesRegex(TypeError, "entries must be exact strings"):
+            mirror.view(source_ids=(Text("provider-a"),))
+        with self.assertRaisesRegex(TypeError, "entries must be exact strings"):
+            mirror.active_view(
+                as_of=datetime(2026, 9, 16, 19, 0, 1, tzinfo=timezone.utc),
+                max_age=timedelta(seconds=30),
+                event_ids=(Text("event-1"),),
+            )
+        with self.assertRaisesRegex(TypeError, "entries must be exact strings"):
+            mirror.view(source_ids=Text("provider-a"))
+
+    def test_selector_rejects_string_subclasses_instead_of_iterating_characters(self) -> None:
+        class SourceId(str):
+            pass
+
+        mirror = MarketMirror()
+        mirror.apply(self.event())
+
+        with self.assertRaisesRegex(TypeError, "exact string"):
+            mirror.active_view(
+                as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+                source_ids=SourceId("provider-a"),
+            )
 
     def test_new_and_forward_updates_are_applied(self) -> None:
         mirror = MarketMirror()
@@ -619,6 +871,183 @@ class MarketMirrorTests(unittest.TestCase):
                 )
             finally:
                 store.close()
+
+
+    def test_live_apply_rejects_ingest_before_local_observation(self) -> None:
+        mirror = MarketMirror()
+        inverted = self.event(
+            observed_ts="2026-09-16T19:00:01+00:00",
+            ingest_ts="2026-09-16T19:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts must not precede observed_ts",
+        ):
+            mirror.apply(inverted)
+
+        self.assertEqual(mirror.snapshot(), ())
+
+    def test_store_rejects_ingest_before_local_observation_without_durable_side_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                inverted = self.event(
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:00+00:00",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts must not precede observed_ts",
+                ):
+                    store.append_many([inverted])
+
+                self.assertEqual(store.events(), [])
+            finally:
+                store.close()
+
+    def test_equal_observed_and_ingest_instants_remain_valid(self) -> None:
+        event = self.event(
+            observed_ts="2026-09-16T19:00:00+00:00",
+            ingest_ts="2026-09-16T20:00:00+01:00",
+        )
+        mirror = MarketMirror()
+
+        result = mirror.apply(event)
+
+        self.assertEqual(result.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.snapshot(), (event,))
+
+
+    def test_inverted_semantic_refresh_preserves_previous_live_truth(self) -> None:
+        mirror = MarketMirror()
+        first = self.prophetx_refresh_event(sequence=1)
+        mirror.apply(first)
+
+        payload = self.prophetx_refresh_event(sequence=2).to_dict()
+        payload["observed_ts"] = "2026-09-16T19:00:02+00:00"
+        payload["ingest_ts"] = "2026-09-16T19:00:01+00:00"
+        inverted = MarketEvent.from_dict(payload)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts must not precede observed_ts",
+        ):
+            mirror.apply(inverted)
+
+        self.assertEqual(mirror.snapshot(), (first,))
+
+    def test_same_sequence_authority_transition_is_material(self) -> None:
+        event = self.event()
+        mirror = MarketMirror()
+
+        initial = mirror._apply_with_causal_authority(
+            event,
+            decision_causal=False,
+        )
+        self.assertEqual(initial.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, ())
+
+        promoted = mirror._apply_with_causal_authority(
+            event,
+            decision_causal=True,
+        )
+        self.assertEqual(promoted.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, (event,))
+
+        demoted = mirror._apply_with_causal_authority(
+            event,
+            decision_causal=False,
+        )
+        self.assertEqual(demoted.status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.causal_view().events, ())
+
+    def test_persist_and_apply_duplicate_requires_durable_authority_for_promotion(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            event = self.event()
+            try:
+                accepted = store.append_batch_accepted((event,))
+                self.assertEqual(len(accepted), 1)
+
+                mirror = MarketMirror()
+                mirror._apply_with_causal_authority(
+                    event,
+                    decision_causal=False,
+                )
+                self.assertEqual(mirror.causal_view().events, ())
+
+                result = mirror.persist_and_apply(store, event)
+
+                self.assertEqual(result.status, MirrorUpdate.APPLIED)
+                self.assertEqual(mirror.causal_view().events, (event,))
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
+    def test_persist_and_apply_inverted_receipt_has_no_durable_or_live_side_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            try:
+                inverted = self.event(
+                    observed_ts="2026-09-16T19:00:01+00:00",
+                    ingest_ts="2026-09-16T19:00:00+00:00",
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts must not precede observed_ts",
+                ):
+                    mirror.persist_and_apply(store, inverted)
+
+                self.assertEqual(store.events(), [])
+                self.assertEqual(mirror.snapshot(), ())
+            finally:
+                store.close()
+
+
+    def test_live_apply_rejects_non_boolean_sequence_type_drift(self) -> None:
+        mirror = MarketMirror()
+        malformed = MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal("2.00"),
+            observed_ts="2026-09-16T19:00:00+00:00",
+            source_id="provider-a",
+            sequence=True,
+            ingest_ts="2026-09-16T19:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "sequence must be a non-boolean int",
+        ):
+            mirror.apply(malformed)
+
+        self.assertEqual(mirror.snapshot(), ())
+
+    def test_live_apply_rejects_sequence_outside_sqlite_authority_range(self) -> None:
+        mirror = MarketMirror()
+        malformed = MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal("2.00"),
+            observed_ts="2026-09-16T19:00:00+00:00",
+            source_id="provider-a",
+            sequence=1 << 63,
+            ingest_ts="2026-09-16T19:00:00+00:00",
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "fit signed 64-bit SQLite INTEGER",
+        ):
+            mirror.apply(malformed)
+
+        self.assertEqual(mirror.snapshot(), ())
 
 
 if __name__ == "__main__":

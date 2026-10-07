@@ -3,12 +3,13 @@ from __future__ import annotations
 import copy
 import hashlib
 import json
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from threading import RLock
-from typing import Mapping
+from typing import Iterator, Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
 from .domain import MarketEvent, PaperTicket, TicketLeg
@@ -21,6 +22,7 @@ from .paper_execution_reality import (
     PaperExecutionLedger,
     PaperExecutionModelConfig,
     PaperExecutionRun,
+    PaperExecutionStateError,
     execute_paper_plan,
 )
 from .portfolio_plan import (
@@ -43,8 +45,25 @@ class PaperExposureBinding:
     currency: str | None
 
     def __post_init__(self) -> None:
-        if type(self.action_id) is not str or not self.action_id:
-            raise ValueError("action_id must be non-empty text")
+        _paper_impl._text(self.action_id, "action_id")
+        if self.sport is not None:
+            _paper_impl._text(self.sport, "sport")
+        if (self.bankroll_id is None) != (self.currency is None):
+            raise ValueError(
+                "bankroll_id and currency must be supplied together"
+            )
+        if self.bankroll_id is not None:
+            _paper_impl._text(self.bankroll_id, "bankroll_id")
+            currency = _paper_impl._text(self.currency, "currency")
+            if (
+                len(currency) != 3
+                or not currency.isascii()
+                or not currency.isalpha()
+                or currency != currency.upper()
+            ):
+                raise ValueError(
+                    "currency must be three-letter uppercase ASCII"
+                )
 
 
 @dataclass(frozen=True, slots=True)
@@ -70,8 +89,33 @@ class PreparedPaperExecution:
         binding_ids = tuple(item.action_id for item in self.exposure_bindings)
         if action_ids != binding_ids:
             raise ValueError("exposure bindings must exactly match execution action order")
-        if type(self.intent_evidence_json) is not str or not self.intent_evidence_json:
-            raise ValueError("intent_evidence_json must be non-empty canonical JSON")
+        if (
+            type(self.intent_evidence_json) is not str
+            or not self.intent_evidence_json
+        ):
+            raise ValueError(
+                "intent_evidence_json must be non-empty canonical JSON"
+            )
+        try:
+            intent_evidence = json.loads(self.intent_evidence_json)
+            canonical_intent_evidence = json.dumps(
+                intent_evidence,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+        except (TypeError, ValueError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                "intent_evidence_json must be valid canonical JSON"
+            ) from exc
+        if (
+            type(intent_evidence) is not dict
+            or canonical_intent_evidence != self.intent_evidence_json
+        ):
+            raise ValueError(
+                "intent_evidence_json must be a canonical JSON object"
+            )
 
 
 @dataclass(frozen=True, slots=True)
@@ -119,6 +163,20 @@ def _timestamp_text(value: datetime) -> str:
     return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
 
 
+_EXECUTION_LOCK_REGISTRY_GUARD = RLock()
+_EXECUTION_LOCKS_BY_PATH: dict[str, RLock] = {}
+
+
+def _execution_lock_for_path(path: str | Path) -> RLock:
+    key = str(Path(path).resolve(strict=False))
+    with _EXECUTION_LOCK_REGISTRY_GUARD:
+        lock = _EXECUTION_LOCKS_BY_PATH.get(key)
+        if lock is None:
+            lock = RLock()
+            _EXECUTION_LOCKS_BY_PATH[key] = lock
+        return lock
+
+
 class PaperExecutionAdoptionRuntime:
     """Bridge canonical PortfolioPlan decisions through #623 PAPER attempt truth.
 
@@ -164,16 +222,19 @@ class PaperExecutionAdoptionRuntime:
         self.book = book
         self.ledger = ledger
         self.config = config
-        # Serialize every canonical execution on this runtime. The PaperValue
-        # authority holds this same re-entrant lock across risk admission and
-        # execution so a second canonical allocation cannot change PaperBook
-        # between the bound risk witness and materialization.
-        self._execution_lock = RLock()
+        self.paper_book_path = Path(paper_book_path)
+        # Serialize every canonical execution targeting the same PaperBook path,
+        # not merely calls made through one runtime instance. PaperValue risk
+        # admission and the persistent live loop use this same re-entrant authority,
+        # so two independently constructed runtimes cannot both spend one stale
+        # residual-capacity witness in-process.
+        self._execution_lock = _execution_lock_for_path(self.paper_book_path)
         # In-process capability registry. Object identity is intentional: serialized,
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
         self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
-        self.paper_book_path = Path(paper_book_path)
+        self._prepared_snapshots: dict[int, PreparedPaperExecution] = {}
+        self._prepared_book_states: dict[int, PaperBook] = {}
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
             self._assert_same_book_state(
@@ -209,17 +270,98 @@ class PaperExecutionAdoptionRuntime:
         )
         if self.max_quote_age <= timedelta(0):
             raise ValueError("effective max_quote_age must be positive")
+        self._book_authority = self.book
+        self._ledger_authority = self.ledger
+        self._ledger_path_authority = self.ledger.path
+        self._ledger_absolute_path_authority = self.ledger.path.absolute()
+        self._ledger_lock_path_authority = self.ledger._lock_path
+        self._ledger_anchor_path_authority = self.ledger._anchor_path
+        self._ledger_lock_authority = self.ledger._lock
+        self._paper_book_absolute_path_authority = self.paper_book_path.absolute()
+        self._config_authority = self.config
+        self._config_fingerprint_authority = self.config.fingerprint
+        self._paper_book_path_authority = self.paper_book_path
+        self._max_quote_age_authority = self.max_quote_age
+        self._execution_lock_authority = self._execution_lock
+
+    def _assert_runtime_authority(self) -> None:
+        if self.book is not self._book_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution PaperBook authority changed after construction"
+            )
+        if self.ledger is not self._ledger_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution ledger authority changed after construction"
+            )
+        if (
+            self.ledger.path != self._ledger_path_authority
+            or self.ledger.path.absolute() != self._ledger_absolute_path_authority
+            or self.ledger._lock_path != self._ledger_lock_path_authority
+            or self.ledger._anchor_path != self._ledger_anchor_path_authority
+            or self.ledger._lock is not self._ledger_lock_authority
+        ):
+            raise PaperExecutionAdoptionError(
+                "PAPER execution ledger persistence authority changed after construction"
+            )
+        if self.paper_book_path.absolute() != self._paper_book_absolute_path_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution PaperBook path resolution changed after construction"
+            )
+        if self.config is not self._config_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution model authority changed after construction"
+            )
+        if self.config.fingerprint != self._config_fingerprint_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution model semantics changed after construction"
+            )
+        if self.paper_book_path != self._paper_book_path_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution PaperBook path authority changed after construction"
+            )
+        if self.max_quote_age != self._max_quote_age_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution quote-age authority changed after construction"
+            )
+        if self._execution_lock is not self._execution_lock_authority:
+            raise PaperExecutionAdoptionError(
+                "PAPER execution serialization authority changed after construction"
+            )
 
     def _mint_prepared(self, prepared: PreparedPaperExecution) -> PreparedPaperExecution:
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
-        self._prepared_authorities[id(prepared)] = prepared
+        with self.execution_guard():
+            pre_run_book = copy.deepcopy(self.book)
+            if not self._same_book_state(self.book, pre_run_book):
+                raise PaperExecutionAdoptionError(
+                    "PaperBook changed during execution preparation"
+                )
+            self._prepared_authorities[id(prepared)] = prepared
+            self._prepared_snapshots[id(prepared)] = copy.deepcopy(prepared)
+            self._prepared_book_states[id(prepared)] = pre_run_book
         return prepared
 
     def _require_minted(self, prepared: PreparedPaperExecution) -> None:
         if self._prepared_authorities.get(id(prepared)) is not prepared:
             raise PaperExecutionAdoptionError(
                 "prepared execution was not minted by this runtime from canonical authority"
+            )
+        snapshot = self._prepared_snapshots.get(id(prepared))
+        if snapshot is None or prepared != snapshot:
+            raise PaperExecutionAdoptionError(
+                "prepared execution semantics changed after canonical mint"
+            )
+
+    def _require_fresh_prepared_book_state(
+        self,
+        prepared: PreparedPaperExecution,
+    ) -> None:
+        self._require_minted(prepared)
+        expected = self._prepared_book_states.get(id(prepared))
+        if expected is None or not self._same_book_state(self.book, expected):
+            raise PaperExecutionAdoptionError(
+                "PaperBook changed after execution preparation"
             )
 
     def prepare(
@@ -229,6 +371,7 @@ class PaperExecutionAdoptionRuntime:
         intents: tuple[OpportunityIntent, ...],
         decision_id: str,
     ) -> PreparedPaperExecution | None:
+        self._assert_runtime_authority()
         if not isinstance(plan, PortfolioPlan):
             raise TypeError("plan must be PortfolioPlan")
         if type(intents) is not tuple or any(
@@ -405,6 +548,7 @@ class PaperExecutionAdoptionRuntime:
         authorized single-leg stake into the same immutable execution plan/run
         authority used by the persistent live loop.
         """
+        self._assert_runtime_authority()
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be MarketEvent")
         if not isinstance(stake, Decimal) or not stake.is_finite() or stake <= 0:
@@ -497,6 +641,7 @@ class PaperExecutionAdoptionRuntime:
         prepared: PreparedPaperExecution,
         trigger_id: str,
     ) -> str:
+        self._assert_runtime_authority()
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
         self._require_minted(prepared)
@@ -537,21 +682,108 @@ class PaperExecutionAdoptionRuntime:
         prepared: PreparedPaperExecution,
         run_id: str,
     ) -> None:
-        """Persist the already-minted #646 scope into the canonical #623 ledger.
-
-        This is not a second scope authority. The in-process minted capability is
-        checked first, then the exact immutable binding is copied into the same
-        hash-chained execution ledger before any attempt can be recorded. A restart
-        re-mints from canonical inputs and can only reproduce the same event payload;
-        any substituted sport/bankroll/currency conflicts on the stable event key.
-        """
+        """Persist the exact #646 scope before any #623 run state."""
         self._require_minted(prepared)
-        self.ledger._append_event(
-            event_type=self._EXPOSURE_SCOPE_EVENT_TYPE,
-            run_id=run_id,
-            key=f"{run_id}:exposure-scope",
-            payload=self._exposure_scope_payload(prepared),
+        try:
+            self.ledger.publish_exposure_scope(
+                run_id=run_id,
+                payload=self._exposure_scope_payload(prepared),
+            )
+        except PaperExecutionStateError as exc:
+            raise PaperExecutionAdoptionError(str(exc)) from exc
+
+    def _require_durable_exposure_scope(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        run_id: str,
+    ) -> None:
+        expected_payload = self._exposure_scope_payload(prepared)
+        scope_events = [
+            event
+            for event in self.ledger.events(run_id)
+            if event["event_type"] == self._EXPOSURE_SCOPE_EVENT_TYPE
+        ]
+        if (
+            len(scope_events) != 1
+            or scope_events[0]["payload"] != expected_payload
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable exposure scope does not match prepared execution"
+            )
+
+    def _recover_reserved_execution_inputs(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        run_id: str,
+    ) -> tuple[
+        dict[str, ObservedPaperExecution],
+        PaperExecutionEvidenceRegistry | None,
+        frozenset[str],
+    ] | None:
+        run_events = self.ledger.events(run_id)
+        reservations = [
+            event
+            for event in run_events
+            if event["event_type"] == "RUN_RESERVED"
+        ]
+        if not reservations:
+            return None
+        if len(reservations) != 1:
+            raise PaperExecutionAdoptionError(
+                "recovery requires exactly one durable #623 reservation"
+            )
+        reservation = reservations[0]["payload"]
+        observation_evidence_ids = reservation.get(
+            "observation_evidence_ids"
         )
+        suspended_raw = reservation.get("suspended_action_ids", [])
+        action_ids = {
+            action.action_id for action in prepared.execution_plan.actions
+        }
+        if (
+            type(observation_evidence_ids) is not dict
+            or any(
+                type(action_id) is not str
+                or not action_id
+                or type(evidence_id) is not str
+                or not evidence_id
+                or action_id not in action_ids
+                for action_id, evidence_id
+                in observation_evidence_ids.items()
+            )
+            or type(suspended_raw) is not list
+            or any(
+                type(action_id) is not str
+                or not action_id
+                or action_id not in action_ids
+                for action_id in suspended_raw
+            )
+            or suspended_raw != sorted(suspended_raw)
+            or len(suspended_raw) != len(set(suspended_raw))
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable execution reservation inputs are malformed"
+            )
+        suspended_action_ids = frozenset(suspended_raw)
+        if set(observation_evidence_ids) & suspended_action_ids:
+            raise PaperExecutionAdoptionError(
+                "durable execution reservation inputs conflict"
+            )
+        if not observation_evidence_ids:
+            return {}, None, suspended_action_ids
+
+        registry = PaperExecutionEvidenceRegistry(self.ledger)
+        observations: dict[str, ObservedPaperExecution] = {}
+        for action_id, evidence_id in observation_evidence_ids.items():
+            record = registry.resolve(evidence_id)
+            if record.action_id != action_id:
+                raise PaperExecutionAdoptionError(
+                    "durable execution evidence action identity is invalid"
+                )
+            observations[action_id] = record.as_observation()
+        return observations, registry, suspended_action_ids
 
     @staticmethod
     def _require_attempt_action_identity(attempt, action: ExecutionAction) -> None:
@@ -584,6 +816,7 @@ class PaperExecutionAdoptionRuntime:
         materialize_exposure: bool,
     ) -> None:
         """Reject restart state not explained by the exact durable #623 run."""
+        self._assert_runtime_authority()
         if not isinstance(pre_action_book, PaperBook):
             raise TypeError("pre_action_book must be PaperBook")
         if not isinstance(prepared, PreparedPaperExecution):
@@ -600,13 +833,34 @@ class PaperExecutionAdoptionRuntime:
             )
 
         run_id = self.expected_run_id(prepared, trigger_id)
+        self._require_durable_exposure_scope(
+            prepared=prepared,
+            run_id=run_id,
+        )
+        recovered_inputs = self._recover_reserved_execution_inputs(
+            prepared=prepared,
+            run_id=run_id,
+        )
+        if recovered_inputs is None:
+            raise PaperExecutionAdoptionError(
+                "PaperBook changed before any durable #623 run evidence"
+            )
+        observations, evidence_registry, suspended_action_ids = (
+            recovered_inputs
+        )
+        observation_evidence_ids = {
+            action_id: observation.evidence_id
+            for action_id, observation in observations.items()
+        }
         run = self.ledger.load_run(
             run_id=run_id,
             trigger_id=trigger_id,
             plan=prepared.execution_plan,
             config=self.config,
             started_at=started_at,
-            observation_evidence_ids={},
+            observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
+            evidence_registry=evidence_registry,
         )
         if run is None:
             raise PaperExecutionAdoptionError(
@@ -672,6 +926,16 @@ class PaperExecutionAdoptionRuntime:
                 "#623-authorized post-action state"
             )
 
+    @contextmanager
+    def execution_guard(self) -> Iterator[None]:
+        """Hold canonical paper-execution serialization across risk revalidation."""
+        self._assert_runtime_authority()
+        lock = self._execution_lock_authority
+        with lock:
+            self._assert_runtime_authority()
+            yield
+            self._assert_runtime_authority()
+
     def execute(
         self,
         *,
@@ -683,7 +947,7 @@ class PaperExecutionAdoptionRuntime:
         evidence_registry: PaperExecutionEvidenceRegistry | None = None,
         suspended_action_ids: frozenset[str] = frozenset(),
     ) -> PaperExecutionAdoptionResult:
-        with self._execution_lock:
+        with self.execution_guard():
             return self._execute_unlocked(
                 prepared=prepared,
                 trigger_id=trigger_id,
@@ -711,6 +975,28 @@ class PaperExecutionAdoptionRuntime:
         if type(materialize_exposure) is not bool:
             raise TypeError("materialize_exposure must be bool")
         expected_run_id = self.expected_run_id(prepared, trigger_id)
+        run_events_before = self.ledger.events(expected_run_id)
+        fresh_run = not any(
+            event["event_type"] == "RUN_RESERVED"
+            for event in run_events_before
+        )
+        if fresh_run:
+            self._require_fresh_prepared_book_state(prepared)
+        if (
+            observations is None
+            and evidence_registry is None
+            and not suspended_action_ids
+        ):
+            recovered_inputs = self._recover_reserved_execution_inputs(
+                prepared=prepared,
+                run_id=expected_run_id,
+            )
+            if recovered_inputs is not None:
+                (
+                    observations,
+                    evidence_registry,
+                    suspended_action_ids,
+                ) = recovered_inputs
         self._publish_exposure_scope(
             prepared=prepared,
             run_id=expected_run_id,
@@ -729,6 +1015,8 @@ class PaperExecutionAdoptionRuntime:
             raise PaperExecutionAdoptionError(
                 "canonical execution returned unexpected run identity"
             )
+        if fresh_run and materialize_exposure:
+            self._require_fresh_prepared_book_state(prepared)
         if not materialize_exposure:
             return PaperExecutionAdoptionResult(run=run, ticket_ids=())
 

@@ -3,6 +3,8 @@ from __future__ import annotations
 import hashlib
 import hmac
 import json
+import math
+import re
 import secrets
 import threading
 import time
@@ -42,12 +44,23 @@ class ReplayLeakageFirewall:
     _UNLOCKED = "unlocked"
 
     def __init__(self, final_results: dict[str, str] | None = None) -> None:
-        self._results = dict(final_results or {})
+        if final_results is not None:
+            if type(final_results) is not dict:
+                raise TypeError("final_results must be an exact dict or null")
+            if any(type(key) is not str for key in final_results):
+                raise TypeError("final result event ids must be exact strings")
+            if any(type(value) is not str for value in final_results.values()):
+                raise TypeError("final result values must be exact strings")
+            self._results = dict(final_results)
+        else:
+            self._results = {}
         self._state = self._SEALED
         self._state_lock = threading.Lock()
         self._active_completion_digest: bytes | None = None
 
     def result_for(self, event_id: str) -> str | None:
+        if type(event_id) is not str:
+            raise TypeError("event_id must be an exact string")
         with self._state_lock:
             if self._state != self._UNLOCKED:
                 raise FutureLeakageError("Final result is sealed until replay completion")
@@ -78,7 +91,7 @@ class ReplayLeakageFirewall:
                 raise FutureLeakageError(
                     "Final result firewall can only complete after its claimed replay runs"
                 )
-            if not isinstance(completion_capability, bytes):
+            if type(completion_capability) is not bytes:
                 raise FutureLeakageError("invalid replay completion capability")
             candidate_digest = hashlib.sha256(completion_capability).digest()
             expected_digest = self._active_completion_digest
@@ -102,8 +115,8 @@ class ReplayRun:
 def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
     """Own one canonical value snapshot without retaining caller metadata aliases."""
 
-    if not isinstance(event, MarketEvent):
-        raise TypeError("replay events must be MarketEvent values")
+    if type(event) is not MarketEvent:
+        raise TypeError("replay events must be exact MarketEvent values")
     try:
         # Dispatch through the canonical base-class serializer so subclasses cannot
         # replace replay identity through an overridden to_dict implementation.
@@ -114,12 +127,14 @@ def _snapshot_replay_event(event: MarketEvent) -> MarketEvent:
 
 class ReplayEngine:
     def __init__(self, events: Iterable[MarketEvent], firewall: ReplayLeakageFirewall | None = None) -> None:
+        if firewall is not None and type(firewall) is not ReplayLeakageFirewall:
+            raise TypeError("firewall must be an exact ReplayLeakageFirewall or null")
         # Snapshot each yielded value immediately. MarketEvent is frozen but nested
         # metadata is mutable, so retaining caller objects would allow strategy-visible
         # replay bytes to drift after dataset_hash was frozen.
         raw_events = [_snapshot_replay_event(event) for event in events]
         self._events = tuple(sorted(raw_events, key=_replay_order_key))
-        self.firewall = firewall or ReplayLeakageFirewall()
+        self.firewall = firewall if firewall is not None else ReplayLeakageFirewall()
         # Dataset identity preserves the pre-causal-delivery ordering contract.
         # Delivery order may evolve to match live availability semantics without
         # silently changing durable experiment/dataset identity for the same input.
@@ -158,9 +173,22 @@ class ReplayEngine:
         run_id: str | None = None,
         on_raw_event: Callable[[MarketEvent], object] | None = None,
     ) -> ReplayRun:
-        # Claim before any strategy-visible callback. The raw completion capability
-        # remains local to this run; the firewall stores only its digest. A failed
-        # run deliberately leaves the firewall retired IN_USE and therefore sealed.
+        if type(speed) not in {int, float} or type(speed) is bool:
+            raise TypeError("speed must be an exact int or float")
+        if not math.isfinite(float(speed)) or speed < 0:
+            raise ValueError("speed must be finite and non-negative")
+        if run_id is not None and (
+            type(run_id) is not str or not run_id or run_id.strip() != run_id
+        ):
+            raise ValueError("run_id must be a non-empty trimmed exact string or null")
+        if not callable(on_event):
+            raise TypeError("on_event must be callable")
+        if on_raw_event is not None and not callable(on_raw_event):
+            raise TypeError("on_raw_event must be callable or null")
+        effective_run_id = run_id if run_id is not None else str(uuid.uuid4())
+
+        # Validate caller-owned controls before claiming the one-shot firewall.
+        # Invalid invocation must not retire a capability that never began replay.
         completion_capability = self.firewall._claim_for_replay()
         previous: float | None = None
         started = utc_now_iso()
@@ -186,14 +214,20 @@ class ReplayEngine:
             # reuse fails closed after the raw durable boundary has observed it.
             update = replay_mirror.apply(event)
             count += 1
-            if update.status == MirrorUpdate.APPLIED:
-                # A strategy callback receives a value snapshot, never the engine's
-                # hash-bound internal event. Callback mutation therefore cannot
-                # rewrite later audit inspection or the durable replay identity.
+            if update.status in {
+                MirrorUpdate.APPLIED,
+                MirrorUpdate.SEMANTIC_REFRESH,
+            }:
+                # A higher-sequence semantic refresh is strategy-visible even when
+                # price/state identity is unchanged: it advances the same causal
+                # liveness/freshness clocks used by live MarketMirror decisions.
+                # Suppressing it here would make replay expire a quote that live
+                # observation has just refreshed. The callback receives a detached
+                # value so it cannot mutate the engine's hash-bound internal event.
                 on_event(_snapshot_replay_event(event))
         self.firewall._complete_replay(completion_capability)
         return ReplayRun(
-            run_id=run_id or str(uuid.uuid4()),
+            run_id=effective_run_id,
             dataset_hash=self.dataset_hash,
             event_count=count,
             started_at=started,
@@ -220,6 +254,16 @@ def _dataset_identity_order_key(event: MarketEvent) -> tuple[datetime, int, str]
 
 
 def _iso_datetime(value: str, *, field_name: str = "observed_ts") -> datetime:
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"invalid replay {field_name}: {value}")
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"replay {field_name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -232,15 +276,19 @@ def _iso_datetime(value: str, *, field_name: str = "observed_ts") -> datetime:
 def _event_available_datetime(event: MarketEvent) -> datetime:
     """Return the first instant when a replay callback may know this event.
 
-    Live decisions cannot consume an event before either its local observation
-    instant or its durable ingestion/receipt instant.  Using the later clock
-    prevents a late-arriving older observation from being replayed into the
-    strategy before the live system could have received it.
+    Live decisions cannot consume an event before its provider/source clock,
+    local observation instant, or durable ingestion/receipt instant. Using the
+    latest of the three prevents provider-future or late-arriving observations
+    from becoming strategy-visible before the causal system could know them.
     """
 
     observed = _iso_datetime(event.observed_ts, field_name="observed_ts")
     ingested = _iso_datetime(event.ingest_ts, field_name="ingest_ts")
-    return max(observed, ingested)
+    sourced = _iso_datetime(
+        event.source_ts or event.observed_ts,
+        field_name="source_ts",
+    )
+    return max(sourced, observed, ingested)
 
 
 def _replay_order_key(event: MarketEvent) -> tuple[datetime, datetime, int, str]:

@@ -154,6 +154,9 @@ def ticket_lines(session) -> list[str]:
 
 
 def observation_summary(result: ObservationResult) -> str:
+    if type(result) is not ObservationResult:
+        raise TypeError("result must be an exact ObservationResult")
+    result.validate()
     flags = (
         ", ".join(result.stats.quality_flags)
         if result.stats.quality_flags
@@ -172,13 +175,18 @@ def observation_summary(result: ObservationResult) -> str:
 
 
 def observation_quote_lines(result: ObservationResult) -> list[str]:
+    if type(result) is not ObservationResult:
+        raise TypeError("result must be an exact ObservationResult")
+    result.validate()
     lines = [
         text(
             "ui.observation.quote",
             event_id=event.event_id,
+            sport=event.sport or text("ui.observation.unspecified"),
             market_type=event.market_type.value,
             market_id=event.market_id,
             selection_id=event.selection_id,
+            exchange_side=event.exchange_side or text("ui.observation.unspecified"),
             odds=event.decimal_odds,
             source_time=event.source_ts or text("ui.observation.unknown_time"),
         )

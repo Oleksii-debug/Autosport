@@ -1,5 +1,6 @@
 import io
 import os
+import sqlite3
 import tempfile
 import unittest
 from contextlib import redirect_stdout
@@ -8,6 +9,8 @@ from pathlib import Path
 from unittest.mock import patch
 
 from autosport.cli import run_observe_table_tennis
+import autosport.storage as storage_module
+from autosport.domain import MarketEvent
 from autosport.providers import InMemoryProvider, ProviderQuote
 from autosport.session import AutosportSession
 
@@ -54,6 +57,133 @@ class ObservationFlowTests(unittest.TestCase):
             self.assertEqual(reopened.source_health.get("fixture:table_tennis").total_accepted, 2)
             self.assertEqual(len(reopened.book.tickets), 0)
             reopened.close()
+
+    def test_session_observation_uses_full_canonical_quote_order(self):
+        provider = InMemoryProvider(
+            "fixture:identity-order",
+            [
+                ProviderQuote(
+                    provider_event_id="match-1",
+                    provider_market_id="winner",
+                    provider_selection_id="player-a",
+                    decimal_odds=Decimal("1.80"),
+                    observed_ts="2026-09-12T20:00:00+00:00",
+                    sequence=1,
+                    sport="tennis",
+                    exchange_side="lay",
+                ),
+                ProviderQuote(
+                    provider_event_id="match-1",
+                    provider_market_id="winner",
+                    provider_selection_id="player-a",
+                    decimal_odds=Decimal("1.81"),
+                    observed_ts="2026-09-12T20:00:01+00:00",
+                    sequence=2,
+                    sport="basketball",
+                    exchange_side="back",
+                ),
+            ],
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            session = AutosportSession(tmp, "10000")
+            try:
+                result = session.observe_provider_once(provider, max_items=10)
+                quote_keys = tuple(event.quote_key for event in result.current_quotes)
+
+                self.assertEqual(quote_keys, tuple(sorted(quote_keys)))
+                self.assertEqual(len(set(quote_keys)), 2)
+            finally:
+                session.close()
+
+    def test_session_observation_excludes_generation_zero_migration_state(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "market.db"
+            legacy = MarketEvent(
+                event_id="legacy-event",
+                market_id="winner",
+                selection_id="legacy-selection",
+                decimal_odds=Decimal("2.20"),
+                observed_ts="2026-09-12T20:00:00+00:00",
+                ingest_ts="2026-09-12T20:00:00+00:00",
+                source_id="fixture:table_tennis",
+                sequence=3,
+                status="open",
+                source_ts="2026-09-12T19:59:59+00:00",
+            )
+            payload = storage_module._canonical_payload(legacy)
+            raw = sqlite3.connect(path)
+            try:
+                raw.execute(
+                    """CREATE TABLE market_events (
+                        dedupe_key TEXT PRIMARY KEY,
+                        quote_key TEXT NOT NULL,
+                        event_id TEXT NOT NULL,
+                        market_id TEXT NOT NULL,
+                        selection_id TEXT NOT NULL,
+                        decimal_odds TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        source_id TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL
+                    )"""
+                )
+                raw.execute(
+                    """CREATE TABLE current_quotes (
+                        source_id TEXT NOT NULL,
+                        quote_key TEXT NOT NULL,
+                        observed_ts TEXT NOT NULL,
+                        sequence INTEGER NOT NULL,
+                        payload_json TEXT NOT NULL,
+                        PRIMARY KEY (source_id, quote_key)
+                    )"""
+                )
+                raw.execute(
+                    """INSERT INTO market_events
+                       (dedupe_key,quote_key,event_id,market_id,selection_id,
+                        decimal_odds,observed_ts,source_id,sequence,payload_json)
+                       VALUES (?,?,?,?,?,?,?,?,?,?)""",
+                    (
+                        legacy.dedupe_key,
+                        legacy.quote_key,
+                        legacy.event_id,
+                        legacy.market_id,
+                        legacy.selection_id,
+                        str(legacy.decimal_odds),
+                        legacy.observed_ts,
+                        legacy.source_id,
+                        legacy.sequence,
+                        payload,
+                    ),
+                )
+                raw.execute(
+                    """INSERT INTO current_quotes
+                       (source_id,quote_key,observed_ts,sequence,payload_json)
+                       VALUES (?,?,?,?,?)""",
+                    (
+                        legacy.source_id,
+                        legacy.quote_key,
+                        legacy.observed_ts,
+                        legacy.sequence,
+                        payload,
+                    ),
+                )
+                raw.commit()
+            finally:
+                raw.close()
+
+            session = AutosportSession(tmp, "10000")
+            try:
+                result = session.observe_provider_once(self._provider(), max_items=10)
+
+                self.assertEqual(result.stats.accepted, 2)
+                self.assertNotIn(
+                    legacy.dedupe_key,
+                    {event.dedupe_key for event in result.current_quotes},
+                )
+                self.assertEqual(len(result.current_quotes), 2)
+            finally:
+                session.close()
 
     def test_session_observation_rejects_nonfinite_provider_odds_before_persistence(self):
         provider = InMemoryProvider(
@@ -144,6 +274,43 @@ class ObservationFlowTests(unittest.TestCase):
             self.assertIn("current_quotes=2", text)
             self.assertIn("odds=1.80", text)
             self.assertIn("1 more current quotes not printed", text)
+
+    def test_cli_observation_announces_full_quote_identity(self):
+        def factory(api_key, *, public_preview):
+            self.assertIsNone(api_key)
+            self.assertTrue(public_preview)
+            return InMemoryProvider(
+                "identity-source",
+                [
+                    ProviderQuote(
+                        provider_event_id="match-1",
+                        provider_market_id="winner",
+                        provider_selection_id="player-a",
+                        decimal_odds=Decimal("1.80"),
+                        observed_ts="2026-09-12T20:00:00+00:00",
+                        sequence=1,
+                        sport="tennis",
+                        exchange_side="lay",
+                    ),
+                ],
+            )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            output = io.StringIO()
+            with redirect_stdout(output):
+                code = run_observe_table_tennis(
+                    Path(tmp),
+                    public_preview=True,
+                    max_items=10,
+                    show=1,
+                    provider_factory=factory,
+                )
+
+        self.assertEqual(code, 0)
+        rendered = output.getvalue()
+        self.assertIn("sport=tennis", rendered)
+        self.assertIn("side=lay", rendered)
+        self.assertIn("odds=1.80", rendered)
 
     def test_cli_never_passes_environment_key_in_output(self):
         seen = []

@@ -11,6 +11,51 @@ from autosport.storage import SQLiteMarketStore
 
 
 class MarketEventBusDeliverySnapshotIntegrityTests(unittest.TestCase):
+    def test_bus_rejects_substituted_store_callback_and_event_types(self) -> None:
+        class Store(SQLiteMarketStore):
+            pass
+
+        class Event(MarketEvent):
+            pass
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            hostile_store = Store(root / "hostile.db")
+            try:
+                with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+                    MarketEventBus(hostile_store)
+            finally:
+                hostile_store.close()
+
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                with self.assertRaisesRegex(TypeError, "callback must be callable"):
+                    bus.subscribe(None)
+
+                canonical = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+                hostile = Event.from_dict(canonical.to_dict())
+                self.assertIs(type(hostile), Event)
+
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    bus.publish(hostile)
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    bus.publish_many((canonical, hostile))
+
+                self.assertEqual(store.events(), ())
+            finally:
+                store.close()
+
     def test_subscriber_mutation_cannot_rewrite_later_delivery_or_failure_evidence(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")
@@ -53,6 +98,78 @@ class MarketEventBusDeliverySnapshotIntegrityTests(unittest.TestCase):
                 self.assertEqual(raised.exception.accepted_count, 1)
                 self.assertEqual(len(raised.exception.exceptions), 1)
                 self.assertIsInstance(raised.exception.exceptions[0], RuntimeError)
+            finally:
+                store.close()
+
+    def test_subscriber_base_exception_is_wrapped_after_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                event = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+
+                def interrupt(_delivered: MarketEvent) -> None:
+                    raise SystemExit("subscriber-stop")
+
+                bus.subscribe(interrupt)
+
+                with self.assertRaises(MarketEventDeliveryError) as raised:
+                    bus.publish(event)
+
+                self.assertEqual(raised.exception.accepted_count, 1)
+                self.assertEqual(len(store.events()), 1)
+                self.assertEqual(len(raised.exception.exceptions), 1)
+                failure = raised.exception.exceptions[0]
+                self.assertIsInstance(failure, RuntimeError)
+                self.assertIn("SystemExit: subscriber-stop", str(failure))
+            finally:
+                store.close()
+
+    def test_unprintable_subscriber_base_exception_remains_typed_delivery_failure(self) -> None:
+        class UnprintableInterrupt(BaseException):
+            def __str__(self) -> str:
+                raise RuntimeError("stringification-failed")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                event = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+
+                def interrupt(_delivered: MarketEvent) -> None:
+                    raise UnprintableInterrupt()
+
+                bus.subscribe(interrupt)
+
+                with self.assertRaises(MarketEventDeliveryError) as raised:
+                    bus.publish(event)
+
+                self.assertEqual(raised.exception.accepted_count, 1)
+                self.assertEqual(len(store.events()), 1)
+                self.assertIn(
+                    "UnprintableInterrupt: <unprintable exception>",
+                    str(raised.exception.exceptions[0]),
+                )
             finally:
                 store.close()
 
@@ -132,6 +249,81 @@ class MarketEventBusDeliverySnapshotIntegrityTests(unittest.TestCase):
                         "producer_only": True,
                     },
                 )
+            finally:
+                store.close()
+
+
+    def test_inverted_receipt_chronology_never_reaches_subscribers(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                delivered: list[MarketEvent] = []
+                bus.subscribe(delivered.append)
+                inverted = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:01+00:00",
+                        "ingest_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts must not precede observed_ts",
+                ):
+                    bus.publish(inverted)
+
+                self.assertEqual(delivered, [])
+                self.assertEqual(store.events(), [])
+            finally:
+                store.close()
+
+    def test_batch_with_inverted_receipt_chronology_is_atomic_before_delivery(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                bus = MarketEventBus(store)
+                delivered: list[MarketEvent] = []
+                bus.subscribe(delivered.append)
+                valid = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "alice",
+                        "decimal_odds": "2.0",
+                        "observed_ts": "2026-09-14T00:00:00+00:00",
+                        "ingest_ts": "2026-09-14T00:00:00+00:00",
+                        "source_id": "source-1",
+                        "sequence": 1,
+                    }
+                )
+                inverted = MarketEvent.from_dict(
+                    {
+                        "event_id": "event-1",
+                        "market_id": "winner",
+                        "selection_id": "bob",
+                        "decimal_odds": "2.5",
+                        "observed_ts": "2026-09-14T00:00:02+00:00",
+                        "ingest_ts": "2026-09-14T00:00:01+00:00",
+                        "source_id": "source-1",
+                        "sequence": 2,
+                    }
+                )
+
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts must not precede observed_ts",
+                ):
+                    bus.publish_many((valid, inverted))
+
+                self.assertEqual(delivered, [])
+                self.assertEqual(store.events(), [])
             finally:
                 store.close()
 

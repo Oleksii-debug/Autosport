@@ -1,0 +1,566 @@
+from __future__ import annotations
+
+from datetime import datetime, timezone
+from decimal import Decimal
+from hashlib import sha256
+from threading import RLock
+from typing import Mapping
+
+from .betfair_authenticated_stream import BetfairAuthenticatedStreamFreshnessRuntime
+from .betfair_stream_codec import (
+    BETFAIR_STREAM_SOURCE_ID,
+    BetfairQuoteIdentity,
+    BetfairQuoteSide,
+)
+from .betfair_stream_publish_freshness import (
+    BetfairStreamFreshnessPolicy,
+    BetfairStreamPublicationEvidence,
+)
+from .domain import MarketEvent, MarketType
+from .providers import ProviderBatch, ProviderQuote
+
+
+_SCHEMA = "autosport.betfair_authenticated_market_provider.v1"
+_MAX_SQLITE_SEQUENCE = (1 << 63) - 1
+
+
+def _iso_from_epoch_ms(value: int) -> str:
+    if type(value) is not int or value < 0:
+        raise ValueError("Betfair epoch milliseconds must be a non-negative int")
+    try:
+        return datetime.fromtimestamp(value / 1000, tz=timezone.utc).isoformat(
+            timespec="milliseconds"
+        )
+    except (OverflowError, OSError, ValueError) as exc:
+        raise ValueError("Betfair epoch milliseconds are outside supported datetime range") from exc
+
+
+def _identity_token(identity: BetfairQuoteIdentity) -> str:
+    if type(identity) is not BetfairQuoteIdentity:
+        raise TypeError("identity must be canonical BetfairQuoteIdentity")
+    price = "" if identity.price is None else str(identity.price)
+    return (
+        f"{identity.selection_id}:{identity.handicap}:"
+        f"{identity.side.value}:{price or 'ltp'}"
+    )
+
+
+def _event_token(market_id: str) -> str:
+    if type(market_id) is not str or not market_id:
+        raise ValueError("Betfair market_id must be a non-empty exact string")
+    return "market-" + sha256(market_id.encode("utf-8")).hexdigest()[:32]
+
+
+def _metadata_from_evidence(
+    evidence: BetfairStreamPublicationEvidence,
+) -> dict[str, object]:
+    identity = evidence.quote.identity
+    return {
+        "schema": _SCHEMA,
+        "market_id": identity.market_id,
+        "selection_id": identity.selection_id,
+        "handicap": str(identity.handicap),
+        "side": identity.side.value,
+        "identity_price": None if identity.price is None else str(identity.price),
+        "quote_size": None if evidence.quote.size is None else str(evidence.quote.size),
+        "evidence_id": evidence.evidence_id,
+        "subscription_id": evidence.subscription_id,
+        "transport_frame_sha256": evidence.frame_sha256,
+        "provider_health": evidence.provider_health.value,
+        "provider_publish_time_ms": evidence.publish_time_ms,
+        "provider_received_time_ms": evidence.received_time_ms,
+        "provider_ingested_time_ms": evidence.ingested_time_ms,
+        "durable_disposition": "open",
+    }
+
+
+def _durable_open_quote(
+    event: MarketEvent,
+    identity: BetfairQuoteIdentity,
+) -> ProviderQuote:
+    """Reconstruct the exact provider-level open state represented by durable current."""
+
+    provider_event_id = _event_token(identity.market_id)
+    provider_selection_id = _identity_token(identity)
+    expected_event_id = f"{BETFAIR_STREAM_SOURCE_ID}:{provider_event_id}"
+    expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
+    expected_selection_id = f"{BETFAIR_STREAM_SOURCE_ID}:{provider_selection_id}"
+    expected_exchange_side = (
+        identity.side.value
+        if identity.side in {BetfairQuoteSide.BACK, BetfairQuoteSide.LAY}
+        else None
+    )
+    if event.event_id != expected_event_id:
+        raise ValueError("durable Betfair bridge event identity mismatch")
+    if event.market_id != expected_market_id:
+        raise ValueError("durable Betfair bridge market identity mismatch")
+    if event.selection_id != expected_selection_id:
+        raise ValueError("durable Betfair bridge selection identity mismatch")
+    if event.exchange_side != expected_exchange_side:
+        raise ValueError("durable Betfair bridge exchange-side identity mismatch")
+    if event.status != "open":
+        raise ValueError("durable Betfair bridge open reconstruction requires open status")
+    if event.metadata.get("durable_disposition") != "open":
+        raise ValueError("durable Betfair bridge open disposition metadata mismatch")
+    if identity.price is not None and event.decimal_odds != identity.price:
+        raise ValueError("durable Betfair bridge odds do not match quote identity")
+
+    return ProviderQuote(
+        provider_event_id=provider_event_id,
+        provider_market_id=identity.market_id,
+        provider_selection_id=provider_selection_id,
+        decimal_odds=event.decimal_odds,
+        observed_ts=event.observed_ts,
+        sequence=event.sequence,
+        market_type=event.market_type,
+        status="open",
+        source_ts=event.source_ts,
+        score_state=event.score_state,
+        metadata=dict(event.metadata),
+        sport=event.sport,
+        exchange_side=event.exchange_side,
+    )
+
+
+def _identity_from_metadata(metadata: object) -> BetfairQuoteIdentity:
+    if type(metadata) is not dict or metadata.get("schema") != _SCHEMA:
+        raise ValueError(
+            "durable Betfair stream current state lacks canonical bridge metadata"
+        )
+    market_id = metadata.get("market_id")
+    selection_id = metadata.get("selection_id")
+    handicap_raw = metadata.get("handicap")
+    side_raw = metadata.get("side")
+    price_raw = metadata.get("identity_price")
+    if type(metadata.get("schema")) is not str:
+        raise ValueError("durable Betfair bridge schema metadata is invalid")
+    if type(market_id) is not str or not market_id:
+        raise ValueError("durable Betfair bridge market_id is invalid")
+    if type(selection_id) is not int or selection_id <= 0:
+        raise ValueError("durable Betfair bridge selection_id is invalid")
+    if type(handicap_raw) is not str:
+        raise ValueError("durable Betfair bridge handicap is invalid")
+    if type(side_raw) is not str:
+        raise ValueError("durable Betfair bridge side is invalid")
+    if price_raw is not None and type(price_raw) is not str:
+        raise ValueError("durable Betfair bridge identity price is invalid")
+    try:
+        handicap = Decimal(handicap_raw)
+        side = BetfairQuoteSide(side_raw)
+        price = None if price_raw is None else Decimal(price_raw)
+    except (ArithmeticError, ValueError) as exc:
+        raise ValueError("durable Betfair bridge identity metadata is invalid") from exc
+    return BetfairQuoteIdentity(
+        BETFAIR_STREAM_SOURCE_ID,
+        market_id,
+        selection_id,
+        handicap,
+        side,
+        price,
+    )
+
+
+class BetfairAuthenticatedMarketProvider:
+    """Authenticated Betfair Stream -> canonical MarketProvider adapter.
+
+    The adapter is deliberately stateful. Before the first read it must be bound to the
+    exact durable current projection from the target SQLiteMarketStore. That binding
+    restores the provider-sequence floor and the set of previously durable open quotes,
+    so a restart can emit explicit higher-sequence closed tombstones when the fresh
+    authenticated image no longer authorizes an old quote.
+
+    It never creates execution authority. It only converts publications that the
+    canonical authenticated runtime still proves decision-eligible, and materializes
+    loss of that authority as ordinary non-open MarketEvent state through ProviderQuote.
+    """
+
+    source_id = BETFAIR_STREAM_SOURCE_ID
+
+    def __init__(
+        self,
+        runtime: BetfairAuthenticatedStreamFreshnessRuntime,
+        *,
+        freshness_policy: BetfairStreamFreshnessPolicy,
+    ) -> None:
+        if type(runtime) is not BetfairAuthenticatedStreamFreshnessRuntime:
+            raise TypeError(
+                "runtime must be canonical BetfairAuthenticatedStreamFreshnessRuntime"
+            )
+        if type(freshness_policy) is not BetfairStreamFreshnessPolicy:
+            raise TypeError("freshness_policy must be canonical BetfairStreamFreshnessPolicy")
+        self._runtime = runtime
+        self._lock = RLock()
+        self._policy = BetfairStreamFreshnessPolicy(
+            max_age_ms=freshness_policy.max_age_ms,
+            max_future_skew_ms=freshness_policy.max_future_skew_ms,
+        )
+        self._bound = False
+        self._sequence = 0
+        self._open_by_identity: dict[BetfairQuoteIdentity, ProviderQuote] = {}
+        self._pending: tuple[ProviderQuote, ...] = ()
+        self._pending_offset = 0
+        self._pending_authority_revoked = False
+        self._rollback_page: tuple[
+            tuple[ProviderQuote, ...],
+            int,
+            int,
+            dict[BetfairQuoteIdentity, ProviderQuote],
+            bool,
+        ] | None = None
+
+    @property
+    def durable_bound(self) -> bool:
+        with self._lock:
+            return self._bound
+
+    def bind_durable_current(
+        self,
+        current: Mapping[tuple[str, str], MarketEvent],
+    ) -> None:
+        with self._lock:
+            self._bind_durable_current_locked(current)
+
+    def _bind_durable_current_locked(
+        self,
+        current: Mapping[tuple[str, str], MarketEvent],
+    ) -> None:
+        """Bind once to independently proven durable current projection before reads."""
+
+        if self._bound:
+            raise RuntimeError("Betfair authenticated provider is already durably bound")
+        if type(current) is not dict:
+            raise TypeError("current must be an exact dict of canonical market events")
+
+        max_sequence = 0
+        restored: dict[BetfairQuoteIdentity, ProviderQuote] = {}
+        for key, event in current.items():
+            if type(key) is not tuple or len(key) != 2:
+                raise ValueError("durable current key must be (source_id, quote_key)")
+            if type(event) is not MarketEvent:
+                raise TypeError("durable current values must be exact MarketEvent")
+            if key != (event.source_id, event.quote_key):
+                raise ValueError("durable current key does not match canonical MarketEvent key")
+            if event.source_id != BETFAIR_STREAM_SOURCE_ID:
+                continue
+            if type(event.sequence) is not int or event.sequence < 1:
+                raise ValueError("durable Betfair bridge sequence must be a positive int")
+            if event.sequence > max_sequence:
+                max_sequence = event.sequence
+            identity = _identity_from_metadata(event.metadata)
+            provider_event_id = _event_token(identity.market_id)
+            provider_selection_id = _identity_token(identity)
+            expected_event_id = f"{BETFAIR_STREAM_SOURCE_ID}:{provider_event_id}"
+            expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
+            expected_selection_id = (
+                f"{BETFAIR_STREAM_SOURCE_ID}:{provider_selection_id}"
+            )
+            if event.event_id != expected_event_id:
+                raise ValueError("durable Betfair bridge event identity mismatch")
+            if event.market_id != expected_market_id:
+                raise ValueError("durable Betfair bridge market identity mismatch")
+            if event.selection_id != expected_selection_id:
+                raise ValueError("durable Betfair bridge selection identity mismatch")
+            disposition = event.metadata.get("durable_disposition")
+            if event.status == "open":
+                provider_quote = _durable_open_quote(event, identity)
+            elif event.status == "closed":
+                if disposition != "closed":
+                    raise ValueError(
+                        "durable Betfair bridge closed disposition metadata mismatch"
+                    )
+                expected_exchange_side = (
+                    identity.side.value
+                    if identity.side in {BetfairQuoteSide.BACK, BetfairQuoteSide.LAY}
+                    else None
+                )
+                if event.exchange_side != expected_exchange_side:
+                    raise ValueError(
+                        "durable Betfair bridge closed exchange-side identity mismatch"
+                    )
+                if identity.price is not None and event.decimal_odds != identity.price:
+                    raise ValueError(
+                        "durable Betfair bridge closed odds do not match quote identity"
+                    )
+                continue
+            else:
+                raise ValueError("durable Betfair bridge status is not canonical")
+            if identity in restored:
+                raise ValueError("durable Betfair bridge contains duplicate open identity")
+            restored[identity] = provider_quote
+
+        if max_sequence < 0 or max_sequence > _MAX_SQLITE_SEQUENCE:
+            raise ValueError("durable Betfair bridge sequence floor is invalid")
+        self._sequence = max_sequence
+        self._open_by_identity = restored
+        self._bound = True
+
+    def assert_durable_current(
+        self,
+        current: Mapping[tuple[str, str], MarketEvent],
+    ) -> None:
+        with self._lock:
+            self._assert_durable_current_locked(current)
+
+    def _assert_durable_current_locked(
+        self,
+        current: Mapping[tuple[str, str], MarketEvent],
+    ) -> None:
+        """Fail closed if durable state diverged from this consumed stream state."""
+
+        if not self._bound:
+            raise RuntimeError("Betfair authenticated provider is not durably bound")
+        if type(current) is not dict:
+            raise TypeError("current must be an exact dict of canonical market events")
+
+        max_sequence = 0
+        durable_open: dict[BetfairQuoteIdentity, ProviderQuote] = {}
+        for key, event in current.items():
+            if type(key) is not tuple or len(key) != 2:
+                raise ValueError("durable current key must be (source_id, quote_key)")
+            if type(event) is not MarketEvent:
+                raise TypeError("durable current values must be exact MarketEvent")
+            if key != (event.source_id, event.quote_key):
+                raise ValueError("durable current key does not match canonical MarketEvent key")
+            if event.source_id != BETFAIR_STREAM_SOURCE_ID:
+                continue
+            identity = _identity_from_metadata(event.metadata)
+            if type(event.sequence) is not int or event.sequence < 1:
+                raise ValueError("durable Betfair bridge sequence must be a positive int")
+            max_sequence = max(max_sequence, event.sequence)
+            provider_event_id = _event_token(identity.market_id)
+            provider_selection_id = _identity_token(identity)
+            expected_event_id = f"{BETFAIR_STREAM_SOURCE_ID}:{provider_event_id}"
+            expected_market_id = f"{BETFAIR_STREAM_SOURCE_ID}:{identity.market_id}"
+            expected_selection_id = (
+                f"{BETFAIR_STREAM_SOURCE_ID}:{provider_selection_id}"
+            )
+            if event.event_id != expected_event_id:
+                raise ValueError("durable Betfair bridge event identity mismatch")
+            if event.market_id != expected_market_id:
+                raise ValueError("durable Betfair bridge market identity mismatch")
+            if event.selection_id != expected_selection_id:
+                raise ValueError("durable Betfair bridge selection identity mismatch")
+            disposition = event.metadata.get("durable_disposition")
+            if event.status == "open":
+                provider_quote = _durable_open_quote(event, identity)
+                if identity in durable_open:
+                    raise ValueError("durable Betfair bridge contains duplicate open identity")
+                durable_open[identity] = provider_quote
+            elif event.status == "closed":
+                if disposition != "closed":
+                    raise ValueError(
+                        "durable Betfair bridge closed disposition metadata mismatch"
+                    )
+                expected_exchange_side = (
+                    identity.side.value
+                    if identity.side in {BetfairQuoteSide.BACK, BetfairQuoteSide.LAY}
+                    else None
+                )
+                if event.exchange_side != expected_exchange_side:
+                    raise ValueError(
+                        "durable Betfair bridge closed exchange-side identity mismatch"
+                    )
+                if identity.price is not None and event.decimal_odds != identity.price:
+                    raise ValueError(
+                        "durable Betfair bridge closed odds do not match quote identity"
+                    )
+            else:
+                raise ValueError("durable Betfair bridge status is not canonical")
+
+        memory_open = dict(self._open_by_identity)
+        if max_sequence != self._sequence or durable_open != memory_open:
+            raise RuntimeError(
+                "durable Betfair current projection diverged from consumed stream state; "
+                "reconnect and rebuild the authenticated provider from SQLite"
+            )
+
+    def _open_quote(
+        self,
+        evidence: BetfairStreamPublicationEvidence,
+        *,
+        sequence: int,
+    ) -> ProviderQuote:
+        identity = evidence.quote.identity
+        exchange_side = (
+            identity.side.value
+            if identity.side in {BetfairQuoteSide.BACK, BetfairQuoteSide.LAY}
+            else None
+        )
+        return ProviderQuote(
+            provider_event_id=_event_token(identity.market_id),
+            provider_market_id=identity.market_id,
+            provider_selection_id=_identity_token(identity),
+            decimal_odds=evidence.quote.price,
+            observed_ts=_iso_from_epoch_ms(evidence.received_time_ms),
+            sequence=sequence,
+            market_type=MarketType.OTHER,
+            status="open",
+            source_ts=_iso_from_epoch_ms(evidence.publish_time_ms),
+            metadata=_metadata_from_evidence(evidence),
+            exchange_side=exchange_side,
+        )
+
+    def _closed_quote(
+        self,
+        prior: ProviderQuote,
+        *,
+        sequence: int,
+    ) -> ProviderQuote:
+        now = datetime.now(timezone.utc).isoformat(timespec="milliseconds")
+        metadata = dict(prior.metadata)
+        metadata["durable_disposition"] = "closed"
+        metadata["invalidation_reason"] = "authenticated_stream_authority_revoked"
+        return ProviderQuote(
+            provider_event_id=prior.provider_event_id,
+            provider_market_id=prior.provider_market_id,
+            provider_selection_id=prior.provider_selection_id,
+            decimal_odds=prior.decimal_odds,
+            observed_ts=now,
+            sequence=sequence,
+            market_type=prior.market_type,
+            status="closed",
+            source_ts=None,
+            score_state=prior.score_state,
+            metadata=metadata,
+            sport=prior.sport,
+            exchange_side=prior.exchange_side,
+        )
+
+    def _build_transition(self) -> tuple[ProviderQuote, ...]:
+        issued = self._runtime.read_and_ingest()
+        emitted: list[ProviderQuote] = []
+        issued_by_identity = {evidence.quote.identity: evidence for evidence in issued}
+        projected_open = dict(self._open_by_identity)
+        projected_sequence = self._sequence
+
+        def allocate_sequence() -> int:
+            nonlocal projected_sequence
+            if projected_sequence >= _MAX_SQLITE_SEQUENCE:
+                raise OverflowError("Betfair bridge exhausted signed 64-bit provider sequence")
+            projected_sequence += 1
+            return projected_sequence
+
+        # Build the complete frame transition without advancing committed bridge state.
+        # read_batch applies only the page it actually exposes, so later truncated pages
+        # cannot become in-memory authority before they cross their own persistence seam.
+        for identity, prior in tuple(projected_open.items()):
+            decision = self._runtime.evaluate(identity, policy=self._policy)
+            if not decision.decision_eligible:
+                emitted.append(
+                    self._closed_quote(prior, sequence=allocate_sequence())
+                )
+                projected_open.pop(identity, None)
+
+        # Then plan only newly issued evidence that remains decision-eligible under
+        # the same authenticated runtime after all frame-level status/epoch updates.
+        for identity in sorted(
+            issued_by_identity,
+            key=lambda item: (
+                item.market_id,
+                item.selection_id,
+                str(item.handicap),
+                item.side.value,
+                "" if item.price is None else str(item.price),
+            ),
+        ):
+            evidence = issued_by_identity[identity]
+            decision = self._runtime.evaluate(identity, policy=self._policy)
+            if not decision.decision_eligible:
+                continue
+            prior = projected_open.get(identity)
+            if prior is not None and prior.metadata.get("evidence_id") == evidence.evidence_id:
+                continue
+            quote = self._open_quote(
+                evidence,
+                sequence=allocate_sequence(),
+            )
+            projected_open[identity] = quote
+            emitted.append(quote)
+
+        return tuple(emitted)
+
+    def reset_pending_snapshot(self) -> None:
+        """Rollback only the last exposed page when persistence never committed it."""
+
+        with self._lock:
+            if self._rollback_page is None:
+                return
+            (
+                pending,
+                start,
+                sequence,
+                open_by_identity,
+                authority_revoked,
+            ) = self._rollback_page
+            self._pending = pending
+            self._pending_offset = start
+            self._sequence = sequence
+            self._open_by_identity = open_by_identity
+            self._pending_authority_revoked = authority_revoked
+            self._rollback_page = None
+
+    def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+        with self._lock:
+            return self._read_batch_locked(max_items)
+
+    def _read_batch_locked(self, max_items: int) -> ProviderBatch:
+        if type(max_items) is not int or max_items <= 0:
+            raise ValueError("max_items must be a positive non-boolean integer")
+        if not self._bound:
+            raise RuntimeError(
+                "Betfair authenticated provider must bind durable current state before read"
+            )
+
+        # A second underlying read can occur only after the previous exposed page has
+        # left the replay wrapper's in-flight slot. At that point the old rollback
+        # checkpoint is no longer eligible for pre-commit abandonment.
+        self._rollback_page = None
+
+        if self._pending_offset >= len(self._pending):
+            self._pending = self._build_transition()
+            self._pending_offset = 0
+            self._pending_authority_revoked = any(
+                quote.status != "open" for quote in self._pending
+            )
+
+        start = self._pending_offset
+        stop = min(len(self._pending), start + max_items)
+        quotes = self._pending[start:stop]
+        self._rollback_page = (
+            self._pending,
+            start,
+            self._sequence,
+            dict(self._open_by_identity),
+            self._pending_authority_revoked,
+        )
+        self._pending_offset = stop
+        for quote in quotes:
+            identity = _identity_from_metadata(quote.metadata)
+            if quote.status == "open":
+                self._open_by_identity[identity] = quote
+            elif quote.status == "closed":
+                self._open_by_identity.pop(identity, None)
+            else:
+                raise AssertionError("Betfair bridge planned a noncanonical status")
+            if quote.sequence <= self._sequence:
+                raise AssertionError("Betfair bridge planned a non-monotonic sequence")
+            self._sequence = quote.sequence
+        truncated = stop < len(self._pending)
+        authority_revoked = self._pending_authority_revoked
+        if not truncated:
+            self._pending = ()
+            self._pending_offset = 0
+            self._pending_authority_revoked = False
+
+        flags: list[str] = []
+        if authority_revoked:
+            flags.append("BETFAIR_AUTHORITY_REVOKED")
+        if truncated:
+            flags.append("TRUNCATED_BATCH")
+        page_cursor = quotes[-1].sequence if quotes else self._sequence
+        return ProviderBatch(
+            self.source_id,
+            quotes,
+            cursor=str(page_cursor),
+            quality_flags=tuple(flags),
+        )

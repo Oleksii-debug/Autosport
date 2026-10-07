@@ -17,6 +17,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import stat
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -97,14 +98,28 @@ def _text(value: object, name: str, *, max_length: int = 512) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
-    if len(text) != 64 or any(ch not in _HEX for ch in text):
-        raise RiskOfRuinEvaluationError(f"{name} must be a canonical SHA-256 digest")
+    text = _text(value, name)
+    if (
+        len(text) != 64
+        or text != text.lower()
+        or any(ch not in _HEX for ch in text)
+    ):
+        raise RiskOfRuinEvaluationError(
+            f"{name} must be a canonical lowercase SHA-256 digest"
+        )
     return text
 
 
 def _instant(value: object, name: str) -> datetime:
     text = _text(value, name)
+    for match in re.finditer(r"[.,]([0-9]+)", text):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise RiskOfRuinEvaluationError(
+                f"{name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:

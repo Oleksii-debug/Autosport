@@ -85,6 +85,21 @@ def _timezone_aware_iso8601_value(value: object, field_name: str) -> str:
     return timestamp
 
 
+def _canonical_market_event_chronology(
+    observed_ts: object,
+    ingest_ts: object,
+) -> tuple[str, str]:
+    """Validate the product-local observation -> ingestion causal ordering."""
+
+    observed = _timezone_aware_iso8601_value(observed_ts, "observed_ts")
+    ingest = _timezone_aware_iso8601_value(ingest_ts, "ingest_ts")
+    observed_instant = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    ingest_instant = datetime.fromisoformat(ingest.replace("Z", "+00:00"))
+    if ingest_instant < observed_instant:
+        raise ValueError("ingest_ts cannot be before observed_ts")
+    return observed, ingest
+
+
 def _required_canonical_string(raw: dict[str, Any], field_name: str) -> str:
     return _canonical_string_value(raw.get(field_name), field_name)
 
@@ -454,8 +469,7 @@ class MarketEvent:
         if type(self.market_type) is not MarketType:
             raise ValueError("market_type must be canonical MarketType")
         _canonical_sequence_value(self.sequence)
-        _timezone_aware_iso8601_value(self.observed_ts, "observed_ts")
-        _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
+        _canonical_market_event_chronology(self.observed_ts, self.ingest_ts)
         if self.source_ts is not None:
             _timezone_aware_iso8601_value(self.source_ts, "source_ts")
         object.__setattr__(
@@ -674,11 +688,9 @@ class MarketEvent:
         # tampered with through object.__setattr__, so re-prove every causal
         # timestamp at the public serialization boundary instead of publishing
         # unchecked post-construction values.
-        canonical_observed_ts = _timezone_aware_iso8601_value(
-            self.observed_ts, "observed_ts"
-        )
-        canonical_ingest_ts = _timezone_aware_iso8601_value(
-            self.ingest_ts, "ingest_ts"
+        canonical_observed_ts, canonical_ingest_ts = _canonical_market_event_chronology(
+            self.observed_ts,
+            self.ingest_ts,
         )
         canonical_source_ts = (
             None

@@ -75,3 +75,47 @@ def test_to_dict_preserves_absent_source_time() -> None:
     payload = event.to_dict()
 
     assert payload["source_ts"] is None
+
+
+def test_constructor_rejects_ingest_before_observation() -> None:
+    with pytest.raises(ValueError, match="ingest_ts cannot be before observed_ts"):
+        MarketEvent(
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            decimal_odds=Decimal("2.5"),
+            observed_ts="2026-10-07T00:00:02+00:00",
+            source_id="provider-1",
+            sequence=1,
+            source_ts="2026-10-07T00:00:03+00:00",
+            ingest_ts="2026-10-07T00:00:01+00:00",
+        )
+
+
+def test_from_dict_rejects_ingest_before_observation() -> None:
+    raw = _event().to_dict()
+    raw["observed_ts"] = "2026-10-07T00:00:02+00:00"
+    raw["ingest_ts"] = "2026-10-07T00:00:01+00:00"
+
+    with pytest.raises(ValueError, match="ingest_ts cannot be before observed_ts"):
+        MarketEvent.from_dict(raw)
+
+
+def test_to_dict_rejects_post_construction_chronology_inversion() -> None:
+    event = _event()
+    object.__setattr__(event, "observed_ts", "2026-10-07T00:00:02+00:00")
+    object.__setattr__(event, "ingest_ts", "2026-10-07T00:00:01+00:00")
+
+    with pytest.raises(ValueError, match="ingest_ts cannot be before observed_ts"):
+        event.to_dict()
+
+
+def test_market_event_chronology_compares_absolute_instants() -> None:
+    event = _event()
+    object.__setattr__(event, "observed_ts", "2026-10-07T02:00:00+02:00")
+    object.__setattr__(event, "ingest_ts", "2026-10-07T00:00:00+00:00")
+
+    payload = event.to_dict()
+
+    assert payload["observed_ts"] == "2026-10-07T02:00:00+02:00"
+    assert payload["ingest_ts"] == "2026-10-07T00:00:00+00:00"

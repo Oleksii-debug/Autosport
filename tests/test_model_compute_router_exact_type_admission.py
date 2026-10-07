@@ -8,8 +8,11 @@ from autosport.model_compute_router import (
     ComputeRoutingPolicy,
     ComputeTier,
     DataClassification,
+    VOCEvidenceProvenance,
+    ValueOfComputationEvidence,
     route_compute,
 )
+from autosport.voc_evaluation import PairedVOCEvaluation
 
 
 SHA256 = "a" * 64
@@ -83,3 +86,47 @@ def test_route_rejects_policy_subclass() -> None:
             _policy(PolicyAlias),
             as_of="2026-10-07T00:00:30Z",
         )
+
+
+
+class _HostilePairedVOCEvaluation(PairedVOCEvaluation):
+    member_accesses = 0
+
+    def __getattribute__(self, name: str):
+        if name in {"member_accesses", "__class__", "__dict__"}:
+            return object.__getattribute__(self, name)
+        type(self).member_accesses += 1
+        raise AssertionError(f"hostile PairedVOCEvaluation member accessed: {name}")
+
+
+def test_voc_evidence_rejects_evaluation_subclass_before_identity_dispatch() -> None:
+    _HostilePairedVOCEvaluation.member_accesses = 0
+    hostile = object.__new__(_HostilePairedVOCEvaluation)
+
+    with pytest.raises(
+        ModelComputeRouterError,
+        match="evaluation must be an exact PairedVOCEvaluation",
+    ):
+        ValueOfComputationEvidence(
+            evidence_id="voc-evidence-1",
+            baseline_candidate_id="candidate-base",
+            challenger_candidate_id="candidate-challenger",
+            baseline_backend_id="backend-base",
+            baseline_model_id="model-base",
+            baseline_config_sha256=SHA256,
+            challenger_backend_id="backend-challenger",
+            challenger_model_id="model-challenger",
+            challenger_config_sha256="b" * 64,
+            measured_at="2026-10-07T00:00:00Z",
+            available_at="2026-10-07T00:00:01Z",
+            provenance=VOCEvidenceProvenance.MEASURED_SHADOW,
+            baseline_utility=Decimal("1"),
+            challenger_utility=Decimal("2"),
+            compute_cost_penalty=Decimal("0"),
+            latency_opportunity_cost_penalty=Decimal("0"),
+            measured_compute_cost=Decimal("0"),
+            evaluation_sha256="c" * 64,
+            evaluation=hostile,
+        )
+
+    assert _HostilePairedVOCEvaluation.member_accesses == 0

@@ -468,9 +468,9 @@ class ValueOfComputationEvidence:
             raise ModelComputeRouterError(
                 "VOC available_at precedes measured_at"
             )
-        if not isinstance(self.provenance, VOCEvidenceProvenance):
+        if type(self.provenance) is not VOCEvidenceProvenance:
             raise ModelComputeRouterError(
-                "provenance must be VOCEvidenceProvenance"
+                "provenance must be an exact VOCEvidenceProvenance"
             )
         _decimal("baseline_utility", self.baseline_utility)
         _decimal("challenger_utility", self.challenger_utility)
@@ -482,11 +482,12 @@ class ValueOfComputationEvidence:
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
         _sha256("evaluation_sha256", self.evaluation_sha256)
         if self.evaluation is not None:
-            if not isinstance(self.evaluation, PairedVOCEvaluation):
+            if type(self.evaluation) is not PairedVOCEvaluation:
                 raise ModelComputeRouterError(
-                    "evaluation must be PairedVOCEvaluation"
+                    "evaluation must be an exact PairedVOCEvaluation"
                 )
             evaluation = self.evaluation
+            PairedVOCEvaluation.__post_init__(evaluation)
             if evaluation.evaluation_id != self.evidence_id:
                 raise ModelComputeRouterError(
                     "VOC evaluation identity does not match evidence_id"

@@ -11,6 +11,8 @@ from autosport.model_compute_router import (
     ComputeTier,
     DataClassification,
     ModelComputeRouterError,
+    _VOC_PRECOMPUTE_FIELDS,
+    _validate_persisted_voc_precompute_admission,
 )
 
 
@@ -73,3 +75,24 @@ def test_valid_router_identity_payload_is_unchanged() -> None:
     assert candidate.payload()["candidate_id"] == "candidate-1"
     assert candidate.payload()["backend_id"] == "backend-1"
     assert candidate.payload()["model_id"] == "model-1"
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0))
+def test_persisted_voc_precompute_rejects_non_exact_int_schema_version(
+    schema_version: object,
+) -> None:
+    raw = {field: None for field in _VOC_PRECOMPUTE_FIELDS}
+    raw["schema_version"] = schema_version
+
+    with pytest.raises(
+        ModelComputeRouterError,
+        match="schema version is unsupported",
+    ):
+        _validate_persisted_voc_precompute_admission(
+            request=None,  # type: ignore[arg-type]
+            candidates=(),
+            decision=None,  # type: ignore[arg-type]
+            domain_observation=None,
+            raw=raw,
+        )
+

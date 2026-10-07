@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import autosport.scientific_registry as registry_module
@@ -149,6 +151,39 @@ def test_registry_append_revalidates_tampered_dataset_snapshot_identity(
         registry.append(record)
 
     assert registry.get("DatasetSnapshot", "dataset-v1") is None
+
+
+def test_registry_restart_rejects_self_consistent_record_id_payload_mismatch(
+    tmp_path,
+) -> None:
+    path = tmp_path / "scientific-registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_dataset())
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["dataset_snapshot_id"] = "dataset-forged"
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    reopened = ScientificRegistry(path)
+    with pytest.raises(ValueError, match="record identity mismatch"):
+        reopened.get("DatasetSnapshot", "dataset-v1")
 
 
 @pytest.mark.parametrize(

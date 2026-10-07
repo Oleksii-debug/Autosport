@@ -1022,6 +1022,55 @@ class ScientificRegistry:
         _iso(raw_entry["available_at"], "available_at")
         if type(raw_entry["payload"]) is not dict:
             raise ValueError("scientific registry payload must be an object")
+        payload = raw_entry["payload"]
+        record_type = raw_entry["record_type"]
+        identity_field = {
+            "ResearchQuestion": "question_id",
+            "Hypothesis": "hypothesis_id",
+            "ResearchProtocol": "research_protocol_id",
+            "DatasetSnapshot": "dataset_snapshot_id",
+            "FeatureSet": "feature_set_id",
+            "ModelVersion": "model_version_id",
+            "StrategyVersion": "strategy_version_id",
+            "EvaluationBundle": "evaluation_bundle_id",
+            "Experiment": "experiment_id",
+            "PromotionDecision": "promotion_decision_id",
+            "PromotionEvidence": "promotion_evidence_id",
+            "Postmortem": "postmortem_id",
+        }.get(record_type)
+        if identity_field is not None:
+            payload_record_id = _text(
+                payload.get(identity_field),
+                f"{record_type}.{identity_field}",
+            )
+        elif record_type == "CounterfactualQualification":
+            authority_id = _text(
+                payload.get("authority_id"),
+                "CounterfactualQualification.authority_id",
+            )
+            authority_version = _text(
+                payload.get("authority_version"),
+                "CounterfactualQualification.authority_version",
+            )
+            payload_record_id = f"{authority_id}@{authority_version}"
+        elif record_type == "CounterfactualSourceEvidence":
+            authority_id = _text(
+                payload.get("authority_id"),
+                "CounterfactualSourceEvidence.authority_id",
+            )
+            authority_version = _text(
+                payload.get("authority_version"),
+                "CounterfactualSourceEvidence.authority_version",
+            )
+            sample_id = _text(
+                payload.get("sample_id"),
+                "CounterfactualSourceEvidence.sample_id",
+            )
+            payload_record_id = f"{authority_id}@{authority_version}:{sample_id}"
+        else:
+            payload_record_id = None
+        if payload_record_id is not None and payload_record_id != raw_entry["record_id"]:
+            raise ValueError("scientific registry record identity mismatch")
         expected = _digest({"record_type": raw_entry["record_type"],
                             "record_id": raw_entry["record_id"],
                             "available_at": raw_entry["available_at"],

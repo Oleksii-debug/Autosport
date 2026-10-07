@@ -241,9 +241,12 @@ def _snapshot_quote_at_cutoff(
     # Preserve the service boundary's runtime diagnostics before adapting this
     # already-materialized event to the stricter serialized ingress contract.
     observed = _timestamp(event.observed_ts, field="observed_ts")
-    _timestamp(event.ingest_ts, field="ingest_ts")
-    if event.source_ts is not None:
-        _timestamp(event.source_ts, field="source_ts")
+    ingest = _timestamp(event.ingest_ts, field="ingest_ts")
+    source = (
+        None
+        if event.source_ts is None
+        else _timestamp(event.source_ts, field="source_ts")
+    )
     _validate_quote_identity_utf8(event)
 
     # Intentionally construct the validation payload from quote-only scalar
@@ -268,8 +271,14 @@ def _snapshot_quote_at_cutoff(
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event quote fields are not canonical") from exc
 
+    if ingest < observed:
+        raise ValueError("selected quote ingest_ts is before observed_ts")
     if observed > cutoff_value:
         raise ValueError("selected quote observed_ts is after the calculation causal cutoff")
+    if source is not None and source > cutoff_value:
+        raise ValueError("selected quote source_ts is after the calculation causal cutoff")
+    if ingest > cutoff_value:
+        raise ValueError("selected quote ingest_ts is after the calculation causal cutoff")
 
     payload = {
         "event_id": canonical.event_id,
@@ -298,7 +307,7 @@ def _causal_cutoff(value: str) -> tuple[datetime, str]:
 
 
 def _timestamp(value: object, *, field: str) -> datetime:
-    if not isinstance(value, str) or not value or value.strip() != value:
+    if type(value) is not str or not value or value.strip() != value:
         raise ValueError(f"{field} must be a non-empty trimmed timezone-aware ISO timestamp")
     try:
         return parse_iso_timestamp(value)

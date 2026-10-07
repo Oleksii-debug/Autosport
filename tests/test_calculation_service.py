@@ -23,6 +23,7 @@ class CalculationServiceTests(unittest.TestCase):
         sequence: int = 1,
         observed_ts: str = "2026-09-14T12:00:00+00:00",
         source_ts: str | None = "2026-09-14T11:59:59+00:00",
+        ingest_ts: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> MarketEvent:
         return MarketEvent(
@@ -35,7 +36,7 @@ class CalculationServiceTests(unittest.TestCase):
             sequence=sequence,
             market_type=MarketType.WINNER,
             source_ts=source_ts,
-            ingest_ts="2026-09-14T12:05:00+00:00",
+            ingest_ts=observed_ts if ingest_ts is None else ingest_ts,
             metadata={} if metadata is None else metadata,
         )
 
@@ -184,6 +185,20 @@ class CalculationServiceTests(unittest.TestCase):
         self.assertNotEqual(first.result.result_hash, second.result.result_hash)
         self.assertNotEqual(first.evidence_sha256, second.evidence_sha256)
 
+    def test_causal_cutoff_rejects_str_subclass_before_virtual_methods(self) -> None:
+        class _ExplosiveCutoff(str):
+            def strip(self, *args: object, **kwargs: object) -> str:
+                raise AssertionError("causal cutoff validation must reject str subclasses before strip")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal_cutoff_ts must be a non-empty trimmed timezone-aware ISO timestamp",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(),
+                causal_cutoff_ts=_ExplosiveCutoff("2026-09-14T12:00:00Z"),  # type: ignore[arg-type]
+            )
+
     def test_future_quote_is_rejected_instead_of_substituted(self) -> None:
         cutoff = "2026-09-14T12:00:30+00:00"
         accepted = self.service.implied_probability_for_event(
@@ -200,6 +215,56 @@ class CalculationServiceTests(unittest.TestCase):
                     observed_ts="2026-09-14T12:01:00+00:00",
                 ),
                 causal_cutoff_ts=cutoff,
+            )
+
+    def test_ingest_timestamp_before_observation_is_rejected_as_invalid_chronology(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts is before observed_ts",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(
+                    observed_ts="2026-09-14T12:00:00+00:00",
+                    ingest_ts="2026-09-14T11:59:59+00:00",
+                ),
+                causal_cutoff_ts="2026-09-14T12:01:00+00:00",
+            )
+
+    def test_future_source_timestamp_is_rejected_as_causally_unavailable(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_ts is after the calculation causal cutoff",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(source_ts="2026-09-14T12:00:01+00:00"),
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            )
+
+    def test_future_ingest_timestamp_is_rejected_as_causally_unavailable(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts is after the calculation causal cutoff",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(ingest_ts="2026-09-14T12:00:01+00:00"),
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            )
+
+    def test_market_devig_rejects_any_quote_not_fully_available_at_cutoff(self) -> None:
+        first = self._event(selection_id="driver-a", sequence=1)
+        future = self._event(
+            selection_id="driver-b",
+            decimal_odds="2.05",
+            sequence=2,
+            ingest_ts="2026-09-14T12:00:01+00:00",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts is after the calculation causal cutoff",
+        ):
+            self.service.multiplicative_devig_for_market(
+                (first, future),
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
             )
 
     def test_mutable_metadata_and_future_outcome_fields_are_not_part_of_evidence(self) -> None:

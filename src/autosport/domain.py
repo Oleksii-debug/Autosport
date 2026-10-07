@@ -321,6 +321,7 @@ class MarketEvent:
             "source_id",
         ):
             _canonical_string_value(getattr(self, field_name), field_name)
+        _canonical_sequence_value(self.sequence)
         _timezone_aware_iso8601_value(self.observed_ts, "observed_ts")
         _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
         if self.source_ts is not None:

@@ -117,3 +117,83 @@ def test_unknown_future_registry_version_fails_closed_without_rewrite(
         ParticipantIdentityRegistry(path)
 
     assert path.read_bytes() == future
+
+
+def test_registry_mutation_ingress_rejects_record_subclasses(tmp_path: Path) -> None:
+    from autosport.participant_identity import (
+        EntityLineage,
+        LineageRelation,
+        RosterMembership,
+    )
+
+    class EntityIdentitySubclass(EntityIdentity):
+        pass
+
+    class AliasRecordSubclass(AliasRecord):
+        pass
+
+    class RosterMembershipSubclass(RosterMembership):
+        pass
+
+    class EntityLineageSubclass(EntityLineage):
+        pass
+
+    path = tmp_path / "identity.json"
+    registry = ParticipantIdentityRegistry.initialize_pristine(path)
+
+    with pytest.raises(TypeError, match="entity must be EntityIdentity"):
+        registry.add_entity(
+            EntityIdentitySubclass(
+                entity_id="team:subclass",
+                kind=EntityKind.TEAM,
+                source_reference="canonical:team:subclass",
+                evidence_sha256=SHA,
+                first_known_at=T0,
+                available_at=T0,
+            )
+        )
+
+    team_a = _identity("team:a", EntityKind.TEAM)
+    team_b = _identity("team:b", EntityKind.TEAM)
+    registry.add_entity(team_a)
+    registry.add_entity(team_b)
+
+    with pytest.raises(TypeError, match="alias must be AliasRecord"):
+        registry.add_alias(
+            AliasRecordSubclass(
+                source_id="provider-a",
+                alias="team-a",
+                entity_id=team_a.entity_id,
+                valid_from=T0,
+                valid_until=None,
+                available_at=T0,
+                evidence_sha256=SHA,
+                recorded_at=T0,
+            )
+        )
+
+    with pytest.raises(TypeError, match="membership must be RosterMembership"):
+        registry.add_roster_membership(
+            RosterMembershipSubclass(
+                event_id="event-1",
+                source_id="provider-a",
+                entity_id=team_a.entity_id,
+                member_from=T0,
+                member_until=None,
+                available_at=T0,
+                evidence_sha256=SHA,
+            )
+        )
+
+    with pytest.raises(TypeError, match="lineage must be EntityLineage"):
+        registry.add_lineage(
+            EntityLineageSubclass(
+                predecessor_entity_id=team_a.entity_id,
+                successor_entity_id=team_b.entity_id,
+                relation=LineageRelation.SUPERSEDES,
+                effective_from=T0,
+                available_at=T0,
+                recorded_at=T0,
+                evidence_sha256=SHA,
+            )
+        )

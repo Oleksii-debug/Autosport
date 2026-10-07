@@ -135,6 +135,51 @@ class ScientificDecisionEnvelopeTests(unittest.TestCase):
         with self.assertRaisesRegex(DecisionEnvelopeError, "duplicated"):
             envelope(evidence=(feature(), duplicate, market()))
 
+    def test_snapshot_helper_rejects_duplicate_typed_evidence_identity(self):
+        duplicate = replace(feature(), evidence_sha256=SHA_C)
+        with self.assertRaisesRegex(DecisionEnvelopeError, "duplicated"):
+            evidence_snapshot_sha256(
+                (feature(), duplicate),
+                EvidenceKind.FEATURE,
+            )
+
+    def test_canonical_payload_revalidates_identity_after_post_init_tamper(self):
+        tampered = feature()
+        object.__setattr__(tampered, "evidence_id", " feature-1")
+        with self.assertRaisesRegex(DecisionEnvelopeError, "evidence_id.*canonical"):
+            tampered.canonical_payload()
+
+        tampered_hash = feature()
+        object.__setattr__(tampered_hash, "evidence_sha256", "A" * 64)
+        with self.assertRaisesRegex(DecisionEnvelopeError, "lowercase SHA-256"):
+            tampered_hash.canonical_payload()
+
+    def test_snapshot_helper_revalidates_kind_and_chronology_after_post_init_tamper(self):
+        tampered_kind = feature()
+        object.__setattr__(tampered_kind, "kind", "FEATURE")
+        with self.assertRaisesRegex(DecisionEnvelopeError, "kind must be EvidenceKind"):
+            evidence_snapshot_sha256(
+                (tampered_kind,),
+                EvidenceKind.FEATURE,
+            )
+
+        tampered_time = feature()
+        object.__setattr__(tampered_time, "ingested_at", T2)
+        with self.assertRaisesRegex(
+            DecisionEnvelopeError,
+            "ingested_at must not be after available_at",
+        ):
+            evidence_snapshot_sha256(
+                (tampered_time,),
+                EvidenceKind.FEATURE,
+            )
+
+    def test_seal_revalidates_exact_evidence_after_post_init_tamper(self):
+        tampered = feature()
+        object.__setattr__(tampered, "evidence_id", "feature-1 ")
+        with self.assertRaisesRegex(DecisionEnvelopeError, "evidence_id.*canonical"):
+            envelope(evidence=(tampered, market()))
+
     def test_action_and_abstention_are_explicit_and_disjoint(self):
         with self.assertRaisesRegex(DecisionEnvelopeError, "ACTION"):
             envelope(abstention_reason="no edge")

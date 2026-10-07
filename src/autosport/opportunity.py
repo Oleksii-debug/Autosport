@@ -19,6 +19,16 @@ class OpportunityContractError(ValueError):
     """Raised when an opportunity/plan contract is ambiguous or non-canonical."""
 
 
+def _exact_dict_fields(raw: object) -> frozenset[str] | None:
+    """Return exact built-in string keys without hashing caller-controlled subtypes."""
+    if type(raw) is not dict:
+        return None
+    keys = tuple(raw.keys())
+    if any(type(key) is not str for key in keys):
+        return None
+    return frozenset(keys)
+
+
 class StrategyClass(str, Enum):
     """Canonical strategy-class vocabulary from binding decision contract #356."""
 
@@ -164,7 +174,7 @@ class EvidenceRef:
 
     @classmethod
     def from_dict(cls, raw: object) -> "EvidenceRef":
-        if type(raw) is not dict or set(raw) != {"authority", "reference"}:
+        if _exact_dict_fields(raw) != frozenset({"authority", "reference"}):
             raise OpportunityContractError(
                 "evidence reference must contain canonical fields"
             )
@@ -323,7 +333,8 @@ class QuoteRef:
             "market_event_hash",
             "market_snapshot_hash",
         }
-        if type(raw) is not dict or frozenset(raw) not in {
+        raw_fields = _exact_dict_fields(raw)
+        if raw_fields not in {
             frozenset(expected),
             frozenset(expected | {"sport"}),
         }:
@@ -463,7 +474,7 @@ class PredictiveEligibilityEvidence:
             "as_of",
             "valid_until",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if _exact_dict_fields(raw) != frozenset(expected):
             raise OpportunityContractError(
                 "predictive eligibility evidence must contain canonical fields"
             )
@@ -711,7 +722,8 @@ class ForecastRef:
             "market_snapshot_hash",
             "quote_market_event_hash",
         }
-        if type(raw) is dict and set(raw) == legacy:
+        raw_fields = _exact_dict_fields(raw)
+        if raw_fields == frozenset(legacy):
             return cls(
                 forecast_id=_canonical_text(raw["forecast_id"], "forecast_id"),
                 forecast_hash=_canonical_hash(
@@ -743,7 +755,7 @@ class ForecastRef:
             "uncertainty",
             "predictive_eligibility",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if raw_fields != frozenset(expected):
             raise OpportunityContractError(
                 "forecast reference must contain canonical fields"
             )
@@ -1004,15 +1016,7 @@ class Opportunity:
             "forecasts",
             "evidence_refs",
         }
-        if type(raw) is not dict:
-            raise OpportunityContractError(
-                "opportunity must contain canonical fields"
-            )
-        raw_keys = tuple(raw.keys())
-        if (
-            any(type(key) is not str for key in raw_keys)
-            or set(raw_keys) != expected
-        ):
+        if _exact_dict_fields(raw) != frozenset(expected):
             raise OpportunityContractError(
                 "opportunity must contain canonical fields"
             )
@@ -1130,9 +1134,8 @@ class OpportunitySet:
 
     @classmethod
     def from_dict(cls, raw: object) -> "OpportunitySet":
-        if (
-            type(raw) is not dict
-            or set(raw) != {"opportunity_set_id", "opportunities"}
+        if _exact_dict_fields(raw) != frozenset(
+            {"opportunity_set_id", "opportunities"}
         ):
             raise OpportunityContractError(
                 "opportunity set must contain canonical fields"
@@ -1181,10 +1184,7 @@ class PlanAllocation:
 
     @classmethod
     def from_dict(cls, raw: object) -> "PlanAllocation":
-        if (
-            type(raw) is not dict
-            or set(raw) != {"opportunity_id", "stake"}
-        ):
+        if _exact_dict_fields(raw) != frozenset({"opportunity_id", "stake"}):
             raise OpportunityContractError(
                 "allocation must contain canonical fields"
             )
@@ -1336,7 +1336,7 @@ class PortfolioPlan:
             "risk_evidence_refs",
             "ledger_state_refs",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if _exact_dict_fields(raw) != frozenset(expected):
             raise OpportunityContractError(
                 "portfolio plan must contain canonical fields"
             )

@@ -1120,11 +1120,16 @@ class ScientificRegistry:
                             raise ValueError(
                                 f"{member_path} must be a canonical identity object"
                             )
-                    elif (
-                        key.endswith("_id")
-                        or key.endswith("_identity")
-                        or key.endswith("_version")
-                    ):
+                    elif key.endswith("_version"):
+                        if member is not None:
+                            if type(member) is int:
+                                if member <= 0:
+                                    raise ValueError(
+                                        f"{member_path} must be a positive integer or canonical string"
+                                    )
+                            else:
+                                _text(member, member_path)
+                    elif key.endswith("_id") or key.endswith("_identity"):
                         if member is not None:
                             _text(member, member_path)
                     validate_identity_shape(member, member_path)

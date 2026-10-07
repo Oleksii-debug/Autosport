@@ -201,6 +201,120 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             stop_reason=stop_reason,
         )
 
+    def test_source_identity_subclasses_fail_before_text_dispatch_at_construction(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "hostile source identity strip dispatched before exact-type admission"
+                )
+
+            def __eq__(self, other):
+                raise AssertionError(
+                    "hostile source identity equality dispatched before exact-type admission"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [()])
+            source.source_id = HostileText("source-x")
+            with self.assertRaisesRegex(
+                ValueError,
+                "source.source_id must be a non-empty canonical string",
+            ):
+                self.make_service(tmp, source)
+
+            source.source_id = "source-x"
+            source.stream_epoch = HostileText("epoch-1")
+            with self.assertRaisesRegex(
+                ValueError,
+                "source.stream_epoch must be a non-empty canonical string",
+            ):
+                self.make_service(tmp, source)
+
+    def test_mutated_source_identity_subclasses_fail_before_runtime_dispatch(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "hostile source identity strip dispatched before runtime exact-type admission"
+                )
+
+            def __eq__(self, other):
+                raise AssertionError(
+                    "hostile source identity equality dispatched before runtime exact-type admission"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [()])
+            service = self.make_service(tmp, source)
+
+            source.source_id = HostileText("source-x")
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source.source_id must remain a non-empty canonical string",
+            ):
+                service.run_cycle()
+
+            source.source_id = "source-x"
+            source.stream_epoch = HostileText("epoch-1")
+            with self.assertRaisesRegex(
+                CollectorServiceError,
+                "source.stream_epoch must remain a non-empty canonical string",
+            ):
+                service.run_cycle()
+
+    def test_delta_batch_tuple_subclass_fails_before_container_dispatch(self):
+        class HostileTuple(tuple):
+            def __len__(self):
+                raise AssertionError(
+                    "hostile delta batch length dispatched before exact-tuple admission"
+                )
+
+            def __iter__(self):
+                raise AssertionError(
+                    "hostile delta batch iteration dispatched before exact-tuple admission"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource(
+                [page],
+                [HostileTuple((make_delta(),))],
+            )
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "source.fetch_deltas must return an exact tuple",
+            ):
+                service.run_cycle()
+
+    def test_collector_delta_subclass_fails_before_validate_dispatch(self):
+        class HostileDelta(CollectorDelta):
+            def validate(self):
+                raise AssertionError(
+                    "hostile CollectorDelta.validate dispatched before exact-type admission"
+                )
+
+        base = make_delta()
+        hostile = HostileDelta(
+            **{
+                name: getattr(base, name)
+                for name in base.__dataclass_fields__
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [(hostile,)])
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "source.fetch_deltas must return canonical CollectorDelta values",
+            ):
+                service.run_cycle()
+
     def test_cycle_accepts_provider_scoped_delta_for_canonical_lifecycle_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = FakeCollectorSource(

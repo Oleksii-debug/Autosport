@@ -35,8 +35,15 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             },
         )
         self._authority_env.start()
+        self._product_clock = patch.object(
+            storage_module,
+            "_market_product_utc_now",
+            return_value=(self.CUTOFF - timedelta(seconds=1)).isoformat(),
+        )
+        self._product_clock.start()
 
     def tearDown(self) -> None:
+        self._product_clock.stop()
         self._authority_env.stop()
         self._authority_directory.cleanup()
 
@@ -123,14 +130,18 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
     ) -> MonotonicWorkspaceAuthority:
         canonical_as_of = storage_module._canonical_replay_cutoff(as_of.isoformat())
         cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
+        issued_at = storage_module._canonical_product_time(
+            storage_module._market_product_utc_now()
+        )
         corpus_sha256 = store._frozen_replay_corpus_sha256(max_generation)
         binding_sha256 = storage_module._replay_cutoff_binding_sha256(
             cutoff_id=cutoff_id,
             canonical_as_of=canonical_as_of,
             max_append_generation=max_generation,
+            issued_at=issued_at,
             corpus_sha256=corpus_sha256,
         )
-        rows = ((cutoff_id, canonical_as_of, max_generation),)
+        rows = ((cutoff_id, canonical_as_of, max_generation, issued_at),)
         intended_state_sha256 = storage_module._replay_cutoff_state_sha256(
             rows,
             sealed_corpus_sha256=corpus_sha256,
@@ -149,9 +160,9 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         )
         store.connection.execute(
             """INSERT INTO market_replay_cutoffs
-               (cutoff_id, as_of, max_append_generation)
-               VALUES (?, ?, ?)""",
-            (cutoff_id, canonical_as_of, max_generation),
+               (cutoff_id, as_of, max_append_generation, issued_at)
+               VALUES (?, ?, ?, ?)""",
+            (cutoff_id, canonical_as_of, max_generation, issued_at),
         )
         store.connection.commit()
         authority.recover(
@@ -1146,6 +1157,91 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_first_historical_cutoff_fails_closed_without_product_time_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                store.append(
+                    self.event(
+                        sequence=2,
+                        odds="9.99",
+                        observed_ts="2026-09-16T18:59:59+00:00",
+                        ingest_ts="2026-09-16T18:59:59+00:00",
+                    )
+                )
+
+                with patch.object(
+                    storage_module,
+                    "_market_product_utc_now",
+                    return_value=(
+                        self.CUTOFF + timedelta(microseconds=1)
+                    ).isoformat(),
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "first-time historical replay cutoff lacks durable product-time availability proof",
+                    ):
+                        self.replay(store)
+
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_replay_cutoffs"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(
+                    store._replay_cutoff_authority().read_history(),
+                    (),
+                )
+            finally:
+                store.close()
+
+    def test_cutoff_issued_at_is_durably_bound_to_decision_cutoff(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "market.db"
+            store = SQLiteMarketStore(path)
+            try:
+                store.append(
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00+00:00",
+                    )
+                )
+                expected = self.semantic_events(self.replay(store))
+                row = store.connection.execute(
+                    """SELECT as_of, issued_at
+                       FROM market_replay_cutoffs"""
+                ).fetchone()
+                self.assertIsNotNone(row)
+                assert row is not None
+                self.assertLessEqual(
+                    storage_module._timezone_aware_instant(
+                        row[1], "issued_at"
+                    ),
+                    storage_module._timezone_aware_instant(
+                        row[0], "as_of"
+                    ),
+                )
+            finally:
+                store.close()
+
+            reopened = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    self.semantic_events(self.replay(reopened)),
+                    expected,
+                )
+            finally:
+                reopened.close()
+
     def test_late_backdated_append_cannot_rewrite_frozen_cutoff(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
@@ -1821,9 +1917,9 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 cutoff_id = storage_module._replay_cutoff_id(canonical)
                 store.connection.execute(
                     """INSERT INTO market_replay_cutoffs
-                       (cutoff_id, as_of, max_append_generation)
-                       VALUES (?, ?, ?)""",
-                    (cutoff_id, canonical, 1),
+                       (cutoff_id, as_of, max_append_generation, issued_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (cutoff_id, canonical, 1, canonical),
                 )
                 store.connection.commit()
 
@@ -3686,9 +3782,9 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 forged_id = storage_module._replay_cutoff_id(forged_as_of)
                 store.connection.execute(
                     """INSERT INTO market_replay_cutoffs
-                       (cutoff_id, as_of, max_append_generation)
-                       VALUES (?, ?, ?)""",
-                    (forged_id, forged_as_of, 1),
+                       (cutoff_id, as_of, max_append_generation, issued_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (forged_id, forged_as_of, 1, forged_as_of),
                 )
                 store.connection.commit()
 
@@ -3765,6 +3861,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     cutoff_id=cutoff_id,
                     canonical_as_of=canonical_as_of,
                     max_append_generation=1,
+                    issued_at=canonical_as_of,
                     corpus_sha256=corpus_sha256,
                 )
                 rows = ((cutoff_id, canonical_as_of, 1),)
@@ -3783,9 +3880,9 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 )
                 store.connection.execute(
                     """INSERT INTO market_replay_cutoffs
-                       (cutoff_id, as_of, max_append_generation)
-                       VALUES (?, ?, ?)""",
-                    (cutoff_id, canonical_as_of, 1),
+                       (cutoff_id, as_of, max_append_generation, issued_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (cutoff_id, canonical_as_of, 1, canonical_as_of),
                 )
                 store.connection.commit()
                 authority.recover(
@@ -4348,9 +4445,9 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 cutoff_id = storage_module._replay_cutoff_id(canonical_as_of)
                 store.connection.execute(
                     """INSERT INTO market_replay_cutoffs
-                       (cutoff_id, as_of, max_append_generation)
-                       VALUES (?, ?, ?)""",
-                    (cutoff_id, canonical_as_of, 1),
+                       (cutoff_id, as_of, max_append_generation, issued_at)
+                       VALUES (?, ?, ?, ?)""",
+                    (cutoff_id, canonical_as_of, 1, canonical_as_of),
                 )
                 store.connection.commit()
 

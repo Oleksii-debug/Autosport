@@ -19,6 +19,14 @@ class _HostileText(str):
         return super().strip(*args, **kwargs)
 
 
+class _HostileInt(int):
+    compare_calls = 0
+
+    def __lt__(self, other):
+        type(self).compare_calls += 1
+        return super().__lt__(other)
+
+
 def _delta(**overrides):
     values = {
         "schema_version": 1,
@@ -79,6 +87,46 @@ class Section2SourceProjectionDeltaExactTypeTests(unittest.TestCase):
         ):
             state.record_source_projection(
                 deltas=(_delta(delta_id=_HostileText("delta-section2")),),
+                backlog=False,
+            )
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+
+    def test_projection_rejects_hostile_provenance_ref_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        state = object.__new__(_ContinuousSessionState)
+        with self.assertRaisesRegex(
+            TypeError,
+            "collector delta lawful_terms_ref must be exact identity text",
+        ):
+            state.record_source_projection(
+                deltas=(_delta(lawful_terms_ref=_HostileText("terms-section2")),),
+                backlog=False,
+            )
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_projection_rejects_hostile_correction_counter_before_comparison_dispatch(self) -> None:
+        _HostileInt.compare_calls = 0
+        state = object.__new__(_ContinuousSessionState)
+        with self.assertRaisesRegex(
+            TypeError,
+            "collector delta revision_number must be an exact integer",
+        ):
+            state.record_source_projection(
+                deltas=(_delta(revision_number=_HostileInt(0)),),
+                backlog=False,
+            )
+        self.assertEqual(_HostileInt.compare_calls, 0)
+
+    def test_projection_rejects_hostile_quality_flag_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        state = object.__new__(_ContinuousSessionState)
+        with self.assertRaisesRegex(
+            TypeError,
+            "collector delta quality_flags must be an exact tuple of exact strings",
+        ):
+            state.record_source_projection(
+                deltas=(_delta(quality_flags=(_HostileText("verified"),)),),
                 backlog=False,
             )
         self.assertEqual(_HostileText.strip_calls, 0)

@@ -2681,6 +2681,43 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_append_rejects_product_commit_clock_rollback_without_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                first = self.event(
+                    sequence=1,
+                    odds="2.00",
+                    observed_ts="2026-09-16T18:59:00+00:00",
+                )
+                second = self.event(
+                    sequence=2,
+                    odds="2.10",
+                    observed_ts="2026-09-16T18:59:01+00:00",
+                )
+                self.assertTrue(store.append(first))
+                with self._clock_lock:
+                    self._product_now -= timedelta(seconds=1)
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "market append commit-time product clock moved backwards",
+                ):
+                    store.append(second)
+
+                self.assertFalse(store.connection.in_transaction)
+                self.assertEqual(store.events(), [first])
+                self.assertEqual(
+                    store.connection.execute(
+                        """SELECT start_append_generation,
+                                  end_append_generation
+                           FROM market_append_commit_times"""
+                    ).fetchall(),
+                    [(1, 1)],
+                )
+            finally:
+                store.close()
+
     def test_append_interrupt_rolls_back_sqlite_and_recovers_prepare_as_abort(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")

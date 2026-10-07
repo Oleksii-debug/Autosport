@@ -442,6 +442,8 @@ class MarketEvent:
             "source_id",
         ):
             _canonical_string_value(getattr(self, field_name), field_name)
+        if type(self.market_type) is not MarketType:
+            raise ValueError("market_type must be canonical MarketType")
         _canonical_sequence_value(self.sequence)
         _timezone_aware_iso8601_value(self.observed_ts, "observed_ts")
         _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
@@ -656,6 +658,8 @@ class MarketEvent:
             if self.exchange_side is None
             else _canonical_exchange_side(self.exchange_side)
         )
+        if type(self.market_type) is not MarketType:
+            raise ValueError("market_type must be canonical MarketType")
 
         payload = {
             "event_id": canonical_event_id,

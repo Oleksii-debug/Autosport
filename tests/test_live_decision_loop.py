@@ -1495,7 +1495,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             input_id = (
                 "catalog:"
-                + canonical_event_identity("provider-a", "table_tennis", "event-1")
+                + canonical_event_identity(source_id="provider-a", sport="table_tennis", event_id="event-1")
             )
 
             gap = loop.run_cycle()
@@ -1923,7 +1923,7 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             input_id = (
                 "catalog:"
-                + canonical_event_identity("provider-a", "table_tennis", "event-1")
+                + canonical_event_identity(source_id="provider-a", sport="table_tennis", event_id="event-1")
             )
 
             first = loop.run_cycle()

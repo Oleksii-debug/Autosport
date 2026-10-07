@@ -206,8 +206,8 @@ class ForecastOutcomeFact:
 
     def __post_init__(self) -> None:
         _canonical_identity_text(self.forecast_id, field_name="forecast_id")
-        if self.outcome not in (0, 1):
-            raise ValueError("outcome must be 0 or 1")
+        if type(self.outcome) is not int or self.outcome not in (0, 1):
+            raise ValueError("outcome must be exact integer 0 or 1")
         parse_iso_timestamp(self.revealed_at)
 
 

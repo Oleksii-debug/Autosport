@@ -20,14 +20,9 @@ A worker discovering a non-gating improvement in a closed Section must place it 
 | --- | --- | --- |
 | Section 0 — Жива технічна правда, конвергенція і reuse-first карта | DONE_IMMUTABLE | Canonical Section plan criteria unchanged through Drive revision 7; durable closure registry already records DONE; live reuse-first/closure authority exists in main. |
 | Section 1 — Єдиний фінальний продуктовий контракт і Definition of Done | DONE_IMMUTABLE | Canonical Section plan criteria unchanged through Drive revision 7; `docs/WHOLE_PRODUCT_COMPLETION_AUTHORITY.md`, `docs/MASTER_TECHNICAL_PROJECT.md`, `docs/PRODUCT_VISION.md`, and closure registry bind one final Autosport product and its completion contract. |
+| Section 2 — Канонічні доменні ідентичності та versioned schemas | DONE_IMMUTABLE | Exact candidate `59182ba9c741b8048bd1e7f50d4d7ce34e02e9f0` passed CI `37644908230`, Windows Candidate `37644908231`, and Endurance `37644908250`; PR #2259 merged with expected-head protection as product merge `c4c01262e506ae67ff1bd6936cda7ee7cca2db60`; post-merge readback confirmed integration. |
 
-Normal workers must skip Sections 0 and 1 and select the earliest unfinished Section after them.
+Normal workers must skip Sections 0, 1 and 2 and select the earliest unfinished Section after them.
 
 Owner directive recorded 2026-10-07.
 
-
-## Active frozen candidate
-
-| Section | State | Exact candidate | Worker rule |
-| --- | --- | --- | --- |
-| Section 2 — Канонічні доменні ідентичності та versioned schemas | CANDIDATE_FROZEN_NO_TOUCH | `3870483b7810852b6f777f6c8b3d12c0e785d537` | Do not mutate the canonical finisher while exact-SHA CI / Windows Candidate / Endurance qualification is running. Only a demonstrated acceptance-relevant gate failure may authorize the smallest repair; otherwise preserve the exact SHA through integration. |

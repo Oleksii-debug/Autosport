@@ -2078,7 +2078,7 @@ def _validate_persisted_voc_precompute_admission(
         raise ModelComputeRouterError(
             "persisted VOC precompute admission schema is invalid"
         )
-    if raw.get("schema_version") != 1:
+    if type(raw.get("schema_version")) is not int or raw.get("schema_version") != 1:
         raise ModelComputeRouterError(
             "persisted VOC precompute admission schema version is unsupported"
         )

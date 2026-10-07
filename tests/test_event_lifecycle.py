@@ -21,6 +21,7 @@ from autosport.event_lifecycle import (
     EvidenceEligibility,
     EventPhase,
     canonical_event_identity,
+    canonical_event_identity_aliases,
 )
 from autosport.ingestion import IngestionEngine
 from autosport.market_bus import MarketEventBus
@@ -817,3 +818,33 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class CanonicalEventIdentityAliasTests(unittest.TestCase):
+    def test_schema_v2_aliases_round_trip_exact_sport_source_and_event(self) -> None:
+        identity = canonical_event_identity(
+            source_id="provider:region",
+            sport="table_tennis",
+            event_id="event-1",
+        )
+
+        self.assertEqual(
+            canonical_event_identity_aliases(identity),
+            (identity, "provider:region:event-1", "event-1"),
+        )
+
+    def test_legacy_alias_uses_rightmost_source_scope_separator(self) -> None:
+        self.assertEqual(
+            canonical_event_identity_aliases("provider:region:event-1"),
+            ("provider:region:event-1", "event-1"),
+        )
+
+    def test_noncanonical_schema_v2_encoding_fails_closed(self) -> None:
+        identity = canonical_event_identity(
+            source_id="provider-a",
+            sport="table_tennis",
+            event_id="event-1",
+        )
+
+        with self.assertRaisesRegex(ValueError, "canonical"):
+            canonical_event_identity_aliases(identity + "A")

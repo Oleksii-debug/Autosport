@@ -153,8 +153,8 @@ class MarketMirror:
         and fails closed rather than silently replacing canonical evidence. Material
         updates are serialized with readers and advance one mirror-wide revision.
         """
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
 
         key = self._key(event)
         with self._lock:
@@ -217,8 +217,8 @@ class MarketMirror:
         """
         if type(store) is not SQLiteMarketStore:
             raise TypeError("store must be an exact SQLiteMarketStore")
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
 
         prior = self.event_for_quote_key(event.source_id, event.quote_key)
         accepted = store.append_batch_accepted((event,))

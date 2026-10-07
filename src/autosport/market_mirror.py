@@ -87,6 +87,22 @@ class MarketMirror:
         return parsed.astimezone(timezone.utc)
 
     @staticmethod
+    def _canonical_lookup_identity(value: object, *, name: str) -> str:
+        """Validate exact canonical identity text before hash/lookup dispatch."""
+        if (
+            type(value) is not str
+            or not value
+            or value.strip() != value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError(f"{name} must be canonical non-empty text")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{name} must be valid UTF-8 text") from exc
+        return value
+
+    @staticmethod
     def _selector(
         values: str | Iterable[str] | None,
         *,
@@ -102,12 +118,18 @@ class MarketMirror:
                 candidates = tuple(values)
             except TypeError as exc:
                 raise TypeError(f"{name} must be a string or iterable of strings") from exc
-        # Identity selectors are a trust boundary. Validate exact built-in text
-        # before constructing the hash-based set so a str subclass cannot dispatch
-        # caller-controlled __hash__/__eq__ before fail-closed admission.
+        # Preserve the existing exact-type admission contract before invoking
+        # any string method, then validate the stricter canonical text spelling.
         if any(type(value) is not str or not value for value in candidates):
             raise ValueError(f"{name} entries must be non-empty strings")
-        return frozenset(candidates)
+        canonical = tuple(
+            MarketMirror._canonical_lookup_identity(
+                value,
+                name=f"{name} entry",
+            )
+            for value in candidates
+        )
+        return frozenset(canonical)
 
     @staticmethod
     def _decision_boundary(*, as_of: datetime, max_age: timedelta) -> tuple[datetime, timedelta]:
@@ -349,12 +371,16 @@ class MarketMirror:
         quote_key: str,
     ) -> MarketEvent | None:
         """Return one exact source-local quote identity without scanning the mirror."""
-        if type(source_id) is not str or not source_id or source_id.strip() != source_id:
-            raise ValueError("source_id must be a non-empty trimmed string")
-        if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
-            raise ValueError("quote_key must be a non-empty trimmed string")
+        canonical_source_id = self._canonical_lookup_identity(
+            source_id,
+            name="source_id",
+        )
+        canonical_quote_key = self._canonical_lookup_identity(
+            quote_key,
+            name="quote_key",
+        )
         with self._lock:
-            event = self._latest.get((source_id, quote_key))
+            event = self._latest.get((canonical_source_id, canonical_quote_key))
             return None if event is None else self._snapshot_event(event)
 
     def active_view_for_keys(
@@ -383,11 +409,15 @@ class MarketMirror:
             if type(value) is not tuple or len(value) != 2:
                 raise ValueError("mirror key must be a (source_id, quote_key) tuple")
             source_id, quote_key = value
-            if type(source_id) is not str or not source_id or source_id.strip() != source_id:
-                raise ValueError("mirror key source_id must be a non-empty trimmed string")
-            if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
-                raise ValueError("mirror key quote_key must be a non-empty trimmed string")
-            normalized.add((source_id, quote_key))
+            canonical_source_id = self._canonical_lookup_identity(
+                source_id,
+                name="mirror key source_id",
+            )
+            canonical_quote_key = self._canonical_lookup_identity(
+                quote_key,
+                name="mirror key quote_key",
+            )
+            normalized.add((canonical_source_id, canonical_quote_key))
 
         boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
         with self._lock:

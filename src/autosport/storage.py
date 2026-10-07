@@ -140,18 +140,19 @@ END""",
 
 
 def _timezone_aware_instant(value: str, field_name: str) -> datetime:
-    if isinstance(value, str):
-        # datetime.fromisoformat() silently truncates fractional-second/offset
-        # precision beyond microseconds. Reject only discarded non-zero digits so
-        # D+submicrosecond evidence can never be rounded backward onto cutoff D.
-        for match in re.finditer(r"[.,]([0-9]+)", value):
-            fractional_digits = match.group(1)
-            if len(fractional_digits) > 6 and any(
-                digit != "0" for digit in fractional_digits[6:]
-            ):
-                raise ValueError(
-                    f"{field_name} precision finer than microseconds is unsupported"
-                )
+    if type(value) is not str:
+        raise ValueError(f"{field_name} must be an exact ISO-8601 string")
+    # datetime.fromisoformat() silently truncates fractional-second/offset
+    # precision beyond microseconds. Reject only discarded non-zero digits so
+    # D+submicrosecond evidence can never be rounded backward onto cutoff D.
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{field_name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except (AttributeError, ValueError) as exc:

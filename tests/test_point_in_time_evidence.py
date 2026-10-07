@@ -561,3 +561,31 @@ def test_feature_provenance_use_boundary_rejects_post_init_digest_alias() -> Non
     with pytest.raises(PointInTimeEvidenceError, match="canonical lowercase SHA-256"):
         provenance.to_payload()
 
+
+
+def test_feature_authority_rejects_lineage_authority_subclass_before_virtual_dispatch() -> None:
+    class HostileLineageAuthority(DatasetSnapshotLineageAuthority):
+        @property
+        def registry(self):
+            raise AssertionError("lineage subclass registry dispatch must not execute")
+
+    snapshot = _snapshot()
+    feature_set = _feature_set()
+    provenance = FeatureArtifactProvenance.issue(
+        dataset_snapshot=snapshot,
+        feature_set=feature_set,
+        feature_payload=_FEATURE_PAYLOAD,
+    )
+    hostile = object.__new__(HostileLineageAuthority)
+
+    with pytest.raises(
+        PointInTimeEvidenceError,
+        match="exact DatasetSnapshotLineageAuthority",
+    ):
+        PointInTimeFeatureAuthority.bind(
+            dataset_snapshot=snapshot,
+            feature_set=feature_set,
+            feature_provenance=provenance,
+            lineage_authority=hostile,
+            decision_cutoff_utc="2099-01-01T00:00:00Z",
+        )

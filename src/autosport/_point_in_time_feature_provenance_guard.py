@@ -413,9 +413,9 @@ def _bind(
         raise evidence.PointInTimeEvidenceError(
             "feature_provenance must be an exact FeatureArtifactProvenance"
         )
-    if not isinstance(lineage_authority, DatasetSnapshotLineageAuthority):
+    if type(lineage_authority) is not DatasetSnapshotLineageAuthority:
         raise evidence.PointInTimeEvidenceError(
-            "lineage_authority must be a DatasetSnapshotLineageAuthority"
+            "lineage_authority must be an exact DatasetSnapshotLineageAuthority"
         )
 
     decision_cutoff = _instant(decision_cutoff_utc, "decision_cutoff_utc")

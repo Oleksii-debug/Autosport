@@ -1,11 +1,12 @@
 from __future__ import annotations
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import datetime, timezone
 from math import isfinite
 from time import perf_counter
 from typing import Callable
 
+from .domain import MarketEvent
 from .ingestion_health import (
     IngestionPolicy,
     SourceHealthState,
@@ -17,6 +18,38 @@ from .providers import CanonicalNormalizer, MarketProvider, ProviderUnavailableE
 
 
 Clock = Callable[[], str]
+
+
+def _stamp_live_event(
+    event: object,
+    ingest_ts: str,
+    *,
+    _market_event_type: type[MarketEvent] = MarketEvent,
+    _replace=replace,
+) -> MarketEvent:
+    if type(event) is not _market_event_type:
+        raise TypeError("normalizer must return exact MarketEvent")
+    stamped = _replace(event, ingest_ts=ingest_ts)
+    if type(stamped) is not _market_event_type or stamped.ingest_ts != ingest_ts:
+        raise TypeError("live ingestion timestamp stamping lost canonical authority")
+    return stamped
+
+
+def _publish_normalized_live_batch(
+    bus: object,
+    events: list[MarketEvent],
+    *,
+    _market_bus_type: type[MarketEventBus] = MarketEventBus,
+    _live_publish=MarketEventBus._publish_many_live_ingestion,
+    _generic_publish=MarketEventBus.publish_many,
+) -> int:
+    if type(bus) is _market_bus_type:
+        return _live_publish(bus, events)
+    if isinstance(bus, _market_bus_type):
+        # Subclasses are non-canonical and stay provenance-neutral even if they
+        # override publication methods.
+        return _generic_publish(bus, events)
+    return bus.publish_many(events)
 
 
 @dataclass(frozen=True, slots=True)
@@ -107,13 +140,16 @@ class _SourceHealthSnapshot:
         )
 
     def after_success(
-        self, outcome: "CommittedIngestionOutcome"
+        self,
+        outcome: "CommittedIngestionOutcome",
+        *,
+        _parse_timestamp=parse_source_timestamp,
     ) -> "_SourceHealthSnapshot":
         latest_source_ts = self.latest_source_ts
         if outcome.latest_source_ts is not None:
             if latest_source_ts is None or (
-                parse_source_timestamp(outcome.latest_source_ts)
-                >= parse_source_timestamp(latest_source_ts)
+                _parse_timestamp(outcome.latest_source_ts)
+                >= _parse_timestamp(latest_source_ts)
             ):
                 latest_source_ts = outcome.latest_source_ts
         quality_flags = tuple(sorted(outcome.quality_flags))
@@ -232,12 +268,31 @@ class IngestionEngine:
         self.health_store = health_store
         self.clock = clock or _utc_now_iso
 
-    def poll_once(self, provider: MarketProvider, max_items: int = 1000) -> IngestionStats:
+    def poll_once(
+        self,
+        provider: MarketProvider,
+        max_items: int = 1000,
+        *,
+        _stamp=_stamp_live_event,
+        _publish=_publish_normalized_live_batch,
+        _parse_timestamp=parse_source_timestamp,
+        _market_bus_type=MarketEventBus,
+    ) -> IngestionStats:
+        # Freeze one operator-owned dependency snapshot before provider-controlled
+        # acquisition. Reentrant provider code must not be able to swap receive-time,
+        # normalization, publication, policy or health authority mid-poll.
+        bus = self.bus
+        live_store = bus.store if type(bus) is _market_bus_type else None
+        normalizer = self.normalizer
+        policy = self.policy
+        health_store = self.health_store
+        poll_clock = self.clock
+
         if isinstance(max_items, bool) or not isinstance(max_items, int) or max_items <= 0:
             raise ValueError("max_items must be a positive integer")
-        if max_items > self.policy.max_batch_size:
+        if max_items > policy.max_batch_size:
             raise ValueError(
-                f"requested batch {max_items} exceeds backpressure limit {self.policy.max_batch_size}"
+                f"requested batch {max_items} exceeds backpressure limit {policy.max_batch_size}"
             )
         started = perf_counter()
 
@@ -255,11 +310,11 @@ class IngestionEngine:
                     f"provider returned {len(batch.quotes)} quotes above requested batch bound {max_items}"
                 )
         except Exception as exc:
-            if self.health_store is not None and provider_source_id is not None:
+            if health_store is not None and provider_source_id is not None:
                 try:
-                    self.health_store.record_failure(
+                    health_store.record_failure(
                         provider_source_id,
-                        now=self.clock(),
+                        now=poll_clock(),
                         error=exc,
                         failure_kind=(
                             "provider_unavailable"
@@ -278,13 +333,13 @@ class IngestionEngine:
         # One post-acquisition evidence instant governs both quote-age truth and this
         # poll's health transition. Equal instants remain distinct via durable
         # transition_order; genuinely older direct evidence still fails closed.
-        now = self.clock()
+        now = poll_clock()
 
         health_before = None
         previous_source_ts = None
-        if self.health_store is not None:
+        if health_store is not None:
             health_before = _SourceHealthSnapshot.from_state(
-                self.health_store.get(batch.source_id)
+                health_store.get(batch.source_id)
             )
             previous_source_ts = health_before.latest_source_ts
 
@@ -292,27 +347,46 @@ class IngestionEngine:
         normalized = []
         rejected = 0
         latest_source: datetime | None = None
-        now_point = parse_source_timestamp(now)
+        now_point = _parse_timestamp(now)
         for quote in batch.quotes:
-            source_point: datetime | None = None
             if quote.source_ts is not None:
                 try:
-                    source_point = parse_source_timestamp(quote.source_ts)
+                    _parse_timestamp(quote.source_ts)
                 except (AttributeError, TypeError, ValueError):
                     flags.add("INVALID_SOURCE_TIMESTAMP")
                     rejected += 1
                     continue
-                age_seconds = (now_point - source_point).total_seconds()
-                if age_seconds > self.policy.stale_after_seconds:
-                    flags.add("STALE_SOURCE")
-                if age_seconds < -self.policy.max_future_skew_seconds:
-                    flags.add("FUTURE_CLOCK_SKEW")
             try:
-                event = self.normalizer.normalize(batch.source_id, quote)
+                event = normalizer.normalize(batch.source_id, quote)
+                # Provider/adaptor observation clocks remain evidence fields.
+                # Durable ingestion time is owned by this post-acquisition
+                # product clock, never by provider-controlled quote payloads.
+                event = _stamp(event, now)
+                if event.source_id != batch.source_id:
+                    raise ValueError("normalizer returned mismatched source_id")
+                source_point = (
+                    _parse_timestamp(event.source_ts)
+                    if event.source_ts is not None
+                    else None
+                )
+                observed_point = _parse_timestamp(event.observed_ts)
             except (TypeError, ValueError):
                 flags.add("INVALID_QUOTE")
                 rejected += 1
                 continue
+
+            # Health must classify the exact temporal truth persisted in MarketEvent,
+            # because MarketMirror.active_view later makes decisions from these same
+            # normalized source/observation clocks.
+            freshness_point = (
+                source_point if source_point is not None else observed_point
+            )
+            age_seconds = (now_point - freshness_point).total_seconds()
+            if age_seconds > policy.stale_after_seconds:
+                flags.add("STALE_SOURCE")
+            if age_seconds < -policy.max_future_skew_seconds:
+                flags.add("FUTURE_CLOCK_SKEW")
+
             normalized.append(event)
             if source_point is not None and (
                 latest_source is None or source_point > latest_source
@@ -321,7 +395,7 @@ class IngestionEngine:
 
         latest_source_ts = latest_source.isoformat() if latest_source is not None else None
         if previous_source_ts is not None and latest_source is not None:
-            if latest_source < parse_source_timestamp(previous_source_ts):
+            if latest_source < _parse_timestamp(previous_source_ts):
                 flags.add("SOURCE_TIME_REGRESSION")
 
         # Persistence and subscriber delivery are local pipeline stages. A failure here
@@ -329,7 +403,11 @@ class IngestionEngine:
         # acquisition/validation/normalization already succeeded.
         ordered_flags = tuple(sorted(flags))
         try:
-            accepted = self.bus.publish_many(normalized)
+            if live_store is not None and bus.store is not live_store:
+                raise RuntimeError(
+                    "live ingestion store authority changed during provider I/O"
+                )
+            accepted = _publish(bus, normalized)
         except MarketEventDeliveryError as delivery_error:
             # MarketEventDeliveryError can only be raised after transactional
             # persistence succeeds. Preserve the exact storage-derived outcome in
@@ -346,9 +424,9 @@ class IngestionEngine:
                 quality_flags=ordered_flags,
                 health_before=health_before,
             )
-            if self.health_store is not None:
+            if health_store is not None:
                 try:
-                    outcome._record_health_once(self.health_store)
+                    outcome._record_health_once(health_store)
                 except Exception as health_error:
                     raise CommittedIngestionHealthError(
                         outcome,
@@ -369,9 +447,9 @@ class IngestionEngine:
             health_before=health_before,
         )
         health_status = "degraded" if ordered_flags else "healthy"
-        if self.health_store is not None:
+        if health_store is not None:
             try:
-                state = outcome._record_health_once(self.health_store)
+                state = outcome._record_health_once(health_store)
             except Exception as health_error:
                 raise CommittedIngestionHealthError(outcome) from health_error
             health_status = state.status
@@ -380,3 +458,21 @@ class IngestionEngine:
 
 def _utc_now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
+
+def _seal_ingestion_authority_call_surface() -> None:
+    """Expose only the supported poll_once API, not its captured authority bindings."""
+
+    poll_once_impl = IngestionEngine.poll_once
+
+    def poll_once(
+        self: IngestionEngine,
+        provider: MarketProvider,
+        max_items: int = 1000,
+    ) -> IngestionStats:
+        return poll_once_impl(self, provider, max_items)
+
+    IngestionEngine.poll_once = poll_once
+
+
+_seal_ingestion_authority_call_surface()
+del _seal_ingestion_authority_call_surface

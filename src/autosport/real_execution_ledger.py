@@ -13,10 +13,23 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+
 
 SCHEMA_VERSION = 1
 _MAX_EXECUTION_DECIMAL_TEXT_LENGTH = 8192
 _T = TypeVar("_T")
+
+# Consume the canonical monotonic authority through function objects captured once.
+# This prevents a caller-owned instance attribute from substituting recover/prepare/
+# commit while keeping the durable transition implementation in its existing module.
+_MONOTONIC_AUTHORITY_TYPE = MonotonicWorkspaceAuthority
+_MONOTONIC_RECOVER = MonotonicWorkspaceAuthority.recover
+_MONOTONIC_PREPARE = MonotonicWorkspaceAuthority.prepare
+_MONOTONIC_COMMIT = MonotonicWorkspaceAuthority.commit
 
 
 class ExecutionLedgerError(RuntimeError):
@@ -333,7 +346,7 @@ class ExternalReceiptIdentity:
 @dataclass(frozen=True, slots=True)
 class ExternalAcknowledgement:
     attempt_id: str
-    external_receipt_id: str
+    external_receipt_id: str | None
     status: AcknowledgementStatus
     acknowledged_at: str
     accepted_odds: Decimal | str | int | None = None
@@ -342,10 +355,21 @@ class ExternalAcknowledgement:
 
     def __post_init__(self) -> None:
         _text(self.attempt_id, "attempt_id")
-        _text(self.external_receipt_id, "external_receipt_id")
+
         _timestamp(self.acknowledged_at, "acknowledged_at")
         if not isinstance(self.status, AcknowledgementStatus):
             raise ValueError("status must be AcknowledgementStatus")
+        if self.status in {
+            AcknowledgementStatus.ACCEPTED,
+            AcknowledgementStatus.PARTIAL,
+        }:
+            if self.external_receipt_id is None:
+                raise ValueError(
+                    "external_receipt_id is required for accepted/partial acknowledgement"
+                )
+            _text(self.external_receipt_id, "external_receipt_id")
+        elif self.external_receipt_id is not None:
+            _text(self.external_receipt_id, "external_receipt_id")
         if self.reconciliation_evidence_id is not None:
             _text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
         if self.status in {
@@ -470,12 +494,15 @@ class ProviderEvidenceBindingView:
     evidence_id: str
     observed_at: str
     source: str
+    request_sha256: str | None = None
     acknowledgement_sha256: str | None = None
 
     def __post_init__(self) -> None:
         _sha256_text(self.evidence_id, "evidence_id")
         _timestamp(self.observed_at, "observed_at")
         _text(self.source, "source")
+        if self.request_sha256 is not None:
+            _sha256_text(self.request_sha256, "request_sha256")
         if self.acknowledgement_sha256 is not None:
             _sha256_text(
                 self.acknowledgement_sha256,
@@ -491,6 +518,7 @@ class ExecutionAttemptReadView:
     action: ExecutionAction
     state: AttemptState
     submitted_at: str | None
+    submitted_request_sha256: str | None
     unknown_reason: str | None
     unknown_observed_at: str | None
     provider_order_ref: str | None
@@ -506,6 +534,8 @@ class VerifiedExecutionPlanView:
 
     snapshot_sha256: str
     event_count: int
+    plan_reserved_event_id: str
+    plan_reserved_at: str
     plan: ExecutionPlan
     plan_fingerprint: str
     stale: bool
@@ -536,7 +566,27 @@ class RealExecutionLedger:
         # False until this instance has proven both the visible file contents and,
         # on POSIX, the directory entry naming the ledger durable.
         self._path_durable = False
-
+        # Serialization ownership is thread-specific. A process-wide boolean lets a
+        # second thread on the same ledger instance bypass the RLock/sidecar while a
+        # writer is inside PREPARE -> publish -> COMMIT and can incorrectly recover/
+        # abort that live transaction.
+        self._serialization_owner_thread_id: int | None = None
+        try:
+            authority_path = self.path.resolve(strict=False)
+            authority_workspace = authority_path.parent
+            authority_key = os.path.normcase(authority_path.name)
+            self._monotonic_authority = _MONOTONIC_AUTHORITY_TYPE(
+                workspace=authority_workspace,
+                domain="execution.real-ledger",
+                key=authority_key,
+            )
+            self._monotonic_authority_binding = (
+                self._monotonic_authority_identity(self._monotonic_authority)
+            )
+        except (OSError, RuntimeError, MonotonicWorkspaceAuthorityError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority could not be initialized"
+            ) from exc
     def _sync_parent_directory(self) -> None:
         """Durably publish this ledger pathname on platforms that require it."""
 
@@ -572,6 +622,124 @@ class RealExecutionLedger:
             ) from exc
         self._path_durable = True
 
+    def _acquire_posix_ledger_lock(self) -> int | None:
+        """Serialize writers on the stable ledger inode when POSIX flock exists."""
+
+        if os.name == "nt":
+            return None
+
+        import fcntl
+
+        try:
+            data_fd = os.open(self.path, os.O_CREAT | os.O_RDWR, 0o600)
+        except OSError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger writer lock could not open ledger inode"
+            ) from exc
+        try:
+            fcntl.flock(data_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerBusyError(
+                "ledger inode is already held by another writer"
+            ) from exc
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger writer lock failed"
+            ) from exc
+
+        try:
+            descriptor_stat = os.fstat(data_fd)
+            path_stat = os.stat(self.path)
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path identity could not be verified"
+            ) from exc
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            path_stat.st_dev,
+            path_stat.st_ino,
+        ):
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path changed while acquiring writer lock"
+            )
+        return data_fd
+
+    def _acquire_posix_ledger_read_lock(self) -> int | None:
+        """Fence authoritative reads against a concurrent canonical writer."""
+
+        if os.name == "nt":
+            return None
+
+        import fcntl
+
+        try:
+            data_fd = os.open(self.path, os.O_RDONLY)
+        except FileNotFoundError:
+            return None
+        except OSError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read lock could not open ledger inode"
+            ) from exc
+        try:
+            fcntl.flock(data_fd, fcntl.LOCK_SH | fcntl.LOCK_NB)
+        except BlockingIOError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerBusyError(
+                "ledger inode is already held by another writer"
+            ) from exc
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read lock failed"
+            ) from exc
+
+        try:
+            descriptor_stat = os.fstat(data_fd)
+            path_stat = os.stat(self.path)
+        except OSError as exc:
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger read path identity could not be verified"
+            ) from exc
+        if (descriptor_stat.st_dev, descriptor_stat.st_ino) != (
+            path_stat.st_dev,
+            path_stat.st_ino,
+        ):
+            os.close(data_fd)
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger path changed while acquiring read lock"
+            )
+        return data_fd
+
+    def _read_serialized(self, operation: Callable[[], _T]) -> _T:
+        with self._thread_lock:
+            try:
+                fd = os.open(
+                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
+                )
+            except FileExistsError as exc:
+                raise ExecutionLedgerBusyError(
+                    "writer lock exists; fail closed while authoritative read is serialized"
+                ) from exc
+
+            data_fd: int | None = None
+            try:
+                data_fd = self._acquire_posix_ledger_read_lock()
+                self._serialization_owner_thread_id = threading.get_ident()
+                return operation()
+            finally:
+                self._serialization_owner_thread_id = None
+                if data_fd is not None:
+                    os.close(data_fd)
+                os.close(fd)
+                try:
+                    self._lock_path.unlink()
+                except FileNotFoundError:
+                    pass
+
     def _mutate(self, operation: Callable[[], _T]) -> _T:
         with self._thread_lock:
             try:
@@ -582,9 +750,16 @@ class RealExecutionLedger:
                 raise ExecutionLedgerBusyError(
                     "writer lock exists; fail closed until writer/crash ownership is resolved"
                 ) from exc
+
+            data_fd: int | None = None
             try:
+                data_fd = self._acquire_posix_ledger_lock()
+                self._serialization_owner_thread_id = threading.get_ident()
                 return operation()
             finally:
+                self._serialization_owner_thread_id = None
+                if data_fd is not None:
+                    os.close(data_fd)
                 os.close(fd)
                 try:
                     self._lock_path.unlink()
@@ -692,11 +867,91 @@ class RealExecutionLedger:
         cls._validate_semantics(events)
         return events
 
-    def _events(self) -> list[dict[str, Any]]:
+    @staticmethod
+    def _monotonic_authority_identity(
+        authority: MonotonicWorkspaceAuthority,
+    ) -> tuple[str, ...]:
+        if type(authority) is not _MONOTONIC_AUTHORITY_TYPE:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority type was substituted"
+            )
+        try:
+            return (
+                os.path.normcase(str(authority.workspace)),
+                authority.workspace_instance_id,
+                authority.domain,
+                authority.key,
+                os.path.normcase(str(authority.authority_root)),
+                authority.namespace_sha256,
+                os.path.normcase(str(authority.journal_dir)),
+                os.path.normcase(str(authority.records_dir)),
+                os.path.normcase(str(authority.namespace_marker_path)),
+                os.path.normcase(str(authority.workspace_binding_path)),
+            )
+        except (AttributeError, TypeError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority identity is invalid"
+            ) from exc
+
+    def _canonical_monotonic_authority(self) -> MonotonicWorkspaceAuthority:
+        authority = self._monotonic_authority
+        if (
+            self._monotonic_authority_identity(authority)
+            != self._monotonic_authority_binding
+        ):
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic authority binding changed"
+            )
+        return authority
+
+    @staticmethod
+    def _monotonic_state_sha256(raw: bytes) -> str | None:
+        return None if not raw else hashlib.sha256(raw).hexdigest()
+
+    def _recover_monotonic_state(
+        self,
+        raw: bytes,
+        events: list[dict[str, Any]],
+    ) -> None:
+        observed = self._monotonic_state_sha256(raw)
+        tx_id: str | None = None
+        semantic_binding_sha256: str | None = None
+        if events:
+            latest_event = events[-1]
+            tx_id = latest_event["event_id"]
+            semantic_binding_sha256 = _digest(latest_event)
+        try:
+            _MONOTONIC_RECOVER(
+                self._canonical_monotonic_authority(),
+                observed_state_sha256=observed,
+                tx_id=tx_id,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger rollback/monotonic authority check failed"
+            ) from exc
+
+    def _read_verified_state(self) -> tuple[bytes, list[dict[str, Any]]]:
+        if self._serialization_owner_thread_id != threading.get_ident():
+            return self._read_serialized(self._read_verified_state)
         if not self.path.exists():
-            return []
-        self._ensure_existing_path_durable()
-        return self._parse(self.path.read_bytes())
+            raw = b""
+        else:
+            self._ensure_existing_path_durable()
+            try:
+                raw = self.path.read_bytes()
+            except OSError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger could not be read"
+                ) from exc
+        events = self._parse(raw)
+        self._recover_monotonic_state(raw, events)
+        return raw, events
+
+    def _events(self) -> list[dict[str, Any]]:
+        _raw, events = self._read_verified_state()
+        return events
 
     def _append(
         self,
@@ -705,33 +960,92 @@ class RealExecutionLedger:
         action_id: str | None,
         attempt_id: str | None,
         payload: dict[str, Any],
+        *,
+        _event_id: str | None = None,
+        _recorded_at: str | None = None,
     ) -> None:
+        if self._serialization_owner_thread_id != threading.get_ident():
+            self._mutate(
+                lambda: self._append(
+                    kind,
+                    plan_id,
+                    action_id,
+                    attempt_id,
+                    payload,
+                )
+            )
+            return
+        if _event_id is None or _recorded_at is None:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger canonical event identity/clock is unavailable"
+            )
         event = {
             "schema_version": SCHEMA_VERSION,
-            "event_id": str(uuid.uuid4()),
+            "event_id": _event_id,
             "event_type": kind.value,
-            "recorded_at": _now(),
+            "recorded_at": _recorded_at,
             "plan_id": plan_id,
             "action_id": action_id,
             "attempt_id": attempt_id,
             "payload": payload,
         }
         self._validate_event(event)
-        envelope = _canonical({"sha256": _digest(event), "event": event})
+        event_digest = _digest(event)
+        envelope = _canonical({"sha256": event_digest, "event": event})
+        raw_before, _ = self._read_verified_state()
+        encoded_event = (envelope + "\n").encode("utf-8")
+        intended_raw = raw_before + encoded_event
+        observed_sha256 = self._monotonic_state_sha256(raw_before)
+        intended_sha256 = hashlib.sha256(intended_raw).hexdigest()
+        tx_id = event["event_id"]
+        semantic_binding_sha256 = event_digest
+        try:
+            _MONOTONIC_PREPARE(
+                self._canonical_monotonic_authority(),
+                tx_id=tx_id,
+                observed_state_sha256=observed_sha256,
+                intended_state_sha256=intended_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic PREPARE failed"
+            ) from exc
+
         path_existed_before = self.path.exists()
         try:
-            with self.path.open("a", encoding="utf-8", newline="\n") as handle:
-                handle.write(envelope + "\n")
+            with self.path.open("ab") as handle:
+                handle.write(encoded_event)
                 handle.flush()
                 os.fsync(handle.fileno())
             if not path_existed_before or not self._path_durable:
                 self._sync_parent_directory()
+            actual_raw = self.path.read_bytes()
         except OSError as exc:
             self._path_durable = False
             raise ExecutionLedgerIntegrityError(
                 "execution ledger durability barrier failed"
             ) from exc
+        if actual_raw != intended_raw:
+            self._path_durable = False
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger changed during durable append"
+            )
+        # The independent COMMIT is allowed to advance only after the exact
+        # fsynced readback remains a canonical, semantically valid ledger.
+        self._parse(actual_raw)
         self._path_durable = True
+        try:
+            _MONOTONIC_COMMIT(
+                self._canonical_monotonic_authority(),
+                tx_id=tx_id,
+                observed_state_sha256=intended_sha256,
+                semantic_binding_sha256=semantic_binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger monotonic COMMIT failed"
+            ) from exc
 
     @staticmethod
     def _plan_event(
@@ -766,6 +1080,8 @@ class RealExecutionLedger:
         state = None
         found_reconciliations: dict[str, dict[str, Any]] = {}
         found_receipt_id: str | None = None
+        provider_acknowledgements: dict[str, str] = {}
+        legacy_provider_evidence_seen = False
         for event in events:
             kind = event["event_type"]
             if kind == EventType.ATTEMPT_RESERVED.value:
@@ -828,6 +1144,40 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "provider evidence requires submitted/UNKNOWN attempt"
                     )
+                evidence_id = event["payload"].get("evidence_id")
+                if not isinstance(evidence_id, str):
+                    raise ExecutionLedgerIntegrityError(
+                        "provider evidence lacks evidence identity"
+                    )
+                acknowledgement_sha256 = event["payload"].get(
+                    "acknowledgement_sha256"
+                )
+                if acknowledgement_sha256 is not None:
+                    try:
+                        _sha256_text(
+                            acknowledgement_sha256,
+                            "acknowledgement_sha256",
+                        )
+                    except ValueError as exc:
+                        raise ExecutionLedgerIntegrityError(
+                            "provider acknowledgement binding digest is invalid"
+                        ) from exc
+                    prior = provider_acknowledgements.get(
+                        acknowledgement_sha256
+                    )
+                    if prior is not None and prior != evidence_id:
+                        raise ExecutionLedgerIntegrityError(
+                            "provider acknowledgement binding is ambiguous"
+                        )
+                    provider_acknowledgements[
+                        acknowledgement_sha256
+                    ] = evidence_id
+                else:
+                    # Compatibility is replay-only. Pre-hardening ledgers could
+                    # durably bind generic provider evidence before a terminal
+                    # acknowledgement. The current write path still requires an
+                    # exact acknowledgement digest and cannot create this shape.
+                    legacy_provider_evidence_seen = True
             elif kind == EventType.EXTERNAL_ACKNOWLEDGEMENT.value:
                 if state not in {
                     AttemptState.SUBMITTED,
@@ -854,10 +1204,20 @@ class RealExecutionLedger:
                         raise ExecutionLedgerIntegrityError(
                             "UNKNOWN acknowledgement receipt mismatches reconciliation evidence"
                         )
-                elif evidence_id:
-                    raise ExecutionLedgerIntegrityError(
-                        "reconciliation evidence is only valid for UNKNOWN acknowledgement"
-                    )
+                else:
+                    if evidence_id:
+                        raise ExecutionLedgerIntegrityError(
+                            "reconciliation evidence is only valid for UNKNOWN acknowledgement"
+                        )
+                    acknowledgement_sha256 = _digest(event["payload"])
+                    if (
+                        acknowledgement_sha256 not in provider_acknowledgements
+                        and not legacy_provider_evidence_seen
+                    ):
+                        raise ExecutionLedgerIntegrityError(
+                            "SUBMITTED acknowledgement lacks exact provider-bound "
+                            "acknowledgement evidence"
+                        )
                 try:
                     state = AttemptState(event["payload"]["status"])
                 except (KeyError, ValueError) as exc:
@@ -925,6 +1285,15 @@ class RealExecutionLedger:
                 EventType.RECONCILED_FOUND.value,
                 EventType.EXTERNAL_ACKNOWLEDGEMENT.value,
             }:
+                continue
+            if (
+                event["event_type"] == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+                and event["payload"].get("external_receipt_id") is None
+            ):
+                if event["payload"].get("status") != AcknowledgementStatus.REJECTED.value:
+                    raise ExecutionLedgerIntegrityError(
+                        "only rejected acknowledgement may omit external receipt identity"
+                    )
                 continue
             identity = cls._receipt_identity(events, event)
             attempt = event["attempt_id"]
@@ -1259,9 +1628,13 @@ class RealExecutionLedger:
                     "stored effect fingerprint mismatch"
                 )
             submitted_time: datetime | None = None
+            submitted_request_sha256: str | None = None
             unknown_time: datetime | None = None
             provider_evidence_time: datetime | None = None
             provider_order_reference_seen = False
+            provider_evidence_seen = False
+            legacy_provider_evidence_time: datetime | None = None
+            provider_acknowledgements: dict[str, datetime] = {}
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
             found_receipt_id: str | None = None
             for followup in attempt_events[1:]:
@@ -1277,8 +1650,28 @@ class RealExecutionLedger:
                         followup["event_type"]
                         == EventType.ATTEMPT_SUBMITTED.value
                     ):
+                        submission_payload = followup["payload"]
+                        if set(submission_payload) not in (
+                            {"submitted_at"},
+                            {"submitted_at", "request_sha256"},
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "ATTEMPT_SUBMITTED payload schema is invalid"
+                            )
+                        request_sha256 = submission_payload.get("request_sha256")
+                        if request_sha256 is not None:
+                            try:
+                                _sha256_text(
+                                    request_sha256,
+                                    "request_sha256",
+                                )
+                            except ValueError as exc:
+                                raise ExecutionLedgerIntegrityError(
+                                    "submitted request digest is invalid"
+                                ) from exc
+                        submitted_request_sha256 = request_sha256
                         submitted_time = _timestamp(
-                            followup["payload"]["submitted_at"],
+                            submission_payload["submitted_at"],
                             "submitted_at",
                         )
                         if submitted_time < reserved_time:
@@ -1425,18 +1818,49 @@ class RealExecutionLedger:
                         followup["event_type"]
                         == EventType.PROVIDER_EVIDENCE_BOUND.value
                     ):
-                        if set(followup["payload"]) != {
-                            "evidence_id",
-                            "observed_at",
-                            "source",
-                        }:
+                        payload_fields = set(followup["payload"])
+                        base_fields = {"evidence_id", "observed_at", "source"}
+                        allowed_optional_fields = {
+                            "request_sha256",
+                            "acknowledgement_sha256",
+                        }
+                        if (
+                            not base_fields.issubset(payload_fields)
+                            or payload_fields - base_fields - allowed_optional_fields
+                        ):
                             raise ExecutionLedgerIntegrityError(
                                 "provider evidence binding schema is invalid"
                             )
+                        if provider_evidence_seen:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt has multiple provider evidence bindings"
+                            )
+                        provider_evidence_seen = True
                         _sha256_text(
                             followup["payload"]["evidence_id"], "evidence_id"
                         )
                         _text(followup["payload"]["source"], "source")
+                        provider_request_sha256 = followup["payload"].get(
+                            "request_sha256"
+                        )
+                        if provider_request_sha256 is not None:
+                            try:
+                                _sha256_text(
+                                    provider_request_sha256,
+                                    "request_sha256",
+                                )
+                            except ValueError as exc:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider request digest is invalid"
+                                ) from exc
+                            if submitted_request_sha256 is None:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider request digest lacks submitted identity"
+                                )
+                            if provider_request_sha256 != submitted_request_sha256:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider request digest mismatches submission"
+                                )
                         if provider_evidence_time is not None:
                             raise ExecutionLedgerIntegrityError(
                                 "attempt has multiple provider evidence bindings"
@@ -1454,6 +1878,24 @@ class RealExecutionLedger:
                                 "provider evidence precedes attempt causal boundary"
                             )
                         provider_evidence_time = evidence_time
+                        acknowledgement_sha256 = followup["payload"].get(
+                            "acknowledgement_sha256"
+                        )
+                        if acknowledgement_sha256 is not None:
+                            try:
+                                _sha256_text(
+                                    acknowledgement_sha256,
+                                    "acknowledgement_sha256",
+                                )
+                            except ValueError as exc:
+                                raise ExecutionLedgerIntegrityError(
+                                    "provider acknowledgement binding digest is invalid"
+                                ) from exc
+                            provider_acknowledgements[
+                                acknowledgement_sha256
+                            ] = evidence_time
+                        else:
+                            legacy_provider_evidence_time = evidence_time
                     elif (
                         followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
@@ -1507,11 +1949,29 @@ class RealExecutionLedger:
                                 raise ExecutionLedgerIntegrityError(
                                     "acknowledgement precedes reconciliation evidence"
                                 )
-                        elif evidence_id:
-                            raise ExecutionLedgerIntegrityError(
-                                "reconciliation evidence is only valid for "
-                                "UNKNOWN acknowledgement"
+                        else:
+                            if evidence_id:
+                                raise ExecutionLedgerIntegrityError(
+                                    "reconciliation evidence is only valid for "
+                                    "UNKNOWN acknowledgement"
+                                )
+                            acknowledgement_sha256 = _digest(
+                                acknowledgement.to_dict()
                             )
+                            evidence_time = provider_acknowledgements.get(
+                                acknowledgement_sha256
+                            )
+                            if evidence_time is None:
+                                evidence_time = legacy_provider_evidence_time
+                            if evidence_time is None:
+                                raise ExecutionLedgerIntegrityError(
+                                    "SUBMITTED acknowledgement lacks exact "
+                                    "provider-bound acknowledgement evidence"
+                                )
+                            if acknowledged_time < evidence_time:
+                                raise ExecutionLedgerIntegrityError(
+                                    "acknowledgement precedes provider evidence"
+                                )
                         if acknowledgement.accepted_stake is not None:
                             requested_stake = _decimal(
                                 action["requested_stake"], "requested_stake"
@@ -1520,6 +1980,29 @@ class RealExecutionLedger:
                                 raise ExecutionLedgerIntegrityError(
                                     "stored acknowledgement stake exceeds "
                                     "requested action stake"
+                                )
+                            if (
+                                acknowledgement.status
+                                is AcknowledgementStatus.ACCEPTED
+                                and acknowledgement.accepted_stake
+                                != requested_stake
+                            ):
+                                raise ExecutionLedgerIntegrityError(
+                                    "stored ACCEPTED acknowledgement stake must "
+                                    "equal requested action stake"
+                                )
+                            if (
+                                acknowledgement.status
+                                is AcknowledgementStatus.PARTIAL
+                                and not (
+                                    Decimal("0")
+                                    < acknowledgement.accepted_stake
+                                    < requested_stake
+                                )
+                            ):
+                                raise ExecutionLedgerIntegrityError(
+                                    "stored PARTIAL acknowledgement stake must be "
+                                    "positive and below requested action stake"
                                 )
                     elif (
                         followup["event_type"]
@@ -1854,18 +2337,28 @@ class RealExecutionLedger:
             )
         return value
 
-    def bind_provider_evidence(
+    def _bind_provider_evidence_payload(
         self,
         *,
         attempt_id: str,
         evidence_id: str,
         observed_at: str,
         source: str,
+        request_sha256: str | None,
+        acknowledgement_sha256: str | None,
+        require_submitted: bool,
     ) -> None:
         _text(attempt_id, "attempt_id")
         _sha256_text(evidence_id, "evidence_id")
         _timestamp(observed_at, "observed_at")
         _text(source, "source")
+        if request_sha256 is not None:
+            _sha256_text(request_sha256, "request_sha256")
+        if acknowledgement_sha256 is not None:
+            _sha256_text(
+                acknowledgement_sha256,
+                "acknowledgement_sha256",
+            )
 
         def operation() -> None:
             events = self._events()
@@ -1879,21 +2372,64 @@ class RealExecutionLedger:
                 "observed_at": observed_at,
                 "source": source,
             }
+            if request_sha256 is not None:
+                submitted_events = [
+                    event
+                    for event in attempt_events
+                    if event["event_type"]
+                    == EventType.ATTEMPT_SUBMITTED.value
+                ]
+                if len(submitted_events) != 1:
+                    raise ExecutionStateError(
+                        "provider request evidence requires one durable submission"
+                    )
+                if (
+                    submitted_events[0]["payload"].get("request_sha256")
+                    != request_sha256
+                ):
+                    raise ExecutionIdentityConflict(
+                        "provider request evidence mismatches durable submission"
+                    )
+                payload["request_sha256"] = request_sha256
+            if acknowledgement_sha256 is not None:
+                payload["acknowledgement_sha256"] = acknowledgement_sha256
             existing = [
                 event
                 for event in attempt_events
                 if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
             ]
             if existing:
-                if len(existing) == 1 and existing[0]["payload"] == payload:
+                existing_payload = existing[0]["payload"]
+                legacy_payload = {
+                    "evidence_id": evidence_id,
+                    "observed_at": observed_at,
+                    "source": source,
+                }
+                if len(existing) == 1 and (
+                    existing_payload == payload
+                    or (
+                        acknowledgement_sha256 is None
+                        and existing_payload == legacy_payload
+                    )
+                ):
                     return
                 raise ExecutionIdentityConflict(
                     "attempt already has different provider evidence"
                 )
             state = self._state(attempt_events)
-            if state not in {AttemptState.SUBMITTED, AttemptState.UNKNOWN}:
+            allowed_states = (
+                {AttemptState.SUBMITTED}
+                if require_submitted
+                else {AttemptState.SUBMITTED, AttemptState.UNKNOWN}
+            )
+            if state not in allowed_states:
+                required = (
+                    "SUBMITTED attempt"
+                    if require_submitted
+                    else "SUBMITTED/UNKNOWN attempt"
+                )
                 raise ExecutionStateError(
-                    "new provider evidence requires SUBMITTED/UNKNOWN attempt"
+                    f"new provider evidence requires {required}"
                 )
             first = attempt_events[0]
             boundaries = [
@@ -1921,6 +2457,80 @@ class RealExecutionLedger:
             )
 
         self._mutate(operation)
+
+    def bind_provider_evidence(
+        self,
+        *,
+        attempt_id: str,
+        evidence_id: str,
+        observed_at: str,
+        source: str,
+        request_sha256: str | None = None,
+    ) -> None:
+        """Persist provider evidence without granting immediate ACK authority.
+
+        This public seam is suitable for evidence that still requires an UNKNOWN
+        reconciliation path. It deliberately cannot authorize a direct
+        SUBMITTED-to-acknowledgement transition.
+        """
+
+        self._bind_provider_evidence_payload(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=observed_at,
+            source=source,
+            request_sha256=request_sha256,
+            acknowledgement_sha256=None,
+            require_submitted=False,
+        )
+
+    def _bind_provider_acknowledgement_evidence(
+        self,
+        *,
+        attempt_id: str,
+        evidence_id: str,
+        observed_at: str,
+        source: str,
+        request_sha256: str | None = None,
+        acknowledgement: ExternalAcknowledgement,
+    ) -> None:
+        """Bind one immediate provider response to its exact ACK payload.
+
+        This internal adapter seam is not a consumer acknowledgement API. The
+        durable binding commits the canonical acknowledgement payload before
+        acknowledge() may move a SUBMITTED attempt to a terminal state.
+        """
+
+        if request_sha256 is not None:
+            _sha256_text(request_sha256, "request_sha256")
+        if type(acknowledgement) is not ExternalAcknowledgement:
+            raise TypeError(
+                "acknowledgement must be exact ExternalAcknowledgement"
+            )
+        if acknowledgement.attempt_id != attempt_id:
+            raise ExecutionIdentityConflict(
+                "provider evidence acknowledgement attempt mismatch"
+            )
+        if acknowledgement.reconciliation_evidence_id is not None:
+            raise ExecutionStateError(
+                "immediate provider evidence cannot carry reconciliation evidence"
+            )
+        if _timestamp(
+            acknowledgement.acknowledged_at,
+            "acknowledged_at",
+        ) != _timestamp(observed_at, "observed_at"):
+            raise ExecutionStateError(
+                "provider evidence time must equal acknowledgement time"
+            )
+        self._bind_provider_evidence_payload(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=observed_at,
+            source=source,
+            request_sha256=request_sha256,
+            acknowledgement_sha256=_digest(acknowledgement.to_dict()),
+            require_submitted=True,
+        )
 
     def provider_evidence_binding(
         self,
@@ -1977,20 +2587,28 @@ class RealExecutionLedger:
         action_id: str,
         attempt_id: str,
         reserved_at: str | None = None,
+        expected_snapshot_sha256: str | None = None,
     ) -> ExecutionAttempt:
         _text(attempt_id, "attempt_id")
+        if expected_snapshot_sha256 is not None:
+            _sha256_text(
+                expected_snapshot_sha256,
+                "expected_snapshot_sha256",
+            )
         reserved_at = reserved_at or _now()
         _timestamp(reserved_at, "reserved_at")
 
         def operation() -> ExecutionAttempt:
-            events = self._events()
+            if expected_snapshot_sha256 is None:
+                events = self._events()
+                current_snapshot_sha256 = None
+            else:
+                raw, events = self._read_verified_state()
+                current_snapshot_sha256 = hashlib.sha256(raw).hexdigest()
             plan_event, action = self._action_payload(
                 events, plan_id, action_id
             )
-            if self._stale(events, plan_id):
-                raise ExecutionStateError(
-                    "execution plan is stale; recompute before another action"
-                )
+
             fingerprint = _digest(
                 {
                     "plan_fingerprint": plan_event["payload"][
@@ -1999,6 +2617,8 @@ class RealExecutionLedger:
                     "action": action,
                 }
             )
+            # Exact durable redelivery is identity resolution, not a new admission.
+            # It must therefore win over both stale-snapshot and stale-plan fences.
             prior_events = self._attempt_events(events, attempt_id)
             if prior_events:
                 prior = prior_events[0]
@@ -2016,6 +2636,23 @@ class RealExecutionLedger:
                     action_id,
                     fingerprint,
                     prior["payload"]["reserved_at"],
+                )
+            if (
+                expected_snapshot_sha256 is not None
+                and current_snapshot_sha256 != expected_snapshot_sha256
+            ):
+                raise ExecutionStateError(
+                    "execution ledger snapshot changed; recompute admission"
+                )
+            if self._stale(events, plan_id):
+                raise ExecutionStateError(
+                    "execution plan is stale; recompute before another action"
+                )
+            if _timestamp(reserved_at, "reserved_at") >= _timestamp(
+                action["expires_at"], "expires_at"
+            ):
+                raise ExecutionStateError(
+                    "cannot reserve attempt at or after persisted quote expiry"
                 )
             for event in events:
                 if (
@@ -2055,16 +2692,40 @@ class RealExecutionLedger:
         return self._mutate(operation)
 
     def mark_submitted(
-        self, attempt_id: str, submitted_at: str | None = None
+        self,
+        attempt_id: str,
+        submitted_at: str | None = None,
+        *,
+        request_sha256: str | None = None,
     ) -> None:
         actual_submitted_at = submitted_at or _now()
         submitted_time = _timestamp(actual_submitted_at, "submitted_at")
+        if request_sha256 is not None:
+            _sha256_text(request_sha256, "request_sha256")
 
         def operation() -> None:
             events = self._events()
             attempt_events = self._attempt_events(events, attempt_id)
             state = self._state(attempt_events)
             if state == AttemptState.SUBMITTED:
+                if request_sha256 is not None:
+                    submitted_events = [
+                        event
+                        for event in attempt_events
+                        if event["event_type"]
+                        == EventType.ATTEMPT_SUBMITTED.value
+                    ]
+                    if len(submitted_events) != 1:
+                        raise ExecutionLedgerIntegrityError(
+                            "attempt has ambiguous submission history"
+                        )
+                    if (
+                        submitted_events[0]["payload"].get("request_sha256")
+                        != request_sha256
+                    ):
+                        raise ExecutionIdentityConflict(
+                            "attempt already submitted with different request identity"
+                        )
                 return
             if state != AttemptState.RESERVED:
                 raise ExecutionStateError(
@@ -2087,12 +2748,17 @@ class RealExecutionLedger:
                 raise ExecutionStateError(
                     "cannot submit attempt at or after persisted quote expiry"
                 )
+            payload: dict[str, str] = {
+                "submitted_at": actual_submitted_at,
+            }
+            if request_sha256 is not None:
+                payload["request_sha256"] = request_sha256
             self._append(
                 EventType.ATTEMPT_SUBMITTED,
                 first["plan_id"],
                 first["action_id"],
                 attempt_id,
-                {"submitted_at": actual_submitted_at},
+                payload,
             )
 
         self._mutate(operation)
@@ -2343,10 +3009,33 @@ class RealExecutionLedger:
                     raise ExecutionStateError(
                         "acknowledgement precedes reconciliation evidence"
                     )
-            elif acknowledgement.reconciliation_evidence_id:
-                raise ExecutionStateError(
-                    "reconciliation evidence is only valid for UNKNOWN acknowledgement"
+            else:
+                if acknowledgement.reconciliation_evidence_id:
+                    raise ExecutionStateError(
+                        "reconciliation evidence is only valid for UNKNOWN acknowledgement"
+                    )
+                acknowledgement_sha256 = _digest(payload)
+                matching_provider_evidence = [
+                    event
+                    for event in attempt_events
+                    if event["event_type"]
+                    == EventType.PROVIDER_EVIDENCE_BOUND.value
+                    and event["payload"].get("acknowledgement_sha256")
+                    == acknowledgement_sha256
+                ]
+                if len(matching_provider_evidence) != 1:
+                    raise ExecutionStateError(
+                        "SUBMITTED acknowledgement requires exact provider-bound "
+                        "acknowledgement evidence"
+                    )
+                provider_evidence_time = _timestamp(
+                    matching_provider_evidence[0]["payload"]["observed_at"],
+                    "observed_at",
                 )
+                if acknowledged_time < provider_evidence_time:
+                    raise ExecutionStateError(
+                        "acknowledgement precedes provider evidence"
+                    )
             if acknowledgement.accepted_stake is not None:
                 _, action = self._action_payload(
                     events, first["plan_id"], first["action_id"]
@@ -2358,18 +3047,39 @@ class RealExecutionLedger:
                     raise ExecutionStateError(
                         "acknowledged stake exceeds requested action stake"
                     )
+                if (
+                    acknowledgement.status is AcknowledgementStatus.ACCEPTED
+                    and acknowledgement.accepted_stake != requested_stake
+                ):
+                    raise ExecutionStateError(
+                        "ACCEPTED acknowledgement stake must equal requested "
+                        "action stake"
+                    )
+                if (
+                    acknowledgement.status is AcknowledgementStatus.PARTIAL
+                    and not (
+                        Decimal("0")
+                        < acknowledgement.accepted_stake
+                        < requested_stake
+                    )
+                ):
+                    raise ExecutionStateError(
+                        "PARTIAL acknowledgement stake must be positive and "
+                        "below requested action stake"
+                    )
             probe_event = {
                 "plan_id": first["plan_id"],
                 "action_id": first["action_id"],
                 "attempt_id": acknowledgement.attempt_id,
                 "payload": payload,
             }
-            identity = self._receipt_identity(events, probe_event)
-            prior = self._receipt_owners(events).get(identity)
-            if prior is not None and prior != acknowledgement.attempt_id:
-                raise ExecutionIdentityConflict(
-                    "provider/account external receipt already belongs to another attempt"
-                )
+            if acknowledgement.external_receipt_id is not None:
+                identity = self._receipt_identity(events, probe_event)
+                prior = self._receipt_owners(events).get(identity)
+                if prior is not None and prior != acknowledgement.attempt_id:
+                    raise ExecutionIdentityConflict(
+                        "provider/account external receipt already belongs to another attempt"
+                    )
             self._append(
                 EventType.EXTERNAL_ACKNOWLEDGEMENT,
                 first["plan_id"],
@@ -2563,15 +3273,7 @@ class RealExecutionLedger:
         self._mutate(operation)
 
     def verified_snapshot(self) -> VerifiedExecutionLedgerSnapshot:
-        if self.path.exists():
-            # A restarted reader must prove the visible ledger file and its
-            # pathname durable before returning facts that callers may bind to
-            # this snapshot identity. Keep the read path aligned with _events().
-            self._ensure_existing_path_durable()
-            raw = self.path.read_bytes()
-        else:
-            raw = b""
-        events = self._parse(raw)
+        raw, events = self._read_verified_state()
         return VerifiedExecutionLedgerSnapshot(
             raw, hashlib.sha256(raw).hexdigest(), len(events)
         )
@@ -2673,6 +3375,11 @@ class RealExecutionLedger:
             submitted_at = (
                 submitted[0]["payload"]["submitted_at"] if submitted else None
             )
+            submitted_request_sha256 = (
+                submitted[0]["payload"].get("request_sha256")
+                if submitted
+                else None
+            )
             unknown_reason = unknown[0]["payload"]["reason"] if unknown else None
             unknown_observed_at = (
                 unknown[0]["payload"]["observed_at"] if unknown else None
@@ -2689,6 +3396,7 @@ class RealExecutionLedger:
                     evidence_id=payload["evidence_id"],
                     observed_at=payload["observed_at"],
                     source=payload["source"],
+                    request_sha256=payload.get("request_sha256"),
                     acknowledgement_sha256=payload.get(
                         "acknowledgement_sha256"
                     ),
@@ -2724,6 +3432,7 @@ class RealExecutionLedger:
                     action=action,
                     state=state,
                     submitted_at=submitted_at,
+                    submitted_request_sha256=submitted_request_sha256,
                     unknown_reason=unknown_reason,
                     unknown_observed_at=unknown_observed_at,
                     provider_order_ref=provider_order_ref,
@@ -2737,6 +3446,8 @@ class RealExecutionLedger:
         return VerifiedExecutionPlanView(
             snapshot_sha256=snapshot.sha256,
             event_count=snapshot.event_count,
+            plan_reserved_event_id=plan_event["event_id"],
+            plan_reserved_at=plan_event["recorded_at"],
             plan=plan,
             plan_fingerprint=plan_event["payload"]["plan_fingerprint"],
             stale=self._stale(events, plan_id),
@@ -2817,3 +3528,84 @@ class RealExecutionLedger:
             action_ids,
             receipts,
         )
+
+
+def _install_canonical_event_clock() -> None:
+    """Bind durable event time to definition-time native UTC primitives."""
+
+    ledger_type = RealExecutionLedger
+    append_impl = ledger_type._append
+    append_impl_code = append_impl.__code__
+    exact_datetime_now = datetime.now
+    exact_datetime_isoformat = datetime.isoformat
+    exact_utc = timezone.utc
+    exact_urandom = os.urandom
+    exact_bytearray = bytearray
+    exact_bytes = bytes
+    exact_bytes_hex = bytes.hex
+    wrapper_code = None
+
+    def append_with_canonical_clock(
+        self: RealExecutionLedger,
+        kind: EventType,
+        plan_id: str,
+        action_id: str | None,
+        attempt_id: str | None,
+        payload: dict[str, Any],
+    ) -> None:
+        if (
+            append_with_canonical_clock.__code__ is not wrapper_code
+            or append_impl.__code__ is not append_impl_code
+        ):
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger event-clock dispatch changed"
+            )
+        try:
+            raw_id = exact_bytearray(exact_urandom(16))
+            raw_id[6] = (raw_id[6] & 0x0F) | 0x40
+            raw_id[8] = (raw_id[8] & 0x3F) | 0x80
+            event_hex = exact_bytes_hex(exact_bytes(raw_id))
+            event_id = (
+                event_hex[:8]
+                + "-"
+                + event_hex[8:12]
+                + "-"
+                + event_hex[12:16]
+                + "-"
+                + event_hex[16:20]
+                + "-"
+                + event_hex[20:]
+            )
+            instant = exact_datetime_now(exact_utc)
+            recorded_at = exact_datetime_isoformat(
+                instant,
+                timespec="microseconds",
+            )
+        except (OSError, OverflowError, TypeError, ValueError) as exc:
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger event identity/clock generation failed"
+            ) from exc
+        append_impl(
+            self,
+            kind,
+            plan_id,
+            action_id,
+            attempt_id,
+            payload,
+            _event_id=event_id,
+            _recorded_at=recorded_at,
+        )
+        if (
+            append_with_canonical_clock.__code__ is not wrapper_code
+            or append_impl.__code__ is not append_impl_code
+        ):
+            raise ExecutionLedgerIntegrityError(
+                "execution ledger event-clock dispatch changed during append"
+            )
+
+    wrapper_code = append_with_canonical_clock.__code__
+    ledger_type._append = append_with_canonical_clock
+
+
+_install_canonical_event_clock()
+del _install_canonical_event_clock

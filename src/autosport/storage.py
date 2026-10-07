@@ -5,11 +5,13 @@ import re
 import sqlite3
 from datetime import datetime
 from pathlib import Path
-from threading import RLock
+from threading import RLock, local
 from typing import Iterable
 
 from .domain import MarketEvent
 
+
+_SEALED_MARKET_EVENT_TYPE = MarketEvent
 
 _HISTORY_COLUMNS = (
     "dedupe_key",
@@ -26,6 +28,79 @@ _HISTORY_COLUMNS = (
 _HISTORY_COLUMNS_SQL = ",".join(_HISTORY_COLUMNS)
 _CURRENT_COLUMNS = ("source_id", "quote_key", "observed_ts", "sequence", "payload_json")
 _CURRENT_COLUMNS_SQL = ",".join(_CURRENT_COLUMNS)
+_LIVE_RECEIPT_COLUMNS = ("dedupe_key", "ingest_ts", "authority")
+_LIVE_RECEIPT_COLUMNS_SQL = ",".join(_LIVE_RECEIPT_COLUMNS)
+_LIVE_RECEIPT_AUTHORITY = "autosport.live_ingestion_receipt.v1"
+
+
+def _decode_market_event(
+    raw: dict[str, object],
+    *,
+    _event_type: type[MarketEvent] = _SEALED_MARKET_EVENT_TYPE,
+    _from_dict=_SEALED_MARKET_EVENT_TYPE.from_dict,
+) -> MarketEvent:
+    """Decode through the import-time canonical MarketEvent codec descriptor."""
+    event = _from_dict(raw)
+    if type(event) is not _event_type:
+        raise TypeError("canonical market event decoder returned a non-canonical type")
+    return event
+
+
+def _encode_market_event(
+    event: MarketEvent,
+    *,
+    _to_dict=_SEALED_MARKET_EVENT_TYPE.to_dict,
+) -> dict[str, object]:
+    """Encode through the import-time canonical MarketEvent codec descriptor."""
+    return _to_dict(event)
+
+
+def _market_event_quote_key(
+    event: MarketEvent,
+    *,
+    _getter=_SEALED_MARKET_EVENT_TYPE.quote_key.fget,
+) -> str:
+    """Read canonical quote identity without mutable descriptor dispatch."""
+    if _getter is None:
+        raise RuntimeError("canonical MarketEvent.quote_key descriptor is unavailable")
+    return _getter(event)
+
+
+def _market_event_dedupe_key(
+    event: MarketEvent,
+    *,
+    _getter=_SEALED_MARKET_EVENT_TYPE.dedupe_key.fget,
+) -> str:
+    """Read canonical dedupe identity without mutable descriptor dispatch."""
+    if _getter is None:
+        raise RuntimeError("canonical MarketEvent.dedupe_key descriptor is unavailable")
+    return _getter(event)
+
+
+class _LiveReceiptBatch:
+    """Immutable retry/fault-injection snapshot; durable authority never trusts it."""
+
+    __slots__ = ("_payloads",)
+
+    def __init__(self, events: tuple[MarketEvent, ...], *, _payload) -> None:
+        object.__setattr__(
+            self,
+            "_payloads",
+            tuple(_payload(event) for event in events),
+        )
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise AttributeError("live receipt batch is immutable")
+
+    def __iter__(
+        self,
+        *,
+        _decode=_decode_market_event,
+        _loads=json.loads,
+    ):
+        return (_decode(_loads(payload)) for payload in self._payloads)
+
+
 _LEGACY_CURRENT_COLUMNS = ("quote_key", "observed_ts", "sequence", "payload_json")
 _LEGACY_CURRENT_COLUMNS_SQL = ",".join(_LEGACY_CURRENT_COLUMNS)
 
@@ -49,6 +124,17 @@ _EXPECTED_TABLE_XINFO = {
         (3, "sequence", "INTEGER", 1, None, 0, 0),
         (4, "payload_json", "TEXT", 1, None, 0, 0),
     ),
+    "market_event_live_receipts": (
+        (0, "dedupe_key", "TEXT", 0, None, 1, 0),
+        (1, "ingest_ts", "TEXT", 1, None, 0, 0),
+        (2, "authority", "TEXT", 1, None, 0, 0),
+    ),
+    "trusted_live_current_quotes": (
+        (0, "source_id", "TEXT", 1, None, 1, 0),
+        (1, "quote_key", "TEXT", 1, None, 2, 0),
+        (2, "sequence", "INTEGER", 1, None, 0, 0),
+        (3, "dedupe_key", "TEXT", 1, None, 0, 0),
+    ),
 }
 _LEGACY_CURRENT_XINFO = (
     (0, "quote_key", "TEXT", 0, None, 1, 0),
@@ -59,6 +145,8 @@ _LEGACY_CURRENT_XINFO = (
 _EXPECTED_PRIMARY_KEYS = {
     "market_events": ("dedupe_key",),
     "current_quotes": ("source_id", "quote_key"),
+    "market_event_live_receipts": ("dedupe_key",),
+    "trusted_live_current_quotes": ("source_id", "quote_key"),
 }
 _LEGACY_CURRENT_PRIMARY_KEYS = ("quote_key",)
 _CANONICAL_SECONDARY_INDEXES = {
@@ -74,6 +162,70 @@ _SQLITE_INTEGER_MIN = -(2**63)
 _SQLITE_INTEGER_MAX = 2**63 - 1
 
 
+def _bind_live_batch_writer(
+    implementation,
+    canonical_append,
+    receipt_writer,
+    market_event_type,
+):
+    """Capture authority callables and reject same-thread recursive issuance."""
+
+    active_calls = local()
+
+    class _BoundStoreAuthority:
+        __slots__ = ("connection", "_connection_lock")
+
+    authority_type = _BoundStoreAuthority
+    object_new = object.__new__
+    object_setattr = object.__setattr__
+
+    def authority_view(connection, connection_lock):
+        bound_store = object_new(authority_type)
+        object_setattr(bound_store, "connection", connection)
+        object_setattr(bound_store, "_connection_lock", connection_lock)
+        return bound_store
+
+    def bound(self, events):
+        active_store_ids = getattr(active_calls, "store_ids", None)
+        if active_store_ids is None:
+            active_store_ids = set()
+            active_calls.store_ids = active_store_ids
+        store_id = id(self)
+        if store_id in active_store_ids:
+            raise RuntimeError(
+                "reentrant live receipt authority dispatch is forbidden"
+            )
+        active_store_ids.add(store_id)
+        try:
+            return implementation(
+                self,
+                events,
+                _market_event_type=market_event_type,
+                _canonical_append=canonical_append,
+                _receipt_writer=receipt_writer,
+                _authority_view_factory=authority_view,
+            )
+        finally:
+            active_store_ids.remove(store_id)
+            if not active_store_ids:
+                del active_calls.store_ids
+
+    return bound
+
+
+def _bind_trusted_receipt_checker(implementation, market_event_type):
+    """Capture the canonical event type outside mutable module aliases."""
+
+    def bound(self, event):
+        return implementation(
+            self,
+            event,
+            _market_event_type=market_event_type,
+        )
+
+    return bound
+
+
 def _timezone_aware_instant(value: str, field_name: str) -> datetime:
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
@@ -84,21 +236,34 @@ def _timezone_aware_instant(value: str, field_name: str) -> datetime:
     return parsed
 
 
-def _observed_instant(value: str) -> datetime:
-    return _timezone_aware_instant(value, "observed_ts")
+def _observed_instant(
+    value: str,
+    *,
+    _parse=_timezone_aware_instant,
+) -> datetime:
+    return _parse(value, "observed_ts")
 
 
-def _event_order_key(event: MarketEvent) -> tuple[datetime, int, str]:
-    return (_observed_instant(event.observed_ts), event.sequence, event.dedupe_key)
+def _event_order_key(
+    event: MarketEvent,
+    *,
+    _observed=_observed_instant,
+    _dedupe_key=_market_event_dedupe_key,
+) -> tuple[datetime, int, str]:
+    return (_observed(event.observed_ts), event.sequence, _dedupe_key(event))
 
 
-def _projection_order_key(event: MarketEvent) -> tuple[int, str]:
+def _projection_order_key(
+    event: MarketEvent,
+    *,
+    _dedupe_key=_market_event_dedupe_key,
+) -> tuple[int, str]:
     """Provider-local sequence is the live/current authority; receipt time is not."""
-    return (event.sequence, event.dedupe_key)
+    return (event.sequence, _dedupe_key(event))
 
 
-def _canonical_json(raw: object) -> str:
-    return json.dumps(
+def _canonical_json(raw: object, *, _dumps=json.dumps) -> str:
+    return _dumps(
         raw,
         ensure_ascii=False,
         sort_keys=True,
@@ -107,11 +272,20 @@ def _canonical_json(raw: object) -> str:
     )
 
 
-def _canonical_payload(event: MarketEvent) -> str:
-    return _canonical_json(event.to_dict())
+def _canonical_payload(
+    event: MarketEvent,
+    *,
+    _encode=_encode_market_event,
+    _canonical_json_fn=_canonical_json,
+) -> str:
+    return _canonical_json_fn(_encode(event))
 
 
-def _source_payload_from_raw(raw: object) -> str:
+def _source_payload_from_raw(
+    raw: object,
+    *,
+    _canonical_json_fn=_canonical_json,
+) -> str:
     if not isinstance(raw, dict):
         raise ValueError("stored market event payload must be a JSON object")
     normalized = dict(raw)
@@ -119,11 +293,16 @@ def _source_payload_from_raw(raw: object) -> str:
     # sequence is polled again. They are not source-snapshot identity.
     normalized.pop("observed_ts", None)
     normalized.pop("ingest_ts", None)
-    return _canonical_json(normalized)
+    return _canonical_json_fn(normalized)
 
 
-def _source_payload(event: MarketEvent) -> str:
-    return _source_payload_from_raw(event.to_dict())
+def _source_payload(
+    event: MarketEvent,
+    *,
+    _encode=_encode_market_event,
+    _source_payload_from_raw_fn=_source_payload_from_raw,
+) -> str:
+    return _source_payload_from_raw_fn(_encode(event))
 
 
 def _typed_equal(left: object, right: object) -> bool:
@@ -131,17 +310,20 @@ def _typed_equal(left: object, right: object) -> bool:
 
 
 def _typed_payload_equal(left: object, right: object) -> bool:
-    if type(left) is not type(right):
-        return False
-    if isinstance(left, dict):
-        if left.keys() != right.keys():
+    def compare(a: object, b: object) -> bool:
+        if type(a) is not type(b):
             return False
-        return all(_typed_payload_equal(left[key], right[key]) for key in left)
-    if isinstance(left, (list, tuple)):
-        if len(left) != len(right):
-            return False
-        return all(_typed_payload_equal(a, b) for a, b in zip(left, right))
-    return left == right
+        if isinstance(a, dict):
+            if a.keys() != b.keys():
+                return False
+            return all(compare(a[key], b[key]) for key in a)
+        if isinstance(a, (list, tuple)):
+            if len(a) != len(b):
+                return False
+            return all(compare(x, y) for x, y in zip(a, b))
+        return a == b
+
+    return compare(left, right)
 
 
 def _reject_duplicate_object_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
@@ -157,50 +339,84 @@ def _reject_non_finite_json_constant(value: str) -> object:
     raise ValueError(f"stored market event payload contains non-finite JSON number: {value}")
 
 
-def _load_history_payload(payload_json: str) -> dict[str, object]:
+def _load_history_payload(
+    payload_json: str,
+    *,
+    _loads=json.loads,
+    _pairs_hook=_reject_duplicate_object_pairs,
+    _parse_constant=_reject_non_finite_json_constant,
+    _json_decode_error=json.JSONDecodeError,
+) -> dict[str, object]:
     try:
-        raw = json.loads(
+        raw = _loads(
             payload_json,
-            object_pairs_hook=_reject_duplicate_object_pairs,
-            parse_constant=_reject_non_finite_json_constant,
+            object_pairs_hook=_pairs_hook,
+            parse_constant=_parse_constant,
         )
-    except json.JSONDecodeError as exc:
+    except _json_decode_error as exc:
         raise ValueError("stored market event payload must be valid JSON") from exc
     if not isinstance(raw, dict):
         raise ValueError("stored market event payload must be a JSON object")
     return raw
 
 
-def _validate_persistable_sequence(value: object) -> int:
+def _validate_persistable_sequence(
+    value: object,
+    *,
+    _minimum=_SQLITE_INTEGER_MIN,
+    _maximum=_SQLITE_INTEGER_MAX,
+) -> int:
     if isinstance(value, bool) or not isinstance(value, int):
         raise ValueError("market event sequence must be a non-boolean int")
-    if value < _SQLITE_INTEGER_MIN or value > _SQLITE_INTEGER_MAX:
+    if value < _minimum or value > _maximum:
         raise ValueError("market event sequence must fit signed 64-bit SQLite INTEGER")
     return value
 
 
-def _validate_incoming_event(event: MarketEvent) -> str:
+def _validate_incoming_event(
+    event: MarketEvent,
+    *,
+    _decode=_decode_market_event,
+    _encode=_encode_market_event,
+    _validate_sequence=_validate_persistable_sequence,
+    _observed=_observed_instant,
+    _timestamp=_timezone_aware_instant,
+    _canonical_json_fn=_canonical_json,
+    _load_payload=_load_history_payload,
+    _payload_equal=_typed_payload_equal,
+) -> str:
     """Prove an event survives the exact durable JSON/SQLite representation without type drift."""
-    _validate_persistable_sequence(event.sequence)
-    _observed_instant(event.observed_ts)
-    _timezone_aware_instant(event.ingest_ts, "ingest_ts")
+    _validate_sequence(event.sequence)
+    _observed(event.observed_ts)
+    _timestamp(event.ingest_ts, "ingest_ts")
     try:
-        raw = event.to_dict()
-        payload = _canonical_json(raw)
-        persisted_raw = _load_history_payload(payload)
-        if not _typed_payload_equal(raw, persisted_raw):
+        raw = _encode(event)
+        payload = _canonical_json_fn(raw)
+        persisted_raw = _load_payload(payload)
+        if not _payload_equal(raw, persisted_raw):
             raise ValueError("market event JSON representation changes payload types")
-        round_tripped = MarketEvent.from_dict(persisted_raw).to_dict()
+        round_tripped = _encode(_decode(persisted_raw))
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event payload is not canonical") from exc
-    if not _typed_payload_equal(persisted_raw, round_tripped):
+    if not _payload_equal(persisted_raw, round_tripped):
         raise ValueError("market event payload is not canonical")
     return payload
 
 
-def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
+def _event_from_history_row(
+    row: tuple[object, ...],
+    *,
+    _decode=_decode_market_event,
+    _history_columns=_HISTORY_COLUMNS,
+    _load_payload=_load_history_payload,
+    _canonical_json_fn=_canonical_json,
+    _canonical_payload_fn=_canonical_payload,
+    _dedupe_key_fn=_market_event_dedupe_key,
+    _quote_key_fn=_market_event_quote_key,
+    _typed_equal_fn=_typed_equal,
+) -> MarketEvent:
     """Decode one persisted history row while proving redundant identity columns agree."""
-    if len(row) != len(_HISTORY_COLUMNS):
+    if len(row) != len(_history_columns):
         raise ValueError("market event history row has unexpected shape")
 
     (
@@ -218,18 +434,18 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
 
     if not isinstance(payload_json, str):
         raise ValueError("stored market event payload must be JSON text")
-    raw = _load_history_payload(payload_json)
-    canonical_raw = _canonical_json(raw)
+    raw = _load_payload(payload_json)
+    canonical_raw = _canonical_json_fn(raw)
     if payload_json != canonical_raw:
         raise ValueError("stored market event payload is not canonical JSON text")
 
-    event = MarketEvent.from_dict(raw)
-    if canonical_raw != _canonical_payload(event):
+    event = _decode(raw)
+    if canonical_raw != _canonical_payload_fn(event):
         raise ValueError("stored market event payload is not canonical")
 
     expected = (
-        ("dedupe_key", dedupe_key, event.dedupe_key),
-        ("quote_key", quote_key, event.quote_key),
+        ("dedupe_key", dedupe_key, _dedupe_key_fn(event)),
+        ("quote_key", quote_key, _quote_key_fn(event)),
         ("event_id", event_id, event.event_id),
         ("market_id", market_id, event.market_id),
         ("selection_id", selection_id, event.selection_id),
@@ -239,43 +455,58 @@ def _event_from_history_row(row: tuple[object, ...]) -> MarketEvent:
         ("sequence", sequence, event.sequence),
     )
     for field_name, persisted, canonical in expected:
-        if not _typed_equal(persisted, canonical):
+        if not _typed_equal_fn(persisted, canonical):
             raise ValueError(f"market event history row identity mismatch: {field_name}")
 
     return event
 
 
-def _event_from_current_payload(payload_json: object) -> MarketEvent:
+def _event_from_current_payload(
+    payload_json: object,
+    *,
+    _decode=_decode_market_event,
+    _load_payload=_load_history_payload,
+    _canonical_json_fn=_canonical_json,
+    _canonical_payload_fn=_canonical_payload,
+    _event_order_key_fn=_event_order_key,
+) -> MarketEvent:
     """Decode canonical projection payload independently of repairable redundant columns."""
     if not isinstance(payload_json, str):
         raise ValueError("current quote projection payload must be JSON text")
-    raw = _load_history_payload(payload_json)
+    raw = _load_payload(payload_json)
     try:
-        event = MarketEvent.from_dict(raw)
+        event = _decode(raw)
     except (ArithmeticError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("current quote projection payload is not canonical") from exc
-    if _canonical_json(raw) != _canonical_payload(event):
+    if _canonical_json_fn(raw) != _canonical_payload_fn(event):
         raise ValueError("current quote projection payload is not canonical")
-    _event_order_key(event)
+    _event_order_key_fn(event)
     return event
 
 
-def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
+def _event_from_current_row(
+    row: tuple[object, ...],
+    *,
+    _current_columns=_CURRENT_COLUMNS,
+    _decode_payload=_event_from_current_payload,
+    _quote_key_fn=_market_event_quote_key,
+    _typed_equal_fn=_typed_equal,
+) -> MarketEvent:
     """Decode one provider-aware current projection row and prove redundant identity."""
-    if len(row) != len(_CURRENT_COLUMNS):
+    if len(row) != len(_current_columns):
         raise ValueError("current quote projection row has unexpected shape")
 
     source_id, quote_key, observed_ts, sequence, payload_json = row
-    event = _event_from_current_payload(payload_json)
+    event = _decode_payload(payload_json)
 
     expected = (
         ("source_id", source_id, event.source_id),
-        ("quote_key", quote_key, event.quote_key),
+        ("quote_key", quote_key, _quote_key_fn(event)),
         ("observed_ts", observed_ts, event.observed_ts),
         ("sequence", sequence, event.sequence),
     )
     for field_name, persisted, canonical in expected:
-        if not _typed_equal(persisted, canonical):
+        if not _typed_equal_fn(persisted, canonical):
             raise ValueError(f"current quote projection row identity mismatch: {field_name}")
 
     return event
@@ -289,7 +520,7 @@ def _event_from_legacy_current_row(row: tuple[object, ...]) -> MarketEvent:
     quote_key, observed_ts, sequence, payload_json = row
     event = _event_from_current_payload(payload_json)
     expected = (
-        ("quote_key", quote_key, event.quote_key),
+        ("quote_key", quote_key, _market_event_quote_key(event)),
         ("observed_ts", observed_ts, event.observed_ts),
         ("sequence", sequence, event.sequence),
     )
@@ -452,11 +683,56 @@ def _validate_legacy_current_table(connection: sqlite3.Connection) -> None:
     )
 
 
+def _validate_live_receipt_rows(connection: sqlite3.Connection) -> None:
+    rows = connection.execute(
+        f"""SELECT r.dedupe_key,r.ingest_ts,r.authority,
+                   {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)}
+            FROM market_event_live_receipts AS r
+            LEFT JOIN market_events AS m
+            ON m.dedupe_key=r.dedupe_key"""
+    ).fetchall()
+    for row in rows:
+        dedupe_key, ingest_ts, authority = row[:3]
+        if (
+            not isinstance(dedupe_key, str)
+            or not dedupe_key
+            or not isinstance(ingest_ts, str)
+            or not isinstance(authority, str)
+        ):
+            raise ValueError("live receipt authority row is malformed")
+        if authority != _LIVE_RECEIPT_AUTHORITY:
+            raise ValueError("live receipt authority kind is not canonical")
+        _timezone_aware_instant(ingest_ts, "live receipt ingest_ts")
+        history_row = row[3:]
+        if not history_row or history_row[0] is None:
+            raise ValueError("live receipt authority references missing market history")
+        event = _event_from_history_row(history_row)
+        if _market_event_dedupe_key(event) != dedupe_key:
+            raise ValueError("live receipt authority dedupe identity does not match market history")
+        if event.ingest_ts != ingest_ts:
+            raise ValueError("live receipt authority ingest_ts does not match market history")
+
+
 def _validate_existing_canonical_tables(connection: sqlite3.Connection) -> bool:
     history = _schema_object(connection, "market_events")
     current = _schema_object(connection, "current_quotes")
+    live_receipts = _schema_object(connection, "market_event_live_receipts")
+    trusted_current = _schema_object(connection, "trusted_live_current_quotes")
     if history is not None:
         _validate_canonical_table(connection, "market_events")
+    if live_receipts is not None:
+        _validate_canonical_table(connection, "market_event_live_receipts")
+        if history is None:
+            raise ValueError(
+                "market_event_live_receipts cannot exist without authoritative history"
+            )
+        _validate_live_receipt_rows(connection)
+    if trusted_current is not None:
+        _validate_canonical_table(connection, "trusted_live_current_quotes")
+        if history is None or live_receipts is None:
+            raise ValueError(
+                "trusted_live_current_quotes cannot exist without live receipt authority"
+            )
 
     legacy_current = False
     if current is not None:
@@ -519,6 +795,120 @@ def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:
             )
 
 
+def _trusted_live_events_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    _decode_row=_event_from_history_row,
+    _order_key=_event_order_key,
+    _history_columns=_HISTORY_COLUMNS,
+    _authority=_LIVE_RECEIPT_AUTHORITY,
+) -> list[MarketEvent]:
+    """Read and verify receipt-authoritative history from one locked connection."""
+    rows = connection.execute(
+        f"""SELECT {",".join(f"m.{column}" for column in _history_columns)},
+                   r.ingest_ts,r.authority
+            FROM market_events AS m
+            INNER JOIN market_event_live_receipts AS r
+            ON r.dedupe_key=m.dedupe_key"""
+    ).fetchall()
+    events: list[MarketEvent] = []
+    for row in rows:
+        event = _decode_row(row[: len(_history_columns)])
+        receipt_ingest_ts, authority = row[-2:]
+        if (
+            receipt_ingest_ts != event.ingest_ts
+            or authority != _authority
+        ):
+            raise ValueError("live receipt authority conflicts with market history")
+        events.append(event)
+    return sorted(events, key=_order_key)
+
+
+def _trusted_live_current_from_connection(
+    connection: sqlite3.Connection,
+    *,
+    _authority: str = _LIVE_RECEIPT_AUTHORITY,
+    _decode_history=_event_from_history_row,
+    _quote_key=_market_event_quote_key,
+    _dedupe_key=_market_event_dedupe_key,
+) -> dict[tuple[str, str], MarketEvent]:
+    """Read the bounded derived trusted-current projection and verify every pointer."""
+
+    rows = connection.execute(
+        f"""SELECT p.source_id,p.quote_key,p.sequence,p.dedupe_key,
+                   {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},
+                   r.ingest_ts,r.authority
+            FROM trusted_live_current_quotes AS p
+            LEFT JOIN market_events AS m
+            ON m.dedupe_key=p.dedupe_key
+            LEFT JOIN market_event_live_receipts AS r
+            ON r.dedupe_key=p.dedupe_key
+            ORDER BY p.source_id,p.quote_key"""
+    ).fetchall()
+
+    current: dict[tuple[str, str], MarketEvent] = {}
+    prefix_size = 4
+    for row in rows:
+        source_id, quote_key, sequence, dedupe_key = row[:prefix_size]
+        history_row = row[prefix_size : prefix_size + len(_HISTORY_COLUMNS)]
+        receipt_ingest_ts, authority = row[-2:]
+        if not history_row or history_row[0] is None:
+            raise ValueError(
+                "trusted live current projection references missing market history"
+            )
+        if receipt_ingest_ts is None or authority is None:
+            raise ValueError(
+                "trusted live current projection references missing receipt authority"
+            )
+        event = _decode_history(history_row)
+        expected = (
+            ("source_id", source_id, event.source_id),
+            ("quote_key", quote_key, _quote_key(event)),
+            ("sequence", sequence, event.sequence),
+            ("dedupe_key", dedupe_key, _dedupe_key(event)),
+        )
+        for field_name, persisted, canonical in expected:
+            if not _typed_equal(persisted, canonical):
+                raise ValueError(
+                    "trusted live current projection identity mismatch: "
+                    f"{field_name}"
+                )
+        if receipt_ingest_ts != event.ingest_ts or authority != _authority:
+            raise ValueError("live receipt authority conflicts with market history")
+        key = (event.source_id, _quote_key(event))
+        if key in current:
+            raise ValueError("trusted live current projection is ambiguous")
+        current[key] = event
+    return current
+
+def _has_trusted_live_receipt_from_connection(
+    connection: sqlite3.Connection,
+    event: MarketEvent,
+    *,
+    _dedupe_key=_market_event_dedupe_key,
+    _canonical_payload_fn=_canonical_payload,
+    _authority: str = _LIVE_RECEIPT_AUTHORITY,
+    _decode_history=_event_from_history_row,
+) -> bool:
+    row = connection.execute(
+        f"""SELECT {",".join(f"m.{column}" for column in _HISTORY_COLUMNS)},r.ingest_ts,r.authority
+            FROM market_events AS m
+            INNER JOIN market_event_live_receipts AS r
+            ON r.dedupe_key=m.dedupe_key
+            WHERE m.dedupe_key=?""",
+        (_dedupe_key(event),),
+    ).fetchone()
+    if row is None:
+        return False
+    stored = _decode_history(row[: len(_HISTORY_COLUMNS)])
+    receipt_ingest_ts, authority = row[-2:]
+    if _canonical_payload_fn(stored) != _canonical_payload_fn(event):
+        raise ValueError("live receipt authority does not bind the supplied market event")
+    if receipt_ingest_ts != stored.ingest_ts or authority != _authority:
+        raise ValueError("live receipt authority conflicts with market event")
+    return True
+
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection.
 
@@ -536,6 +926,7 @@ class SQLiteMarketStore:
             self.connection.execute("PRAGMA synchronous=FULL")
             self._init_schema()
             self._rebuild_current_quotes()
+            self._rebuild_trusted_live_current_quotes()
         except Exception:
             self.connection.close()
             raise
@@ -562,7 +953,7 @@ class SQLiteMarketStore:
             ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
-                history_by_dedupe[event.dedupe_key] = event
+                history_by_dedupe[_market_event_dedupe_key(event)] = event
 
             projection_rows = self.connection.execute(
                 f"SELECT {_LEGACY_CURRENT_COLUMNS_SQL} FROM current_quotes"
@@ -572,7 +963,7 @@ class SQLiteMarketStore:
                     projection_event = _event_from_current_payload(projection_row[3])
                 except (KeyError, TypeError, ValueError):
                     continue
-                history_event = history_by_dedupe.get(projection_event.dedupe_key)
+                history_event = history_by_dedupe.get(_market_event_dedupe_key(projection_event))
                 if history_event is None:
                     raise ValueError(
                         "legacy current_quotes projection event is missing from authoritative history"
@@ -616,9 +1007,26 @@ class SQLiteMarketStore:
             self._migrate_legacy_current_quotes()
         else:
             self._create_current_quotes()
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS market_event_live_receipts (
+                dedupe_key TEXT PRIMARY KEY,
+                ingest_ts TEXT NOT NULL,
+                authority TEXT NOT NULL
+            )"""
+        )
+        self.connection.execute(
+            """CREATE TABLE IF NOT EXISTS trusted_live_current_quotes (
+                source_id TEXT NOT NULL,
+                quote_key TEXT NOT NULL,
+                sequence INTEGER NOT NULL,
+                dedupe_key TEXT NOT NULL,
+                PRIMARY KEY (source_id, quote_key)
+            )"""
+        )
 
         for table_name in _EXPECTED_TABLE_XINFO:
             _validate_canonical_table(self.connection, table_name)
+        _validate_live_receipt_rows(self.connection)
         _ensure_canonical_secondary_indexes(self.connection)
         self.connection.commit()
 
@@ -633,9 +1041,9 @@ class SQLiteMarketStore:
             ).fetchall()
             for row in rows:
                 event = _event_from_history_row(row)
-                history_by_dedupe[event.dedupe_key] = event
+                history_by_dedupe[_market_event_dedupe_key(event)] = event
                 order_key = _projection_order_key(event)
-                projection_key = (event.source_id, event.quote_key)
+                projection_key = (event.source_id, _market_event_quote_key(event))
                 previous = latest.get(projection_key)
                 if previous is None or order_key > previous[0]:
                     latest[projection_key] = (order_key, event)
@@ -648,7 +1056,7 @@ class SQLiteMarketStore:
                     projection_event = _event_from_current_payload(projection_row[4])
                 except (KeyError, TypeError, ValueError):
                     continue
-                history_event = history_by_dedupe.get(projection_event.dedupe_key)
+                history_event = history_by_dedupe.get(_market_event_dedupe_key(projection_event))
                 if history_event is None:
                     raise ValueError(
                         "current_quotes projection event is missing from authoritative history"
@@ -670,7 +1078,7 @@ class SQLiteMarketStore:
                        VALUES (?,?,?,?,?)""",
                     (
                         event.source_id,
-                        event.quote_key,
+                        _market_event_quote_key(event),
                         event.observed_ts,
                         event.sequence,
                         payload,
@@ -682,17 +1090,71 @@ class SQLiteMarketStore:
         else:
             self.connection.commit()
 
-    def _insert_one(self, event: MarketEvent) -> bool:
-        payload = _validate_incoming_event(event)
-        incoming_key = _projection_order_key(event)
+    def _rebuild_trusted_live_current_quotes(
+        self,
+        *,
+        _trusted_events=_trusted_live_events_from_connection,
+        _quote_key=_market_event_quote_key,
+        _dedupe_key=_market_event_dedupe_key,
+        _projection_key=_projection_order_key,
+    ) -> None:
+        """Repair the bounded trusted-current projection from validated receipt history."""
+
+        with self._connection_lock:
+            self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                latest: dict[tuple[str, str], tuple[tuple[int, str], MarketEvent]] = {}
+                for event in _trusted_events(self.connection):
+                    key = (event.source_id, _quote_key(event))
+                    order_key = _projection_key(event)
+                    previous = latest.get(key)
+                    if previous is None or order_key > previous[0]:
+                        latest[key] = (order_key, event)
+
+                self.connection.execute("DELETE FROM trusted_live_current_quotes")
+                for key in sorted(latest):
+                    event = latest[key][1]
+                    self.connection.execute(
+                        """INSERT INTO trusted_live_current_quotes
+                           (source_id,quote_key,sequence,dedupe_key)
+                           VALUES (?,?,?,?)""",
+                        (
+                            event.source_id,
+                            _quote_key(event),
+                            event.sequence,
+                            _dedupe_key(event),
+                        ),
+                    )
+            except Exception:
+                self.connection.rollback()
+                raise
+            else:
+                self.connection.commit()
+
+    def _insert_one(
+        self,
+        event: MarketEvent,
+        *,
+        _validate_event=_validate_incoming_event,
+        _projection_key=_projection_order_key,
+        _dedupe_key=_market_event_dedupe_key,
+        _quote_key=_market_event_quote_key,
+        _decode_history=_event_from_history_row,
+        _source_payload_fn=_source_payload,
+        _decode_current=_event_from_current_row,
+        _history_columns_sql=_HISTORY_COLUMNS_SQL,
+        _current_columns_sql=_CURRENT_COLUMNS_SQL,
+    ) -> bool:
+        payload = _validate_event(event)
+        incoming_key = _projection_key(event)
         cursor = self.connection.execute(
             """INSERT INTO market_events
                (dedupe_key,quote_key,event_id,market_id,selection_id,decimal_odds,observed_ts,source_id,sequence,payload_json)
                VALUES (?,?,?,?,?,?,?,?,?,?)
                ON CONFLICT(dedupe_key) DO NOTHING""",
             (
-                event.dedupe_key,
-                event.quote_key,
+                _dedupe_key(event),
+                _quote_key(event),
                 event.event_id,
                 event.market_id,
                 event.selection_id,
@@ -705,25 +1167,25 @@ class SQLiteMarketStore:
         )
         if cursor.rowcount == 0:
             existing = self.connection.execute(
-                f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events WHERE dedupe_key=?",
-                (event.dedupe_key,),
+                f"SELECT {_history_columns_sql} FROM market_events WHERE dedupe_key=?",
+                (_dedupe_key(event),),
             ).fetchone()
             if existing is None:
                 raise RuntimeError("market event dedupe conflict row disappeared")
-            existing_event = _event_from_history_row(existing)
-            if _source_payload(existing_event) != _source_payload(event):
+            existing_event = _decode_history(existing)
+            if _source_payload_fn(existing_event) != _source_payload_fn(event):
                 raise ValueError(
                     "conflicting duplicate market event identity: "
-                    f"{event.dedupe_key}"
+                    f"{_dedupe_key(event)}"
                 )
             return False
         previous = self.connection.execute(
-            f"""SELECT {_CURRENT_COLUMNS_SQL} FROM current_quotes
+            f"""SELECT {_current_columns_sql} FROM current_quotes
                 WHERE source_id=? AND quote_key=?""",
-            (event.source_id, event.quote_key),
+            (event.source_id, _quote_key(event)),
         ).fetchone()
-        previous_event = _event_from_current_row(previous) if previous is not None else None
-        if previous_event is None or incoming_key > _projection_order_key(previous_event):
+        previous_event = _decode_current(previous) if previous is not None else None
+        if previous_event is None or incoming_key > _projection_key(previous_event):
             self.connection.execute(
                 """INSERT INTO current_quotes
                    (source_id,quote_key,observed_ts,sequence,payload_json)
@@ -734,7 +1196,7 @@ class SQLiteMarketStore:
                    payload_json=excluded.payload_json""",
                 (
                     event.source_id,
-                    event.quote_key,
+                    _quote_key(event),
                     event.observed_ts,
                     event.sequence,
                     payload,
@@ -742,20 +1204,340 @@ class SQLiteMarketStore:
             )
         return True
 
+    def _insert_live_receipt_authority(
+        self,
+        event: MarketEvent,
+        *,
+        _dedupe_key=_market_event_dedupe_key,
+        _authority=_LIVE_RECEIPT_AUTHORITY,
+    ) -> None:
+        cursor = self.connection.execute(
+            """INSERT INTO market_event_live_receipts
+               (dedupe_key,ingest_ts,authority)
+               VALUES (?,?,?)""",
+            (
+                _dedupe_key(event),
+                event.ingest_ts,
+                _authority,
+            ),
+        )
+        if cursor.rowcount != 1:
+            raise RuntimeError("live receipt authority insert did not persist exactly one row")
+
+    def _append_batch_accepted_canonical(
+        self,
+        events: Iterable[MarketEvent],
+        *,
+        _insert_one_impl=_insert_one,
+    ) -> list[MarketEvent]:
+        accepted: list[MarketEvent] = []
+        with self._connection_lock:
+            owns_transaction = not self.connection.in_transaction
+            if owns_transaction:
+                self.connection.execute("BEGIN IMMEDIATE")
+            try:
+                for event in events:
+                    if _insert_one_impl(self, event):
+                        accepted.append(event)
+            except Exception:
+                if owns_transaction:
+                    self.connection.rollback()
+                raise
+            else:
+                if owns_transaction:
+                    self.connection.commit()
+        return accepted
+
+    def _before_live_append_attempt(self, events: Iterable[MarketEvent]) -> None:
+        """Non-authoritative pre-transaction retry/fault-injection seam."""
+
+    def _append_live_batch_accepted_impl(
+        self,
+        events: Iterable[MarketEvent],
+        *,
+        _market_event_type: type[MarketEvent],
+        _canonical_append,
+        _receipt_writer,
+        _authority_view_factory,
+        _batch_type=_LiveReceiptBatch,
+        _batch_init=_LiveReceiptBatch.__init__,
+        _decode_batch_payload=_decode_market_event,
+        _loads_batch_payload=json.loads,
+        _object_new=object.__new__,
+        _dedupe_key=_market_event_dedupe_key,
+        _quote_key=_market_event_quote_key,
+        _canonical_payload_fn=_canonical_payload,
+        _history_columns_sql=_HISTORY_COLUMNS_SQL,
+        _current_columns_sql=_CURRENT_COLUMNS_SQL,
+        _decode_current=_event_from_current_row,
+        _projection_key=_projection_order_key,
+        _decode_history=_event_from_history_row,
+        _authority=_LIVE_RECEIPT_AUTHORITY,
+    ) -> list[MarketEvent]:
+        """Persist one live-ingestion batch and its receipt witnesses atomically.
+
+        Lazy caller iterables are fully materialized before any transaction begins.
+        The replaceable retry/fault-injection seam runs before the authority
+        transaction. The transaction itself uses the exact canonical append
+        implementation, so overridden public append behavior cannot commit or mint
+        authority from inside the live transaction. Live authority is derived only
+        after this method proves which exact canonical batch rows were newly inserted.
+        """
+        if type(self) is not __class__:
+            raise TypeError(
+                "live receipt authority requires an exact SQLiteMarketStore"
+            )
+        # Bind the exact durable store authority before touching the caller iterable.
+        # Materializing a lazy iterable may execute arbitrary caller code, so waiting
+        # until after tuple(events) would let that code redefine which workspace is
+        # treated as canonical before the first authority check.
+        connection_lock = self._connection_lock
+        connection = self.connection
+        store_path = self.path
+        authority_store = _authority_view_factory(connection, connection_lock)
+        with connection_lock:
+            if (
+                self._connection_lock is not connection_lock
+                or self.connection is not connection
+                or self.path is not store_path
+            ):
+                raise RuntimeError(
+                    "live receipt store authority changed before batch materialization"
+                )
+            materialized = tuple(events)
+            if (
+                self._connection_lock is not connection_lock
+                or self.connection is not connection
+                or self.path is not store_path
+            ):
+                if connection.in_transaction:
+                    connection.rollback()
+                raise RuntimeError(
+                    "live receipt batch materialization changed canonical store authority"
+                )
+            if any(type(event) is not _market_event_type for event in materialized):
+                raise TypeError("live receipt authority requires exact MarketEvent values")
+            # Snapshot canonical payloads before exposing the non-authoritative batch
+            # object. Durable reconstruction never reads that object's mutable payload slot.
+            canonical_payloads = tuple(
+                _canonical_payload_fn(event) for event in materialized
+            )
+            batch = _object_new(_batch_type)
+            _batch_init(batch, materialized, _payload=_canonical_payload_fn)
+            canonical_events = tuple(
+                _decode_batch_payload(_loads_batch_payload(payload))
+                for payload in canonical_payloads
+            )
+            if connection.in_transaction:
+                raise RuntimeError(
+                    "live receipt authority requires transaction ownership"
+                )
+            self._before_live_append_attempt(batch)
+            if (
+                self._connection_lock is not connection_lock
+                or self.connection is not connection
+                or self.path is not store_path
+            ):
+                if connection.in_transaction:
+                    connection.rollback()
+                raise RuntimeError(
+                    "live append attempt seam changed canonical store authority"
+                )
+            if connection.in_transaction:
+                connection.rollback()
+                raise RuntimeError(
+                    "live append attempt seam must not leave an active transaction"
+                )
+            connection.execute("BEGIN IMMEDIATE")
+            try:
+                preexisting: set[str] = set()
+                canonical_by_dedupe: dict[str, MarketEvent] = {}
+                for event in canonical_events:
+                    existing = canonical_by_dedupe.get(_dedupe_key(event))
+                    if existing is None:
+                        canonical_by_dedupe[_dedupe_key(event)] = event
+                    elif _canonical_payload_fn(existing) != _canonical_payload_fn(event):
+                        raise ValueError(
+                            "conflicting duplicate live market event identity: "
+                            f"{_dedupe_key(event)}"
+                        )
+
+                for event in canonical_by_dedupe.values():
+                    row = connection.execute(
+                        f"SELECT {_history_columns_sql} FROM market_events WHERE dedupe_key=?",
+                        (_dedupe_key(event),),
+                    ).fetchone()
+                    if row is not None:
+                        preexisting.add(_dedupe_key(event))
+
+                expected_append_changes = 0
+                projection_state: dict[tuple[str, str], MarketEvent | None] = {}
+                for event in canonical_by_dedupe.values():
+                    if _dedupe_key(event) in preexisting:
+                        continue
+                    expected_append_changes += 1
+                    projection_key = (event.source_id, _quote_key(event))
+                    if projection_key not in projection_state:
+                        row = connection.execute(
+                            f"""SELECT {_current_columns_sql} FROM current_quotes
+                                WHERE source_id=? AND quote_key=?""",
+                            projection_key,
+                        ).fetchone()
+                        projection_state[projection_key] = (
+                            _decode_current(row) if row is not None else None
+                        )
+                    previous = projection_state[projection_key]
+                    if previous is None or _projection_key(event) > _projection_key(
+                        previous
+                    ):
+                        expected_append_changes += 1
+                        projection_state[projection_key] = event
+
+                changes_before = connection.total_changes
+                # canonical_events was reconstructed from the sealed payload tuple
+                # before the replaceable retry seam ran. Persist that exact tuple
+                # directly; the retry-only capability object is never a durable source.
+                accepted = _canonical_append(authority_store, canonical_events)
+                if not connection.in_transaction:
+                    raise RuntimeError(
+                        "live append hook relinquished transaction ownership"
+                    )
+                if type(accepted) is not list:
+                    raise TypeError("live append hook must return an exact list")
+
+                expected: list[MarketEvent] = []
+                for dedupe_key, canonical_event in canonical_by_dedupe.items():
+                    row = connection.execute(
+                        f"SELECT {_history_columns_sql} FROM market_events WHERE dedupe_key=?",
+                        (dedupe_key,),
+                    ).fetchone()
+                    if dedupe_key in preexisting:
+                        continue
+                    if row is None:
+                        raise RuntimeError(
+                            "live append hook did not persist an expected market event"
+                        )
+                    stored = _decode_history(row)
+                    if _canonical_payload_fn(stored) != _canonical_payload_fn(canonical_event):
+                        raise RuntimeError(
+                            "live append hook persisted a non-canonical market event"
+                        )
+                    expected.append(stored)
+
+                if connection.total_changes - changes_before != expected_append_changes:
+                    raise RuntimeError(
+                        "live append hook changed storage outside the canonical batch"
+                    )
+
+                if any(
+                    type(event) is not _market_event_type
+                    for event in accepted
+                ):
+                    raise TypeError(
+                        "live append hook must return exact MarketEvent instances"
+                    )
+                if tuple(_canonical_payload_fn(event) for event in accepted) != tuple(
+                    _canonical_payload_fn(event) for event in expected
+                ):
+                    raise RuntimeError(
+                        "live append hook returned events outside the canonical inserted set"
+                    )
+
+                receipt_changes_before = connection.total_changes
+                for event in expected:
+                    _receipt_writer(authority_store, event)
+                if not connection.in_transaction:
+                    raise RuntimeError(
+                        "live receipt writer relinquished transaction ownership"
+                    )
+                if (
+                    connection.total_changes - receipt_changes_before
+                    != len(expected)
+                ):
+                    raise RuntimeError(
+                        "live receipt writer changed authority outside the canonical batch"
+                    )
+                for event in expected:
+                    receipt = connection.execute(
+                        """SELECT ingest_ts,authority
+                           FROM market_event_live_receipts
+                           WHERE dedupe_key=?""",
+                        (_dedupe_key(event),),
+                    ).fetchone()
+                    if receipt != (event.ingest_ts, _authority):
+                        raise RuntimeError(
+                            "live receipt writer did not persist canonical authority"
+                        )
+
+                # Maintain the bounded trusted-current projection in the same
+                # transaction as canonical history and receipt authority. Generic
+                # append/replay/import paths never touch this table.
+                for event in expected:
+                    dedupe_key = _dedupe_key(event)
+                    quote_key = _quote_key(event)
+                    connection.execute(
+                        """INSERT INTO trusted_live_current_quotes
+                           (source_id,quote_key,sequence,dedupe_key)
+                           VALUES (?,?,?,?)
+                           ON CONFLICT(source_id,quote_key) DO UPDATE SET
+                           sequence=excluded.sequence,
+                           dedupe_key=excluded.dedupe_key
+                           WHERE excluded.sequence>trusted_live_current_quotes.sequence
+                              OR (
+                                  excluded.sequence=trusted_live_current_quotes.sequence
+                                  AND excluded.dedupe_key>trusted_live_current_quotes.dedupe_key
+                              )""",
+                        (event.source_id, quote_key, event.sequence, dedupe_key),
+                    )
+
+                # A stale accepted history row may legitimately leave the projection
+                # unchanged; it must never move the trusted projection behind that row.
+                for event in expected:
+                    projected = connection.execute(
+                        """SELECT sequence,dedupe_key
+                           FROM trusted_live_current_quotes
+                           WHERE source_id=? AND quote_key=?""",
+                        (event.source_id, _quote_key(event)),
+                    ).fetchone()
+                    if (
+                        projected is None
+                        or (projected[0], projected[1])
+                        < (event.sequence, _dedupe_key(event))
+                    ):
+                        raise RuntimeError(
+                            "trusted live current projection did not retain canonical order"
+                        )
+                if (
+                    self._connection_lock is not connection_lock
+                    or self.connection is not connection
+                    or self.path is not store_path
+                ):
+                    raise RuntimeError(
+                        "live receipt store authority changed during authority transaction"
+                    )
+            except Exception:
+                connection.rollback()
+                raise
+            else:
+                connection.commit()
+                return expected
+
+    _append_live_batch_accepted = _bind_live_batch_writer(
+        _append_live_batch_accepted_impl,
+        _append_batch_accepted_canonical,
+        _insert_live_receipt_authority,
+        _SEALED_MARKET_EVENT_TYPE,
+    )
+    del _append_live_batch_accepted_impl
+
     def append(self, event: MarketEvent) -> bool:
         with self._connection_lock:
             with self.connection:
                 return self._insert_one(event)
 
     def append_batch_accepted(self, events: Iterable[MarketEvent]) -> list[MarketEvent]:
-        """Insert one normalized batch in one transaction and return newly accepted events."""
-        accepted: list[MarketEvent] = []
-        with self._connection_lock:
-            with self.connection:
-                for event in events:
-                    if self._insert_one(event):
-                        accepted.append(event)
-        return accepted
+        """Insert one normalized batch and return newly accepted events."""
+        return __class__._append_batch_accepted_canonical(self, events)
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:
         return len(self.append_batch_accepted(events))
@@ -774,6 +1556,62 @@ class SQLiteMarketStore:
             events = [_event_from_history_row(row) for row in rows]
         return sorted(events, key=_event_order_key)
 
+    def _has_trusted_live_receipt_impl(
+        self,
+        event: MarketEvent,
+        *,
+        _market_event_type: type[MarketEvent],
+        _history_columns=_HISTORY_COLUMNS,
+        _dedupe_key=_market_event_dedupe_key,
+        _decode_history=_event_from_history_row,
+        _canonical_payload_fn=_canonical_payload,
+        _authority=_LIVE_RECEIPT_AUTHORITY,
+    ) -> bool:
+        if type(event) is not _market_event_type:
+            raise TypeError("event must be an exact MarketEvent")
+        with self._connection_lock:
+            row = self.connection.execute(
+                f"""SELECT {",".join(f"m.{column}" for column in _history_columns)},r.ingest_ts,r.authority
+                    FROM market_events AS m
+                    INNER JOIN market_event_live_receipts AS r
+                    ON r.dedupe_key=m.dedupe_key
+                    WHERE m.dedupe_key=?""",
+                (_dedupe_key(event),),
+            ).fetchone()
+        if row is None:
+            return False
+        stored = _decode_history(row[: len(_history_columns)])
+        receipt_ingest_ts, authority = row[-2:]
+        if _canonical_payload_fn(stored) != _canonical_payload_fn(event):
+            raise ValueError("live receipt authority does not bind the supplied market event")
+        if receipt_ingest_ts != stored.ingest_ts or authority != _authority:
+            raise ValueError("live receipt authority conflicts with market event")
+        return True
+
+    has_trusted_live_receipt = _bind_trusted_receipt_checker(
+        _has_trusted_live_receipt_impl,
+        _SEALED_MARKET_EVENT_TYPE,
+    )
+    del _has_trusted_live_receipt_impl
+
+    def trusted_live_events(
+        self,
+        *,
+        _read=_trusted_live_events_from_connection,
+    ) -> list[MarketEvent]:
+        """Return only history rows whose local receipt instant has product authority."""
+        with self._connection_lock:
+            return _read(self.connection)
+
+    def trusted_live_current_by_source(
+        self,
+        *,
+        _read=_trusted_live_current_from_connection,
+    ) -> dict[tuple[str, str], MarketEvent]:
+        """Return bounded latest live state proven by durable receipt authority."""
+        with self._connection_lock:
+            return _read(self.connection)
+
     def current_by_source(self) -> dict[tuple[str, str], MarketEvent]:
         with self._connection_lock:
             rows = self.connection.execute(
@@ -782,7 +1620,7 @@ class SQLiteMarketStore:
             current: dict[tuple[str, str], MarketEvent] = {}
             for row in rows:
                 event = _event_from_current_row(row)
-                current[(event.source_id, event.quote_key)] = event
+                current[(event.source_id, _market_event_quote_key(event))] = event
             return current
 
     def current(self) -> dict[str, MarketEvent]:
@@ -799,3 +1637,64 @@ class SQLiteMarketStore:
     def close(self) -> None:
         with self._connection_lock:
             self.connection.close()
+
+def _seal_live_receipt_authority_call_surfaces() -> None:
+    """Hide canonical dependency bindings from callers of receipt-authority APIs."""
+
+    live_append_impl = SQLiteMarketStore._append_live_batch_accepted
+    rebuild_trusted_current_impl = SQLiteMarketStore._rebuild_trusted_live_current_quotes
+    append_impl = SQLiteMarketStore.append_batch_accepted
+    has_receipt_impl = SQLiteMarketStore.has_trusted_live_receipt
+    trusted_events_impl = SQLiteMarketStore.trusted_live_events
+    trusted_current_impl = SQLiteMarketStore.trusted_live_current_by_source
+
+    def _append_live_batch_accepted(
+        self: SQLiteMarketStore,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
+        return live_append_impl(self, events)
+
+    def _insert_live_receipt_authority(
+        self: SQLiteMarketStore,
+        event: MarketEvent,
+    ) -> None:
+        raise PermissionError(
+            "live receipt authority writes are internal to canonical live ingestion"
+        )
+
+    def _rebuild_trusted_live_current_quotes(
+        self: SQLiteMarketStore,
+    ) -> None:
+        return rebuild_trusted_current_impl(self)
+
+    def append_batch_accepted(
+        self: SQLiteMarketStore,
+        events: Iterable[MarketEvent],
+    ) -> list[MarketEvent]:
+        return append_impl(self, events)
+
+    def has_trusted_live_receipt(
+        self: SQLiteMarketStore,
+        event: MarketEvent,
+    ) -> bool:
+        return has_receipt_impl(self, event)
+
+    def trusted_live_events(self: SQLiteMarketStore) -> list[MarketEvent]:
+        return trusted_events_impl(self)
+
+    def trusted_live_current_by_source(
+        self: SQLiteMarketStore,
+    ) -> dict[tuple[str, str], MarketEvent]:
+        return trusted_current_impl(self)
+
+    SQLiteMarketStore._append_live_batch_accepted = _append_live_batch_accepted
+    SQLiteMarketStore._insert_live_receipt_authority = _insert_live_receipt_authority
+    SQLiteMarketStore._rebuild_trusted_live_current_quotes = _rebuild_trusted_live_current_quotes
+    SQLiteMarketStore.append_batch_accepted = append_batch_accepted
+    SQLiteMarketStore.has_trusted_live_receipt = has_trusted_live_receipt
+    SQLiteMarketStore.trusted_live_events = trusted_live_events
+    SQLiteMarketStore.trusted_live_current_by_source = trusted_live_current_by_source
+
+
+_seal_live_receipt_authority_call_surfaces()
+del _seal_live_receipt_authority_call_surfaces

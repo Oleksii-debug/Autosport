@@ -2,16 +2,19 @@ import tempfile
 import threading
 import time
 import unittest
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
 from autosport.live_observation import (
     OneShotObservationWorker,
     observe_workspace_once,
     poll_open_market_store_once,
 )
+from autosport.market_bus import MarketEventBus
 from autosport.market_mirror import MarketMirror
 from autosport.market_mirror_runtime import BoundedMirrorInvalidationBuffer
 from autosport.providers import InMemoryProvider, ProviderQuote
@@ -78,6 +81,51 @@ class LiveObservationTests(unittest.TestCase):
             self.assertTrue((Path(tmp) / "source_health.json").exists())
             self.assertFalse((Path(tmp) / "paper_book.json").exists())
 
+    def test_workspace_observer_stamps_product_owned_ingest_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            result = self._observe(tmp)
+
+            self.assertEqual(result.stats.accepted, 2)
+            self.assertEqual(
+                {event.observed_ts for event in result.current_quotes},
+                {"2026-09-12T20:00:00+00:00"},
+            )
+            self.assertEqual(
+                {event.ingest_ts for event in result.current_quotes},
+                {_RECEIVE_TIME},
+            )
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                persisted = store.events()
+            finally:
+                store.close()
+            self.assertEqual({event.ingest_ts for event in persisted}, {_RECEIVE_TIME})
+
+    def test_open_store_poll_mirror_uses_product_owned_ingest_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                mirror = MarketMirror.from_store(store)
+                updates = BoundedMirrorInvalidationBuffer(mirror)
+                health_store = SourceHealthStore(root / "source_health.json")
+                stats = poll_open_market_store_once(
+                    store,
+                    health_store,
+                    self._provider(),
+                    mirror_updates=updates,
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                )
+
+                self.assertEqual(stats.accepted, 2)
+                self.assertEqual(
+                    {event.ingest_ts for event in mirror.snapshot()},
+                    {_RECEIVE_TIME},
+                )
+            finally:
+                store.close()
+
     def test_workspace_observer_closes_market_store_if_health_store_init_fails(self):
         with tempfile.TemporaryDirectory() as tmp:
             with patch("autosport.live_observation.SQLiteMarketStore") as store_type:
@@ -121,6 +169,202 @@ class LiveObservationTests(unittest.TestCase):
                 self.assertEqual(stats.accepted, 2)
                 self.assertEqual(len(mirror.snapshot()), 2)
                 self.assertEqual(updates.pending_count, 2)
+            finally:
+                store.close()
+
+    def test_reused_workspace_buffer_reconciles_missed_trusted_current_and_invalidates(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            path = root / "market.db"
+            bootstrap_store = SQLiteMarketStore(path)
+            try:
+                mirror = MarketMirror.from_live_store(bootstrap_store)
+                updates = BoundedMirrorInvalidationBuffer(mirror)
+                self.assertEqual(updates.reconcile_trusted_store(bootstrap_store), ())
+            finally:
+                bootstrap_store.close()
+
+            external = MarketEvent(
+                event_id="match-1",
+                market_id="winner",
+                selection_id="player-c",
+                decimal_odds=Decimal("3.10"),
+                observed_ts="2026-09-12T20:00:01+00:00",
+                source_id="live-fixture",
+                sequence=10,
+                status="open",
+                source_ts="2026-09-12T20:00:00+00:00",
+                ingest_ts=_RECEIVE_TIME,
+            )
+            writer = SQLiteMarketStore(path)
+            try:
+                self.assertEqual(
+                    MarketEventBus(writer)._publish_many_live_ingestion([external]),
+                    1,
+                )
+            finally:
+                writer.close()
+
+            with patch.object(
+                SQLiteMarketStore,
+                "trusted_live_events",
+                side_effect=AssertionError(
+                    "workspace reconciliation must not replay append-only history"
+                ),
+            ):
+                result = observe_workspace_once(
+                    root,
+                    self._provider(),
+                    max_items=10,
+                    clock=lambda: _RECEIVE_TIME,
+                    mirror_updates=updates,
+                )
+
+            self.assertEqual(result.stats.accepted, 2)
+            self.assertEqual(
+                {event.selection_id for event in result.current_quotes},
+                {"player-a", "player-b", "player-c"},
+            )
+            self.assertEqual(
+                {
+                    event.selection_id
+                    for event in mirror.snapshot()
+                    if event.source_id == "live-fixture"
+                },
+                {"player-a", "player-b", "player-c"},
+            )
+            dirty = updates.drain(max_items=10)
+            self.assertFalse(dirty.full_refresh_required)
+            self.assertFalse(dirty.has_more)
+            self.assertEqual(
+                set(dirty.changed_keys),
+                {
+                    ("live-fixture", "match-1|winner|player-a"),
+                    ("live-fixture", "match-1|winner|player-b"),
+                    ("live-fixture", "match-1|winner|player-c"),
+                },
+            )
+
+    def test_open_store_poll_rejects_buffer_bound_to_other_workspace_before_provider_io(self):
+        with tempfile.TemporaryDirectory() as first_tmp, tempfile.TemporaryDirectory() as second_tmp:
+            first_store = SQLiteMarketStore(Path(first_tmp) / "market.db")
+            second_store = SQLiteMarketStore(Path(second_tmp) / "market.db")
+            try:
+                updates = BoundedMirrorInvalidationBuffer(MarketMirror())
+                updates.reconcile_trusted_store(first_store)
+                second_health = SourceHealthStore(Path(second_tmp) / "source_health.json")
+
+                with patch(
+                    "autosport.live_observation._drain_snapshot",
+                    side_effect=AssertionError(
+                        "provider I/O must not start for a cross-workspace buffer"
+                    ),
+                ):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "different market store",
+                    ):
+                        poll_open_market_store_once(
+                            second_store,
+                            second_health,
+                            self._provider(),
+                            mirror_updates=updates,
+                            max_items=10,
+                            clock=lambda: _RECEIVE_TIME,
+                        )
+
+                self.assertEqual(second_store.events(), [])
+            finally:
+                first_store.close()
+                second_store.close()
+
+    def test_live_ingestion_receipt_time_fences_historical_replay(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            self._observe(tmp)
+            store = SQLiteMarketStore(Path(tmp) / "market.db")
+            try:
+                before_receipt = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(
+                        2026,
+                        9,
+                        12,
+                        20,
+                        0,
+                        1,
+                        tzinfo=timezone.utc,
+                    ),
+                    max_age=timedelta(minutes=5),
+                )
+                after_receipt = MarketMirror.replay_view_from_store(
+                    store,
+                    as_of=datetime(
+                        2026,
+                        9,
+                        12,
+                        20,
+                        0,
+                        3,
+                        tzinfo=timezone.utc,
+                    ),
+                    max_age=timedelta(minutes=5),
+                )
+            finally:
+                store.close()
+
+            self.assertEqual(before_receipt.events, ())
+            self.assertEqual(len(after_receipt.events), 2)
+            self.assertEqual(
+                {event.ingest_ts for event in after_receipt.events},
+                {_RECEIVE_TIME},
+            )
+
+    def test_duplicate_provider_sequence_preserves_first_receipt_time(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                mirror = MarketMirror.from_store(store)
+                updates = BoundedMirrorInvalidationBuffer(mirror)
+                health_store = SourceHealthStore(root / "source_health.json")
+                receive_time = {"value": _RECEIVE_TIME}
+
+                first = poll_open_market_store_once(
+                    store,
+                    health_store,
+                    self._provider(),
+                    mirror_updates=updates,
+                    max_items=10,
+                    clock=lambda: receive_time["value"],
+                )
+                self.assertEqual(first.accepted, 2)
+                first_persisted = store.events()
+                self.assertEqual(
+                    {event.ingest_ts for event in first_persisted},
+                    {_RECEIVE_TIME},
+                )
+
+                receive_time["value"] = "2026-09-12T20:00:05+00:00"
+                duplicate = poll_open_market_store_once(
+                    store,
+                    health_store,
+                    self._provider(),
+                    mirror_updates=updates,
+                    max_items=10,
+                    clock=lambda: receive_time["value"],
+                )
+
+                self.assertEqual(duplicate.accepted, 0)
+                persisted = store.events()
+                self.assertEqual(len(persisted), 2)
+                self.assertEqual(
+                    {event.ingest_ts for event in persisted},
+                    {_RECEIVE_TIME},
+                )
+                self.assertEqual(
+                    {event.ingest_ts for event in mirror.snapshot()},
+                    {_RECEIVE_TIME},
+                )
             finally:
                 store.close()
 

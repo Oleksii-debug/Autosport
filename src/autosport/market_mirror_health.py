@@ -1,6 +1,7 @@
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Iterable, Iterator, Mapping
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from enum import Enum
@@ -34,6 +35,56 @@ class ProviderHealthReplayBoundary:
     source_id: str
     recorded_at: str | None
     transition_order: int
+
+    def __post_init__(self) -> None:
+        if (
+            type(self.source_id) is not str
+            or not self.source_id
+            or self.source_id.strip() != self.source_id
+        ):
+            raise ValueError("health replay source_id must be a non-empty trimmed string")
+        if (
+            isinstance(self.transition_order, bool)
+            or not isinstance(self.transition_order, int)
+            or self.transition_order < 0
+        ):
+            raise ValueError(
+                "health replay transition_order must be a non-negative integer"
+            )
+        if self.transition_order == 0:
+            if self.recorded_at is not None:
+                raise ValueError(
+                    "zero health replay boundary cannot carry recorded_at"
+                )
+            return
+        if self.recorded_at is None:
+            raise ValueError(
+                "positive health replay boundary requires recorded_at"
+            )
+        parse_source_timestamp(self.recorded_at)
+
+    def to_dict(self) -> dict[str, object]:
+        return {
+            "source_id": self.source_id,
+            "recorded_at": self.recorded_at,
+            "transition_order": self.transition_order,
+        }
+
+    @classmethod
+    def from_dict(cls, raw: object) -> "ProviderHealthReplayBoundary":
+        if type(raw) is not dict or set(raw) != {
+            "source_id",
+            "recorded_at",
+            "transition_order",
+        }:
+            raise ValueError(
+                "health replay boundary must contain canonical fields"
+            )
+        return cls(
+            source_id=raw["source_id"],
+            recorded_at=raw["recorded_at"],
+            transition_order=raw["transition_order"],
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -109,6 +160,60 @@ class HealthGatedMirrorDecisionIndex:
             raise ValueError("health replay transition_order must be a non-negative integer")
         return value
 
+    def _latest_durable_boundary(
+        self,
+        source_id: str,
+    ) -> ProviderHealthReplayBoundary:
+        """Return the latest physically durable source-health horizon.
+
+        This deliberately does not apply an ``as_of`` cutoff. Economic publication
+        uses it under the source-health writer lock to prove that no transition landed
+        after the earlier causal capture, including a newly known transition whose
+        evidence timestamp is later than that earlier decision cutoff.
+        """
+        normalized_source = self._source_id(source_id)
+        raw = self._health_store._read()
+        schema_version = raw["schema_version"]
+        if schema_version == 1:
+            payload = raw["sources"].get(normalized_source)
+            if payload is None:
+                return ProviderHealthReplayBoundary(
+                    source_id=normalized_source,
+                    recorded_at=None,
+                    transition_order=0,
+                )
+            state = self._health_store._state_from_payload(payload)
+            recorded_at = self._health_store._transition_at(state)
+            if recorded_at is None:
+                return ProviderHealthReplayBoundary(
+                    source_id=normalized_source,
+                    recorded_at=None,
+                    transition_order=0,
+                )
+            return ProviderHealthReplayBoundary(
+                source_id=normalized_source,
+                recorded_at=recorded_at,
+                transition_order=1,
+            )
+
+        entries = raw.get("history", {}).get(normalized_source, ())
+        if not entries:
+            return ProviderHealthReplayBoundary(
+                source_id=normalized_source,
+                recorded_at=None,
+                transition_order=0,
+            )
+        latest = entries[-1]
+        return ProviderHealthReplayBoundary(
+            source_id=normalized_source,
+            recorded_at=latest["recorded_at"],
+            transition_order=(
+                latest["transition_order"]
+                if "transition_order" in latest
+                else len(entries)
+            ),
+        )
+
     def _health_at_boundary(
         self,
         source_id: str,
@@ -143,7 +248,7 @@ class HealthGatedMirrorDecisionIndex:
         elif entries:
             available_order = (
                 entries[-1]["transition_order"]
-                if schema_version == 3
+                if "transition_order" in entries[-1]
                 else len(entries)
             )
             available_recorded_at = entries[-1]["recorded_at"]
@@ -168,7 +273,7 @@ class HealthGatedMirrorDecisionIndex:
                         break
                     horizon_order = (
                         entry["transition_order"]
-                        if schema_version == 3
+                        if "transition_order" in entry
                         else index
                     )
                     horizon_recorded_at = entry["recorded_at"]
@@ -191,7 +296,7 @@ class HealthGatedMirrorDecisionIndex:
                     expected = entries[horizon_order - 1]
                     expected_order = (
                         expected["transition_order"]
-                        if schema_version == 3
+                        if "transition_order" in expected
                         else horizon_order
                     )
                     if expected_order != horizon_order:
@@ -222,7 +327,7 @@ class HealthGatedMirrorDecisionIndex:
 
         selected: dict | None = None
         for index, entry in enumerate(entries, start=1):
-            order = entry["transition_order"] if schema_version == 3 else index
+            order = entry["transition_order"] if "transition_order" in entry else index
             if order > horizon_order:
                 break
             if parse_source_timestamp(entry["recorded_at"]) <= as_of:
@@ -278,6 +383,111 @@ class HealthGatedMirrorDecisionIndex:
             last_success_at=state.last_success_at,
             replay_boundary=bound,
         )
+
+    def bind_replay_boundaries(
+        self,
+        source_ids: Iterable[str],
+        *,
+        as_of: datetime,
+        require_eligible: bool = True,
+    ) -> tuple[ProviderHealthReplayBoundary, ...]:
+        """Bind exact durable health horizons for one causal decision cut."""
+        if type(require_eligible) is not bool:
+            raise TypeError("require_eligible must be a bool")
+        normalized = tuple(sorted({self._source_id(value) for value in source_ids}))
+        boundary = self._as_of(as_of)
+        decisions = tuple(
+            self.provider_health(source_id, as_of=boundary)
+            for source_id in normalized
+        )
+        if require_eligible:
+            blocked = tuple(
+                decision.source_id
+                for decision in decisions
+                if not decision.eligible
+            )
+            if blocked:
+                raise ValueError(
+                    "provider health is not decision-eligible for sources: "
+                    + ",".join(blocked)
+                )
+        return tuple(decision.replay_boundary for decision in decisions)
+
+    @contextmanager
+    def hold_replay_boundaries(
+        self,
+        boundaries: tuple[ProviderHealthReplayBoundary, ...],
+        *,
+        as_of: datetime,
+        require_eligible: bool = True,
+        require_failed: bool = False,
+    ) -> Iterator[None]:
+        """Hold the health writer fence while proving exact bound horizons.
+
+        The writer lock linearizes final economic publication against concurrent
+        SourceHealthStore transitions. A transition completed before this witness
+        changes the latest bound horizon and rejects publication; a transition after
+        the witness cannot land until the caller leaves the context.
+        """
+        if type(boundaries) is not tuple:
+            raise TypeError("boundaries must be an exact tuple")
+        if type(require_eligible) is not bool or type(require_failed) is not bool:
+            raise TypeError("provider health publication requirements must be bools")
+        if require_eligible and require_failed:
+            raise ValueError(
+                "provider health publication cannot require eligible and failed together"
+            )
+        for item in boundaries:
+            if type(item) is not ProviderHealthReplayBoundary:
+                raise TypeError(
+                    "boundaries must contain exact ProviderHealthReplayBoundary values"
+                )
+        canonical = tuple(sorted(boundaries, key=lambda item: item.source_id))
+        if canonical != boundaries or len({item.source_id for item in boundaries}) != len(
+            boundaries
+        ):
+            raise ValueError(
+                "health replay boundaries must be unique and sorted by source_id"
+            )
+        boundary = self._as_of(as_of)
+        if not boundaries:
+            if require_failed:
+                raise ValueError(
+                    "provider health publication lacks durable failed evidence"
+                )
+            yield
+            return
+
+        with self._health_store._writer_guard():
+            replayed_decisions = []
+            for expected in boundaries:
+                latest_boundary = self._latest_durable_boundary(expected.source_id)
+                if latest_boundary != expected:
+                    raise ValueError(
+                        "provider health replay boundary advanced before decision publication"
+                    )
+                replayed = self.provider_health(
+                    expected.source_id,
+                    as_of=boundary,
+                    replay_boundary=expected,
+                )
+                replayed_decisions.append(replayed)
+                if require_eligible and not replayed.eligible:
+                    raise ValueError(
+                        "provider health became ineligible before decision publication"
+                    )
+            if (
+                require_failed
+                and replayed_decisions
+                and not any(
+                    decision.source_status == "failed"
+                    for decision in replayed_decisions
+                )
+            ):
+                raise ValueError(
+                    "provider health publication lacks durable failed evidence"
+                )
+            yield
 
     def decision_view(
         self,

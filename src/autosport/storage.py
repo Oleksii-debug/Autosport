@@ -67,6 +67,12 @@ _EXPECTED_TABLE_XINFO = {
         (0, "dedupe_key", "TEXT", 0, None, 1, 0),
         (1, "append_generation", "INTEGER", 1, None, 0, 0),
     ),
+    "market_append_commit_times": (
+        (0, "end_append_generation", "INTEGER", 0, None, 1, 0),
+        (1, "start_append_generation", "INTEGER", 1, None, 0, 0),
+        (2, "append_tx_id", "TEXT", 1, None, 0, 0),
+        (3, "committed_at", "TEXT", 1, None, 0, 0),
+    ),
     "market_append_availability": (
         (0, "max_append_generation", "INTEGER", 0, None, 1, 0),
         (1, "append_authority_record_sha256", "TEXT", 1, None, 0, 0),
@@ -90,6 +96,7 @@ _EXPECTED_PRIMARY_KEYS = {
     "market_events": ("dedupe_key",),
     "current_quotes": ("source_id", "quote_key"),
     "market_event_commit_order": ("dedupe_key",),
+    "market_append_commit_times": ("end_append_generation",),
     "market_append_availability": ("max_append_generation",),
     "market_replay_cutoffs": ("cutoff_id",),
 }
@@ -115,6 +122,7 @@ _APPEND_MACHINE_DOMAIN: Final = "data.market-event-positive-append.v1"
 _APPEND_MACHINE_KEY_PREFIX: Final = "sqlite-market-store-positive-append:"
 _APPEND_STATE_SCHEMA: Final = "autosport.market-event-positive-append.chain.v1"
 _APPEND_BINDING_SCHEMA: Final = "autosport.market-event-positive-append.binding.v1"
+_APPEND_BINDING_SCHEMA_V2: Final = "autosport.market-event-positive-append.binding.v2"
 _APPEND_BASELINE_SCHEMA: Final = "autosport.market-event-generation-zero-baseline.v1"
 _APPEND_BASELINE_BINDING_SCHEMA: Final = "autosport.market-event-generation-zero-baseline.binding.v1"
 _APPEND_BASELINE_TX_RE: Final = re.compile(r"^baseline-(?P<nonce>[0-9a-f]{32})$")
@@ -144,6 +152,18 @@ END""",
 BEFORE UPDATE ON market_event_commit_order
 BEGIN
     SELECT RAISE(ABORT, 'market event append-generation rows are immutable');
+END""",
+}
+_APPEND_COMMIT_TIME_IMMUTABILITY_TRIGGERS: Final = {
+    "market_append_commit_times_no_delete": """CREATE TRIGGER market_append_commit_times_no_delete
+BEFORE DELETE ON market_append_commit_times
+BEGIN
+    SELECT RAISE(ABORT, 'market append commit-time rows are immutable');
+END""",
+    "market_append_commit_times_no_update": """CREATE TRIGGER market_append_commit_times_no_update
+BEFORE UPDATE ON market_append_commit_times
+BEGIN
+    SELECT RAISE(ABORT, 'market append commit-time rows are immutable');
 END""",
 }
 _APPEND_AVAILABILITY_IMMUTABILITY_TRIGGERS: Final = {
@@ -292,15 +312,21 @@ def _append_binding_sha256(
     previous_state_sha256: str | None,
     intended_state_sha256: str,
     entries: tuple[tuple[int, str, str], ...],
+    committed_at: str | None = None,
 ) -> str:
-    return _canonical_sha256(
-        {
-            "schema": _APPEND_BINDING_SCHEMA,
-            "previous_state_sha256": previous_state_sha256,
-            "intended_state_sha256": intended_state_sha256,
-            "entries": [list(entry) for entry in entries],
-        }
-    )
+    payload: dict[str, object] = {
+        "schema": _APPEND_BINDING_SCHEMA,
+        "previous_state_sha256": previous_state_sha256,
+        "intended_state_sha256": intended_state_sha256,
+        "entries": [list(entry) for entry in entries],
+    }
+    if committed_at is not None:
+        canonical_committed_at = _canonical_product_time(committed_at)
+        if canonical_committed_at != committed_at:
+            raise ValueError("market append commit time is not canonical")
+        payload["schema"] = _APPEND_BINDING_SCHEMA_V2
+        payload["committed_at"] = canonical_committed_at
+    return _canonical_sha256(payload)
 
 
 def _append_availability_state_sha256(
@@ -776,6 +802,20 @@ def _validate_table_shape(
                 "market_event_commit_order schema is not canonical: "
                 "immutable append-generation triggers mismatch"
             )
+    elif table_name == "market_append_commit_times":
+        expected_triggers = tuple(
+            sorted(_APPEND_COMMIT_TIME_IMMUTABILITY_TRIGGERS.items())
+        )
+        actual_triggers = tuple(
+            (name, sql)
+            for name, sql in triggers
+            if isinstance(name, str) and isinstance(sql, str)
+        )
+        if actual_triggers != expected_triggers:
+            raise ValueError(
+                "market_append_commit_times schema is not canonical: "
+                "immutable commit-time triggers mismatch"
+            )
     elif table_name == "market_append_availability":
         expected_triggers = tuple(
             sorted(_APPEND_AVAILABILITY_IMMUTABILITY_TRIGGERS.items())
@@ -1101,6 +1141,9 @@ class SQLiteMarketStore:
             replay_cutoff_state = _schema_object(
                 self.connection, "market_replay_cutoffs"
             )
+            append_commit_time_state = _schema_object(
+                self.connection, "market_append_commit_times"
+            )
             append_availability_state = _schema_object(
                 self.connection, "market_append_availability"
             )
@@ -1109,17 +1152,31 @@ class SQLiteMarketStore:
                     "causal replay schema is incomplete: "
                     "commit order/cutoff tables disagree"
                 )
+            if commit_order_state is None and append_commit_time_state is not None:
+                raise ValueError(
+                    "causal replay schema is incomplete: "
+                    "append commit time exists without append order"
+                )
             if commit_order_state is None and append_availability_state is not None:
                 raise ValueError(
                     "causal replay schema is incomplete: "
                     "append availability exists without append order"
                 )
             initialize_causal_replay = commit_order_state is None
+            initialize_append_commit_times = append_commit_time_state is None
             initialize_append_availability = append_availability_state is None
             self.connection.execute(
                 """CREATE TABLE IF NOT EXISTS market_event_commit_order (
                     dedupe_key TEXT PRIMARY KEY,
                     append_generation INTEGER NOT NULL
+                )"""
+            )
+            self.connection.execute(
+                """CREATE TABLE IF NOT EXISTS market_append_commit_times (
+                    end_append_generation INTEGER PRIMARY KEY,
+                    start_append_generation INTEGER NOT NULL,
+                    append_tx_id TEXT NOT NULL,
+                    committed_at TEXT NOT NULL
                 )"""
             )
             self.connection.execute(
@@ -1142,6 +1199,9 @@ class SQLiteMarketStore:
                 for trigger_sql in _COMMIT_ORDER_IMMUTABILITY_TRIGGERS.values():
                     self.connection.execute(trigger_sql)
                 for trigger_sql in _REPLAY_CUTOFF_IMMUTABILITY_TRIGGERS.values():
+                    self.connection.execute(trigger_sql)
+            if initialize_append_commit_times:
+                for trigger_sql in _APPEND_COMMIT_TIME_IMMUTABILITY_TRIGGERS.values():
                     self.connection.execute(trigger_sql)
             if initialize_append_availability:
                 for trigger_sql in _APPEND_AVAILABILITY_IMMUTABILITY_TRIGGERS.values():

@@ -33,6 +33,9 @@ class _FrozenDecisionPayloadList(tuple):
     """Tuple-backed marker preserving the source distinction between JSON lists and tuples."""
 
 
+_SAFE_DECISION_PAYLOAD_KEY_TYPES = (str, int, float, bool, type(None))
+
+
 def _freeze_decision_payload(value: Any) -> Any:
     if type(value) is dict:
         # Snapshot an exact built-in dict without rehashing its existing keys.
@@ -41,8 +44,7 @@ def _freeze_decision_payload(value: Any) -> Any:
         # JSON validator's historical rejection point for benign non-string keys.
         snapshot = dict.copy(value)
         keys = tuple(dict.keys(snapshot))
-        safe_key_types = {str, int, float, bool, type(None)}
-        if any(type(key) not in safe_key_types for key in keys):
+        if any(type(key) not in _SAFE_DECISION_PAYLOAD_KEY_TYPES for key in keys):
             raise ValueError(
                 "decision payload mapping keys must use exact built-in scalar types"
             )
@@ -51,6 +53,18 @@ def _freeze_decision_payload(value: Any) -> Any:
                 key: _freeze_decision_payload(dict.__getitem__(snapshot, key))
                 for key in keys
             }
+        )
+    if type(value) is MappingProxyType:
+        # dataclasses.replace/canonical copy paths may legitimately feed an
+        # already-frozen payload back through the constructor. Re-prove its
+        # key types before indexing the proxy.
+        keys = tuple(value.keys())
+        if any(type(key) not in _SAFE_DECISION_PAYLOAD_KEY_TYPES for key in keys):
+            raise ValueError(
+                "decision payload mapping keys must use exact built-in scalar types"
+            )
+        return MappingProxyType(
+            {key: _freeze_decision_payload(value[key]) for key in keys}
         )
     if isinstance(value, Mapping):
         raise ValueError("decision payload mappings must be exact dictionaries")
@@ -64,11 +78,20 @@ def _freeze_decision_payload(value: Any) -> Any:
 
 
 def _detached_decision_payload(value: Any) -> Any:
-    if isinstance(value, Mapping):
+    if type(value) is MappingProxyType:
+        keys = tuple(value.keys())
+        if any(type(key) not in _SAFE_DECISION_PAYLOAD_KEY_TYPES for key in keys):
+            raise ValueError(
+                "frozen decision payload mapping keys must use exact built-in scalar types"
+            )
         return {
-            key: _detached_decision_payload(child)
-            for key, child in value.items()
+            key: _detached_decision_payload(value[key])
+            for key in keys
         }
+    if isinstance(value, Mapping):
+        raise ValueError(
+            "frozen decision payload mappings must be exact mapping proxies"
+        )
     if isinstance(value, _FrozenDecisionPayloadList):
         return [_detached_decision_payload(child) for child in value]
     if isinstance(value, tuple):
@@ -320,7 +343,8 @@ def verify_economic_goal_binding(
             "Decision Ledger record is not classified as a material economic decision"
         )
 
-    evidence = record.payload.get(ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY)
+    payload = _detached_decision_payload(record.payload)
+    evidence = payload.get(ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY)
     if evidence is None:
         raise DecisionLedgerIntegrityError(
             "Decision Ledger economic decision is missing EconomicGoal provenance"
@@ -339,7 +363,7 @@ def verify_economic_goal_binding(
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger risk policy is not bound to the supplied EconomicGoalContract"
             )
-        actual_policy = record.payload.get(RISK_POLICY_PROVENANCE_PAYLOAD_KEY)
+        actual_policy = payload.get(RISK_POLICY_PROVENANCE_PAYLOAD_KEY)
         if actual_policy != _risk_policy_provenance_payload(risk_policy):
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger risk-policy provenance mismatch"
@@ -718,10 +742,11 @@ class JsonlDecisionLedger:
 
         if type(record) is not DecisionRecord:
             raise TypeError("Decision Ledger append requires an exact DecisionRecord")
+        payload = _detached_decision_payload(record.payload)
         if (
             record.decision_kind == ECONOMIC_DECISION_KIND
-            or ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in record.payload
-            or RISK_POLICY_PROVENANCE_PAYLOAD_KEY in record.payload
+            or ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in payload
+            or RISK_POLICY_PROVENANCE_PAYLOAD_KEY in payload
         ):
             raise DecisionLedgerIntegrityError(
                 "Decision Ledger material economic decision must use append_economic"

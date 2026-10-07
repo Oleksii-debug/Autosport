@@ -85,7 +85,7 @@ class Section2ContinuousSettlementIdentityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ValueError,
-            "event_identity must be a non-empty trimmed string",
+            "event_identity must be a non-empty canonical string",
         ):
             coordinator._settlement_resolutions(
                 as_of="2026-10-07T03:45:00+00:00"

@@ -621,6 +621,91 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
 
+    def test_apply_rejects_market_event_subclass_before_live_dispatch(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"source_id", "quote_key", "sequence", "to_dict"}:
+                    raise AssertionError("MarketEvent subtype dispatch must not execute")
+                return super().__getattribute__(name)
+
+        canonical = self.event(sequence=91)
+        hostile = HostileMarketEvent(
+            event_id=canonical.event_id,
+            market_id=canonical.market_id,
+            selection_id=canonical.selection_id,
+            decimal_odds=canonical.decimal_odds,
+            observed_ts=canonical.observed_ts,
+            source_id=canonical.source_id,
+            sequence=canonical.sequence,
+            market_type=canonical.market_type,
+            status=canonical.status,
+            source_ts=canonical.source_ts,
+            ingest_ts=canonical.ingest_ts,
+            score_state=canonical.score_state,
+            metadata=canonical.metadata,
+            sport=canonical.sport,
+            competition_id=canonical.competition_id,
+            market_semantics_id=canonical.market_semantics_id,
+            provider_source_class=canonical.provider_source_class,
+            exchange_side=canonical.exchange_side,
+        )
+
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            mirror.apply(hostile)
+        self.assertEqual(len(mirror), 0)
+
+    def test_persist_and_apply_rejects_market_event_subclass_before_store_use(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"source_id", "quote_key", "sequence", "to_dict"}:
+                    raise AssertionError("MarketEvent subtype dispatch must not execute")
+                return super().__getattribute__(name)
+
+        canonical = self.event(sequence=92)
+        hostile = HostileMarketEvent(
+            event_id=canonical.event_id,
+            market_id=canonical.market_id,
+            selection_id=canonical.selection_id,
+            decimal_odds=canonical.decimal_odds,
+            observed_ts=canonical.observed_ts,
+            source_id=canonical.source_id,
+            sequence=canonical.sequence,
+            market_type=canonical.market_type,
+            status=canonical.status,
+            source_ts=canonical.source_ts,
+            ingest_ts=canonical.ingest_ts,
+            score_state=canonical.score_state,
+            metadata=canonical.metadata,
+            sport=canonical.sport,
+            competition_id=canonical.competition_id,
+            market_semantics_id=canonical.market_semantics_id,
+            provider_source_class=canonical.provider_source_class,
+            exchange_side=canonical.exchange_side,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    mirror.persist_and_apply(store, hostile)
+                self.assertEqual(store.events(), [])
+                self.assertEqual(len(mirror), 0)
+            finally:
+                store.close()
+
+    def test_persist_and_apply_rejects_store_subclass_before_append_dispatch(self) -> None:
+        class HostileStore(SQLiteMarketStore):
+            def append(self, event: MarketEvent) -> bool:
+                raise AssertionError("store subclass append dispatch must not execute")
+
+        hostile = object.__new__(HostileStore)
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            mirror.persist_and_apply(hostile, self.event(sequence=93))
+        self.assertEqual(len(mirror), 0)
+
     def test_get_rejects_identity_subclasses_before_lookup_dispatch(self) -> None:
         dispatch_calls: list[str] = []
 

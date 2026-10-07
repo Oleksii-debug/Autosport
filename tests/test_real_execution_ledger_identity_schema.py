@@ -242,6 +242,46 @@ def test_plan_readback_rejects_hostile_action_key_before_hash_dispatch() -> None
         RealExecutionLedger._plan_from_dict(raw)
 
 
+def test_supervised_approval_lookup_rejects_hostile_identity_subclasses_before_dispatch(
+    tmp_path,
+) -> None:
+    ledger = RealExecutionLedger(tmp_path / "execution-ledger.jsonl")
+
+    with pytest.raises(ValueError, match="plan_id.*exact canonical"):
+        ledger.supervised_approval_is_active(
+            plan_id=_TrapStr("plan-1"),
+            approval_id="approval-1",
+            approval_fingerprint="a" * 64,
+        )
+    with pytest.raises(ValueError, match="approval_id.*exact canonical"):
+        ledger.supervised_approval_is_active(
+            plan_id="plan-1",
+            approval_id=_TrapStr("approval-1"),
+            approval_fingerprint="a" * 64,
+        )
+    with pytest.raises(ValueError, match="approval_fingerprint.*non-empty text"):
+        ledger.supervised_approval_is_active(
+            plan_id="plan-1",
+            approval_id="approval-1",
+            approval_fingerprint=_TrapStr("a" * 64),
+        )
+
+
+def test_supervised_approval_revoke_rejects_hostile_plan_identity_before_lookup(
+    tmp_path,
+) -> None:
+    ledger = RealExecutionLedger(tmp_path / "execution-ledger.jsonl")
+
+    with pytest.raises(ValueError, match="plan_id.*exact canonical"):
+        ledger.revoke_supervised_approval(
+            plan_id=_TrapStr("plan-1"),
+            approval_id="approval-1",
+            approval_fingerprint="a" * 64,
+            revoked_at=T1,
+            revocation_evidence_sha256="b" * 64,
+        )
+
+
 def test_acknowledgement_readback_rejects_hostile_status_before_enum_dispatch() -> None:
     acknowledgement = ExternalAcknowledgement(
         attempt_id="attempt-1",

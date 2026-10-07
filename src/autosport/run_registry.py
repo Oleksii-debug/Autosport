@@ -1038,6 +1038,7 @@ class RunRegistry:
         paper_book_sha256: str | None = None,
         decision_ledger_sha256: str | None = None,
     ) -> None:
+        _require_nonempty_string("key", key)
         if result_path is not None and not isinstance(result_path, str):
             raise ValueError("result_path must be a string or null")
         if paper_book_sha256 is not None:
@@ -1068,6 +1069,7 @@ class RunRegistry:
         paper_book_sha256: str,
         decision_ledger_sha256: str,
     ) -> None:
+        _require_nonempty_string("key", key)
         if not isinstance(reason, str):
             raise ValueError("abort reason must be a string")
         _require_canonical_sha256("paper_book_sha256", paper_book_sha256)
@@ -1101,6 +1103,7 @@ class RunRegistry:
         )
 
     def get(self, key: str) -> dict:
+        _require_nonempty_string("key", key)
         item = self._read()["runs"].get(key)
         if item is None:
             raise KeyError(key)
@@ -1232,6 +1235,7 @@ class RunRegistry:
     ) -> None:
         """Complete only a run whose durable summary and current PaperBook prove the same commit."""
 
+        _require_nonempty_string("key", key)
         state = self._read()
         item = state["runs"].get(key)
         if item is None:

@@ -300,21 +300,22 @@ def _candidate_ticket(
 
 def _ticket_leg_from_candidate(leg: CandidateLeg) -> TicketLeg:
     event_id, market_id, selection_id = leg.ticket_identity()
-    if any("|" in component for component in (event_id, market_id, selection_id)):
-        raise ValueError(
-            "candidate structured identity cannot enter quote-key scenario risk while an identity component contains '|'"
-        )
     if not leg.decimal_odds.is_finite():
         raise ValueError("candidate decimal odds must be finite")
     if leg.decimal_odds <= 1:
         raise ValueError("candidate decimal odds must be greater than 1")
-    return TicketLeg(
+    ticket_leg = TicketLeg(
         event_id,
         market_id,
         selection_id,
         leg.decimal_odds,
         sport=leg.sport,
     )
+    if ticket_leg.quote_key != leg.quote_key:
+        raise ValueError(
+            "candidate structured identity does not match canonical TicketLeg quote_key"
+        )
+    return ticket_leg
 
 
 def _dependent_existing_ticket_ids(

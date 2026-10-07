@@ -748,17 +748,14 @@ class PaperBook:
         cls._require_canonical_text(
             leg.event_id,
             f"event_id{suffix}",
-            forbid_quote_key_delimiter=True,
         )
         cls._require_canonical_text(
             leg.market_id,
             f"market_id{suffix}",
-            forbid_quote_key_delimiter=True,
         )
         cls._require_canonical_text(
             leg.selection_id,
             f"selection_id{suffix}",
-            forbid_quote_key_delimiter=True,
         )
         if leg.sport is not None:
             sport = cls._require_canonical_text(

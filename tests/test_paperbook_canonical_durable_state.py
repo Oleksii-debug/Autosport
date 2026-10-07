@@ -63,9 +63,6 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
             TicketLeg(" event-1", "winner", "alice", Decimal("2")),
             TicketLeg("event-1", "winner ", "alice", Decimal("2")),
             TicketLeg("event-1", "winner", " alice", Decimal("2")),
-            TicketLeg("event|1", "winner", "alice", Decimal("2")),
-            TicketLeg("event-1", "win|ner", "alice", Decimal("2")),
-            TicketLeg("event-1", "winner", "ali|ce", Decimal("2")),
         )
         for leg in invalid_legs:
             with self.subTest(leg=leg):
@@ -74,6 +71,39 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
                     book.open_ticket([leg], "10")
                 self.assertEqual(book.balance, Decimal("100"))
                 self.assertEqual(book.tickets, {})
+
+    def test_delimiter_bearing_leg_survives_open_save_load_and_settlement(self) -> None:
+        leg = TicketLeg(
+            "event|2026",
+            "market|spread",
+            "player|a",
+            Decimal("2"),
+        )
+        self.assertTrue(leg.quote_key.startswith("component-boundary-v1-"))
+
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.save(self.path)
+
+        restored = PaperBook.load(self.path)
+        restored_ticket = restored.tickets[ticket.ticket_id]
+        self.assertEqual(restored_ticket.legs[0].event_id, leg.event_id)
+        self.assertEqual(restored_ticket.legs[0].market_id, leg.market_id)
+        self.assertEqual(restored_ticket.legs[0].selection_id, leg.selection_id)
+        self.assertEqual(restored_ticket.legs[0].quote_key, leg.quote_key)
+
+        settled = restored.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at="2026-09-14T09:01:00+00:00",
+        )
+        self.assertIs(settled.status, TicketStatus.WON)
+        self.assertEqual(restored.balance, Decimal("110"))
+
 
     def test_open_ticket_rejects_noncanonical_leg_object_before_bankroll_mutation(self) -> None:
         book = PaperBook("100")
@@ -153,9 +183,6 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
             ("", "winner", "alice", "non-empty trimmed string"),
             ("event-1", " winner", "alice", "non-empty trimmed string"),
             ("event-1", "winner", "alice ", "non-empty trimmed string"),
-            ("event|1", "winner", "alice", "quote-key delimiter"),
-            ("event-1", "win|ner", "alice", "quote-key delimiter"),
-            ("event-1", "winner", "ali|ce", "quote-key delimiter"),
         )
         for event_id, market_id, selection_id, message in cases:
             with self.subTest(

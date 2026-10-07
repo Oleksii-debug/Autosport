@@ -98,6 +98,42 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             ],
         }
 
+    def test_structured_legacy_quote_alias_normalizes_across_instruction_graph(self):
+        raw = self._plan_dict()
+        decision = raw["decisions"][0]
+        legacy_quote = "event|2026|market|spread|player|a"
+        candidate_leg = decision["candidate"]["legs"][0]
+        candidate_leg.update(
+            {
+                "quote_key": legacy_quote,
+                "event_id": "event|2026",
+                "market_id": "market|spread",
+                "selection_id": "player|a",
+            }
+        )
+        decision["trigger_quote_key"] = legacy_quote
+        decision["scenario_groups"][0]["outcomes"][1]["quote_key"] = legacy_quote
+        decision["forecasts"][0]["quote_key"] = legacy_quote
+        decision["evidence"][0]["quote_key"] = legacy_quote
+
+        plan = ResearchStrategyPlan.from_dict(raw)
+        instruction = plan.instructions[0]
+        canonical_quote = instruction.candidate.legs[0].quote_key
+
+        self.assertTrue(canonical_quote.startswith("component-boundary-v1-"))
+        self.assertEqual(instruction.trigger_quote_key, canonical_quote)
+        self.assertIn(
+            canonical_quote,
+            {
+                outcome.quote_key
+                for group in instruction.groups
+                for outcome in group.outcomes
+            },
+        )
+        self.assertEqual(instruction.forecasts[0].quote_key, canonical_quote)
+        self.assertEqual(instruction.evidence[0].quote_key, canonical_quote)
+
+
     def test_research_strategy_runs_full_typed_pipeline_in_dataset_session(self):
         dataset = load_dataset(Path("examples/tt_demo"))
         plan = ResearchStrategyPlan.from_dict(self._plan_dict())

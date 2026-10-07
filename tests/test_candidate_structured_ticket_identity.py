@@ -10,8 +10,7 @@ from autosport.candidate_optimizer import (
     _ticket_leg_from_candidate,
 )
 from autosport.candidate_search import CandidateLeg, ParlayCandidate
-from autosport.domain import PaperTicket, TicketLeg
-from autosport.portfolio import PortfolioEngine
+from autosport.domain import PaperTicket, TicketLeg, _quote_identity
 from autosport.research_strategy import _candidate_leg_from_dict
 from autosport.scenario_search import ScenarioGroup, ScenarioOutcome
 
@@ -22,7 +21,7 @@ def _structured_leg(
     market_id: str = "market|spread",
     selection_id: str = "player|a",
 ) -> CandidateLeg:
-    quote_key = f"{event_id}|{market_id}|{selection_id}"
+    quote_key = _quote_identity(event_id, market_id, selection_id)
     return CandidateLeg(
         quote_key,
         event_id,
@@ -42,14 +41,16 @@ def _single_candidate(leg: CandidateLeg) -> ParlayCandidate:
     )
 
 
-def test_optimizer_ticket_conversion_rejects_delimiter_bearing_structured_identity() -> None:
+def test_optimizer_ticket_conversion_accepts_delimiter_bearing_structured_identity() -> None:
     leg = _structured_leg()
 
-    with pytest.raises(
-        ValueError,
-        match="cannot enter quote-key scenario risk",
-    ):
-        _ticket_leg_from_candidate(leg)
+    ticket_leg = _ticket_leg_from_candidate(leg)
+
+    assert ticket_leg.event_id == leg.event_id
+    assert ticket_leg.market_id == leg.market_id
+    assert ticket_leg.selection_id == leg.selection_id
+    assert ticket_leg.quote_key == leg.quote_key
+    assert ticket_leg.quote_key.startswith("component-boundary-v1-")
 
 
 def test_optimizer_ticket_conversion_accepts_injective_structured_identity() -> None:
@@ -108,8 +109,9 @@ def test_research_plan_loader_accepts_explicit_delimiter_bearing_identity_as_dat
         "market|spread",
         "player|a",
     )
-    with pytest.raises(ValueError, match="cannot enter quote-key scenario risk"):
-        _ticket_leg_from_candidate(leg)
+    assert leg.quote_key.startswith("component-boundary-v1-")
+    ticket_leg = _ticket_leg_from_candidate(leg)
+    assert ticket_leg.quote_key == leg.quote_key
 
 
 def test_research_plan_loader_rejects_ambiguous_legacy_quote_key() -> None:
@@ -159,71 +161,27 @@ def test_research_plan_loader_rejects_mismatched_structured_identity() -> None:
         _candidate_leg_from_dict(raw)
 
 
-@pytest.mark.parametrize(
-    ("market_id", "selection_id"),
-    (("m|x", "s"), ("m", "x|s")),
-)
-def test_colliding_structured_identities_are_rejected_before_candidate_risk(
-    monkeypatch: pytest.MonkeyPatch,
-    market_id: str,
-    selection_id: str,
-) -> None:
-    """The base portfolio is genuinely evaluated, but an aliasing candidate never reaches risk P&L."""
+def test_previously_colliding_structured_identities_are_injective_for_candidate_conversion() -> None:
+    first = _structured_leg(event_id="e", market_id="m|x", selection_id="s")
+    second = _structured_leg(event_id="e", market_id="m", selection_id="x|s")
 
-    safe_key = "safe-event|winner|a"
-    existing = PaperTicket(
-        ticket_id="existing",
-        stake=Decimal("10"),
-        legs=(TicketLeg("safe-event", "winner", "a", Decimal("2")),),
-        placed_at="test",
-    )
-    groups = [
-        ScenarioGroup(
-            "safe",
-            (
-                ScenarioOutcome(safe_key),
-                ScenarioOutcome("safe-event|winner|b"),
-            ),
-        ),
-        ScenarioGroup(
-            "candidate",
-            (
-                ScenarioOutcome("e|m|x|s"),
-                ScenarioOutcome("other-event|winner|other"),
-            ),
-        ),
-    ]
-    leg = CandidateLeg(
+    assert first.quote_key != second.quote_key
+    assert _ticket_leg_from_candidate(first).quote_key == first.quote_key
+    assert _ticket_leg_from_candidate(second).quote_key == second.quote_key
+
+
+def test_direct_legacy_structured_alias_fails_closed_without_loader_migration() -> None:
+    legacy = CandidateLeg(
         "e|m|x|s",
         "e",
         Decimal("2"),
         Decimal("0.5"),
-        market_id,
-        selection_id,
+        "m|x",
+        "s",
     )
 
-    original = PortfolioEngine.scenario_profit
-    profit_calls = 0
-
-    def counted_profit(tickets: list[PaperTicket], winning_quote_keys: set[str]) -> Decimal:
-        nonlocal profit_calls
-        profit_calls += 1
-        return original(tickets, winning_quote_keys)
-
-    monkeypatch.setattr(PortfolioEngine, "scenario_profit", staticmethod(counted_profit))
-
-    optimizer = PortfolioAwareCandidateOptimizer()
-    with pytest.raises(ValueError, match="cannot enter quote-key scenario risk"):
-        optimizer.evaluate_candidates(
-            [existing],
-            [_single_candidate(leg)],
-            groups,
-            stake=Decimal("10"),
-        )
-
-    # Two binary groups produce four exact base states. A with-candidate analysis would
-    # add another four calls, so exactly four proves rejection happened before candidate P&L.
-    assert profit_calls == 4
+    with pytest.raises(ValueError, match="does not match quote_key"):
+        _ticket_leg_from_candidate(legacy)
 
 
 def test_optimizer_ticket_id_remains_structurally_bound_for_injective_identity() -> None:

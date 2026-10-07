@@ -10,7 +10,7 @@ from typing import Any, Iterable
 
 from .agents import AgentContext
 from .candidate_search import CandidateLeg, ParlayCandidate
-from .domain import MarketEvent
+from .domain import MarketEvent, _quote_identity
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .research_pipeline import (
     ResearchDecisionAlreadyCommitted,
@@ -581,10 +581,20 @@ def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
         event_id = _canonical_identity_field(raw, "event_id")
         market_id = _canonical_identity_field(raw, "market_id")
         selection_id = _canonical_identity_field(raw, "selection_id")
-        if quote_key != f"{event_id}|{market_id}|{selection_id}":
+        canonical_quote_key = _quote_identity(
+            event_id,
+            market_id,
+            selection_id,
+            None,
+        )
+        legacy_quote_key = f"{event_id}|{market_id}|{selection_id}"
+        if quote_key not in {canonical_quote_key, legacy_quote_key}:
             raise ValueError(
                 "research candidate structured event/market/selection identity does not match quote_key"
             )
+        # Exact structured components are sufficient evidence to migrate the former
+        # ambiguous pipe serialization into the current injective identity.
+        quote_key = canonical_quote_key
     else:
         parts = quote_key.split("|")
         if len(parts) != 3 or not all(parts):
@@ -615,10 +625,23 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
     if not isinstance(legs_raw, list) or not legs_raw:
         raise ValueError("research decision candidate legs must be a non-empty list")
     legs: list[CandidateLeg] = []
+    quote_aliases: dict[str, str] = {}
     combined_odds = Decimal("1")
     combined_probability = Decimal("1")
     for item in legs_raw:
+        raw_quote_key = (
+            _exact_plan_text(item.get("quote_key"), field="candidate quote_key")
+            if type(item) is dict
+            else None
+        )
         leg = _candidate_leg_from_dict(item)
+        if raw_quote_key is not None:
+            existing_alias = quote_aliases.get(raw_quote_key)
+            if existing_alias is not None and existing_alias != leg.quote_key:
+                raise ValueError(
+                    "research candidate legacy quote_key alias is ambiguous across structured identities"
+                )
+            quote_aliases[raw_quote_key] = leg.quote_key
         legs.append(leg)
         combined_odds *= leg.decimal_odds
         combined_probability *= leg.probability
@@ -643,11 +666,15 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         for outcome in outcomes_raw:
             if type(outcome) is not dict:
                 raise ValueError("research scenario outcome must be an object")
+            raw_outcome_quote_key = _exact_plan_text(
+                outcome["quote_key"],
+                field="scenario outcome quote_key",
+            )
             parsed_outcomes.append(
                 ScenarioOutcome(
-                    _exact_plan_text(
-                        outcome["quote_key"],
-                        field="scenario outcome quote_key",
+                    quote_aliases.get(
+                        raw_outcome_quote_key,
+                        raw_outcome_quote_key,
                     ),
                     Decimal(str(outcome["probability"]))
                     if outcome.get("probability") is not None
@@ -667,23 +694,57 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
     forecasts_raw = raw.get("forecasts")
     if not isinstance(forecasts_raw, list) or not forecasts_raw:
         raise ValueError("research decision forecasts must be a non-empty list")
-    forecasts = tuple(_forecast_from_dict(item) for item in forecasts_raw)
+    normalized_forecasts: list[Any] = []
+    for item in forecasts_raw:
+        if type(item) is dict:
+            normalized_item = dict(item)
+            raw_quote_key = _exact_plan_text(
+                normalized_item.get("quote_key"),
+                field="forecast quote_key",
+            )
+            normalized_item["quote_key"] = quote_aliases.get(
+                raw_quote_key,
+                raw_quote_key,
+            )
+            normalized_forecasts.append(normalized_item)
+        else:
+            normalized_forecasts.append(item)
+    forecasts = tuple(_forecast_from_dict(item) for item in normalized_forecasts)
 
     evidence_raw = raw.get("evidence")
     if not isinstance(evidence_raw, list) or not evidence_raw:
         raise ValueError("research decision evidence must be a non-empty list")
-    evidence = tuple(_evidence_from_dict(item) for item in evidence_raw)
+    normalized_evidence: list[Any] = []
+    for item in evidence_raw:
+        if type(item) is dict:
+            normalized_item = dict(item)
+            raw_quote_key = _exact_plan_text(
+                normalized_item.get("quote_key"),
+                field="evidence quote_key",
+            )
+            normalized_item["quote_key"] = quote_aliases.get(
+                raw_quote_key,
+                raw_quote_key,
+            )
+            normalized_evidence.append(normalized_item)
+        else:
+            normalized_evidence.append(item)
+    evidence = tuple(_evidence_from_dict(item) for item in normalized_evidence)
     risk_of_ruin_raw = raw.get("risk_of_ruin_evidence")
     risk_of_ruin_evidence = (
         None
         if risk_of_ruin_raw is None
         else _risk_of_ruin_evidence_from_dict(risk_of_ruin_raw)
     )
+    raw_trigger_quote_key = _exact_plan_text(
+        raw.get("trigger_quote_key"),
+        field="trigger_quote_key",
+    )
     return ResearchReplayInstruction(
         decision_id=_exact_plan_text(raw["decision_id"], field="decision_id"),
-        trigger_quote_key=_exact_plan_text(
-            raw.get("trigger_quote_key"),
-            field="trigger_quote_key",
+        trigger_quote_key=quote_aliases.get(
+            raw_trigger_quote_key,
+            raw_trigger_quote_key,
         ),
         decision_ts=_exact_plan_text(raw["decision_ts"], field="decision_ts"),
         stake=Decimal(str(raw["stake"])),

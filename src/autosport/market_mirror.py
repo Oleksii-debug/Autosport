@@ -108,12 +108,12 @@ class MarketMirror:
 
     @staticmethod
     def _decision_boundary(*, as_of: datetime, max_age: timedelta) -> tuple[datetime, timedelta]:
-        if not isinstance(as_of, datetime):
-            raise TypeError("as_of must be a datetime")
+        if type(as_of) is not datetime:
+            raise TypeError("as_of must be an exact datetime")
         if as_of.tzinfo is None or as_of.utcoffset() is None:
             raise ValueError("as_of must be timezone-aware")
-        if not isinstance(max_age, timedelta):
-            raise TypeError("max_age must be a timedelta")
+        if type(max_age) is not timedelta:
+            raise TypeError("max_age must be an exact timedelta")
         if max_age < timedelta(0):
             raise ValueError("max_age must be non-negative")
         return as_of.astimezone(timezone.utc), max_age
@@ -215,8 +215,8 @@ class MarketMirror:
         but valid provider observations may still be retained in history for audit;
         ``apply`` then keeps the live source-local projection monotonic.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         if not isinstance(event, MarketEvent):
             raise TypeError("event must be a MarketEvent")
 

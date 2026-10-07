@@ -201,8 +201,7 @@ class ForecastOutcomeFact:
     revealed_at: str
 
     def __post_init__(self) -> None:
-        if not self.forecast_id:
-            raise ValueError("forecast_id required")
+        _canonical_identity_text(self.forecast_id, field_name="forecast_id")
         if self.outcome not in (0, 1):
             raise ValueError("outcome must be 0 or 1")
         parse_iso_timestamp(self.revealed_at)
@@ -372,6 +371,9 @@ def evaluate_forecast_window(
         raise ValueError("bins must be positive")
     outcome_by_id: dict[str, ForecastOutcomeFact] = {}
     for fact in outcomes:
+        if type(fact) is not ForecastOutcomeFact:
+            raise ValueError("outcomes must contain exact ForecastOutcomeFact values")
+        ForecastOutcomeFact.__post_init__(fact)
         if fact.forecast_id in outcome_by_id:
             raise ValueError(f"duplicate outcome fact for forecast: {fact.forecast_id}")
         outcome_by_id[fact.forecast_id] = fact
@@ -380,6 +382,9 @@ def evaluate_forecast_window(
     selected: list[tuple[ForecastRecord, ForecastOutcomeFact]] = []
     selected_ids: set[str] = set()
     for record in records:
+        if type(record) is not ForecastRecord:
+            raise ValueError("records must contain exact ForecastRecord values")
+        ForecastRecord.to_dict(record)
         if record.forecast_id in selected_ids:
             raise ValueError(f"duplicate forecast_id: {record.forecast_id}")
         if not window.contains(record.generated_at):

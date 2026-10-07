@@ -4,7 +4,13 @@ from decimal import Decimal
 
 import pytest
 
-from autosport.forecasting import ForecastRecord, JsonlForecastLedger
+from autosport.forecasting import (
+    ForecastOutcomeFact,
+    ForecastRecord,
+    JsonlForecastLedger,
+    TemporalEvaluationWindow,
+    evaluate_forecast_window,
+)
 
 
 _TS = "2026-10-07T00:00:00+00:00"
@@ -136,3 +142,66 @@ def test_valid_forecast_identity_spelling_and_hash_remain_stable() -> None:
     assert payload["model_version"] == "model-version-1"
     assert payload["strategy_version"] == "strategy-version-1"
     assert len(record.canonical_hash) == 64
+
+
+@pytest.mark.parametrize("value", ("", " padded", "padded ", "line\nbreak", "\x7f", "\ud800"))
+def test_forecast_outcome_identity_rejects_noncanonical_spelling(value: str) -> None:
+    with pytest.raises(ValueError, match="forecast_id"):
+        ForecastOutcomeFact(forecast_id=value, outcome=1, revealed_at=_TS)
+
+
+def test_forecast_outcome_identity_rejects_string_subclass_before_dispatch() -> None:
+    with pytest.raises(ValueError, match="forecast_id"):
+        ForecastOutcomeFact(
+            forecast_id=_ExplosiveString("forecast-1"),
+            outcome=1,
+            revealed_at=_TS,
+        )
+
+
+def _evaluation_window() -> TemporalEvaluationWindow:
+    return TemporalEvaluationWindow(
+        window_id="window-1",
+        training_end_ts="2026-10-06T21:00:00+00:00",
+        evaluation_start_ts="2026-10-06T23:30:00+00:00",
+        evaluation_end_ts="2026-10-07T00:30:00+00:00",
+    )
+
+
+def test_evaluation_revalidates_post_init_forecast_identity() -> None:
+    record = _record(generated_at="2026-10-07T00:00:00+00:00")
+    object.__setattr__(record, "forecast_id", " forecast-1")
+    fact = ForecastOutcomeFact(
+        forecast_id="forecast-1",
+        outcome=1,
+        revealed_at="2026-10-07T00:10:00+00:00",
+    )
+
+    with pytest.raises(ValueError, match="forecast_id"):
+        evaluate_forecast_window((record,), (fact,), _evaluation_window())
+
+
+def test_evaluation_revalidates_post_init_outcome_identity() -> None:
+    record = _record(generated_at="2026-10-07T00:00:00+00:00")
+    fact = ForecastOutcomeFact(
+        forecast_id="forecast-1",
+        outcome=1,
+        revealed_at="2026-10-07T00:10:00+00:00",
+    )
+    object.__setattr__(fact, "forecast_id", " forecast-1")
+
+    with pytest.raises(ValueError, match="forecast_id"):
+        evaluate_forecast_window((record,), (fact,), _evaluation_window())
+
+
+def test_evaluation_rejects_forecast_and_outcome_subclasses_before_virtual_dispatch() -> None:
+    record = _record(generated_at="2026-10-07T00:00:00+00:00")
+    subclass_record = _ForecastRecordSubclass(**record.to_dict())
+    fact = ForecastOutcomeFact(
+        forecast_id="forecast-1",
+        outcome=1,
+        revealed_at="2026-10-07T00:10:00+00:00",
+    )
+
+    with pytest.raises(ValueError, match="exact ForecastRecord"):
+        evaluate_forecast_window((subclass_record,), (fact,), _evaluation_window())

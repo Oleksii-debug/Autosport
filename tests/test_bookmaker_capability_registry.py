@@ -123,6 +123,18 @@ def test_registry_rejects_profile_and_governance_subclasses_before_identity_prop
         registry.register_governance(hostile_governance)
 
 
+def test_governance_identity_revalidates_post_init_tamper_before_hash_or_persist(tmp_path) -> None:
+    evidence = _governance()
+    object.__setattr__(evidence, "venue_id", "book-a\n")
+
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        _ = evidence.evidence_id
+
+    registry = BookmakerCapabilityRegistry(tmp_path / "bookmaker-capabilities.json")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        registry.register_governance(evidence)
+
+
 def test_registry_reopens_and_returns_latest_version(tmp_path) -> None:
     path = tmp_path / "bookmaker-capabilities.json"
     registry = BookmakerCapabilityRegistry(path)

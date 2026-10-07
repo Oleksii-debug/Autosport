@@ -1,4 +1,5 @@
 import unittest
+from contextlib import nullcontext
 
 from autosport.causal_collector import (
     CanonicalDesktopApplication,
@@ -326,6 +327,118 @@ class Section2SourceProjectionDeltaExactTypeTests(unittest.TestCase):
         ):
             delta.validate()
         self.assertEqual(_HostileInt.compare_calls, 0)
+
+
+    def test_stream_checkpoint_rejects_hostile_identity_before_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        checkpoint = StreamCheckpoint(
+            source_id=_HostileText("source-section2"),
+            stream_epoch="epoch-section2",
+            last_cursor="cursor-section2",
+            last_position=1,
+            last_delta_id="delta-section2",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "source_id must be exact string identity text",
+        ):
+            checkpoint.validate()
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_stream_checkpoint_rejects_hostile_position_before_comparison(self) -> None:
+        _HostileInt.compare_calls = 0
+        checkpoint = StreamCheckpoint(
+            source_id="source-section2",
+            stream_epoch="epoch-section2",
+            last_cursor="cursor-section2",
+            last_position=_HostileInt(1),
+            last_delta_id="delta-section2",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "last_position must be an exact integer",
+        ):
+            checkpoint.validate()
+        self.assertEqual(_HostileInt.compare_calls, 0)
+
+    def test_desktop_receipt_rejects_hostile_identity_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        receipt = DesktopApplicationReceipt(
+            delta_id=_HostileText("delta-section2"),
+            canonical_event_digest="1" * 64,
+            receipt_id="receipt-section2",
+            applied_at="2026-10-07T03:40:04+00:00",
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "delta_id must be exact string identity text",
+        ):
+            receipt.validate()
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_desktop_consumer_rejects_delta_subclass_before_virtual_validation(self) -> None:
+        _HostileCollectorDelta.validate_calls = 0
+        hostile = object.__new__(_HostileCollectorDelta)
+        consumer = DesktopDeltaConsumer(
+            _CollectorFeed(hostile),
+            _Checkpoint(),
+            resolve_event=lambda delta: {},
+            apply_event=lambda delta, event: None,
+            lookup_application_receipt=lambda delta: None,
+        )
+        with self.assertRaisesRegex(
+            TypeError,
+            "collector feed must contain exact CollectorDelta",
+        ):
+            consumer.drain(as_of="2026-10-07T03:40:10+00:00")
+        self.assertEqual(_HostileCollectorDelta.validate_calls, 0)
+
+    def test_desktop_consumer_rejects_durable_receipt_subclass_before_virtual_validation(self) -> None:
+        _HostileReceipt.validate_calls = 0
+        delta = _delta()
+        hostile = _HostileReceipt(
+            delta_id=delta.delta_id,
+            canonical_event_digest=delta.canonical_event_digest,
+            receipt_id="receipt-section2",
+            applied_at="2026-10-07T03:40:04+00:00",
+        )
+        consumer = DesktopDeltaConsumer(
+            _CollectorFeed(delta),
+            _Checkpoint(),
+            resolve_event=lambda item: {},
+            apply_event=lambda item, event: None,
+            lookup_application_receipt=lambda item: hostile,
+        )
+        with self.assertRaisesRegex(
+            ApplicationReceiptError,
+            "lookup_application_receipt must return an exact durable DesktopApplicationReceipt",
+        ):
+            consumer.drain(as_of="2026-10-07T03:40:10+00:00")
+        self.assertEqual(_HostileReceipt.validate_calls, 0)
+
+    def test_desktop_consumer_rejects_apply_receipt_subclass_before_virtual_validation(self) -> None:
+        _HostileReceipt.validate_calls = 0
+        event = {"event_id": "event-section2"}
+        delta = _delta(canonical_event_digest=canonical_event_digest(event))
+        hostile = _HostileReceipt(
+            delta_id=delta.delta_id,
+            canonical_event_digest=delta.canonical_event_digest,
+            receipt_id="receipt-section2",
+            applied_at="2026-10-07T03:40:04+00:00",
+        )
+        consumer = DesktopDeltaConsumer(
+            _CollectorFeed(delta),
+            _Checkpoint(),
+            resolve_event=lambda item: event,
+            apply_event=lambda item, resolved: hostile,
+            lookup_application_receipt=lambda item: None,
+        )
+        with self.assertRaisesRegex(
+            ApplicationReceiptError,
+            "apply_event must return an exact durable DesktopApplicationReceipt",
+        ):
+            consumer.drain(as_of="2026-10-07T03:40:10+00:00")
+        self.assertEqual(_HostileReceipt.validate_calls, 0)
 
 
 if __name__ == "__main__":

@@ -21,6 +21,7 @@ from autosport.event_lifecycle import (
     CatalogPage,
     ContinuousEventLifecycle,
     EvidenceEligibility,
+    EventLifecycleRecord,
     EventPhase,
     canonical_event_identity,
     canonical_event_identity_aliases,
@@ -243,6 +244,133 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                     hostile,
                     discovered_at=self.START.isoformat(),
                 )
+
+    def test_catalog_event_readback_rejects_hostile_key_before_hash_dispatch(self) -> None:
+        raw = self._catalog_event().to_dict()
+
+        class HostileKey(str):
+            armed = False
+
+            def __hash__(self):
+                if self.armed:
+                    raise AssertionError(
+                        "hostile catalog event key hashed before exact admission"
+                    )
+                return str.__hash__(self)
+
+            def __eq__(self, other):
+                if self.armed:
+                    raise AssertionError(
+                        "hostile catalog event key compared before exact admission"
+                    )
+                return str.__eq__(self, other)
+
+        key = HostileKey("source_id")
+        value = raw.pop("source_id")
+        raw[key] = value
+        key.armed = True
+
+        with self.assertRaisesRegex(ValueError, "catalog event fields mismatch"):
+            CatalogEvent.from_dict(raw)
+
+    def test_catalog_event_readback_rejects_hostile_phase_before_enum_dispatch(self) -> None:
+        raw = self._catalog_event().to_dict()
+
+        class HostilePhase(str):
+            def __hash__(self):
+                raise AssertionError("hostile phase hashed before exact admission")
+
+            def __eq__(self, other):
+                raise AssertionError("hostile phase compared before exact admission")
+
+            def strip(self, *args, **kwargs):
+                raise AssertionError("hostile phase stripped before exact admission")
+
+        raw["phase"] = HostilePhase(raw["phase"])
+        with self.assertRaisesRegex(
+            ValueError,
+            "catalog event phase must be a non-empty trimmed canonical string",
+        ):
+            CatalogEvent.from_dict(raw)
+
+    def test_lifecycle_record_readback_rejects_hostile_key_before_hash_dispatch(self) -> None:
+        event = self._catalog_event()
+        identity = event.identity
+        raw = {
+            "identity": identity,
+            "source_id": event.source_id,
+            "sport": event.sport,
+            "event_id": event.event_id,
+            "phase": event.phase.value,
+            "first_discovered_at": self.START.isoformat(),
+            "last_available_at": event.available_at,
+            "scheduled_start_at": event.scheduled_start_at,
+            "completion_ref": None,
+            "settlement_ref": None,
+            "completion_discovered_at": None,
+            "settlement_discovered_at": None,
+            "last_discovered_at": self.START.isoformat(),
+        }
+
+        class HostileKey(str):
+            armed = False
+
+            def __hash__(self):
+                if self.armed:
+                    raise AssertionError(
+                        "hostile lifecycle key hashed before exact admission"
+                    )
+                return str.__hash__(self)
+
+            def __eq__(self, other):
+                if self.armed:
+                    raise AssertionError(
+                        "hostile lifecycle key compared before exact admission"
+                    )
+                return str.__eq__(self, other)
+
+        key = HostileKey("identity")
+        value = raw.pop("identity")
+        raw[key] = value
+        key.armed = True
+
+        with self.assertRaisesRegex(ValueError, "lifecycle record fields mismatch"):
+            EventLifecycleRecord.from_dict(raw)
+
+    def test_lifecycle_record_readback_rejects_hostile_phase_before_enum_dispatch(self) -> None:
+        event = self._catalog_event()
+        raw = {
+            "identity": event.identity,
+            "source_id": event.source_id,
+            "sport": event.sport,
+            "event_id": event.event_id,
+            "phase": event.phase.value,
+            "first_discovered_at": self.START.isoformat(),
+            "last_available_at": event.available_at,
+            "scheduled_start_at": event.scheduled_start_at,
+            "completion_ref": None,
+            "settlement_ref": None,
+            "completion_discovered_at": None,
+            "settlement_discovered_at": None,
+            "last_discovered_at": self.START.isoformat(),
+        }
+
+        class HostilePhase(str):
+            def __hash__(self):
+                raise AssertionError("hostile lifecycle phase hashed before exact admission")
+
+            def __eq__(self, other):
+                raise AssertionError("hostile lifecycle phase compared before exact admission")
+
+            def strip(self, *args, **kwargs):
+                raise AssertionError("hostile lifecycle phase stripped before exact admission")
+
+        raw["phase"] = HostilePhase(raw["phase"])
+        with self.assertRaisesRegex(
+            ValueError,
+            "lifecycle record phase must be a non-empty trimmed canonical string",
+        ):
+            EventLifecycleRecord.from_dict(raw)
 
     def test_lifecycle_identity_is_sport_scoped_and_deterministic(self) -> None:
         table_tennis = canonical_event_identity(

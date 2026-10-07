@@ -523,18 +523,69 @@ class MarketSettlementOutcomeAuthority:
         MarketSettlementOutcomeAuthority.__post_init__(verified_authority)
         canonical = verified_authority.to_dict()
         expected = set(canonical)
-        if type(raw) is not dict or set(raw) != expected:
+        if type(raw) is not dict:
             raise ValueError(
                 "serialized market outcome authority must contain canonical fields"
             )
+        raw_keys = tuple(raw.keys())
+        if any(type(key) is not str for key in raw_keys) or set(raw_keys) != expected:
+            raise ValueError(
+                "serialized market outcome authority must contain canonical fields"
+            )
+
+        schema = _canonical_text(
+            "serialized market outcome authority schema",
+            raw["schema"],
+        )
+        schema_version = raw["schema_version"]
         if (
-            raw["schema"] != "autosport.market_settlement_outcome_authority"
-            or raw["schema_version"] != 1
+            schema != "autosport.market_settlement_outcome_authority"
+            or type(schema_version) is not int
+            or schema_version != 1
         ):
             raise ValueError("unsupported market outcome authority schema")
-        if type(raw["selection_ids"]) is not list:
+
+        MarketOutcomeIdentity.from_dict(raw["identity"])
+
+        selection_ids = raw["selection_ids"]
+        if type(selection_ids) is not list:
             raise ValueError(
                 "serialized market outcome selection_ids must be a list"
+            )
+        for index, selection_id in enumerate(selection_ids):
+            _canonical_text(
+                f"serialized market outcome selection_ids[{index}]",
+                selection_id,
+            )
+
+        _canonical_text("serialized roster_basis", raw["roster_basis"])
+        _canonical_text(
+            "serialized settlement_semantics",
+            raw["settlement_semantics"],
+        )
+        _canonical_text("serialized source_revision", raw["source_revision"])
+        _canonical_timestamp("serialized causal_cutoff", raw["causal_cutoff"])
+        _canonical_timestamp("serialized observed_at", raw["observed_at"])
+        _canonical_sha256(
+            "serialized roster_provenance_sha256",
+            raw["roster_provenance_sha256"],
+        )
+        _canonical_sha256(
+            "serialized settlement_rules_sha256",
+            raw["settlement_rules_sha256"],
+        )
+        _canonical_sha256(
+            "serialized verification_protocol_sha256",
+            raw["verification_protocol_sha256"],
+        )
+        _canonical_sha256(
+            "serialized authority_sha256",
+            raw["authority_sha256"],
+        )
+
+        if type(raw["terminal_space_exact"]) is not bool:
+            raise ValueError(
+                "serialized terminal-space exactness must be a bool"
             )
         if (
             type(raw["terminal_state_count"]) is not int

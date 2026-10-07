@@ -42,6 +42,40 @@ def _event(**overrides: object) -> MarketEvent:
     return MarketEvent(**payload)  # type: ignore[arg-type]
 
 
+
+def test_market_event_from_dict_rejects_hostile_key_before_hash_or_equality_dispatch() -> None:
+    raw = _event().to_dict()
+
+    class HostileKey(str):
+        armed = False
+
+        def __hash__(self):
+            if self.armed:
+                raise AssertionError("hostile market-event key hashed before exact admission")
+            return str.__hash__(self)
+
+        def __eq__(self, other):
+            if self.armed:
+                raise AssertionError("hostile market-event key compared before exact admission")
+            return str.__eq__(self, other)
+
+    key = HostileKey("event_id")
+    value = raw.pop("event_id")
+    raw[key] = value
+    key.armed = True
+
+    with pytest.raises(ValueError, match="serialized market event fields mismatch"):
+        MarketEvent.from_dict(raw)
+
+
+def test_market_event_from_dict_rejects_unknown_schema_field() -> None:
+    raw = _event().to_dict()
+    raw["provider_specific_alias"] = "event-1"
+
+    with pytest.raises(ValueError, match="serialized market event fields mismatch"):
+        MarketEvent.from_dict(raw)
+
+
 @pytest.mark.parametrize(
     ("field_name", "value"),
     (

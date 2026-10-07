@@ -335,6 +335,104 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 verified_authority=reverified,
             )
 
+    def test_durable_authority_readback_rejects_hostile_key_before_hash_dispatch(self):
+        authority = self._authority()
+        reverified = self._authority()
+        raw = authority.to_dict()
+
+        class HostileKey(str):
+            armed = False
+
+            def __hash__(self):
+                if self.armed:
+                    raise AssertionError(
+                        "hostile serialized authority key hashed before exact admission"
+                    )
+                return str.__hash__(self)
+
+            def __eq__(self, other):
+                if self.armed:
+                    raise AssertionError(
+                        "hostile serialized authority key compared before exact admission"
+                    )
+                return str.__eq__(self, other)
+
+        key = HostileKey("schema")
+        schema = raw.pop("schema")
+        raw[key] = schema
+        key.armed = True
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized market outcome authority must contain canonical fields",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(
+                raw,
+                verified_authority=reverified,
+            )
+
+    def test_durable_authority_readback_rejects_hostile_scalar_before_comparison(self):
+        authority = self._authority()
+        reverified = self._authority()
+        raw = authority.to_dict()
+
+        class HostileText(str):
+            def __hash__(self):
+                raise AssertionError(
+                    "hostile serialized authority text hashed before exact admission"
+                )
+
+            def __eq__(self, other):
+                raise AssertionError(
+                    "hostile serialized authority text compared before exact admission"
+                )
+
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "hostile serialized authority text stripped before exact admission"
+                )
+
+        raw["authority_sha256"] = HostileText(raw["authority_sha256"])
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized authority_sha256 must be a non-empty canonical string",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(
+                raw,
+                verified_authority=reverified,
+            )
+
+    def test_durable_authority_readback_rejects_hostile_nested_selection_identity(self):
+        authority = self._authority()
+        reverified = self._authority()
+        raw = authority.to_dict()
+
+        class HostileSelectionId(str):
+            def __hash__(self):
+                raise AssertionError(
+                    "hostile selection identity hashed before exact admission"
+                )
+
+            def __eq__(self, other):
+                raise AssertionError(
+                    "hostile selection identity compared before exact admission"
+                )
+
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "hostile selection identity stripped before exact admission"
+                )
+
+        raw["selection_ids"][0] = HostileSelectionId(raw["selection_ids"][0])
+        with self.assertRaisesRegex(
+            ValueError,
+            r"serialized market outcome selection_ids\[0\] must be a non-empty canonical string",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(
+                raw,
+                verified_authority=reverified,
+            )
+
     def test_settlement_authority_read_boundaries_revalidate_mutated_semantics(self):
         accessors = (
             lambda authority: authority.quote_keys,

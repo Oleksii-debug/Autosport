@@ -59,6 +59,14 @@ def test_market_event_direct_constructor_rejects_string_subclass_before_dispatch
         _event(**{field_name: _ExplosiveString(value)})
 
 
+@pytest.mark.parametrize("sequence", (True, _ExplosiveInt(1)))
+def test_market_event_direct_constructor_rejects_noncanonical_sequence(
+    sequence: object,
+) -> None:
+    with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
+        _event(sequence=sequence)
+
+
 @pytest.mark.parametrize(
     "field_name",
     ("event_id", "market_id", "selection_id", "source_id"),

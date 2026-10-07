@@ -12,7 +12,12 @@ from .candidate_search import (
     ParlayCandidate,
 )
 from .domain import PaperTicket, TicketLeg, TicketStatus
-from .scenario_search import ScenarioGroup, ScenarioSearchEngine, ScenarioSearchReport
+from .scenario_search import (
+    ScenarioGroup,
+    ScenarioSearchEngine,
+    ScenarioSearchReport,
+    _validate_scenario_group_identity,
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -181,7 +186,8 @@ def _scale_standalone_expected_profit(
 
 def _quote_group_map(groups: list[ScenarioGroup]) -> dict[str, int]:
     mapping: dict[str, int] = {}
-    for group_index, group in enumerate(groups):
+    for group_index, raw_group in enumerate(groups):
+        group = _validate_scenario_group_identity(raw_group)
         for outcome in group.outcomes:
             if outcome.quote_key in mapping:
                 raise ValueError(f"quote_key appears in multiple scenario groups: {outcome.quote_key}")

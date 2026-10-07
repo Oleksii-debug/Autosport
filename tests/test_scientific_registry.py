@@ -45,6 +45,27 @@ def _question() -> ResearchQuestion:
     return ResearchQuestion("question-1", "Does candidate improve holdout ROI?", SHA_A, T0)
 
 
+class _HostileTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile scientific identity tuple iteration must not run")
+
+    def __len__(self):
+        raise AssertionError("hostile scientific identity tuple length must not run")
+
+
+def test_causal_records_rejects_record_type_subclass_before_membership_dispatch(tmp_path):
+    class HostileRecordType(str):
+        def __hash__(self):
+            raise AssertionError("hostile record_type hash dispatched before exact-type admission")
+
+        def __eq__(self, other):
+            raise AssertionError("hostile record_type equality dispatched before exact-type admission")
+
+    registry = ScientificRegistry(tmp_path / "registry.json")
+    with pytest.raises(ValueError, match="record_type must be a non-empty canonical string"):
+        registry.causal_records(HostileRecordType("DatasetSnapshot"), as_of=T1)
+
+
 def _hypothesis() -> Hypothesis:
     return Hypothesis(
         "hypothesis-1",
@@ -56,6 +77,20 @@ def _hypothesis() -> Hypothesis:
         ("max_drawdown",),
         T0,
     )
+
+
+def test_hypothesis_rejects_tuple_subclass_before_identity_iteration():
+    with pytest.raises(ValueError, match="exact tuple"):
+        Hypothesis(
+            "hypothesis-hostile",
+            "question-1",
+            "Candidate improves the frozen primary metric.",
+            "holdout ROI > champion ROI",
+            "holdout ROI <= champion ROI or any guardrail regresses",
+            "roi",
+            _HostileTuple(("max_drawdown",)),
+            T0,
+        )
 
 
 def _payload_sha(record) -> str:

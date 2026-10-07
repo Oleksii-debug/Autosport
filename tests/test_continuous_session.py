@@ -85,6 +85,40 @@ class _HostileSettlementResolution(SettlementResolution):
         return super().__getattribute__(name)
 
 
+class ContinuousSessionCanonicalIdentityTextTests(unittest.TestCase):
+    def test_settlement_identity_rejects_internal_control_aliases(self) -> None:
+        for field, value in (
+            ("event_identity", "provider-a:event\n1"),
+            ("settlement_ref", "provider-result:\x7f1"),
+            ("evidence_id", "outcome\t1"),
+        ):
+            with self.subTest(field=field):
+                kwargs = {
+                    "event_identity": "provider-a:event-1",
+                    "settlement_ref": "provider-result:1",
+                    "quote_outcomes": {"provider-a:event-1:winner:home": "win"},
+                    "evidence_id": "outcome-1",
+                    "evidence_sha256": "0" * 64,
+                    "available_at": "2026-10-07T04:00:00+00:00",
+                }
+                kwargs[field] = value
+                resolution = SettlementResolution(**kwargs)
+                with self.assertRaisesRegex(ValueError, "canonical string"):
+                    resolution.validate(as_of="2026-10-07T04:00:00+00:00")
+
+    def test_settlement_quote_key_rejects_internal_control_alias(self) -> None:
+        resolution = SettlementResolution(
+            event_identity="provider-a:event-1",
+            settlement_ref="provider-result:1",
+            quote_outcomes={"provider-a:event-1:winner:\nhome": "win"},
+            evidence_id="outcome-1",
+            evidence_sha256="0" * 64,
+            available_at="2026-10-07T04:00:00+00:00",
+        )
+        with self.assertRaisesRegex(ValueError, "canonical string"):
+            resolution.validate(as_of="2026-10-07T04:00:00+00:00")
+
+
 class ContinuousSessionSchemaVersionTests(unittest.TestCase):
     def test_restart_rejects_boolean_schema_version_without_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

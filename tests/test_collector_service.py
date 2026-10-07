@@ -231,6 +231,82 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             ):
                 self.make_service(tmp, source)
 
+    def test_run_and_feed_identity_subclasses_fail_before_text_dispatch(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "hostile collector identity strip dispatched before exact-type admission"
+                )
+
+            def __eq__(self, other):
+                raise AssertionError(
+                    "hostile collector identity equality dispatched before exact-type admission"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [()])
+            with self.assertRaisesRegex(
+                ValueError,
+                "run_id must be a non-empty string",
+            ):
+                self.make_service(tmp, source, run_id=HostileText("run-1"))
+
+            store = CollectorDeltaStore(Path(tmp) / "feed-collector.json")
+            with self.assertRaisesRegex(
+                ValueError,
+                "source_id must be a non-empty string",
+            ):
+                ReadOnlyCollectorDeltaFeed(
+                    store,
+                    source_id=HostileText("source-x"),
+                )
+
+    def test_collector_identity_controls_fail_closed(self):
+        bad_values = ("identity\\nvalue", "identity\\tvalue", "identity\\rvalue", "identity\\x7fvalue")
+
+        for bad in bad_values:
+            with self.subTest(boundary="run_id", value=repr(bad)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    page = catalog_page(1, "event-1")
+                    source = FakeCollectorSource([page], [()])
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "run_id must be a non-empty string",
+                    ):
+                        self.make_service(tmp, source, run_id=bad)
+
+            with self.subTest(boundary="feed_source_id", value=repr(bad)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    store = CollectorDeltaStore(Path(tmp) / "feed-collector.json")
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "source_id must be a non-empty string",
+                    ):
+                        ReadOnlyCollectorDeltaFeed(store, source_id=bad)
+
+            with self.subTest(boundary="source_id", value=repr(bad)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    page = catalog_page(1, "event-1")
+                    source = FakeCollectorSource([page], [()])
+                    source.source_id = bad
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "source.source_id must be a non-empty canonical string",
+                    ):
+                        self.make_service(tmp, source)
+
+            with self.subTest(boundary="stream_epoch", value=repr(bad)):
+                with tempfile.TemporaryDirectory() as tmp:
+                    page = catalog_page(1, "event-1")
+                    source = FakeCollectorSource([page], [()])
+                    source.stream_epoch = bad
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "source.stream_epoch must be a non-empty canonical string",
+                    ):
+                        self.make_service(tmp, source)
+
     def test_mutated_source_identity_subclasses_fail_before_runtime_dispatch(self):
         class HostileText(str):
             def strip(self, *args, **kwargs):

@@ -261,8 +261,13 @@ class ContinuousSessionStatus:
 
 
 def _text(value: object, field: str) -> str:
-    if type(value) is not str or not value or value.strip() != value:
-        raise ValueError(f"{field} must be a non-empty trimmed string")
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{field} must be a non-empty canonical string")
     return value
 
 

@@ -63,6 +63,66 @@ def _governance(
     )
 
 
+def test_registry_identity_text_fails_before_hostile_dispatch(tmp_path) -> None:
+    class HostileText(str):
+        def strip(self, *args, **kwargs):
+            raise AssertionError("hostile bookmaker identity strip dispatched")
+
+        def __eq__(self, other):
+            raise AssertionError("hostile bookmaker identity equality dispatched")
+
+        def __hash__(self):
+            raise AssertionError("hostile bookmaker identity hash dispatched")
+
+    registry = BookmakerCapabilityRegistry(tmp_path / "bookmaker-capabilities.json")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        registry.profile_history(HostileText("book-a"), "acct-a", "adapter-a")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        registry.governance_history("book-a\\n", "acct-a")
+
+
+def test_registry_rejects_profile_and_governance_subclasses_before_identity_properties(tmp_path) -> None:
+    class HostileProfile(BookmakerCapabilityProfile):
+        @property
+        def profile_id(self):
+            raise AssertionError("hostile profile_id dispatched before exact-type admission")
+
+    class HostileGovernance(BookmakerGovernanceEvidence):
+        @property
+        def evidence_id(self):
+            raise AssertionError("hostile evidence_id dispatched before exact-type admission")
+
+    base_profile = _profile()
+    hostile_profile = HostileProfile(
+        venue_id=base_profile.venue_id,
+        account_id=base_profile.account_id,
+        adapter_id=base_profile.adapter_id,
+        adapter_version=base_profile.adapter_version,
+        profile_version=base_profile.profile_version,
+        facts=base_profile.facts,
+        observed_at=base_profile.observed_at,
+        source_ref=base_profile.source_ref,
+        source_payload_sha256=base_profile.source_payload_sha256,
+    )
+    base_governance = _governance()
+    hostile_governance = HostileGovernance(
+        venue_id=base_governance.venue_id,
+        account_id=base_governance.account_id,
+        jurisdiction=base_governance.jurisdiction,
+        terms_version=base_governance.terms_version,
+        automation_permission=base_governance.automation_permission,
+        observed_at=base_governance.observed_at,
+        source_ref=base_governance.source_ref,
+        source_payload_sha256=base_governance.source_payload_sha256,
+    )
+
+    registry = BookmakerCapabilityRegistry(tmp_path / "bookmaker-capabilities.json")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="exact BookmakerCapabilityProfile"):
+        registry.register_profile(hostile_profile)
+    with pytest.raises(BookmakerCapabilityRegistryError, match="exact BookmakerGovernanceEvidence"):
+        registry.register_governance(hostile_governance)
+
+
 def test_registry_reopens_and_returns_latest_version(tmp_path) -> None:
     path = tmp_path / "bookmaker-capabilities.json"
     registry = BookmakerCapabilityRegistry(path)

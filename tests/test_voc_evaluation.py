@@ -116,6 +116,46 @@ class _HostileVOCPayload(dict):
         raise AssertionError("hostile VOC payload get must not run")
 
 
+class _HostileVOCScalar(str):
+    def __hash__(self):
+        raise AssertionError("hostile VOC scalar hash must not run")
+
+    def __eq__(self, other):
+        raise AssertionError("hostile VOC scalar equality must not run")
+
+
+class _HostilePairedVOCEvaluation(PairedVOCEvaluation):
+    def __getattribute__(self, name):
+        raise AssertionError("hostile paired VOC attribute dispatch must not run")
+
+
+class _HostileOutcomeDerivedVOCScore(OutcomeDerivedVOCScore):
+    def __getattribute__(self, name):
+        raise AssertionError("hostile VOC score attribute dispatch must not run")
+
+
+class _HostileVOCContext(dict):
+    def __iter__(self):
+        raise AssertionError("hostile VOC context iteration must not run")
+
+    def get(self, key, default=None):
+        raise AssertionError("hostile VOC context lookup must not run")
+
+
+def test_paired_voc_identity_rejects_internal_control_aliases():
+    for field, value in (
+        ("evaluation_id", "voc\neval-1"),
+        ("task_class", "forecast\talias"),
+        ("holdout_access_id", "holdout\x7f1"),
+    ):
+        with unittest.TestCase().subTest(field=field):
+            with unittest.TestCase().assertRaisesRegex(
+                VOCEvaluationError,
+                "canonical string",
+            ):
+                evaluation(**{field: value})
+
+
 def test_paired_voc_payload_rejects_mapping_subclass_before_dispatch():
     hostile = _HostileVOCPayload(evaluation().payload())
     with unittest.TestCase().assertRaisesRegex(
@@ -131,6 +171,27 @@ def test_paired_voc_payload_rejects_unknown_schema_fields():
     with unittest.TestCase().assertRaisesRegex(
         VOCEvaluationError,
         "schema fields mismatch",
+    ):
+        PairedVOCEvaluation.from_payload(payload)
+
+
+def test_paired_voc_payload_rejects_numeric_decimal_wire_alias():
+    payload = evaluation().payload()
+    assert payload["baseline_utility"] == "1"
+    payload["baseline_utility"] = 1
+    with unittest.TestCase().assertRaisesRegex(
+        VOCEvaluationError,
+        "baseline_utility.*exact string",
+    ):
+        PairedVOCEvaluation.from_payload(payload)
+
+
+def test_paired_voc_payload_rejects_hostile_provenance_before_enum_dispatch():
+    payload = evaluation().payload()
+    payload["provenance"] = _HostileVOCScalar(payload["provenance"])
+    with unittest.TestCase().assertRaisesRegex(
+        VOCEvaluationError,
+        "provenance.*exact string",
     ):
         PairedVOCEvaluation.from_payload(payload)
 
@@ -245,6 +306,32 @@ class FixtureCanonicalAuthorityResolver:
             ),
             source_artifact_sha256=SHA_D,
         )
+
+class _HostileResolvedEvaluationResolver(FixtureCanonicalAuthorityResolver):
+    def resolve(self, evaluation, *, as_of):
+        return object.__new__(_HostilePairedVOCEvaluation)
+
+
+class _HostileScoreResolver(FixtureCanonicalAuthorityResolver):
+    def resolve_score(self, evaluation, *, as_of):
+        return object.__new__(_HostileOutcomeDerivedVOCScore)
+
+
+class _HostileContextResolver(FixtureCanonicalAuthorityResolver):
+    def resolve_decision_context(self, context_sha256, *, as_of):
+        return _HostileVOCContext(
+            {
+                "request_id": "source:hostile",
+                "decision_input_sha256": SHA_E,
+                "task_class": "forecast",
+                "sport_id": "table-tennis",
+                "league_id": "league-1",
+                "regime_id": "regime-1",
+                "urgency_id": "routine",
+                "contradiction_state": "none",
+            }
+        )
+
 
 def candidates():
     return (
@@ -1389,6 +1476,71 @@ class PairedVOCEvaluationTests(unittest.TestCase):
         )
         self.assertEqual(decision.tier, ComputeTier.LOCAL)
         self.assertIn("simulated", decision.reason)
+
+
+def test_voc_store_record_rejects_evaluation_subclass_before_dispatch():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = VOCEvaluationStore(Path(tmp) / "voc.json")
+        hostile = object.__new__(_HostilePairedVOCEvaluation)
+        with unittest.TestCase().assertRaisesRegex(
+            TypeError,
+            "exact PairedVOCEvaluation",
+        ):
+            store.record(hostile)
+
+
+def test_voc_store_require_rejects_resolver_evaluation_subclass_before_dispatch():
+    with tempfile.TemporaryDirectory() as tmp:
+        resolver = _HostileResolvedEvaluationResolver()
+        value = evaluation()
+        store = VOCEvaluationStore(
+            Path(tmp) / "voc.json",
+            canonical_authority_resolver=resolver,
+        )
+        store.record(value)
+        with unittest.TestCase().assertRaisesRegex(
+            VOCEvaluationError,
+            "returned invalid evaluation",
+        ):
+            store.require(
+                value.evaluation_id,
+                evaluation_sha256=value.evaluation_sha256,
+                as_of=T2,
+            )
+
+
+def test_voc_store_require_score_rejects_score_subclass_before_dispatch():
+    with tempfile.TemporaryDirectory() as tmp:
+        resolver = _HostileScoreResolver()
+        value = evaluation()
+        resolver.register(value)
+        store = VOCEvaluationStore(
+            Path(tmp) / "voc.json",
+            canonical_authority_resolver=resolver,
+        )
+        store.record(value)
+        with unittest.TestCase().assertRaisesRegex(
+            VOCEvaluationError,
+            "outcome-derived VOC score is missing",
+        ):
+            store.require_score(
+                value.evaluation_id,
+                evaluation_sha256=value.evaluation_sha256,
+                as_of=T2,
+            )
+
+
+def test_voc_store_rejects_context_mapping_subclass_before_iteration():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = VOCEvaluationStore(
+            Path(tmp) / "voc.json",
+            canonical_authority_resolver=_HostileContextResolver(),
+        )
+        with unittest.TestCase().assertRaisesRegex(
+            VOCEvaluationError,
+            "decision context schema is invalid",
+        ):
+            store.require_decision_context(SHA_A, as_of=T2)
 
 
 if __name__ == "__main__":

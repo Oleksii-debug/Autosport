@@ -354,9 +354,10 @@ class OutcomeAvailabilityGlobalStrictFenceTests(unittest.TestCase):
 
     def test_resolver_rejects_revision_subclass_before_causal_dispatch(self) -> None:
         class HostileRevision(TrustedOutcomeRevision):
-            @property
-            def first_available_at(self):
-                raise AssertionError("revision subclass dispatch must not execute")
+            def __getattribute__(self, name: str):
+                if name == "first_available_at":
+                    raise AssertionError("revision subclass dispatch must not execute")
+                return super().__getattribute__(name)
 
         revision = HostileRevision(
             revision=1,

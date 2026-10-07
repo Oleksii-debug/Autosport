@@ -198,6 +198,73 @@ class DecisionLedgerTests(unittest.TestCase):
             ):
                 ledger.verify_integrity()
 
+    def test_decision_id_rejects_noncanonical_spelling_at_construction(self):
+        class _TrapStr(str):
+            def strip(self, *args: object, **kwargs: object) -> str:
+                raise AssertionError("decision identity must reject str subclass before dispatch")
+
+        for decision_id in (
+            " decision-1",
+            "decision-1 ",
+            "decision\x00forged",
+            "decision\x1fforged",
+            _TrapStr("decision-1"),
+            "decision-\ud800",
+        ):
+            with self.subTest(decision_id=repr(decision_id)):
+                with self.assertRaisesRegex(
+                    DecisionLedgerIntegrityError,
+                    "decision_id is invalid",
+                ):
+                    self._record(decision_id=decision_id)
+
+    def test_forged_padded_decision_id_fails_restart_integrity(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            record = self._record(decision_id="decision-1").to_dict()
+            record["decision_id"] = " decision-1 "
+            canonical = json.dumps(
+                record,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            )
+            envelope = json.dumps(
+                {
+                    "sha256": hashlib.sha256(canonical.encode("utf-8")).hexdigest(),
+                    "record": record,
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            path.write_text(envelope + "\n", encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                DecisionLedgerIntegrityError,
+                "decision_id is invalid at line 1",
+            ):
+                JsonlDecisionLedger(path).verify_integrity()
+
+    def test_economic_decision_lookup_rejects_noncanonical_decision_id(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "decisions.jsonl"
+            goal = self._economic_goal()
+            record = self._economic_record(decision_id="decision-1")
+            JsonlDecisionLedger(path).append_economic(record, goal)
+
+            for decision_id in (" decision-1", "decision-1 ", "decision\x00forged"):
+                with self.subTest(decision_id=repr(decision_id)):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        "decision_id must be exact canonical text",
+                    ):
+                        JsonlDecisionLedger(path).verified_economic_decision(
+                            decision_id,
+                            goal,
+                        )
+
     def test_append_rejects_duplicate_decision_identity(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "decisions.jsonl"

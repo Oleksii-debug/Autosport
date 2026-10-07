@@ -921,7 +921,12 @@ class ContinuousEventLifecycle:
                 and observed <= cutoff
                 and observed <= ingested <= cutoff
             ):
-                availability.append(ingested)
+                product_available = _instant(
+                    store.event_product_available_at(event),
+                    "product_available_at",
+                )
+                if product_available <= cutoff:
+                    availability.append(max(ingested, product_available))
         first = min(availability) if availability else None
         threshold = cutoff - required_history
         if first is None or first > threshold:

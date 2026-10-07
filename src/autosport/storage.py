@@ -3142,6 +3142,94 @@ class SQLiteMarketStore:
                     raise
         return sorted(events, key=_event_order_key)
 
+    def event_product_available_at(self, event: MarketEvent) -> str:
+        """Return independently proven product availability for one persisted event."""
+
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
+        expected_payload = _validate_incoming_event(event)
+        append_authority = self._market_append_authority()
+        availability_authority = self._market_append_availability_authority()
+
+        with self._market_append_issuance_lock(append_authority):
+            with self._connection_lock:
+                # Crash recovery may need to publish a conservative availability
+                # witness for a committed append before this read can be answered.
+                self._ensure_market_append_availability_authority(
+                    append_authority
+                )
+                self.connection.execute("BEGIN")
+                try:
+                    _validate_canonical_table(self.connection, "market_events")
+                    self._validate_causal_replay_state()
+                    self._require_product_issued_positive_history(
+                        append_authority
+                    )
+                    availability_rows = (
+                        self._validated_append_availability_rows(
+                            append_authority
+                        )
+                    )
+                    self._recover_append_availability_authority(
+                        availability_authority,
+                        availability_rows,
+                    )
+
+                    qualified_columns = ",".join(
+                        f"m.{column}" for column in _HISTORY_COLUMNS
+                    )
+                    row = self.connection.execute(
+                        f"""SELECT c.append_generation, {qualified_columns}
+                            FROM market_event_commit_order AS c
+                            JOIN market_events AS m
+                              ON m.dedupe_key = c.dedupe_key
+                            WHERE c.dedupe_key=?""",
+                        (event.dedupe_key,),
+                    ).fetchone()
+                    if row is None or len(row) != len(_HISTORY_COLUMNS) + 1:
+                        raise ValueError(
+                            "market event lacks canonical persisted append history"
+                        )
+                    generation = row[0]
+                    if type(generation) is not int or generation < 0:
+                        raise ValueError(
+                            "market event append generation is invalid"
+                        )
+                    persisted = _event_from_history_row(tuple(row[1:]))
+                    if _canonical_payload(persisted) != expected_payload:
+                        raise ValueError(
+                            "market event does not match canonical persisted history"
+                        )
+
+                    boundary_index = next(
+                        (
+                            index
+                            for index, availability in enumerate(
+                                availability_rows
+                            )
+                            if generation <= availability[0]
+                        ),
+                        None,
+                    )
+                    if boundary_index is None:
+                        raise MonotonicAuthorityRollbackError(
+                            "market event lacks durable product availability evidence"
+                        )
+                    availability_prefix = availability_rows[
+                        : boundary_index + 1
+                    ]
+                    self._require_append_availability_authority_bindings(
+                        availability_authority,
+                        availability_prefix,
+                        exact=False,
+                    )
+                    available_at = availability_prefix[-1][3]
+                    self._commit_stable_database_path()
+                except BaseException:
+                    self.connection.rollback()
+                    raise
+        return available_at
+
     def replay_events_at_frozen_cutoff(self, *, as_of: str) -> list[MarketEvent]:
         """Return the exact independently issued durable history cutoff for as_of.
 

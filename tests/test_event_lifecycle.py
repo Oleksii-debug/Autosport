@@ -857,6 +857,46 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_backdated_ingest_cannot_fabricate_required_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+            event = self._catalog_event(phase=EventPhase.LIVE, available_offset=0)
+            lifecycle.apply_page(
+                self._page(1, event),
+                discovered_at=self.START.isoformat(),
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                cutoff = self.START + timedelta(seconds=10)
+                self._product_now = self.START + timedelta(seconds=9)
+                backdated = self._event(
+                    event_id=self._stored_event_id("event-1"),
+                    observed_offset=0,
+                    ingest_offset=0,
+                )
+                self.assertTrue(store.append(backdated))
+
+                assessment = self._assess_evidence(
+                    lifecycle,
+                    event.identity,
+                    store,
+                    as_of=cutoff.isoformat(),
+                    required_history=timedelta(seconds=5),
+                )
+
+                self.assertEqual(
+                    assessment.status,
+                    EvidenceEligibility.WAIT_EVIDENCE,
+                )
+                self.assertEqual(
+                    assessment.evidence_first_available_at,
+                    (self.START + timedelta(seconds=9)).isoformat(),
+                )
+                self.assertIn("cannot backfill", assessment.detail)
+            finally:
+                store.close()
+
     def test_inverted_local_clock_does_not_count_as_causal_history(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

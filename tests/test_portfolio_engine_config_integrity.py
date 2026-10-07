@@ -168,6 +168,57 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "portfolio tickets must be an exact list"):
             PortfolioEngine().analyse(hostile)
 
+    def test_settlement_map_rejects_control_and_non_utf8_quote_aliases(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+        invalid_keys = (
+            "event\\x00|winner|alice",
+            "event|winner|\\ud800",
+        )
+
+        for invalid_key in invalid_keys:
+            with self.subTest(invalid_key=repr(invalid_key)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "settlement_by_quote keys must be non-empty canonical strings",
+                ):
+                    PortfolioEngine.scenario_profit_settlements(
+                        [ticket],
+                        {
+                            leg.quote_key: "win",
+                            invalid_key: "loss",
+                        },
+                    )
+
+    def test_settlement_map_rejects_quote_key_subclass_before_strip_dispatch(self) -> None:
+        dispatch_calls = []
+
+        class HostileQuoteKey(str):
+            def strip(self, *args, **kwargs):
+                dispatch_calls.append("strip")
+                raise AssertionError(
+                    "hostile settlement quote identity dispatched before exact-type admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement_by_quote keys must be non-empty canonical strings",
+        ):
+            PortfolioEngine.scenario_profit_settlements(
+                [ticket],
+                {
+                    leg.quote_key: "win",
+                    HostileQuoteKey("other|winner|bob"): "loss",
+                },
+            )
+
+        self.assertEqual(dispatch_calls, [])
+
     def test_portfolio_decimal_subclasses_fail_before_virtual_dispatch(self) -> None:
         class HostileDecimal(Decimal):
             def is_finite(self):

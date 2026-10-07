@@ -91,11 +91,17 @@ def _make_ticket_opening_authority_registry():
                     "PaperBook byte-loaded snapshot lacks product-issued opening authority"
                 )
             expected = dict(current)
-        if set(expected) != set(book.tickets):
+        tickets = getattr(book, "tickets", None)
+        if type(tickets) is not dict:
+            raise ValueError("PaperBook ticket mapping must be an exact dict")
+        ticket_ids = tuple(tickets.keys())
+        if any(type(ticket_id) is not str for ticket_id in ticket_ids):
+            raise ValueError("PaperBook ticket identity keys must be exact strings")
+        if frozenset(ticket_ids) != frozenset(expected):
             raise ValueError(
                 "PaperBook ticket set changed outside product-issued opening authority"
             )
-        for ticket_id, ticket in book.tickets.items():
+        for ticket_id, ticket in tickets.items():
             if expected[ticket_id] != _ticket_opening_commitment(ticket):
                 raise ValueError(
                     "PaperBook ticket opening economic identity changed after admission"
@@ -110,7 +116,14 @@ def _make_ticket_opening_authority_registry():
                 )
             expected = dict(current)
         candidate_tickets = getattr(candidate_book, "tickets", None)
-        if type(candidate_tickets) is not dict or set(candidate_tickets) != set(expected):
+        if type(candidate_tickets) is not dict:
+            raise ValueError("PaperBook serialized candidate ticket mapping must be an exact dict")
+        candidate_ticket_ids = tuple(candidate_tickets.keys())
+        if any(type(ticket_id) is not str for ticket_id in candidate_ticket_ids):
+            raise ValueError(
+                "PaperBook serialized candidate ticket identity keys must be exact strings"
+            )
+        if frozenset(candidate_ticket_ids) != frozenset(expected):
             raise ValueError(
                 "PaperBook serialized candidate ticket set differs from product-issued opening authority"
             )
@@ -148,9 +161,28 @@ def _paperbook_causal_history_snapshot(book: object) -> tuple[object, ...]:
     settlement_times = getattr(book, "_settlement_times", None)
     if type(lifecycle) is not list or type(settlement_times) is not dict:
         raise ValueError("PaperBook causal history state is not canonical")
+
+    for entry in lifecycle:
+        if type(entry) is not tuple or len(entry) != 4:
+            raise ValueError("PaperBook lifecycle entry must be an exact four-item tuple")
+        action, ticket_id, winners, voids = entry
+        if type(action) is not str or type(ticket_id) is not str:
+            raise ValueError("PaperBook lifecycle action/ticket identities must be exact strings")
+        if (
+            type(winners) is not tuple
+            or type(voids) is not tuple
+            or any(type(value) is not str for value in winners)
+            or any(type(value) is not str for value in voids)
+        ):
+            raise ValueError("PaperBook lifecycle quote identities must be exact string tuples")
+
+    settlement_items = tuple(settlement_times.items())
+    if any(type(ticket_id) is not str for ticket_id, _ in settlement_items):
+        raise ValueError("PaperBook settlement history ticket identity keys must be exact strings")
+
     return (
         tuple(lifecycle),
-        tuple(sorted(settlement_times.items())),
+        tuple(sorted(settlement_items)),
     )
 
 
@@ -468,6 +500,7 @@ class PaperBook:
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
         self._validate_loaded_state(self)
+        ticket_id = self._require_canonical_text(ticket_id, "ticket_id")
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
@@ -632,6 +665,8 @@ class PaperBook:
         text = cls._require_utf8_string(value, label)
         if not text or text.strip() != text:
             raise ValueError(f"PaperBook {label} must be a non-empty trimmed string")
+        if any(ord(character) < 32 or ord(character) == 127 for character in text):
+            raise ValueError(f"PaperBook {label} must not contain control characters")
         if forbid_quote_key_delimiter and "|" in text:
             raise ValueError(f"PaperBook {label} must not contain quote-key delimiter '|'")
         return text

@@ -98,8 +98,17 @@ def _require_canonical_sha256(name: str, value: object) -> str:
 
 
 def _require_nonempty_string(name: str, value: object) -> str:
-    if type(value) is not str or not value:
-        raise ValueError(f"{name} must be an exact non-empty string")
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{name} must be an exact non-empty string with canonical spelling")
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be an exact non-empty string with canonical UTF-8 spelling") from exc
     return value
 
 

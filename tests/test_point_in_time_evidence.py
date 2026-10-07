@@ -606,6 +606,41 @@ def test_feature_provenance_rejects_boolean_schema_version_alias() -> None:
         FeatureArtifactProvenance.from_payload(payload)
 
 
+def test_feature_provenance_rejects_hostile_mapping_key_before_hash_dispatch() -> None:
+    dispatch_calls: list[str] = []
+
+    class HostileKey(str):
+        armed = False
+
+        def __hash__(self) -> int:
+            if self.armed:
+                dispatch_calls.append("hash")
+                raise AssertionError("hostile provenance key hashed before exact admission")
+            return str.__hash__(self)
+
+        def __eq__(self, other: object) -> bool:
+            if self.armed:
+                dispatch_calls.append("eq")
+                raise AssertionError("hostile provenance key compared before exact admission")
+            return str.__eq__(self, other)
+
+    provenance = FeatureArtifactProvenance.issue(
+        dataset_snapshot=_snapshot(),
+        feature_set=_feature_set(),
+        feature_payload=_FEATURE_PAYLOAD,
+    )
+    hostile = provenance.to_payload()
+    key = HostileKey("dataset_snapshot_id")
+    value = hostile.pop("dataset_snapshot_id")
+    hostile[key] = value
+    key.armed = True
+
+    with pytest.raises(PointInTimeEvidenceError, match="fields mismatch"):
+        FeatureArtifactProvenance.from_payload(hostile)
+
+    assert dispatch_calls == []
+
+
 def test_holdout_ledger_rejects_boolean_schema_version_without_rewrite(tmp_path) -> None:
     path = tmp_path / "holdout_consumption.json"
     snapshot = _snapshot()

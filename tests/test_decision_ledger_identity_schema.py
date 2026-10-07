@@ -77,6 +77,80 @@ def test_constructor_rejects_noncanonical_top_level_identity_text(
         _record(**{field_name: value})
 
 
+def test_constructor_rejects_hostile_payload_key_before_hash_dispatch() -> None:
+    dispatch_calls: list[str] = []
+
+    class HostilePayloadKey(str):
+        armed = False
+
+        def __hash__(self) -> int:
+            if self.armed:
+                dispatch_calls.append("hash")
+                raise AssertionError("hostile payload key hashed before exact admission")
+            return str.__hash__(self)
+
+        def __eq__(self, other: object) -> bool:
+            if self.armed:
+                dispatch_calls.append("eq")
+                raise AssertionError("hostile payload key compared before exact admission")
+            return str.__eq__(self, other)
+
+    key = HostilePayloadKey("material_action_id")
+    payload: dict[object, object] = {}
+    payload[key] = "action-1"
+    key.armed = True
+
+    with pytest.raises(ValueError, match="mapping keys must use exact"):
+        _record(payload=payload)
+
+    assert dispatch_calls == []
+
+
+def test_constructor_rejects_mapping_subclass_before_virtual_iteration() -> None:
+    class HostileMapping(dict):
+        def items(self):
+            raise AssertionError("mapping subclass items must not execute")
+
+    with pytest.raises(ValueError, match="mappings must be exact dictionaries"):
+        _record(payload=HostileMapping({"material_action_id": "action-1"}))
+
+
+def test_constructor_accepts_already_frozen_canonical_payload() -> None:
+    original = _record(payload={"x": 1, "items": ["a", "b"]})
+    cloned = _record(payload=original.payload)
+
+    assert cloned.to_dict()["payload"] == {"x": 1, "items": ["a", "b"]}
+
+
+def test_append_rejects_tampered_payload_mapping_before_virtual_dispatch(
+    tmp_path: Path,
+) -> None:
+    dispatch_calls: list[str] = []
+
+    class HostileMapping(dict):
+        def items(self):
+            dispatch_calls.append("items")
+            raise AssertionError("tampered payload items must not execute")
+
+        def __contains__(self, key: object) -> bool:
+            dispatch_calls.append("contains")
+            raise AssertionError("tampered payload membership must not execute")
+
+        def get(self, key: object, default: object = None) -> object:
+            dispatch_calls.append("get")
+            raise AssertionError("tampered payload get must not execute")
+
+    record = _record()
+    object.__setattr__(record, "payload", HostileMapping({"x": 1}))
+    path = tmp_path / "decisions.jsonl"
+
+    with pytest.raises(ValueError, match="frozen decision payload mappings must be exact"):
+        JsonlDecisionLedger(path).append(record)
+
+    assert dispatch_calls == []
+    assert not path.exists()
+
+
 def test_append_revalidates_tampered_top_level_identity_before_virtual_dispatch(
     tmp_path: Path,
 ) -> None:

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -63,6 +64,12 @@ def _sha256(value: object, name: str) -> str:
 
 def _iso(value: object, name: str) -> str:
     text = _text(value, name)
+    for match in re.finditer(r"[.,]([0-9]+)", text):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(f"{name} precision finer than microseconds is unsupported")
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:

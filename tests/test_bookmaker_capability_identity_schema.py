@@ -29,6 +29,19 @@ class _TrapStr(str):
         raise AssertionError("str subclass encode must not execute")
 
 
+class _TrapFrozenSet(frozenset):
+    def __iter__(self):
+        raise AssertionError("frozenset subclass iteration must not execute")
+
+    def __contains__(self, item: object) -> bool:
+        raise AssertionError("frozenset subclass membership must not execute")
+
+
+class _TrapTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("tuple subclass iteration must not execute")
+
+
 def _facts(*caps: BookmakerCapability) -> tuple[BookmakerCapabilityFact, ...]:
     return tuple(
         BookmakerCapabilityFact(cap, BookmakerCapabilityState.SUPPORTED)
@@ -132,6 +145,45 @@ def test_account_position_identifiers_reject_non_utf8_aliases(
 ) -> None:
     with pytest.raises(BookmakerCapabilityError, match="UTF-8 identity text"):
         factory(**{field_name: "identity\ud800"})
+
+
+def test_snapshot_rejects_observed_capabilities_subclass_before_dispatch() -> None:
+    observed = _TrapFrozenSet(
+        {
+            BookmakerCapability.BALANCE_READ,
+            BookmakerCapability.OPEN_POSITIONS_READ,
+        }
+    )
+
+    with pytest.raises(BookmakerCapabilityError, match="exact frozenset"):
+        BookmakerAccountSnapshot(
+            profile=_profile(),
+            observed_capabilities=observed,
+            observed_at=TS,
+            balance=_balance(),
+            open_positions=(_position(),),
+        )
+
+
+@pytest.mark.parametrize("field_name", ("open_positions", "settled_positions"))
+def test_snapshot_rejects_position_tuple_subclass_before_dispatch(
+    field_name: str,
+) -> None:
+    values: dict[str, object] = {
+        "profile": _profile(),
+        "observed_capabilities": frozenset(
+            {
+                BookmakerCapability.BALANCE_READ,
+                BookmakerCapability.OPEN_POSITIONS_READ,
+            }
+        ),
+        "observed_at": TS,
+        "balance": _balance(),
+    }
+    values[field_name] = _TrapTuple((_position(),))
+
+    with pytest.raises(BookmakerCapabilityError, match="exact tuple"):
+        BookmakerAccountSnapshot(**values)  # type: ignore[arg-type]
 
 
 def test_snapshot_revalidates_profile_identity_after_post_init_tamper() -> None:

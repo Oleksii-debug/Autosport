@@ -392,9 +392,9 @@ class BookmakerAccountSnapshot:
             snapshot_at,
             "profile",
         )
-        if not isinstance(self.observed_capabilities, frozenset):
+        if type(self.observed_capabilities) is not frozenset:
             raise BookmakerCapabilityError(
-                "observed_capabilities must be a frozenset"
+                "observed_capabilities must be an exact frozenset"
             )
         for capability in self.observed_capabilities:
             if not isinstance(capability, BookmakerCapability):
@@ -467,8 +467,8 @@ class BookmakerAccountSnapshot:
         field: str,
         snapshot_at: datetime,
     ) -> None:
-        if not isinstance(positions, tuple):
-            raise BookmakerCapabilityError(f"{field} must be a tuple")
+        if type(positions) is not tuple:
+            raise BookmakerCapabilityError(f"{field} must be an exact tuple")
         if positions and capability not in self.observed_capabilities:
             raise BookmakerCapabilityError(
                 f"{field} cannot contain observations unless {capability.value} "

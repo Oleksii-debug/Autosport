@@ -1211,6 +1211,10 @@ class ScientificRegistry:
         """Private canonical append authority retained for frozen cross-module callers."""
 
         entry = self._entry(record)
+        if entry["record_type"] == "PromotionDecision":
+            raise PromotionEvidenceError(
+                "promotion decisions must be recorded through record_promotion"
+            )
         if type(allow_repeat_experiment) is not bool:
             raise ValueError("allow_repeat_experiment must be boolean")
         with WorkspaceEconomicLock(self.path.parent):

@@ -329,6 +329,68 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 _verification_token=authority._verification_token,
             )
 
+    def test_raw_assessment_rejects_identity_subclass_before_market_type_dispatch(self):
+        base = self._raw_identity()
+
+        class HostileIdentity(MarketOutcomeIdentity):
+            __slots__ = ("_armed",)
+
+            def __getattribute__(self, name):
+                if name == "market_type":
+                    try:
+                        armed = object.__getattribute__(self, "_armed")
+                    except AttributeError:
+                        armed = False
+                    if armed:
+                        raise AssertionError(
+                            "assessment identity member dispatch must not execute before exact admission"
+                        )
+                return super().__getattribute__(name)
+
+        hostile = HostileIdentity(
+            sport=base.sport,
+            event_id=base.event_id,
+            market_id=base.market_id,
+            source_id=base.source_id,
+            market_type=base.market_type,
+        )
+        object.__setattr__(hostile, "_armed", True)
+
+        with self.assertRaisesRegex(TypeError, "identity must be MarketOutcomeIdentity"):
+            assess_market_outcome_authority(
+                identity=hostile,
+                selection_ids=("away", "home"),
+                roster_basis=OutcomeRosterBasis.PROVIDER_MARKET_DEFINITION,
+                settlement_semantics=SettlementSemantics.EXCLUSIVE_SINGLE_WINNER,
+                source_revision="revision-1",
+                causal_cutoff="2026-09-18T15:00:00Z",
+                observed_at="2026-09-18T15:00:01Z",
+                roster_provenance_sha256="a" * 64,
+                settlement_rules_sha256="b" * 64,
+                verification_protocol_sha256="c" * 64,
+            )
+
+    def test_assessment_revalidates_mutated_exact_identity_before_status_logic(self):
+        assessment = self._raw_assessment()
+
+        class HostileSourceId(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "mutated assessment identity must fail before virtual strip dispatch"
+                )
+
+        object.__setattr__(
+            assessment.identity,
+            "source_id",
+            HostileSourceId(assessment.identity.source_id),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "market outcome source_id must be a non-empty canonical string",
+        ):
+            type(assessment).__post_init__(assessment)
+
     def test_authoritative_search_revalidates_mutated_exact_identity_before_sort(self):
         authority = self._authority(("away", "home"))
 

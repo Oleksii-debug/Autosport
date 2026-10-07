@@ -283,6 +283,155 @@ def test_registry_mutation_ingress_revalidates_tampered_exact_records(
         registry.add_lineage(bad_lineage)
 
 
+def test_registry_admission_detaches_identity_records_from_caller_references(
+    tmp_path: Path,
+) -> None:
+    from autosport.participant_identity import (
+        EntityLineage,
+        LineageRelation,
+        RosterMembership,
+    )
+
+    path = tmp_path / "identity.json"
+    registry = ParticipantIdentityRegistry.initialize_pristine(path)
+    team_a = _identity("team:a", EntityKind.TEAM)
+    team_b = _identity("team:b", EntityKind.TEAM)
+    registry.add_entity(team_a)
+    registry.add_entity(team_b)
+
+    alias = AliasRecord(
+        source_id="provider-a",
+        alias="team-a",
+        entity_id="team:a",
+        valid_from=T0,
+        valid_until=None,
+        available_at=T0,
+        evidence_sha256=SHA,
+        recorded_at=T0,
+    )
+    membership = RosterMembership(
+        event_id="event-1",
+        source_id="provider-a",
+        entity_id="team:a",
+        member_from=T0,
+        member_until=None,
+        available_at=T0,
+        evidence_sha256=SHA,
+    )
+    lineage = EntityLineage(
+        predecessor_entity_id="team:a",
+        successor_entity_id="team:b",
+        relation=LineageRelation.SUPERSEDES,
+        effective_from=T0,
+        available_at=T0,
+        recorded_at=T0,
+        evidence_sha256=SHA,
+    )
+    registry.add_alias(alias)
+    registry.add_roster_membership(membership)
+    registry.add_lineage(lineage)
+
+    object.__setattr__(team_a, "entity_id", "team:poison")
+    object.__setattr__(alias, "alias", "poison")
+    object.__setattr__(membership, "event_id", "event:poison")
+    object.__setattr__(lineage, "successor_entity_id", "team:poison")
+
+    # Force a later persistence cycle. None of the admitted authority records may
+    # follow the caller-owned object references after admission.
+    registry.add_entity(_identity("team:c", EntityKind.TEAM))
+
+    reopened = ParticipantIdentityRegistry(path)
+    assert reopened.resolve_alias("provider-a", "team-a", as_of=T1).entity_id == "team:a"
+    assert {
+        entity.entity_id
+        for entity in reopened.roster_at("event-1", "provider-a", as_of=T1)
+    } == {"team:a"}
+    assert reopened.lineage_at("team:a", as_of=T1) == (
+        EntityLineage(
+            predecessor_entity_id="team:a",
+            successor_entity_id="team:b",
+            relation=LineageRelation.SUPERSEDES,
+            effective_from=T0,
+            available_at=T0,
+            recorded_at=T0,
+            evidence_sha256=SHA,
+        ),
+    )
+
+
+def test_registry_egress_returns_detached_identity_snapshots(tmp_path: Path) -> None:
+    from autosport.participant_identity import (
+        EntityLineage,
+        LineageRelation,
+        RosterMembership,
+    )
+
+    path = tmp_path / "identity.json"
+    registry = ParticipantIdentityRegistry.initialize_pristine(path)
+    registry.add_entity(_identity("team:a", EntityKind.TEAM))
+    registry.add_entity(_identity("team:b", EntityKind.TEAM))
+    alias = AliasRecord(
+        source_id="provider-a",
+        alias="team-a",
+        entity_id="team:a",
+        valid_from=T0,
+        valid_until=None,
+        available_at=T0,
+        evidence_sha256=SHA,
+        recorded_at=T0,
+    )
+    registry.add_alias(alias)
+    registry.add_roster_membership(
+        RosterMembership(
+            event_id="event-1",
+            source_id="provider-a",
+            entity_id="team:a",
+            member_from=T0,
+            member_until=None,
+            available_at=T0,
+            evidence_sha256=SHA,
+        )
+    )
+    registry.add_lineage(
+        EntityLineage(
+            predecessor_entity_id="team:a",
+            successor_entity_id="team:b",
+            relation=LineageRelation.SUPERSEDES,
+            effective_from=T0,
+            available_at=T0,
+            recorded_at=T0,
+            evidence_sha256=SHA,
+        )
+    )
+
+    returned_alias = registry.resolve_alias_record(
+        "provider-a", "team-a", as_of=T1
+    )
+    returned_entity = registry.resolve_alias("provider-a", "team-a", as_of=T1)
+    returned_roster_entity = registry.roster_at(
+        "event-1", "provider-a", as_of=T1
+    )[0]
+    returned_lineage = registry.lineage_at("team:a", as_of=T1)[0]
+
+    object.__setattr__(returned_alias, "alias", "poison")
+    object.__setattr__(returned_entity, "entity_id", "team:poison")
+    object.__setattr__(returned_roster_entity, "entity_id", "team:poison")
+    object.__setattr__(returned_lineage, "successor_entity_id", "team:poison")
+
+    assert registry.resolve_alias_record(
+        "provider-a", "team-a", as_of=T1
+    ).alias == "team-a"
+    assert registry.resolve_alias(
+        "provider-a", "team-a", as_of=T1
+    ).entity_id == "team:a"
+    assert registry.roster_at(
+        "event-1", "provider-a", as_of=T1
+    )[0].entity_id == "team:a"
+    assert registry.lineage_at(
+        "team:a", as_of=T1
+    )[0].successor_entity_id == "team:b"
+
+
 @pytest.mark.parametrize(
     "entity_id",
     (

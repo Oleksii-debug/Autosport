@@ -172,6 +172,88 @@ class EvidenceIdentitySchemaTests(unittest.TestCase):
                 evidence=(item,),
             )
 
+    def test_payload_rejects_mapping_subclass_before_items_dispatch(self):
+        dispatch_calls = []
+
+        class HostilePayload(dict):
+            def items(self):
+                dispatch_calls.append("items")
+                raise AssertionError("payload mapping dispatch must not execute")
+
+        with self.assertRaisesRegex(ValueError, "must be an exact JSON object"):
+            EvidenceItem(
+                evidence_id="evidence-hostile-map",
+                as_of_ts="2026-10-07T00:00:00+00:00",
+                source="provider:test",
+                kind="research",
+                payload=HostilePayload({"participant": "selection-a"}),
+            )
+
+        self.assertEqual(dispatch_calls, [])
+
+    def test_payload_rejects_nested_list_subclass_before_iteration(self):
+        dispatch_calls = []
+
+        class HostileList(list):
+            def __iter__(self):
+                dispatch_calls.append("iter")
+                raise AssertionError("payload list dispatch must not execute")
+
+        with self.assertRaisesRegex(ValueError, "unsupported JSON value type HostileList"):
+            EvidenceItem(
+                evidence_id="evidence-hostile-list",
+                as_of_ts="2026-10-07T00:00:00+00:00",
+                source="provider:test",
+                kind="research",
+                payload={"nested": HostileList(["selection-a"])},
+            )
+
+        self.assertEqual(dispatch_calls, [])
+
+    def test_payload_rejects_nested_string_subclass_before_encode_dispatch(self):
+        dispatch_calls = []
+
+        class HostileText(str):
+            def encode(self, *args, **kwargs):
+                dispatch_calls.append("encode")
+                raise AssertionError("payload string dispatch must not execute")
+
+        with self.assertRaisesRegex(ValueError, "unsupported JSON value type HostileText"):
+            EvidenceItem(
+                evidence_id="evidence-hostile-text",
+                as_of_ts="2026-10-07T00:00:00+00:00",
+                source="provider:test",
+                kind="research",
+                payload={"participant": HostileText("selection-a")},
+            )
+
+        self.assertEqual(dispatch_calls, [])
+
+    def test_payload_rejects_scalar_and_key_type_aliases(self):
+        class AliasInt(int):
+            pass
+
+        class AliasKey(str):
+            pass
+
+        with self.assertRaisesRegex(ValueError, "unsupported JSON value type AliasInt"):
+            EvidenceItem(
+                evidence_id="evidence-alias-int",
+                as_of_ts="2026-10-07T00:00:00+00:00",
+                source="provider:test",
+                kind="research",
+                payload={"sequence": AliasInt(1)},
+            )
+
+        with self.assertRaisesRegex(ValueError, "JSON object keys must be exact strings"):
+            EvidenceItem(
+                evidence_id="evidence-alias-key",
+                as_of_ts="2026-10-07T00:00:00+00:00",
+                source="provider:test",
+                kind="research",
+                payload={AliasKey("participant"): "selection-a"},
+            )
+
     def test_research_packet_rejects_duplicate_evidence_identity(self):
         first = self._item(evidence_id="same-evidence")
         second = EvidenceItem(

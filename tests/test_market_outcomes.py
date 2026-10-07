@@ -510,6 +510,28 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 datetime(2026, 9, 18, 15, 0, 0, tzinfo=timezone.utc)
             )
 
+    def test_authority_rejects_datetime_subclass_before_virtual_dispatch(self):
+        authority = self._authority()
+        dispatch_calls = []
+
+        class HostileDatetime(datetime):
+            def utcoffset(self):
+                dispatch_calls.append("utcoffset")
+                raise AssertionError("datetime subclass dispatch must not execute")
+
+            def astimezone(self, *args, **kwargs):
+                dispatch_calls.append("astimezone")
+                raise AssertionError("datetime subclass dispatch must not execute")
+
+        hostile = HostileDatetime(
+            2026, 9, 18, 15, 0, 2, tzinfo=timezone.utc
+        )
+
+        with self.assertRaisesRegex(TypeError, "decision_as_of must be an exact datetime"):
+            authority.assert_available_as_of(hostile)
+
+        self.assertEqual(dispatch_calls, [])
+
     def test_authoritative_scenario_search_covers_unticketed_real_third_outcome(self):
         authority = self._authority()
         book = PaperBook("100")

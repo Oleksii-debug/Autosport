@@ -940,6 +940,9 @@ class RunRegistry:
 
     @staticmethod
     def experiment_identity(market_sha256: str, results_sha256: str, strategy_id: str) -> str:
+        market_sha256 = _require_canonical_sha256("market_sha256", market_sha256)
+        results_sha256 = _require_canonical_sha256("results_sha256", results_sha256)
+        strategy_id = _require_nonempty_string("strategy_id", strategy_id)
         canonical = f"{market_sha256}|{results_sha256}|{strategy_id}".encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 

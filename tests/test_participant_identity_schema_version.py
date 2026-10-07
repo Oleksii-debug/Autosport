@@ -103,6 +103,28 @@ def test_legacy_v1_rejects_new_v2_entity_vocabulary_without_rewrite(
     assert path.read_bytes() == forged_v1
 
 
+def test_boolean_registry_version_fails_closed_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    path = tmp_path / "identity.json"
+    ParticipantIdentityRegistry.initialize_pristine(path)
+    raw = json.loads(path.read_text(encoding="utf-8"))
+    raw["version"] = True
+    path.write_text(
+        json.dumps(raw, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    forged = path.read_bytes()
+
+    with pytest.raises(
+        ParticipantIdentityError,
+        match="unsupported identity registry schema",
+    ):
+        ParticipantIdentityRegistry(path)
+
+    assert path.read_bytes() == forged
+
+
 def test_unknown_future_registry_version_fails_closed_without_rewrite(
     tmp_path: Path,
 ) -> None:

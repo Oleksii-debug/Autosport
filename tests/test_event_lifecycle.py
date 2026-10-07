@@ -300,6 +300,26 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             self.assertEqual(persisted["schema_version"], 2)
             self.assertEqual(set(persisted["events"]), {event.identity})
 
+    def test_boolean_schema_version_fails_closed_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            ContinuousEventLifecycle(path)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["schema_version"] = True
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            forged = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                CatalogLifecycleError,
+                "unsupported catalog lifecycle state",
+            ):
+                ContinuousEventLifecycle(path)
+
+            self.assertEqual(path.read_bytes(), forged)
+
     def test_schema_v1_without_durable_sport_fails_closed_without_rewrite(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "catalog.json"

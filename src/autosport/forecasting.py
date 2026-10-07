@@ -48,6 +48,18 @@ def _canonical_sha256(value: object, *, field_name: str) -> str:
     return value
 
 
+def _canonical_identity_text(value: object, *, field_name: str) -> str:
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"{field_name} must be canonical non-empty identity text")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field_name} must not contain control characters")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 identity text") from exc
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ForecastRecord:
     """Immutable pre-outcome forecast with explicit model/data causal boundaries."""
@@ -71,8 +83,14 @@ class ForecastRecord:
         uncertainty = Decimal(str(self.uncertainty))
         object.__setattr__(self, "probability", probability)
         object.__setattr__(self, "uncertainty", uncertainty)
-        if not self.quote_key or not self.model_id or not self.model_version or not self.strategy_version:
-            raise ValueError("forecast identities must not be empty")
+        for field_name in (
+            "forecast_id",
+            "quote_key",
+            "model_id",
+            "model_version",
+            "strategy_version",
+        ):
+            _canonical_identity_text(getattr(self, field_name), field_name=field_name)
         if not probability.is_finite():
             raise ValueError("probability must be finite")
         if not uncertainty.is_finite():
@@ -94,8 +112,10 @@ class ForecastRecord:
         if contains_forbidden_future_key(provenance):
             raise ValueError("forecast provenance must not contain future-result fields")
         object.__setattr__(self, "provenance", provenance)
-        if not isinstance(self.evidence_hashes, (tuple, list)):
-            raise ValueError("evidence_hashes must be an ordered collection of SHA-256 digests")
+        if type(self.evidence_hashes) not in {tuple, list}:
+            raise ValueError(
+                "evidence_hashes must be an exact list or tuple of SHA-256 digests"
+            )
         evidence_hashes = tuple(
             _canonical_sha256(value, field_name="evidence hash")
             for value in self.evidence_hashes
@@ -116,8 +136,10 @@ class ForecastRecord:
 
     @property
     def canonical_hash(self) -> str:
+        if type(self) is not ForecastRecord:
+            raise ValueError("forecast record must be an exact ForecastRecord")
         canonical = json.dumps(
-            self.to_dict(),
+            ForecastRecord.to_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -126,6 +148,29 @@ class ForecastRecord:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
+        for field_name in (
+            "forecast_id",
+            "quote_key",
+            "model_id",
+            "model_version",
+            "strategy_version",
+        ):
+            _canonical_identity_text(getattr(self, field_name), field_name=field_name)
+        if type(self.evidence_hashes) is not tuple:
+            raise ValueError(
+                "evidence_hashes must remain an exact tuple of SHA-256 digests"
+            )
+        evidence_hashes = tuple(
+            _canonical_sha256(value, field_name="evidence hash")
+            for value in self.evidence_hashes
+        )
+        if len(set(evidence_hashes)) != len(evidence_hashes):
+            raise ValueError("duplicate evidence hashes")
+        if self.market_snapshot_hash is not None:
+            _canonical_sha256(
+                self.market_snapshot_hash,
+                field_name="market_snapshot_hash",
+            )
         return {
             "forecast_id": self.forecast_id,
             "quote_key": self.quote_key,
@@ -151,6 +196,8 @@ class JsonlForecastLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, record: ForecastRecord) -> str:
+        if type(record) is not ForecastRecord:
+            raise ValueError("forecast ledger requires exact ForecastRecord")
         payload = record.to_dict()
         digest = record.canonical_hash
         envelope = json.dumps(
@@ -173,10 +220,9 @@ class ForecastOutcomeFact:
     revealed_at: str
 
     def __post_init__(self) -> None:
-        if not self.forecast_id:
-            raise ValueError("forecast_id required")
-        if self.outcome not in (0, 1):
-            raise ValueError("outcome must be 0 or 1")
+        _canonical_identity_text(self.forecast_id, field_name="forecast_id")
+        if type(self.outcome) is not int or self.outcome not in (0, 1):
+            raise ValueError("outcome must be exact integer 0 or 1")
         parse_iso_timestamp(self.revealed_at)
 
 
@@ -191,10 +237,9 @@ class TemporalEvaluationWindow:
     split: str = "holdout"
 
     def __post_init__(self) -> None:
-        if not self.window_id:
-            raise ValueError("window_id required")
-        if self.split not in _ALLOWED_SPLITS:
-            raise ValueError("split must be validation or holdout")
+        _canonical_identity_text(self.window_id, field_name="window_id")
+        if type(self.split) is not str or self.split not in _ALLOWED_SPLITS:
+            raise ValueError("split must be exact validation or holdout text")
         training_end = parse_iso_timestamp(self.training_end_ts)
         evaluation_start = parse_iso_timestamp(self.evaluation_start_ts)
         evaluation_end = parse_iso_timestamp(self.evaluation_end_ts)
@@ -340,10 +385,16 @@ def evaluate_forecast_window(
 ) -> ForecastEvaluationSummary:
     """Evaluate one temporal fold without allowing model-training leakage across its boundary."""
 
+    if type(window) is not TemporalEvaluationWindow:
+        raise ValueError("evaluation window must be exact TemporalEvaluationWindow")
+    TemporalEvaluationWindow.__post_init__(window)
     if bins <= 0:
         raise ValueError("bins must be positive")
     outcome_by_id: dict[str, ForecastOutcomeFact] = {}
     for fact in outcomes:
+        if type(fact) is not ForecastOutcomeFact:
+            raise ValueError("outcomes must contain exact ForecastOutcomeFact values")
+        ForecastOutcomeFact.__post_init__(fact)
         if fact.forecast_id in outcome_by_id:
             raise ValueError(f"duplicate outcome fact for forecast: {fact.forecast_id}")
         outcome_by_id[fact.forecast_id] = fact
@@ -352,6 +403,9 @@ def evaluate_forecast_window(
     selected: list[tuple[ForecastRecord, ForecastOutcomeFact]] = []
     selected_ids: set[str] = set()
     for record in records:
+        if type(record) is not ForecastRecord:
+            raise ValueError("records must contain exact ForecastRecord values")
+        ForecastRecord.to_dict(record)
         if record.forecast_id in selected_ids:
             raise ValueError(f"duplicate forecast_id: {record.forecast_id}")
         if not window.contains(record.generated_at):
@@ -409,7 +463,16 @@ def evaluate_walk_forward(
     window_values = tuple(windows)
     if not window_values:
         raise ValueError("walk-forward windows required")
-    ordered = sorted(window_values, key=lambda item: parse_iso_timestamp(item.evaluation_start_ts))
+    for window in window_values:
+        if type(window) is not TemporalEvaluationWindow:
+            raise ValueError(
+                "walk-forward windows must contain exact TemporalEvaluationWindow values"
+            )
+        TemporalEvaluationWindow.__post_init__(window)
+    ordered = sorted(
+        window_values,
+        key=lambda item: parse_iso_timestamp(item.evaluation_start_ts),
+    )
     previous_end: datetime | None = None
     for window in ordered:
         start = parse_iso_timestamp(window.evaluation_start_ts)

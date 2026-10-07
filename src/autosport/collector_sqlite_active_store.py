@@ -1425,8 +1425,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
     ) -> bool:
         """Atomically admit one canonical delta and its active-epoch authority."""
 
-        if not isinstance(delta, CollectorDelta):
-            raise TypeError("delta must be CollectorDelta")
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         delta.validate()
         _instant(activated_at, "activated_at")
         connection = self._connect()
@@ -1631,6 +1631,8 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         connection: sqlite3.Connection,
         delta: CollectorDelta,
     ) -> bool:
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         delta.validate()
         encoded = _canonical_delta_json(delta)
         digest = _payload_digest(encoded)
@@ -1674,6 +1676,12 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
             )
         return changed
 
+    def get(self, delta_id: str) -> CollectorDelta | None:
+        if type(delta_id) is not str:
+            raise TypeError("delta_id must be exact string identity text")
+        _text(delta_id, "delta_id")
+        return super().get(delta_id)
+
     def _all(self) -> list[CollectorDelta]:
         connection = self._connect()
         try:
@@ -1694,7 +1702,11 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         after_delta_id: str | None = None,
         max_items: int = 1000,
     ) -> tuple[CollectorDelta, ...]:
+        if type(source_id) is not str:
+            raise TypeError("source_id must be exact string identity text")
         _text(source_id, "source_id")
+        if after_delta_id is not None and type(after_delta_id) is not str:
+            raise TypeError("after_delta_id must be exact string identity text or None")
         if (
             isinstance(max_items, bool)
             or not isinstance(max_items, int)
@@ -1737,6 +1749,10 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         source_id: str,
         stream_epoch: str,
     ) -> StreamCheckpoint | None:
+        if type(source_id) is not str:
+            raise TypeError("source_id must be exact string identity text")
+        if type(stream_epoch) is not str:
+            raise TypeError("stream_epoch must be exact string identity text")
         _text(source_id, "source_id")
         _text(stream_epoch, "stream_epoch")
         connection = self._connect()
@@ -1762,7 +1778,9 @@ class CollectorDeltaStore(_SQLiteCollectorDeltaStore):
         if not isinstance(raw, dict):
             raise TypeError("raw must be a dict")
 
-    def append(self, delta) -> bool:
+    def append(self, delta: CollectorDelta) -> bool:
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         connection = self._connect()
         try:
             connection.execute("BEGIN IMMEDIATE")

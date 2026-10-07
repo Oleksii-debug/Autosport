@@ -215,11 +215,9 @@ class LiveObservationStorageRetryTests(unittest.TestCase):
             clock=lambda: next(clock_values),
         )
 
-        first = provider.read_batch(max_items=1)
-        self.assertEqual([quote.provider_selection_id for quote in first.quotes], ["A"])
-        self.assertEqual(first.quality_flags, ("TRUNCATED_BATCH",))
-        self.assertEqual(len(transport_calls), 1)
-
+        # Canonical identity validation covers the complete provider snapshot
+        # before any partial batch can escape. The malformed later event therefore
+        # rejects this snapshot immediately and clears pending state.
         with self.assertRaises(ProviderPayloadError):
             provider.read_batch(max_items=1)
         self.assertEqual(len(transport_calls), 1)

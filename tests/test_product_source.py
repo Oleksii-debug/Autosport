@@ -9,7 +9,11 @@ from unittest.mock import patch
 import autosport.product_source as product_source_module
 from autosport.causal_collector import StreamCheckpoint
 from autosport.domain import MarketType
-from autosport.event_lifecycle import CatalogCheckpoint, EventPhase
+from autosport.event_lifecycle import (
+    CatalogCheckpoint,
+    EventPhase,
+    canonical_event_identity,
+)
 from autosport.parlayapi_provider import ParlayApiTableTennisProvider
 from autosport.product_source import (
     ParlayApiProductSource,
@@ -109,7 +113,14 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(page.cursor, "snapshot-1")
             self.assertEqual(len(page.events), 1)
             self.assertEqual(page.events[0].event_id, "event-1")
-            self.assertEqual(page.events[0].identity, f"{_SOURCE_ID}:event-1")
+            self.assertEqual(
+                page.events[0].identity,
+                canonical_event_identity(
+                    source_id=_SOURCE_ID,
+                    sport="table_tennis",
+                    event_id="event-1",
+                ),
+            )
             self.assertEqual(page.events[0].phase, EventPhase.PRE_MATCH)
 
             deltas = source.fetch_deltas(None, (), 10)

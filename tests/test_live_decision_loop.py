@@ -21,6 +21,7 @@ from autosport.event_lifecycle import (
     CatalogPage,
     ContinuousEventLifecycle,
     EventPhase,
+    canonical_event_identity,
 )
 from autosport.live_decision_loop import (
     LiveCycleStatus,
@@ -1492,7 +1493,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 catalog_fetch_page=fetch_page,
                 catalog_source_id="provider-a",
             )
-            input_id = "catalog:provider-a:event-1"
+            input_id = (
+                "catalog:"
+                + canonical_event_identity(source_id="provider-a", sport="table_tennis", event_id="event-1")
+            )
 
             gap = loop.run_cycle()
             self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
@@ -1917,7 +1921,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 catalog_fetch_page=fetch_page,
                 catalog_source_id="provider-a",
             )
-            input_id = "catalog:provider-a:event-1"
+            input_id = (
+                "catalog:"
+                + canonical_event_identity(source_id="provider-a", sport="table_tennis", event_id="event-1")
+            )
 
             first = loop.run_cycle()
             self.assertEqual(first.status, LiveCycleStatus.NO_CHANGE)

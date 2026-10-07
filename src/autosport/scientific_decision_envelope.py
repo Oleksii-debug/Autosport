@@ -37,6 +37,8 @@ class DecisionDisposition(StrEnum):
 def _text(value: object, name: str) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise DecisionEnvelopeError(f"{name} must be a non-empty canonical string")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise DecisionEnvelopeError(f"{name} must not contain control characters")
     try:
         value.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
@@ -99,8 +101,11 @@ class CausalEvidenceRef:
     available_at: str
 
     def __post_init__(self) -> None:
+        self._validate_identity_and_chronology()
+
+    def _validate_identity_and_chronology(self) -> None:
         _text(self.evidence_id, "evidence_id")
-        if not isinstance(self.kind, EvidenceKind):
+        if type(self.kind) is not EvidenceKind:
             raise DecisionEnvelopeError("kind must be EvidenceKind")
         _sha256(self.evidence_sha256, "evidence_sha256")
         event = _instant(self.event_at, "event_at")
@@ -118,6 +123,7 @@ class CausalEvidenceRef:
         return False
 
     def canonical_payload(self) -> dict[str, Any]:
+        self._validate_identity_and_chronology()
         return {
             "evidence_id": self.evidence_id,
             "kind": self.kind.value,
@@ -135,18 +141,27 @@ def evidence_snapshot_sha256(
 ) -> str:
     """Hash the exact canonical assertion subset for one scientific surface."""
 
-    if not isinstance(evidence, tuple):
-        raise DecisionEnvelopeError("evidence must be a tuple")
-    if not isinstance(kind, EvidenceKind):
+    if type(evidence) is not tuple:
+        raise DecisionEnvelopeError("evidence must be an exact tuple")
+    if type(kind) is not EvidenceKind:
         raise DecisionEnvelopeError("kind must be EvidenceKind")
     if any(type(item) is not CausalEvidenceRef for item in evidence):
         raise DecisionEnvelopeError("evidence must contain exact CausalEvidenceRef values")
+
+    canonical_evidence = tuple(item.canonical_payload() for item in evidence)
     selected = sorted(
-        (item.canonical_payload() for item in evidence if item.kind is kind),
+        (
+            payload
+            for item, payload in zip(evidence, canonical_evidence, strict=True)
+            if item.kind is kind
+        ),
         key=lambda item: (item["evidence_id"], item["evidence_sha256"]),
     )
     if not selected:
         raise DecisionEnvelopeError(f"{kind.value} evidence must not be empty")
+    identities = [item["evidence_id"] for item in selected]
+    if len(identities) != len(set(identities)):
+        raise DecisionEnvelopeError("evidence identities must not be duplicated")
     return _digest({"kind": kind.value, "evidence": selected, "schema_version": 2})
 
 
@@ -176,12 +191,14 @@ class SealedDecisionEnvelope:
     def __post_init__(self) -> None:
         _text(self.protocol_id, "protocol_id")
         _text(self.decision_id, "decision_id")
-        if not isinstance(self.disposition, DecisionDisposition):
-            raise DecisionEnvelopeError("disposition must be DecisionDisposition")
-        if not isinstance(self.evidence, tuple) or not self.evidence:
-            raise DecisionEnvelopeError("evidence must be a non-empty tuple")
+        if type(self.disposition) is not DecisionDisposition:
+            raise DecisionEnvelopeError("disposition must be exact DecisionDisposition")
+        if type(self.evidence) is not tuple or not self.evidence:
+            raise DecisionEnvelopeError("evidence must be a non-empty exact tuple")
         if any(type(item) is not CausalEvidenceRef for item in self.evidence):
             raise DecisionEnvelopeError("evidence must contain exact CausalEvidenceRef values")
+        for item in self.evidence:
+            item._validate_identity_and_chronology()
 
         decision = _instant(self.decision_at, "decision_at")
         event_watermark = _instant(self.event_watermark, "event_watermark")
@@ -277,6 +294,7 @@ class SealedDecisionEnvelope:
         )
 
     def canonical_payload(self) -> dict[str, Any]:
+        SealedDecisionEnvelope.__post_init__(self)
         return {
             "schema": "autosport.sealed_decision_envelope",
             "schema_version": 2,
@@ -298,7 +316,11 @@ class SealedDecisionEnvelope:
 
     @property
     def envelope_sha256(self) -> str:
-        return _digest(self.canonical_payload())
+        if type(self) is not SealedDecisionEnvelope:
+            raise DecisionEnvelopeError(
+                "sealed decision envelope must be an exact SealedDecisionEnvelope"
+            )
+        return _digest(SealedDecisionEnvelope.canonical_payload(self))
 
 
 @dataclass(frozen=True, slots=True)
@@ -342,6 +364,7 @@ class DecisionOutcomeAppend:
         )
 
     def verify_envelope(self, envelope: SealedDecisionEnvelope) -> None:
+        DecisionOutcomeAppend.__post_init__(self)
         if type(envelope) is not SealedDecisionEnvelope:
             raise DecisionEnvelopeError("envelope must be exact SealedDecisionEnvelope")
         if self.decision_id != envelope.decision_id:

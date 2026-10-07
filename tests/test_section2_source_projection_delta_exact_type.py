@@ -1,6 +1,6 @@
 import unittest
 
-from autosport.causal_collector import CollectorDelta
+from autosport.causal_collector import CollectorDelta, CollectorDeltaStore
 from autosport.continuous_session import _ContinuousSessionState
 
 
@@ -51,6 +51,19 @@ def _delta(**overrides):
 
 
 class Section2SourceProjectionDeltaExactTypeTests(unittest.TestCase):
+    def test_collector_store_rejects_delta_subclass_before_virtual_validation(self) -> None:
+        _HostileCollectorDelta.validate_calls = 0
+        hostile = object.__new__(_HostileCollectorDelta)
+        store = object.__new__(CollectorDeltaStore)
+
+        with self.assertRaisesRegex(
+            TypeError,
+            "delta must be exact CollectorDelta",
+        ):
+            store.append(hostile)
+
+        self.assertEqual(_HostileCollectorDelta.validate_calls, 0)
+
     def test_projection_rejects_delta_subclass_before_virtual_validation(self) -> None:
         _HostileCollectorDelta.validate_calls = 0
         hostile = object.__new__(_HostileCollectorDelta)

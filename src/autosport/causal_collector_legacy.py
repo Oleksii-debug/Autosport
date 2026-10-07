@@ -597,6 +597,10 @@ class CollectorDeltaStore(_JsonAtomicStore):
         return [CollectorDelta.from_dict(raw) for raw in self._read()["deltas"]]
 
     def append(self, delta: CollectorDelta) -> bool:
+        # This is the durable identity ingress. Reject subclasses before invoking
+        # caller-controlled validation or reading authority-bearing identity fields.
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         delta.validate()
         raw = self._read()
         encoded = delta.to_dict()

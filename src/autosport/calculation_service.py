@@ -225,51 +225,19 @@ def _snapshot_quote_at_cutoff(
     *,
     cutoff_value: datetime,
 ) -> MarketQuoteEvidence:
-    if type(event) is not MarketEvent:
-        raise ValueError("event must be an exact MarketEvent")
-    if not isinstance(event.market_type, MarketType):
-        raise ValueError("market event market_type must be a MarketType")
-    if type(event.decimal_odds) is not Decimal:
-        raise ValueError("market event quote fields are not canonical")
-    if (
-        type(event.observed_ts) is not str
-        or type(event.ingest_ts) is not str
-        or (event.source_ts is not None and type(event.source_ts) is not str)
-    ):
-        raise ValueError("market event quote fields are not canonical")
-
-    # Preserve the service boundary's runtime diagnostics before adapting this
-    # already-materialized event to the stricter serialized ingress contract.
-    observed = _timestamp(event.observed_ts, field="observed_ts")
-    ingest = _timestamp(event.ingest_ts, field="ingest_ts")
-    source = (
-        None
-        if event.source_ts is None
-        else _timestamp(event.source_ts, field="source_ts")
-    )
-    _validate_quote_identity_utf8(event)
-
-    # Intentionally construct the validation payload from quote-only scalar
-    # fields. Do not call event.to_dict(): that would traverse mutable metadata
-    # which may contain outcome/future-only material irrelevant to a calculation.
-    raw = {
-        "event_id": event.event_id,
-        "market_id": event.market_id,
-        "selection_id": event.selection_id,
-        "decimal_odds": str(event.decimal_odds),
-        "observed_ts": event.observed_ts,
-        "source_id": event.source_id,
-        "sequence": event.sequence,
-        "market_type": event.market_type.value,
-        "source_ts": event.source_ts,
-        "ingest_ts": event.ingest_ts,
-    }
-    if event.sport is not None:
-        raw["sport"] = event.sport
+    raw = _quote_scalar_snapshot(event)
     try:
         canonical = MarketEvent.from_dict(raw)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event quote fields are not canonical") from exc
+
+    observed = _timestamp(canonical.observed_ts, field="observed_ts")
+    ingest = _timestamp(canonical.ingest_ts, field="ingest_ts")
+    source = (
+        None
+        if canonical.source_ts is None
+        else _timestamp(canonical.source_ts, field="source_ts")
+    )
 
     if ingest < observed:
         raise ValueError("selected quote ingest_ts is before observed_ts")
@@ -279,6 +247,15 @@ def _snapshot_quote_at_cutoff(
         raise ValueError("selected quote source_ts is after the calculation causal cutoff")
     if ingest > cutoff_value:
         raise ValueError("selected quote ingest_ts is after the calculation causal cutoff")
+
+    # Detect exact-object TOCTOU mutation after the coherent scalar snapshot was
+    # validated. Evidence is never built from a second unchecked read.
+    try:
+        canonical_after = MarketEvent.from_dict(_quote_scalar_snapshot(event))
+    except (AttributeError, KeyError, TypeError, ValueError) as exc:
+        raise ValueError("market event quote fields changed during calculation snapshot") from exc
+    if canonical_after != canonical:
+        raise ValueError("market event quote fields changed during calculation snapshot")
 
     payload = {
         "event_id": canonical.event_id,
@@ -299,6 +276,31 @@ def _snapshot_quote_at_cutoff(
         **payload,
         quote_evidence_sha256=digest,
     )
+
+
+def _quote_scalar_snapshot(event: MarketEvent) -> dict[str, object]:
+    if type(event) is not MarketEvent:
+        raise ValueError("event must be an exact MarketEvent")
+    market_type = event.market_type
+    decimal_odds = event.decimal_odds
+    if type(market_type) is not MarketType or type(decimal_odds) is not Decimal:
+        raise ValueError("market event quote fields are not canonical")
+
+    raw: dict[str, object] = {
+        "event_id": event.event_id,
+        "market_id": event.market_id,
+        "selection_id": event.selection_id,
+        "decimal_odds": str(decimal_odds),
+        "observed_ts": event.observed_ts,
+        "source_id": event.source_id,
+        "sequence": event.sequence,
+        "market_type": market_type.value,
+        "source_ts": event.source_ts,
+        "ingest_ts": event.ingest_ts,
+    }
+    if event.sport is not None:
+        raw["sport"] = event.sport
+    return raw
 
 
 def _causal_cutoff(value: str) -> tuple[datetime, str]:

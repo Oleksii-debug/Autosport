@@ -288,6 +288,38 @@ class CalculationServiceTests(unittest.TestCase):
         self.assertNotIn("status", contaminated.quote_sources[0].as_dict())
         self.assertNotIn("score_state", contaminated.quote_sources[0].as_dict())
 
+    def test_quote_snapshot_fails_closed_on_exact_event_toctou_mutation(self) -> None:
+        event = self._event(
+            observed_ts="2026-09-14T11:59:59+00:00",
+            ingest_ts="2026-09-14T11:59:59+00:00",
+        )
+        original_timestamp = calculation_service_module._timestamp
+
+        def mutating_timestamp(value: object, *, field: str):
+            parsed = original_timestamp(value, field=field)
+            if field == "observed_ts":
+                object.__setattr__(
+                    event,
+                    "observed_ts",
+                    "2026-09-14T12:30:00+00:00",
+                )
+            return parsed
+
+        with patch.object(
+            calculation_service_module,
+            "_timestamp",
+            side_effect=mutating_timestamp,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "changed during calculation snapshot",
+            ):
+                self.service.implied_probability_for_event(
+                    event,
+                    causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+                )
+
+
     def test_market_devig_binds_exact_source_quotes_and_is_order_invariant(self) -> None:
         first = self._event(selection_id="driver-a", decimal_odds="2.10", sequence=1)
         second = self._event(

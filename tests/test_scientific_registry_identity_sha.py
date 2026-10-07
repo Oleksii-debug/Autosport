@@ -153,6 +153,25 @@ def test_registry_append_revalidates_tampered_dataset_snapshot_identity(
     assert registry.get("DatasetSnapshot", "dataset-v1") is None
 
 
+def test_registry_restart_rejects_boolean_root_schema_version(
+    tmp_path,
+) -> None:
+    path = tmp_path / "scientific-registry.json"
+    ScientificRegistry.initialize_pristine(path)
+    state = json.loads(path.read_text(encoding="utf-8"))
+    state["schema_version"] = True
+    path.write_text(
+        json.dumps(state, ensure_ascii=False, sort_keys=True, separators=(",", ":")),
+        encoding="utf-8",
+    )
+    forged = path.read_bytes()
+
+    with pytest.raises(ValueError, match="schema_version mismatch"):
+        ScientificRegistry(path)
+
+    assert path.read_bytes() == forged
+
+
 def test_registry_restart_rejects_self_consistent_record_id_payload_mismatch(
     tmp_path,
 ) -> None:

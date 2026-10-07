@@ -158,6 +158,25 @@ class ResearchStrategyRiskOfRuinIngressTests(unittest.TestCase):
         second = ResearchStrategyPlan.from_dict(changed)
         self.assertNotEqual(first.source_sha256, second.source_sha256)
 
+    def test_plan_rejects_risk_identity_string_type_laundering(self):
+        fields = (
+            "evidence_id",
+            "research_protocol_sha256",
+            "producer_identity",
+            "causal_cutoff",
+            "bankroll_id",
+            "candidate_sha256",
+        )
+        for field in fields:
+            with self.subTest(field=field):
+                raw = self._plan_raw()
+                raw["decisions"][0]["risk_of_ruin_evidence"][field] = 7
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must be exact non-empty canonical text",
+                ):
+                    ResearchStrategyPlan.from_dict(raw)
+
     def test_legacy_plan_without_ruin_witness_remains_backward_readable(self):
         plan = ResearchStrategyPlan.from_dict(self._plan_raw(include_risk=False))
 

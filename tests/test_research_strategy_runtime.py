@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -145,6 +146,58 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
         raw["decisions"][0]["evidence"][0]["quality_flags"] = "GAP_DETECTED"
         with self.assertRaisesRegex(ValueError, "quality_flags must be a JSON array"):
             ResearchStrategyPlan.from_dict(raw)
+
+    def test_plan_rejects_identity_string_type_laundering(self):
+        mutations = (
+            ("decision_id", lambda raw: raw["decisions"][0].__setitem__("decision_id", 7)),
+            (
+                "scenario group_id",
+                lambda raw: raw["decisions"][0]["scenario_groups"][0].__setitem__(
+                    "group_id", 7
+                ),
+            ),
+            (
+                "forecast model_id",
+                lambda raw: raw["decisions"][0]["forecasts"][0].__setitem__(
+                    "model_id", 7
+                ),
+            ),
+            (
+                "forecast forecast_id",
+                lambda raw: raw["decisions"][0]["forecasts"][0].__setitem__(
+                    "forecast_id", 7
+                ),
+            ),
+            (
+                "evidence source_id",
+                lambda raw: raw["decisions"][0]["evidence"][0].__setitem__(
+                    "source_id", 7
+                ),
+            ),
+            (
+                "evidence content_sha256",
+                lambda raw: raw["decisions"][0]["evidence"][0].__setitem__(
+                    "content_sha256", 7
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                raw = self._plan_dict()
+                mutate(raw)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must be exact non-empty canonical text",
+                ):
+                    ResearchStrategyPlan.from_dict(raw)
+
+    def test_direct_instruction_rejects_non_string_identity(self):
+        instruction = ResearchStrategyPlan.from_dict(self._plan_dict()).instructions[0]
+        with self.assertRaisesRegex(
+            ValueError,
+            "decision_id must be exact non-empty canonical text",
+        ):
+            replace(instruction, decision_id=7)
 
     def test_stale_candidate_odds_fail_before_registry_or_book_mutation(self):
         dataset = load_dataset(Path("examples/tt_demo"))

@@ -277,3 +277,14 @@ def test_forecast_canonical_hash_rejects_subclass_before_virtual_serialization()
 
     with pytest.raises(ValueError, match="exact ForecastRecord"):
         _ = record.canonical_hash
+
+
+@pytest.mark.parametrize(
+    "field_name",
+    ("model_training_cutoff_ts", "input_cutoff_ts", "generated_at"),
+)
+def test_forecast_rejects_nonzero_submicrosecond_timestamp_precision(
+    field_name: str,
+) -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        _record(**{field_name: "2026-10-06T22:00:00.1234561+00:00"})

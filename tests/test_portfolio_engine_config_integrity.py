@@ -43,6 +43,39 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "exclusive groups must not be empty"):
             PortfolioEngine().analyse([ticket], exclusive_groups=[set()])
 
+    def test_exclusive_group_rejects_noncanonical_container_before_quote_hash_dispatch(self) -> None:
+        class HostileQuoteKey(str):
+            def __hash__(self) -> int:
+                raise AssertionError(
+                    "hostile quote_key hash dispatched before portfolio identity admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exclusive_groups entries must be exact sets of quote keys",
+        ):
+            PortfolioEngine().analyse(
+                [ticket],
+                exclusive_groups=[[HostileQuoteKey(leg.quote_key)]],
+            )
+
+    def test_exclusive_groups_rejects_list_subclass_before_truthiness_dispatch(self) -> None:
+        class HostileGroups(list):
+            def __bool__(self) -> bool:
+                raise AssertionError(
+                    "exclusive_groups truthiness dispatched before container admission"
+                )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "exclusive_groups must be an exact list",
+        ):
+            PortfolioEngine().analyse([], exclusive_groups=HostileGroups())
+
     def test_empty_exclusive_group_fails_for_empty_portfolio(self) -> None:
         with self.assertRaisesRegex(ValueError, "exclusive groups must not be empty"):
             PortfolioEngine().analyse([], exclusive_groups=[set()])

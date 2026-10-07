@@ -50,9 +50,9 @@ def _text(value: object, name: str) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
+    text = _text(value, name)
     if len(text) != 64 or any(char not in _HEX for char in text):
-        raise ValueError(f"{name} must be a canonical SHA-256 hex string")
+        raise ValueError(f"{name} must be a canonical lowercase SHA-256 hex string")
     return text
 
 
@@ -988,6 +988,15 @@ class ScientificRegistry:
 
     @staticmethod
     def _entry(record: ScientificRecord) -> dict[str, Any]:
+        # Model/strategy version identities are authority-bearing Section-2
+        # records. Re-run their exact constructor contract at the serialization
+        # boundary so post-construction mutation cannot be silently normalized
+        # by to_payload().
+        if type(record) is ModelVersion:
+            ModelVersion.__post_init__(record)
+        elif type(record) is StrategyVersion:
+            StrategyVersion.__post_init__(record)
+
         if record.record_type not in _RECORD_TYPES:
             raise ValueError("unsupported scientific record type")
         record_id = _text(record.record_id, "record_id")

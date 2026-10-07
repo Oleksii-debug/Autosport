@@ -1,0 +1,105 @@
+from __future__ import annotations
+
+import pytest
+
+from autosport.scientific_registry import (
+    ModelVersion,
+    ScientificRegistry,
+    StrategyVersion,
+)
+
+
+SHA_A = "a" * 64
+SHA_B = "b" * 64
+SHA_C = "c" * 64
+SHA_D = "d" * 64
+T0 = "2026-10-07T00:00:00+00:00"
+
+
+def _model(**overrides: object) -> ModelVersion:
+    values: dict[str, object] = {
+        "model_version_id": "model-v1",
+        "model_family": "fixture-model",
+        "artifact_sha256": SHA_A,
+        "source_sha256": SHA_B,
+        "environment_sha256": SHA_C,
+        "dataset_snapshot_id": "dataset-v1",
+        "feature_set_id": "features-v1",
+        "research_protocol_id": "protocol-v1",
+        "seed": 7,
+        "config_sha256": SHA_D,
+        "created_at": T0,
+    }
+    values.update(overrides)
+    return ModelVersion(**values)  # type: ignore[arg-type]
+
+
+def _strategy(**overrides: object) -> StrategyVersion:
+    values: dict[str, object] = {
+        "strategy_version_id": "strategy-v1",
+        "canonical_strategy_id": "canonical-strategy",
+        "source_sha256": SHA_A,
+        "environment_sha256": SHA_B,
+        "config_sha256": SHA_C,
+        "created_at": T0,
+        "model_version_id": "model-v1",
+    }
+    values.update(overrides)
+    return StrategyVersion(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("field_name", "factory"),
+    (
+        ("artifact_sha256", _model),
+        ("source_sha256", _model),
+        ("environment_sha256", _model),
+        ("config_sha256", _model),
+        ("source_sha256", _strategy),
+        ("environment_sha256", _strategy),
+        ("config_sha256", _strategy),
+    ),
+)
+def test_version_records_reject_uppercase_sha_identity_alias(
+    field_name: str,
+    factory,
+) -> None:
+    with pytest.raises(ValueError, match="canonical lowercase SHA-256"):
+        factory(**{field_name: "A" * 64})
+
+
+@pytest.mark.parametrize(
+    ("factory", "field_name"),
+    (
+        (_model, "artifact_sha256"),
+        (_strategy, "source_sha256"),
+    ),
+)
+def test_registry_append_revalidates_tampered_version_sha_identity(
+    tmp_path,
+    factory,
+    field_name: str,
+) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+    record = factory()
+    object.__setattr__(record, field_name, "A" * 64)
+
+    with pytest.raises(ValueError, match="canonical lowercase SHA-256"):
+        registry.append(record)
+
+    assert registry.get(record.record_type, record.record_id) is None
+
+
+def test_valid_version_sha_payloads_remain_byte_spelling_stable() -> None:
+    model = _model()
+    strategy = _strategy()
+
+    assert model.to_payload()["artifact_sha256"] == SHA_A
+    assert model.to_payload()["source_sha256"] == SHA_B
+    assert model.to_payload()["environment_sha256"] == SHA_C
+    assert model.to_payload()["config_sha256"] == SHA_D
+    assert strategy.to_payload()["source_sha256"] == SHA_A
+    assert strategy.to_payload()["environment_sha256"] == SHA_B
+    assert strategy.to_payload()["config_sha256"] == SHA_C

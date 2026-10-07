@@ -33,9 +33,9 @@ def _text(value: object, name: str) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
+    text = _text(value, name)
     if len(text) != 64 or any(char not in _HEX for char in text):
-        raise ValueError(f"{name} must be a canonical SHA-256 hex string")
+        raise ValueError(f"{name} must be a canonical lowercase SHA-256 hex string")
     return text
 
 
@@ -86,8 +86,8 @@ def _reject_nonfinite(value: str) -> None:
 
 
 def _members(value: object, name: str = "member_sha256") -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise ValueError(f"{name} must be a tuple")
+    if type(value) is not tuple:
+        raise ValueError(f"{name} must be an exact tuple")
     result = tuple(_sha256(item, f"{name} item") for item in value)
     if len(result) != len(set(result)):
         raise ValueError(f"{name} must not contain duplicate members")
@@ -219,8 +219,8 @@ class DatasetSnapshotLineageAuthority:
         authority_root: str | Path | None = None,
         workspace_instance_id: str | None = None,
     ) -> None:
-        if not isinstance(registry, ScientificRegistry):
-            raise ValueError("registry must be a ScientificRegistry")
+        if type(registry) is not ScientificRegistry:
+            raise ValueError("registry must be an exact ScientificRegistry")
         self.path = Path(path).expanduser().resolve(strict=False)
         self.registry = registry
         self.monotonic_authority = self._make_monotonic_authority(
@@ -258,8 +258,8 @@ class DatasetSnapshotLineageAuthority:
         authority_root: str | Path | None = None,
         workspace_instance_id: str | None = None,
     ) -> "DatasetSnapshotLineageAuthority":
-        if not isinstance(registry, ScientificRegistry):
-            raise ValueError("registry must be a ScientificRegistry")
+        if type(registry) is not ScientificRegistry:
+            raise ValueError("registry must be an exact ScientificRegistry")
         target = Path(path).expanduser().resolve(strict=False)
         target.parent.mkdir(parents=True, exist_ok=True)
         machine = cls._make_monotonic_authority(

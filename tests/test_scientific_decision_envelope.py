@@ -1,6 +1,8 @@
 import unittest
 from dataclasses import replace
 
+import pytest
+
 from autosport.scientific_decision_envelope import (
     CausalEvidenceRef,
     DecisionDisposition,

@@ -57,16 +57,6 @@ def _record(**overrides: object) -> ForecastRecord:
     return ForecastRecord(**payload)  # type: ignore[arg-type]
 
 
-@pytest.mark.parametrize(
-    ("field_name", "value"),
-    (
-        ("forecast_id", "forecast-1"),
-        ("quote_key", "event-1|market-1|selection-1"),
-        ("model_id", "model-1"),
-        ("model_version", "model-version-1"),
-        ("strategy_version", "strategy-version-1"),
-    ),
-)
 def test_forecast_evidence_hashes_reject_container_subclass_before_dispatch() -> None:
     digest = "a" * 64
     for evidence_hashes in (
@@ -77,6 +67,16 @@ def test_forecast_evidence_hashes_reject_container_subclass_before_dispatch() ->
             _record(evidence_hashes=evidence_hashes)
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("forecast_id", "forecast-1"),
+        ("quote_key", "event-1|market-1|selection-1"),
+        ("model_id", "model-1"),
+        ("model_version", "model-version-1"),
+        ("strategy_version", "strategy-version-1"),
+    ),
+)
 def test_forecast_identity_rejects_string_subclass_before_dispatch(
     field_name: str,
     value: str,

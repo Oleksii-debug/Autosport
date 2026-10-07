@@ -192,10 +192,59 @@ def _bind_availability_with_unknown_suffix(
     )
 
 
+def _canonical_binding_for_causal_use(
+    binding: _outcome_trust.OutcomeLineageBinding,
+    *,
+    context: str,
+) -> _outcome_trust.OutcomeLineageBinding:
+    """Re-prove exact immutable lineage fields before causal-time dispatch."""
+
+    if type(binding) is not _outcome_trust.OutcomeLineageBinding:
+        raise _outcome_trust.OutcomeLineageTrustError(
+            f"{context} must be an exact OutcomeLineageBinding"
+        )
+    if (
+        type(binding.revisions) is not tuple
+        or not binding.revisions
+        or any(
+            type(revision) is not _outcome_trust.TrustedOutcomeRevision
+            for revision in binding.revisions
+        )
+    ):
+        raise _outcome_trust.OutcomeLineageTrustError(
+            f"{context} revisions must be a non-empty exact tuple of TrustedOutcomeRevision values"
+        )
+
+    payload = {
+        "source_identity": binding.source_identity,
+        "record_id": binding.record_id,
+        "root_revision_id": binding.root_revision_id,
+        "root_record_sha256": binding.root_record_sha256,
+        "revisions": [
+            {
+                "revision": revision.revision,
+                "revision_id": revision.revision_id,
+                "record_sha256": revision.record_sha256,
+                **(
+                    {"first_available_at": revision.first_available_at}
+                    if revision.first_available_at is not None
+                    else {}
+                ),
+            }
+            for revision in binding.revisions
+        ],
+    }
+    return _binding_from_payload_with_unknown_suffix(payload, context=context)
+
+
 def _resolve_with_unknown_suffix(
     binding: _outcome_trust.OutcomeLineageBinding,
     cutoff: str,
 ) -> _outcome_trust.TrustedOutcomeRevision | None:
+    binding = _canonical_binding_for_causal_use(
+        binding,
+        context="outcome as-of binding",
+    )
     cutoff_dt = _outcome_trust._parse_timestamp(
         _outcome_trust._canonical_timestamp(cutoff, field="outcome as-of cutoff")
     )

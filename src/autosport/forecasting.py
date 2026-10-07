@@ -218,8 +218,7 @@ class TemporalEvaluationWindow:
     split: str = "holdout"
 
     def __post_init__(self) -> None:
-        if not self.window_id:
-            raise ValueError("window_id required")
+        _canonical_identity_text(self.window_id, field_name="window_id")
         if self.split not in _ALLOWED_SPLITS:
             raise ValueError("split must be validation or holdout")
         training_end = parse_iso_timestamp(self.training_end_ts)
@@ -367,6 +366,9 @@ def evaluate_forecast_window(
 ) -> ForecastEvaluationSummary:
     """Evaluate one temporal fold without allowing model-training leakage across its boundary."""
 
+    if type(window) is not TemporalEvaluationWindow:
+        raise ValueError("evaluation window must be exact TemporalEvaluationWindow")
+    TemporalEvaluationWindow.__post_init__(window)
     if bins <= 0:
         raise ValueError("bins must be positive")
     outcome_by_id: dict[str, ForecastOutcomeFact] = {}

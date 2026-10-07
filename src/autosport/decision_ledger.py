@@ -241,8 +241,8 @@ def bind_economic_goal(
 ) -> DecisionRecord:
     """Return the same economic decision identity with canonical goal evidence bound."""
 
-    if not isinstance(record, DecisionRecord):
-        raise TypeError("economic decision binding requires a DecisionRecord")
+    if type(record) is not DecisionRecord:
+        raise TypeError("economic decision binding requires an exact DecisionRecord")
     if not isinstance(contract, EconomicGoalContract):
         raise TypeError("economic decision binding requires an EconomicGoalContract")
     if record.decision_kind != ECONOMIC_DECISION_KIND:
@@ -295,8 +295,8 @@ def verify_economic_goal_binding(
 ) -> EconomicGoalProvenance:
     """Fail closed unless one durable economic decision is bound to ``contract`` exactly."""
 
-    if not isinstance(record, DecisionRecord):
-        raise TypeError("economic decision verification requires a DecisionRecord")
+    if type(record) is not DecisionRecord:
+        raise TypeError("economic decision verification requires an exact DecisionRecord")
     if not isinstance(contract, EconomicGoalContract):
         raise TypeError("economic decision verification requires an EconomicGoalContract")
     if record.decision_kind != ECONOMIC_DECISION_KIND:
@@ -613,7 +613,9 @@ class JsonlDecisionLedger:
         )
 
     def _append_validated(self, record: DecisionRecord) -> str:
-        payload = self._validate_record(record.to_dict())
+        if type(record) is not DecisionRecord:
+            raise TypeError("Decision Ledger append requires an exact DecisionRecord")
+        payload = self._validate_record(DecisionRecord.to_dict(record))
         canonical = self._canonical_record(payload)
         digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
         envelope = json.dumps(
@@ -699,8 +701,8 @@ class JsonlDecisionLedger:
     def append(self, record: DecisionRecord) -> str:
         """Persist a non-economic decision only."""
 
-        if not isinstance(record, DecisionRecord):
-            raise TypeError("Decision Ledger append requires a DecisionRecord")
+        if type(record) is not DecisionRecord:
+            raise TypeError("Decision Ledger append requires an exact DecisionRecord")
         if (
             record.decision_kind == ECONOMIC_DECISION_KIND
             or ECONOMIC_GOAL_PROVENANCE_PAYLOAD_KEY in record.payload

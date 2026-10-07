@@ -99,8 +99,11 @@ class CausalEvidenceRef:
     available_at: str
 
     def __post_init__(self) -> None:
+        self._validate_identity_and_chronology()
+
+    def _validate_identity_and_chronology(self) -> None:
         _text(self.evidence_id, "evidence_id")
-        if not isinstance(self.kind, EvidenceKind):
+        if type(self.kind) is not EvidenceKind:
             raise DecisionEnvelopeError("kind must be EvidenceKind")
         _sha256(self.evidence_sha256, "evidence_sha256")
         event = _instant(self.event_at, "event_at")
@@ -118,6 +121,7 @@ class CausalEvidenceRef:
         return False
 
     def canonical_payload(self) -> dict[str, Any]:
+        self._validate_identity_and_chronology()
         return {
             "evidence_id": self.evidence_id,
             "kind": self.kind.value,
@@ -137,16 +141,25 @@ def evidence_snapshot_sha256(
 
     if not isinstance(evidence, tuple):
         raise DecisionEnvelopeError("evidence must be a tuple")
-    if not isinstance(kind, EvidenceKind):
+    if type(kind) is not EvidenceKind:
         raise DecisionEnvelopeError("kind must be EvidenceKind")
     if any(type(item) is not CausalEvidenceRef for item in evidence):
         raise DecisionEnvelopeError("evidence must contain exact CausalEvidenceRef values")
+
+    canonical_evidence = tuple(item.canonical_payload() for item in evidence)
     selected = sorted(
-        (item.canonical_payload() for item in evidence if item.kind is kind),
+        (
+            payload
+            for item, payload in zip(evidence, canonical_evidence, strict=True)
+            if item.kind is kind
+        ),
         key=lambda item: (item["evidence_id"], item["evidence_sha256"]),
     )
     if not selected:
         raise DecisionEnvelopeError(f"{kind.value} evidence must not be empty")
+    identities = [item["evidence_id"] for item in selected]
+    if len(identities) != len(set(identities)):
+        raise DecisionEnvelopeError("evidence identities must not be duplicated")
     return _digest({"kind": kind.value, "evidence": selected, "schema_version": 2})
 
 
@@ -182,6 +195,8 @@ class SealedDecisionEnvelope:
             raise DecisionEnvelopeError("evidence must be a non-empty tuple")
         if any(type(item) is not CausalEvidenceRef for item in self.evidence):
             raise DecisionEnvelopeError("evidence must contain exact CausalEvidenceRef values")
+        for item in self.evidence:
+            item._validate_identity_and_chronology()
 
         decision = _instant(self.decision_at, "decision_at")
         event_watermark = _instant(self.event_watermark, "event_watermark")

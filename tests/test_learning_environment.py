@@ -105,6 +105,31 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
                 decision_at="2026-09-17T13:09:59+00:00",
             )
 
+    def test_decision_boundary_rejects_observation_subclass_before_identity_dispatch(self) -> None:
+        class HostileObservation(Observation):
+            __slots__ = ()
+
+            @property
+            def observation_id(self) -> str:
+                raise AssertionError("Observation subclass identity dispatch must not execute")
+
+        environment = self._environment()
+        exact = self._observation(environment.environment_id)
+        hostile = HostileObservation(
+            environment_id=exact.environment_id,
+            observed_at=exact.observed_at,
+            available_at=exact.available_at,
+            evidence=exact.evidence,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact Observation"):
+            environment.act(
+                hostile,
+                action_type="WAIT",
+                decision_at="2026-09-17T13:00:02+00:00",
+            )
+
+
     def test_policy_cannot_choose_outside_externally_admissible_action_set(self) -> None:
         environment = self._environment()
         observation = self._observation(environment.environment_id)

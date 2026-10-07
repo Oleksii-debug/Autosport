@@ -1034,6 +1034,30 @@ def test_promotion_rejects_preconsumed_confirmation_holdout(tmp_path):
         registry.record_promotion(decision)
 
 
+def test_public_append_does_not_dispatch_through_private_compatibility_hook(
+    tmp_path,
+    monkeypatch,
+):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    called = False
+
+    def forged_private_append(self, record, *, allow_repeat_experiment=False):
+        del self, record, allow_repeat_experiment
+        nonlocal called
+        called = True
+        raise AssertionError("public append must not dispatch through _append")
+
+    monkeypatch.setattr(ScientificRegistry, "_append", forged_private_append)
+
+    digest = registry.append(_question())
+
+    assert len(digest) == 64
+    assert registry.get("ResearchQuestion", "question-1") is not None
+    assert called is False
+
+
 def test_promotion_evidence_constructor_rejects_subclass_before_payload_dispatch():
     exact = _promotion_evidence(
         experiment_id="experiment-identity-subclass",

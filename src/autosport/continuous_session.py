@@ -570,8 +570,8 @@ class _ContinuousSessionState:
         if type(backlog) is not bool:
             raise TypeError("backlog must be boolean")
         for delta in deltas:
-            if not isinstance(delta, CollectorDelta):
-                raise TypeError("deltas must contain CollectorDelta values")
+            if type(delta) is not CollectorDelta:
+                raise TypeError("deltas must contain exact CollectorDelta values")
             delta.validate()
             if delta.source_id != self.source_id:
                 raise ContinuousSessionError(

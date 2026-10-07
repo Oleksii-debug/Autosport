@@ -299,14 +299,19 @@ class ResearchStrategyPlan:
             ),
         )
         first_observed_quote_times: dict[str, Any] = {}
-        first_observed_event_times: dict[str, Any] = {}
-        first_observed_market_times: dict[tuple[str, str], Any] = {}
+        first_observed_event_times: dict[tuple[str | None, str], Any] = {}
+        first_observed_market_times: dict[
+            tuple[str | None, str, str], Any
+        ] = {}
         for event in ordered:
             observed_time = parse_iso_timestamp(event.observed_ts)
             first_observed_quote_times.setdefault(event.quote_key, observed_time)
-            first_observed_event_times.setdefault(event.event_id, observed_time)
+            first_observed_event_times.setdefault(
+                (event.sport, event.event_id),
+                observed_time,
+            )
             first_observed_market_times.setdefault(
-                (event.event_id, event.market_id),
+                (event.sport, event.event_id, event.market_id),
                 observed_time,
             )
         for event in ordered:
@@ -458,21 +463,23 @@ def _validate_market_binding(
             raise ValueError(f"ForecastRecord snapshot hash does not match replay state: {leg.quote_key}")
 
 
-def _scenario_quote_event_market(quote_key: str) -> tuple[str, str] | None:
+def _scenario_quote_event_market(
+    quote_key: str,
+) -> tuple[str | None, str, str] | None:
     try:
-        _sport, event_id, market_id, _selection_id, _exchange_side = (
+        sport, event_id, market_id, _selection_id, _exchange_side = (
             _quote_identity_components(quote_key)
         )
     except ValueError:
         return None
-    return event_id, market_id
+    return sport, event_id, market_id
 
 
 def _validate_scenario_future_identity(
     groups: tuple[ScenarioGroup, ...],
     first_observed_quote_times: dict[str, Any],
-    first_observed_event_times: dict[str, Any],
-    first_observed_market_times: dict[tuple[str, str], Any],
+    first_observed_event_times: dict[tuple[str | None, str], Any],
+    first_observed_market_times: dict[tuple[str | None, str, str], Any],
     decision_time,
 ) -> None:
     """Reject replay quote, event, or market identities not yet knowable at decision time."""
@@ -488,34 +495,46 @@ def _validate_scenario_future_identity(
             scenario_identity = _scenario_quote_event_market(outcome.quote_key)
             if scenario_identity is None:
                 continue
-            scenario_event_id, scenario_market_id = scenario_identity
+            scenario_sport, scenario_event_id, scenario_market_id = scenario_identity
+            scenario_event_identity = (scenario_sport, scenario_event_id)
             future_event_matches = sorted(
-                event_id
-                for event_id, first_event_observed in first_observed_event_times.items()
+                event_identity
+                for event_identity, first_event_observed in first_observed_event_times.items()
                 if first_event_observed > decision_time
-                and event_id == scenario_event_id
+                and event_identity == scenario_event_identity
             )
             if future_event_matches:
-                event_id = future_event_matches[0]
+                sport, event_id = future_event_matches[0]
+                sport_prefix = "" if sport is None else f"{sport}:"
                 raise ValueError(
                     "research scenario event identity first appears after decision: "
-                    f"{event_id}"
+                    f"{sport_prefix}{event_id}"
                 )
+            scenario_market_identity = (
+                scenario_sport,
+                scenario_event_id,
+                scenario_market_id,
+            )
             future_market_matches = sorted(
                 (
-                    (event_id, market_id)
-                    for (event_id, market_id), first_market_observed in first_observed_market_times.items()
+                    market_identity
+                    for market_identity, first_market_observed
+                    in first_observed_market_times.items()
                     if first_market_observed > decision_time
-                    and (event_id, market_id)
-                    == (scenario_event_id, scenario_market_id)
+                    and market_identity == scenario_market_identity
                 ),
-                key=lambda item: (item[0], item[1]),
+                key=lambda item: (
+                    "" if item[0] is None else item[0],
+                    item[1],
+                    item[2],
+                ),
             )
             if future_market_matches:
-                event_id, market_id = future_market_matches[0]
+                sport, event_id, market_id = future_market_matches[0]
+                sport_prefix = "" if sport is None else f"{sport}:"
                 raise ValueError(
                     "research scenario market identity first appears after decision: "
-                    f"{event_id}|{market_id}"
+                    f"{sport_prefix}{event_id}|{market_id}"
                 )
 
 
@@ -543,17 +562,19 @@ def _validate_scenario_space_binding(
             continue
 
         market_identities = {
-            (event.event_id, event.market_id) for event in observed_outcomes
+            (event.sport, event.event_id, event.market_id)
+            for event in observed_outcomes
         }
         if len(market_identities) != 1:
             raise ValueError(
                 f"research scenario group must bind one replay event/market: {group.group_id}"
             )
-        event_id, market_id = next(iter(market_identities))
+        sport, event_id, market_id = next(iter(market_identities))
         replay_market_keys = {
             event.quote_key
             for event in latest_quotes.values()
-            if event.event_id == event_id
+            if event.sport == sport
+            and event.event_id == event_id
             and event.market_id == market_id
             and parse_iso_timestamp(event.observed_ts) <= decision_time
         }
@@ -566,7 +587,7 @@ def _validate_scenario_space_binding(
 
         for quote_key in sorted(outcome_keys - replay_market_keys):
             scenario_identity = _scenario_quote_event_market(quote_key)
-            if scenario_identity == (event_id, market_id):
+            if scenario_identity == (sport, event_id, market_id):
                 raise ValueError(
                     f"research scenario outcome absent from replay state: {quote_key}"
                 )

@@ -117,6 +117,7 @@ class MarketOutcomeIdentity:
 
     @property
     def identity_key(self) -> tuple[str, str, str, str, str]:
+        MarketOutcomeIdentity.__post_init__(self)
         return (
             self.sport,
             self.event_id,
@@ -128,6 +129,7 @@ class MarketOutcomeIdentity:
     @property
     def market_key(self) -> tuple[str, str, str, str]:
         """Provider-independent key only when canonical market IDs already align."""
+        MarketOutcomeIdentity.__post_init__(self)
         return (
             self.sport,
             self.event_id,
@@ -136,6 +138,7 @@ class MarketOutcomeIdentity:
         )
 
     def quote_key(self, selection_id: str) -> str:
+        MarketOutcomeIdentity.__post_init__(self)
         selection = _canonical_text("market outcome selection_id", selection_id)
         return _quote_identity(
             self.event_id,
@@ -145,6 +148,7 @@ class MarketOutcomeIdentity:
         )
 
     def to_dict(self) -> dict[str, object]:
+        MarketOutcomeIdentity.__post_init__(self)
         return {
             "sport": self.sport,
             "event_id": self.event_id,

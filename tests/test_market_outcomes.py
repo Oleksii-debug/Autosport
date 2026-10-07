@@ -121,6 +121,43 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             "win",
         )
 
+    def test_market_outcome_identity_read_boundaries_revalidate_mutated_fields(self):
+        class HostileSourceId(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "mutated market identity must fail before virtual strip dispatch"
+                )
+
+            def __hash__(self):
+                raise AssertionError(
+                    "mutated market identity must fail before hash dispatch"
+                )
+
+            def __format__(self, spec):
+                raise AssertionError(
+                    "mutated market identity must fail before format dispatch"
+                )
+
+        accessors = (
+            lambda identity: identity.identity_key,
+            lambda identity: identity.market_key,
+            lambda identity: identity.quote_key("home"),
+            lambda identity: identity.to_dict(),
+        )
+        for accessor in accessors:
+            with self.subTest(accessor=accessor):
+                identity = self._raw_identity()
+                object.__setattr__(
+                    identity,
+                    "source_id",
+                    HostileSourceId(identity.source_id),
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "market outcome source_id must be a non-empty canonical string",
+                ):
+                    accessor(identity)
+
     def test_raw_caller_roster_cannot_self_assert_exhaustive_authority(self):
         assessment = self._raw_assessment()
         self.assertEqual(assessment.status, OutcomeAuthorityStatus.REFUSED)

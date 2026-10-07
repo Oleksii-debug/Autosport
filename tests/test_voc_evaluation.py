@@ -134,6 +134,14 @@ class _HostileOutcomeDerivedVOCScore(OutcomeDerivedVOCScore):
         raise AssertionError("hostile VOC score attribute dispatch must not run")
 
 
+class _HostileVOCContext(dict):
+    def __iter__(self):
+        raise AssertionError("hostile VOC context iteration must not run")
+
+    def get(self, key, default=None):
+        raise AssertionError("hostile VOC context lookup must not run")
+
+
 def test_paired_voc_payload_rejects_mapping_subclass_before_dispatch():
     hostile = _HostileVOCPayload(evaluation().payload())
     with unittest.TestCase().assertRaisesRegex(
@@ -293,6 +301,22 @@ class _HostileResolvedEvaluationResolver(FixtureCanonicalAuthorityResolver):
 class _HostileScoreResolver(FixtureCanonicalAuthorityResolver):
     def resolve_score(self, evaluation, *, as_of):
         return object.__new__(_HostileOutcomeDerivedVOCScore)
+
+
+class _HostileContextResolver(FixtureCanonicalAuthorityResolver):
+    def resolve_decision_context(self, context_sha256, *, as_of):
+        return _HostileVOCContext(
+            {
+                "request_id": "source:hostile",
+                "decision_input_sha256": SHA_E,
+                "task_class": "forecast",
+                "sport_id": "table-tennis",
+                "league_id": "league-1",
+                "regime_id": "regime-1",
+                "urgency_id": "routine",
+                "contradiction_state": "none",
+            }
+        )
 
 
 def candidates():
@@ -1490,6 +1514,19 @@ def test_voc_store_require_score_rejects_score_subclass_before_dispatch():
                 evaluation_sha256=value.evaluation_sha256,
                 as_of=T2,
             )
+
+
+def test_voc_store_rejects_context_mapping_subclass_before_iteration():
+    with tempfile.TemporaryDirectory() as tmp:
+        store = VOCEvaluationStore(
+            Path(tmp) / "voc.json",
+            canonical_authority_resolver=_HostileContextResolver(),
+        )
+        with unittest.TestCase().assertRaisesRegex(
+            VOCEvaluationError,
+            "decision context schema is invalid",
+        ):
+            store.require_decision_context(SHA_A, as_of=T2)
 
 
 if __name__ == "__main__":

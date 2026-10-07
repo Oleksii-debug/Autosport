@@ -116,6 +116,14 @@ class _HostileVOCPayload(dict):
         raise AssertionError("hostile VOC payload get must not run")
 
 
+class _HostileVOCScalar(str):
+    def __hash__(self):
+        raise AssertionError("hostile VOC scalar hash must not run")
+
+    def __eq__(self, other):
+        raise AssertionError("hostile VOC scalar equality must not run")
+
+
 def test_paired_voc_payload_rejects_mapping_subclass_before_dispatch():
     hostile = _HostileVOCPayload(evaluation().payload())
     with unittest.TestCase().assertRaisesRegex(
@@ -131,6 +139,27 @@ def test_paired_voc_payload_rejects_unknown_schema_fields():
     with unittest.TestCase().assertRaisesRegex(
         VOCEvaluationError,
         "schema fields mismatch",
+    ):
+        PairedVOCEvaluation.from_payload(payload)
+
+
+def test_paired_voc_payload_rejects_numeric_decimal_wire_alias():
+    payload = evaluation().payload()
+    assert payload["baseline_utility"] == "1"
+    payload["baseline_utility"] = 1
+    with unittest.TestCase().assertRaisesRegex(
+        VOCEvaluationError,
+        "baseline_utility.*exact string",
+    ):
+        PairedVOCEvaluation.from_payload(payload)
+
+
+def test_paired_voc_payload_rejects_hostile_provenance_before_enum_dispatch():
+    payload = evaluation().payload()
+    payload["provenance"] = _HostileVOCScalar(payload["provenance"])
+    with unittest.TestCase().assertRaisesRegex(
+        VOCEvaluationError,
+        "provenance.*exact string",
     ):
         PairedVOCEvaluation.from_payload(payload)
 

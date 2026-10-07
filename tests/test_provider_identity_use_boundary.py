@@ -68,6 +68,43 @@ def test_source_identity_rejects_str_subclass_before_virtual_method() -> None:
         CanonicalNormalizer().normalize(source_id, _quote())  # type: ignore[arg-type]
 
 
+def test_source_identity_rejects_lone_surrogate() -> None:
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        ProviderBatch("provider-\ud800", ())
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        CanonicalNormalizer().normalize("provider-\ud800", _quote())
+
+
+@pytest.mark.parametrize(
+    "field",
+    ("provider_event_id", "provider_market_id", "provider_selection_id", "sport"),
+)
+def test_provider_quote_rejects_lone_surrogate_identity(field: str) -> None:
+    values: dict[str, object] = {
+        "provider_event_id": "event-1",
+        "provider_market_id": "winner",
+        "provider_selection_id": "home",
+        "decimal_odds": Decimal("2.00"),
+        "observed_ts": "2026-10-07T00:00:00+00:00",
+        "sequence": 1,
+        "sport": "football",
+    }
+    values[field] = "\ud800"
+
+    with pytest.raises(ValueError):
+        ProviderQuote(**values)  # type: ignore[arg-type]
+
+
+def test_use_boundaries_reject_post_construction_lone_surrogate_identity() -> None:
+    quote = _quote()
+    object.__setattr__(quote, "provider_selection_id", "\ud800")
+
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        ProviderBatch("provider-a", (quote,))
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        CanonicalNormalizer().normalize("provider-a", quote)
+
+
 @pytest.mark.parametrize(
     ("field", "value", "message"),
     (
@@ -129,11 +166,13 @@ def test_normalizer_rejects_quote_subclass_before_member_access() -> None:
     assert quote.member_accesses == 0
 
 
-def test_batch_cursor_rejects_subclass_and_control_characters() -> None:
+def test_batch_cursor_rejects_subclass_control_and_non_utf8_text() -> None:
     with pytest.raises(TypeError, match="cursor must be str"):
         ProviderBatch("provider-a", (_quote(),), cursor=_TrapStr("1"))
     with pytest.raises(ValueError, match="cursor must not contain control"):
         ProviderBatch("provider-a", (_quote(),), cursor="1\n2")
+    with pytest.raises(ValueError, match="valid UTF-8"):
+        ProviderBatch("provider-a", (_quote(),), cursor="\ud800")
 
 
 def test_valid_provider_identity_remains_byte_stable() -> None:

@@ -4,6 +4,8 @@ import pytest
 
 from autosport.model_compute_router import (
     ComputeCandidate,
+    ComputeExecutionEvidence,
+    ComputeRouteDecision,
     ComputeRouteRequest,
     ComputeRoutingPolicy,
     ComputeTier,
@@ -48,6 +50,84 @@ def _request(record_type=ComputeRouteRequest):
 
 def _policy(record_type=ComputeRoutingPolicy):
     return record_type(policy_id="policy-1", policy_version=1)
+
+
+class _HostilePayload(dict):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError(
+            "hostile model-router mapping dispatched before exact payload admission"
+        )
+
+    __getitem__ = _dispatch
+    get = _dispatch
+    keys = _dispatch
+    __iter__ = _dispatch
+
+
+class _HostileJsonList(list):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError(
+            "hostile model-router list dispatched before exact payload admission"
+        )
+
+    __iter__ = _dispatch
+    __len__ = _dispatch
+
+
+class _HostileJsonText(str):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError(
+            "hostile model-router text dispatched before exact payload admission"
+        )
+
+    __hash__ = _dispatch
+    __eq__ = _dispatch
+    __iter__ = _dispatch
+    __len__ = _dispatch
+
+
+@pytest.mark.parametrize(
+    "parser",
+    (
+        ComputeCandidate.from_payload,
+        ComputeRouteRequest.from_payload,
+        ComputeRoutingPolicy.from_payload,
+        ValueOfComputationEvidence.from_payload,
+        ComputeRouteDecision.from_payload,
+        ComputeExecutionEvidence.from_payload,
+    ),
+)
+def test_public_from_payload_rejects_mapping_subclass_before_dispatch(parser) -> None:
+    with pytest.raises(ModelComputeRouterError, match="exact JSON object"):
+        parser(_HostilePayload())
+
+
+def test_candidate_from_payload_rejects_nested_list_subclass_before_dispatch() -> None:
+    payload = _candidate().payload()
+    payload["capabilities"] = _HostileJsonList(["forecast"])
+    with pytest.raises(ModelComputeRouterError, match="exact JSON carrier types"):
+        ComputeCandidate.from_payload(payload)
+
+
+def test_candidate_from_payload_rejects_nested_text_subclass_before_enum_dispatch() -> None:
+    payload = _candidate().payload()
+    payload["tier"] = _HostileJsonText("LOCAL")
+    with pytest.raises(ModelComputeRouterError, match="exact JSON carrier types"):
+        ComputeCandidate.from_payload(payload)
+
+
+def test_candidate_constructor_rejects_capability_text_subclass_before_hash_dispatch() -> None:
+    with pytest.raises(ModelComputeRouterError, match="capability"):
+        ComputeCandidate(
+            candidate_id="candidate-1",
+            tier=ComputeTier.LOCAL,
+            backend_id="backend-1",
+            model_id="model-1",
+            config_sha256=SHA256,
+            capabilities=(_HostileJsonText("forecast"),),
+            estimated_cost=Decimal("0"),
+            estimated_latency_seconds=Decimal("1"),
+        )
 
 
 def test_route_rejects_candidate_subclass() -> None:

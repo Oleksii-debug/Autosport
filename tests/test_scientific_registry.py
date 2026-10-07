@@ -52,6 +52,19 @@ class _HostileTuple(tuple):
         raise AssertionError("hostile scientific identity tuple length must not run")
 
 
+def test_causal_records_rejects_record_type_subclass_before_membership_dispatch(tmp_path):
+    class HostileRecordType(str):
+        def __hash__(self):
+            raise AssertionError("hostile record_type hash dispatched before exact-type admission")
+
+        def __eq__(self, other):
+            raise AssertionError("hostile record_type equality dispatched before exact-type admission")
+
+    registry = ScientificRegistry(tmp_path / "registry.json")
+    with pytest.raises(ValueError, match="record_type must be a non-empty canonical string"):
+        registry.causal_records(HostileRecordType("DatasetSnapshot"), as_of=T1)
+
+
 def _hypothesis() -> Hypothesis:
     return Hypothesis(
         "hypothesis-1",

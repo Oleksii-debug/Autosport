@@ -152,6 +152,23 @@ def test_account_position_identifiers_reject_non_utf8_aliases(
         factory(**{field_name: "identity\ud800"})
 
 
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("adapter_version", "1.0"),
+        ("observed_at", TS),
+        ("source_ref", "provider-evidence"),
+        ("source_payload_sha256", SHA),
+    ),
+)
+def test_profile_identity_payload_rejects_str_subclass_before_dispatch(
+    field_name: str,
+    value: str,
+) -> None:
+    with pytest.raises(BookmakerCapabilityError, match="exact canonical identity text"):
+        _profile(**{field_name: _TrapStr(value)})
+
+
 def test_profile_rejects_profile_version_int_subclass_before_dispatch() -> None:
     with pytest.raises(BookmakerCapabilityError, match="exact positive integer"):
         _profile(profile_version=_TrapInt(1))

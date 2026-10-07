@@ -481,6 +481,7 @@ class PaperBook:
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
         self._validate_loaded_state(self)
+        ticket_id = self._require_canonical_text(ticket_id, "ticket_id")
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")

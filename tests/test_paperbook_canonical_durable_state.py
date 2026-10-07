@@ -142,6 +142,17 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         self.assertEqual(book.balance, Decimal("90"))
 
 
+    def test_settlement_rejects_hostile_ticket_id_before_hash_dispatch(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+
+        with self.assertRaisesRegex(ValueError, "ticket_id.*exact string"):
+            book.settle(_ExplosiveString(ticket.ticket_id), {leg.quote_key})
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(book.balance, Decimal("90"))
+
     def test_open_ticket_rejects_noncanonical_leg_object_before_bankroll_mutation(self) -> None:
         book = PaperBook("100")
 

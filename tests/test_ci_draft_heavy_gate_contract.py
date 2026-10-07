@@ -22,7 +22,7 @@ def _assert_runner_free_pr_admission(workflow: str) -> None:
     assert "github.event.pull_request.head.repo.full_name == github.repository" in block
     assert "github.event.pull_request.base.repo.full_name == github.repository" in block
     assert "github.event.pull_request.draft == false" in block
-    assert "runs-on: ubuntu-latest" in block
+    assert "runs-on: ubuntu-slim" in block
     assert "timeout-minutes: 5" in block
 
 

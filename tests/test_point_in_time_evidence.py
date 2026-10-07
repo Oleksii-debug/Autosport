@@ -589,3 +589,46 @@ def test_feature_authority_rejects_lineage_authority_subclass_before_virtual_dis
             lineage_authority=hostile,
             decision_cutoff_utc="2099-01-01T00:00:00Z",
         )
+
+
+def test_feature_provenance_rejects_boolean_schema_version_alias() -> None:
+    snapshot = _snapshot()
+    feature_set = _feature_set()
+    provenance = FeatureArtifactProvenance.issue(
+        dataset_snapshot=snapshot,
+        feature_set=feature_set,
+        feature_payload=_FEATURE_PAYLOAD,
+    )
+    payload = provenance.to_payload()
+    payload["schema_version"] = True
+
+    with pytest.raises(PointInTimeEvidenceError, match="schema mismatch"):
+        FeatureArtifactProvenance.from_payload(payload)
+
+
+def test_holdout_ledger_rejects_boolean_schema_version_without_rewrite(tmp_path) -> None:
+    path = tmp_path / "holdout_consumption.json"
+    snapshot = _snapshot()
+    lineage = _holdout_lineage(tmp_path, snapshot)
+    ledger = HoldoutConsumptionLedger(path, lineage_authority=lineage)
+    ledger.consume(
+        dataset_snapshot=snapshot,
+        research_protocol_id="protocol-42",
+        confirmation_trial_family_id="family-9",
+        consumer_identity="experiment:challenger-a",
+        purpose="final-confirmation",
+        consumed_at_utc="2026-09-20T10:05:00Z",
+    )
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    payload["schema_version"] = True
+    path.write_text(
+        json.dumps(payload, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    forged = path.read_bytes()
+
+    with pytest.raises(EvidenceLedgerCorruptError, match="schema is unsupported"):
+        HoldoutConsumptionLedger(path, lineage_authority=lineage)
+
+    assert path.read_bytes() == forged
+

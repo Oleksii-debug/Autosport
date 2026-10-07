@@ -908,11 +908,19 @@ class ContinuousEventLifecycle:
             ):
                 continue
             try:
+                source = _instant(
+                    event.source_ts or event.observed_ts,
+                    "source_ts",
+                )
                 observed = _instant(event.observed_ts, "observed_ts")
                 ingested = _instant(event.ingest_ts, "ingest_ts")
             except ValueError:
                 continue
-            if observed <= cutoff and ingested <= cutoff:
+            if (
+                source <= cutoff
+                and observed <= cutoff
+                and observed <= ingested <= cutoff
+            ):
                 availability.append(ingested)
         first = min(availability) if availability else None
         threshold = cutoff - required_history

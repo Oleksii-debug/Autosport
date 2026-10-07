@@ -815,6 +815,89 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_future_source_time_does_not_count_as_causal_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+            event = self._catalog_event(phase=EventPhase.LIVE, available_offset=0)
+            lifecycle.apply_page(
+                self._page(1, event),
+                discovered_at=self.START.isoformat(),
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                cutoff = self.START + timedelta(seconds=10)
+                future_source = MarketEvent(
+                    event_id=self._stored_event_id("event-1"),
+                    market_id="winner",
+                    selection_id="home",
+                    decimal_odds=Decimal("2.00"),
+                    observed_ts=self.START.isoformat(),
+                    source_id="provider-a",
+                    sequence=1,
+                    source_ts=(cutoff + timedelta(seconds=1)).isoformat(),
+                    ingest_ts=self.START.isoformat(),
+                    sport="table_tennis",
+                )
+                self.assertTrue(store.append(future_source))
+
+                assessment = self._assess_evidence(
+                    lifecycle,
+                    event.identity,
+                    store,
+                    as_of=cutoff.isoformat(),
+                    required_history=timedelta(0),
+                )
+
+                self.assertEqual(
+                    assessment.status,
+                    EvidenceEligibility.WAIT_EVIDENCE,
+                )
+                self.assertIsNone(assessment.evidence_first_available_at)
+            finally:
+                store.close()
+
+    def test_inverted_local_clock_does_not_count_as_causal_history(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+            event = self._catalog_event(phase=EventPhase.LIVE, available_offset=0)
+            lifecycle.apply_page(
+                self._page(1, event),
+                discovered_at=self.START.isoformat(),
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                impossible = MarketEvent(
+                    event_id=self._stored_event_id("event-1"),
+                    market_id="winner",
+                    selection_id="home",
+                    decimal_odds=Decimal("2.00"),
+                    observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                    source_id="provider-a",
+                    sequence=1,
+                    source_ts=self.START.isoformat(),
+                    ingest_ts=(self.START + timedelta(seconds=1)).isoformat(),
+                    sport="table_tennis",
+                )
+                self.assertTrue(store.append(impossible))
+
+                assessment = self._assess_evidence(
+                    lifecycle,
+                    event.identity,
+                    store,
+                    as_of=(self.START + timedelta(seconds=5)).isoformat(),
+                    required_history=timedelta(0),
+                )
+
+                self.assertEqual(
+                    assessment.status,
+                    EvidenceEligibility.WAIT_EVIDENCE,
+                )
+                self.assertIsNone(assessment.evidence_first_available_at)
+            finally:
+                store.close()
+
     def test_register_eligible_rejects_identity_subclass_before_hash_dispatch(self) -> None:
         class HostileIdentity(str):
             def __hash__(self):

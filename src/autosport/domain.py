@@ -208,11 +208,14 @@ def _optional_canonical_timestamp(raw: dict[str, Any], field_name: str) -> str |
     return _timezone_aware_iso8601_value(value, field_name)
 
 
-def _required_sequence(raw: dict[str, Any]) -> int:
-    value = raw.get("sequence")
+def _canonical_sequence_value(value: object) -> int:
     if type(value) is not int:
         raise ValueError("sequence must be a non-boolean int")
     return value
+
+
+def _required_sequence(raw: dict[str, Any]) -> int:
+    return _canonical_sequence_value(raw.get("sequence"))
 
 
 def _required_decimal_odds(raw: dict[str, Any]) -> Decimal:
@@ -361,6 +364,7 @@ class MarketEvent:
         canonical_selection_id = _canonical_string_value(
             self.selection_id, "selection_id"
         )
+        canonical_sequence = _canonical_sequence_value(self.sequence)
         if self.exchange_side is not None:
             canonical_side = _canonical_exchange_side(self.exchange_side)
             canonical_sport = (
@@ -374,12 +378,12 @@ class MarketEvent:
                 canonical_market_id,
                 canonical_selection_id,
                 canonical_side,
-                self.sequence,
+                canonical_sequence,
             )
         if self.sport is None:
             return (
                 f"{canonical_source_id}|{canonical_event_id}|{canonical_market_id}|"
-                f"{canonical_selection_id}|{self.sequence}"
+                f"{canonical_selection_id}|{canonical_sequence}"
             )
         return _encoded_sport_identity(
             "dedupe",
@@ -388,7 +392,7 @@ class MarketEvent:
             canonical_event_id,
             canonical_market_id,
             canonical_selection_id,
-            self.sequence,
+            canonical_sequence,
         )
 
     @classmethod

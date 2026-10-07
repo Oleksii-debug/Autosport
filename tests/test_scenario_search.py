@@ -108,6 +108,31 @@ class ScenarioSearchTests(unittest.TestCase):
                 [],
             )
 
+    def test_scenario_search_rejects_group_list_subclass_before_truthiness_or_iteration(self):
+        class HostileGroupList(list):
+            def __iter__(self):
+                raise AssertionError(
+                    "scenario group list iterated before exact-list admission"
+                )
+
+            def __bool__(self):
+                raise AssertionError(
+                    "scenario group list truthiness dispatched before exact-list admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        ticket = book.open_ticket([leg], "1")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario groups must be an exact list",
+        ):
+            ScenarioSearchEngine().analyse(
+                [ticket],
+                HostileGroupList(),  # type: ignore[arg-type]
+            )
+
     def test_scenario_search_revalidates_mutated_group_identity_at_use_boundary(self):
         book = PaperBook("100")
         a = TicketLeg("e1", "winner", "a", Decimal("2"))

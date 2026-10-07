@@ -170,26 +170,34 @@ def _quote_identity(
     sport: str | None,
     exchange_side: str | None = None,
 ) -> str:
+    # This helper is also a direct lookup boundary (for example MarketMirror.get),
+    # not only a constructor helper. Re-prove every identity component here so a
+    # str subclass cannot reach f-string/JSON dispatch before canonical admission.
+    canonical_event_id = _canonical_string_value(event_id, "event_id")
+    canonical_market_id = _canonical_string_value(market_id, "market_id")
+    canonical_selection_id = _canonical_string_value(selection_id, "selection_id")
     if exchange_side is not None:
         canonical_side = _canonical_exchange_side(exchange_side)
         canonical_sport = None if sport is None else _canonical_sport_value(sport)
         return _encoded_exchange_side_identity(
             "quote",
             canonical_sport,
-            event_id,
-            market_id,
-            selection_id,
+            canonical_event_id,
+            canonical_market_id,
+            canonical_selection_id,
             canonical_side,
         )
     if sport is None:
-        return f"{event_id}|{market_id}|{selection_id}"
+        return (
+            f"{canonical_event_id}|{canonical_market_id}|{canonical_selection_id}"
+        )
     canonical_sport = _canonical_sport_value(sport)
     return _encoded_sport_identity(
         "quote",
         canonical_sport,
-        event_id,
-        market_id,
-        selection_id,
+        canonical_event_id,
+        canonical_market_id,
+        canonical_selection_id,
     )
 
 

@@ -918,6 +918,23 @@ _LOCAL_SCIENTIFIC_RECORD_TYPES = {
 _LOCAL_SCIENTIFIC_RECORD_CLASSES = tuple(_LOCAL_SCIENTIFIC_RECORD_TYPES.values())
 
 
+def _external_scientific_record_types() -> dict[str, type[Any]]:
+    """Resolve canonical cross-module registry records without import cycles."""
+
+    from .champion_eligibility import ChampionEligibilityDecision
+    from .drift_control import DriftFinding, DriftObservation, DriftReference
+    from .voc_evaluation import PairedVOCEvaluation, VOCCohort
+
+    return {
+        "DriftReference": DriftReference,
+        "DriftObservation": DriftObservation,
+        "DriftFinding": DriftFinding,
+        "PairedVOCEvaluation": PairedVOCEvaluation,
+        "VOCCohort": VOCCohort,
+        "ChampionEligibilityDecision": ChampionEligibilityDecision,
+    }
+
+
 class ScientificRegistryError(RuntimeError):
     pass
 
@@ -1014,10 +1031,11 @@ class ScientificRegistry:
 
     @staticmethod
     def _entry(record: ScientificRecord) -> dict[str, Any]:
-        # Local canonical scientific records are durable identity authorities.
-        # Re-run their exact constructor contract before any property/payload
-        # dispatch so subclasses and post-construction mutation cannot alter or
-        # normalize the persisted identity.
+        # Every registry record type has one canonical writer class. Re-run the
+        # exact constructor contract before virtual property/payload dispatch so
+        # subclasses and post-construction mutation cannot alter or normalize
+        # durable identity.
+        matched_class: type[Any] | None = None
         for record_class in _LOCAL_SCIENTIFIC_RECORD_CLASSES:
             if isinstance(record, record_class):
                 if type(record) is not record_class:
@@ -1025,33 +1043,55 @@ class ScientificRegistry:
                         "scientific record must use an exact canonical record type"
                     )
                 record_class.__post_init__(record)
+                matched_class = record_class
                 break
+
+        external_types: dict[str, type[Any]] | None = None
+        if matched_class is None:
+            external_types = _external_scientific_record_types()
+            for record_class in external_types.values():
+                if isinstance(record, record_class):
+                    if type(record) is not record_class:
+                        raise ValueError(
+                            "scientific record must use an exact canonical record type"
+                        )
+                    record_class.__post_init__(record)
+                    matched_class = record_class
+                    break
 
         record_type = record.record_type
         expected_class = _LOCAL_SCIENTIFIC_RECORD_TYPES.get(record_type)
-        if expected_class is not None and type(record) is not expected_class:
+        if expected_class is None:
+            if external_types is None:
+                external_types = _external_scientific_record_types()
+            expected_class = external_types.get(record_type)
+        if expected_class is None:
+            if record_type in _RECORD_TYPES:
+                raise ValueError(
+                    "supported scientific record type lacks canonical write authority"
+                )
+            raise ValueError("unsupported scientific record type")
+        if type(record) is not expected_class:
             raise ValueError(
                 "scientific record_type must use its canonical record class"
             )
-        if record_type not in _RECORD_TYPES:
-            raise ValueError("unsupported scientific record type")
+
         record_id = _text(record.record_id, "record_id")
         available_at = _iso(record.available_at, "available_at")
         payload = record.to_payload()
         if type(payload) is not dict:
             raise ValueError("scientific record payload must be an object")
-        envelope = {"record_type": record.record_type, "record_id": record_id,
+        envelope = {"record_type": record_type, "record_id": record_id,
                     "available_at": available_at, "payload": payload}
         envelope["record_sha256"] = _digest(envelope)
         return envelope
 
     def append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
-        if record.record_type == "PromotionDecision":
-            raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")
-        return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
-
-    def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
         entry = self._entry(record)
+        if entry["record_type"] == "PromotionDecision":
+            raise PromotionEvidenceError(
+                "promotion decisions must be recorded through record_promotion"
+            )
         if type(allow_repeat_experiment) is not bool:
             raise ValueError("allow_repeat_experiment must be boolean")
         with WorkspaceEconomicLock(self.path.parent):

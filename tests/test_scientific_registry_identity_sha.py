@@ -163,3 +163,39 @@ def test_registry_append_revalidates_tampered_dataset_snapshot_identity(
 def test_scientific_registry_text_identity_rejects_control_aliases(factory, field_name: str, value: str) -> None:
     with pytest.raises(ValueError, match="canonical string"):
         factory(**{field_name: value})
+
+
+
+class _ForgedExternalRecord:
+    def __init__(self, record_type: str) -> None:
+        self.record_type = record_type
+        self.record_id = "forged-record"
+        self.available_at = T0
+
+    def to_payload(self) -> dict[str, object]:
+        return {"forged": True}
+
+
+@pytest.mark.parametrize(
+    "record_type",
+    (
+        "DriftReference",
+        "DriftObservation",
+        "DriftFinding",
+        "PairedVOCEvaluation",
+        "VOCCohort",
+        "ChampionEligibilityDecision",
+    ),
+)
+def test_registry_rejects_protocol_only_external_record_forgery(
+    tmp_path,
+    record_type: str,
+) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific-registry.json"
+    )
+
+    with pytest.raises(ValueError, match="canonical record class"):
+        registry.append(_ForgedExternalRecord(record_type))  # type: ignore[arg-type]
+
+    assert registry.get(record_type, "forged-record") is None

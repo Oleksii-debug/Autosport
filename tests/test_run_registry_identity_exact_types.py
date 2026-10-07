@@ -47,6 +47,81 @@ class _HostileRevision(TrustedOutcomeRevision):
 
 
 class RunRegistryIdentityExactTypeTests(unittest.TestCase):
+    def test_restart_entry_rejects_hostile_experiment_key_before_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class HostileKey(str):
+            def __bool__(self) -> bool:
+                dispatch_calls.append("bool")
+                raise AssertionError("hostile experiment key bool dispatched")
+
+            def __hash__(self) -> int:
+                dispatch_calls.append("hash")
+                raise AssertionError("hostile experiment key hash dispatched")
+
+            def __format__(self, spec: str) -> str:
+                dispatch_calls.append("format")
+                raise AssertionError("hostile experiment key format dispatched")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            with self.assertRaisesRegex(ValueError, "invalid experiment key"):
+                registry._validate_entry(HostileKey("hostile-key"), {})
+
+        self.assertEqual(dispatch_calls, [])
+
+    def test_restart_entry_rejects_hostile_field_key_before_hash_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class HostileField(str):
+            armed = False
+
+            def __hash__(self) -> int:
+                if self.armed:
+                    dispatch_calls.append("hash")
+                    raise AssertionError("hostile run-entry field hashed before exact admission")
+                return str.__hash__(self)
+
+            def __eq__(self, other: object) -> bool:
+                if self.armed:
+                    dispatch_calls.append("eq")
+                    raise AssertionError("hostile run-entry field compared before exact admission")
+                return str.__eq__(self, other)
+
+        hostile = HostileField("status")
+        item: dict[object, object] = {hostile: "in_progress"}
+        hostile.armed = True
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            with self.assertRaisesRegex(ValueError, "entry keys must be exact strings"):
+                registry._validate_entry("key", item)
+
+        self.assertEqual(dispatch_calls, [])
+
+    def test_restart_entry_rejects_mapping_subclass_before_mapping_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class HostileMapping(dict):
+            def __iter__(self):
+                dispatch_calls.append("iter")
+                raise AssertionError("hostile mapping iter dispatched")
+
+            def get(self, *args, **kwargs):
+                dispatch_calls.append("get")
+                raise AssertionError("hostile mapping get dispatched")
+
+            def keys(self):
+                dispatch_calls.append("keys")
+                raise AssertionError("hostile mapping keys dispatched")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            with self.assertRaisesRegex(ValueError, "invalid run entry"):
+                registry._validate_entry("key", HostileMapping())
+
+        self.assertEqual(dispatch_calls, [])
+
     def test_begin_rejects_sha_subclasses_before_virtual_string_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run_registry.json"

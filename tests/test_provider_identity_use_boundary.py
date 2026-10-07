@@ -15,9 +15,12 @@ class _TrapStr(str):
 class _HostileQuoteSubclass(ProviderQuote):
     def __post_init__(self) -> None:
         object.__setattr__(self, "member_accesses", 0)
+        object.__setattr__(self, "_armed", False)
 
     def __getattribute__(self, name: str):
-        if name in {"member_accesses", "__class__", "__dict__"}:
+        if name in {"member_accesses", "_armed", "__class__", "__dict__", "__post_init__"}:
+            return object.__getattribute__(self, name)
+        if not object.__getattribute__(self, "_armed"):
             return object.__getattribute__(self, name)
         object.__setattr__(
             self,
@@ -159,6 +162,8 @@ def test_normalizer_rejects_quote_subclass_before_member_access() -> None:
         sequence=1,
         sport="football",
     )
+
+    object.__setattr__(quote, "_armed", True)
 
     with pytest.raises(TypeError, match="quote must be ProviderQuote"):
         CanonicalNormalizer().normalize("provider-a", quote)

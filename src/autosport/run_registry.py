@@ -1676,54 +1676,71 @@ class RunRegistry:
             )
 
     def _validate_entry(self, key: object, item: object) -> None:
-        if not isinstance(key, str) or not key:
-            raise ValueError("run registry contains an invalid experiment key")
-        if not isinstance(item, dict):
+        try:
+            key = _require_nonempty_string("run registry experiment key", key)
+        except ValueError as exc:
+            raise ValueError("run registry contains an invalid experiment key") from exc
+        if type(item) is not dict:
             raise ValueError("run registry contains an invalid run entry")
-        fields = set(item)
+        raw_keys = tuple(dict.keys(item))
+        if any(type(field) is not str for field in raw_keys):
+            raise ValueError("run registry entry keys must be exact strings")
+        fields = frozenset(raw_keys)
         if not _REQUIRED_ENTRY_FIELDS.issubset(fields) or not fields.issubset(
             _REQUIRED_ENTRY_FIELDS | _OPTIONAL_ENTRY_FIELDS
         ):
             raise ValueError("run registry contains invalid run entry fields")
 
-        status = item.get("status")
+        status = dict.__getitem__(item, "status")
         if status not in _ALLOWED_STATUSES:
             raise ValueError("run registry contains an invalid status")
-        market_sha256 = item.get("market_sha256")
-        results_sha256 = item.get("results_sha256")
-        strategy_id = item.get("strategy_id")
-        run_id = item.get("run_id")
+        market_sha256 = dict.__getitem__(item, "market_sha256")
+        results_sha256 = dict.__getitem__(item, "results_sha256")
+        strategy_id = dict.__getitem__(item, "strategy_id")
+        run_id = dict.__getitem__(item, "run_id")
         if not _is_canonical_sha256(market_sha256) or not _is_canonical_sha256(results_sha256):
             raise ValueError("run registry contains invalid canonical SHA-256 identity fields")
-        if (
-            not isinstance(strategy_id, str)
-            or not strategy_id
-            or not isinstance(run_id, str)
-            or not run_id
-        ):
-            raise ValueError("run registry contains invalid experiment identity fields")
+        try:
+            strategy_id = _require_nonempty_string(
+                "run registry strategy_id",
+                strategy_id,
+            )
+            run_id = _require_nonempty_string("run registry run_id", run_id)
+        except ValueError as exc:
+            raise ValueError(
+                "run registry contains invalid experiment identity fields"
+            ) from exc
 
-        base_book_present = "base_paper_book_sha256" in item
-        base_ledger_present = "base_decision_ledger_sha256" in item
+        base_book_present = "base_paper_book_sha256" in fields
+        base_ledger_present = "base_decision_ledger_sha256" in fields
         if base_book_present != base_ledger_present:
             raise ValueError("run registry contains incomplete base transaction evidence")
         for field_name in _HASH_EVIDENCE_FIELDS:
-            if field_name in item and not _is_canonical_sha256(item[field_name]):
+            if field_name in fields and not _is_canonical_sha256(
+                dict.__getitem__(item, field_name)
+            ):
                 raise ValueError(f"run registry contains invalid {field_name}")
 
-        if "outcome_lineage" in item:
+        if "outcome_lineage" in fields:
             try:
                 outcome_lineage_binding_from_payload(
-                    item["outcome_lineage"],
+                    dict.__getitem__(item, "outcome_lineage"),
                     context="run registry outcome_lineage",
                 )
             except OutcomeLineageTrustError as exc:
                 raise ValueError("run registry contains invalid outcome lineage evidence") from exc
-        if "result_path" in item and item["result_path"] is not None and not isinstance(item["result_path"], str):
-            raise ValueError("run registry contains an invalid result_path")
-        if "abort_reason" in item and not isinstance(item["abort_reason"], str):
+        if "result_path" in fields:
+            result_path = dict.__getitem__(item, "result_path")
+            if result_path is not None and type(result_path) is not str:
+                raise ValueError("run registry contains an invalid result_path")
+        if "abort_reason" in fields and type(
+            dict.__getitem__(item, "abort_reason")
+        ) is not str:
             raise ValueError("run registry contains an invalid abort_reason")
-        if "reconciled_from_summary" in item and item["reconciled_from_summary"] is not True:
+        if "reconciled_from_summary" in fields and dict.__getitem__(
+            item,
+            "reconciled_from_summary",
+        ) is not True:
             raise ValueError("run registry contains invalid reconciliation evidence")
 
         expected_base_identity = self.experiment_identity(
@@ -1731,7 +1748,7 @@ class RunRegistry:
             results_sha256,
             strategy_id,
         )
-        if item.get("base_identity") != expected_base_identity:
+        if dict.__getitem__(item, "base_identity") != expected_base_identity:
             raise ValueError("run registry contains an inconsistent base identity")
         expected_keys = {
             expected_base_identity,

@@ -409,7 +409,11 @@ class PaperSettlementLearningBridge:
             "state_sha256",
         }:
             raise PaperSettlementLearningBridgeError("bridge state schema mismatch")
-        if state["schema"] != SCHEMA or state["schema_version"] != SCHEMA_VERSION:
+        if (
+            state["schema"] != SCHEMA
+            or type(state["schema_version"]) is not int
+            or state["schema_version"] != SCHEMA_VERSION
+        ):
             raise PaperSettlementLearningBridgeError("unsupported bridge schema")
         if type(state["bindings"]) is not dict:
             raise PaperSettlementLearningBridgeError("bridge bindings must be an object")

@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .causal_integrity import (
@@ -37,6 +37,11 @@ def _canonical_timestamp(value: object, field_name: str) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware ISO-8601")
     return text
+
+
+def _instant(value: object, field_name: str) -> datetime:
+    text = _canonical_timestamp(value, field_name)
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def _optional_sha256(value: object, field_name: str) -> str | None:
@@ -106,11 +111,14 @@ class ResearchPacket:
 
     def __post_init__(self) -> None:
         _canonical_text(self.event_id, "event_id")
-        _canonical_timestamp(self.generated_at, "generated_at")
+        generated_at = _instant(self.generated_at, "generated_at")
         if type(self.evidence) is not tuple:
             raise ValueError("evidence must be an exact tuple")
         if any(type(item) is not EvidenceItem for item in self.evidence):
             raise ValueError("evidence must contain exact EvidenceItem values")
+        for item in self.evidence:
+            if _instant(item.as_of_ts, "evidence.as_of_ts") > generated_at:
+                raise ValueError("research packet contains evidence from after generated_at")
         evidence_ids = [item.evidence_id for item in self.evidence]
         if len(evidence_ids) != len(set(evidence_ids)):
             raise ValueError("research packet contains duplicate evidence_id")

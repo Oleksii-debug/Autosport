@@ -166,3 +166,31 @@ def test_scenario_space_does_not_merge_same_local_market_across_sports() -> None
         },
         parse_iso_timestamp(_DECISION_TS),
     )
+
+
+def test_research_future_guard_revalidates_mutated_scenario_identity_before_hashing() -> None:
+    class HostileQuoteKey(str):
+        def __hash__(self) -> int:
+            raise AssertionError("scenario quote hash dispatched before exact admission")
+
+    first = ScenarioOutcome("event|market|a")
+    group = ScenarioGroup(
+        "mutated-scenario",
+        (
+            first,
+            ScenarioOutcome("event|market|b"),
+        ),
+    )
+    object.__setattr__(first, "quote_key", HostileQuoteKey(first.quote_key))
+
+    with pytest.raises(
+        ValueError,
+        match="scenario outcome quote_key must be a non-empty trimmed string",
+    ):
+        _validate_scenario_future_identity(
+            (group,),
+            {},
+            {},
+            {},
+            parse_iso_timestamp(_DECISION_TS),
+        )

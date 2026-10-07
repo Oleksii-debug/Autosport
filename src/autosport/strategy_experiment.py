@@ -981,6 +981,55 @@ def load_champion_challenger_protocol_json(
     return protocol
 
 
+def _validate_strategy_run_evidence_identity(evidence: object) -> StrategyRunEvidence:
+    """Fail closed before identity-bearing experiment evidence is dispatched."""
+    if type(evidence) is not StrategyRunEvidence:
+        raise ValueError("evidence must be an exact StrategyRunEvidence")
+    for field in (
+        "source_path",
+        "run_id",
+        "dataset_name",
+        "sport",
+        "strategy_id",
+        "canonical_strategy_id",
+        "price_semantics",
+    ):
+        _require_text(getattr(evidence, field), f"evidence.{field}")
+    for field in (
+        "source_sha256",
+        "market_sha256",
+        "sealed_results_sha256",
+        "replay_dataset_hash",
+        "agent_composition_sha256",
+    ):
+        _require_sha256(getattr(evidence, field), f"evidence.{field}")
+    if evidence.historical_import_identity is not None:
+        _require_sha256(
+            evidence.historical_import_identity,
+            "evidence.historical_import_identity",
+        )
+    if evidence.research_plan_sha256 is not None:
+        _require_sha256(
+            evidence.research_plan_sha256,
+            "evidence.research_plan_sha256",
+        )
+    if type(evidence.dataset_schema_version) is not int or evidence.dataset_schema_version < 1:
+        raise ValueError("evidence.dataset_schema_version must be an integer >= 1")
+    if type(evidence.event_count) is not int or evidence.event_count < 1:
+        raise ValueError("evidence.event_count must be an integer >= 1")
+    _require_text_tuple(evidence.agent_names, "evidence.agent_names")
+    _require_text_tuple(evidence.price_source_ids, "evidence.price_source_ids")
+    _require_bool(
+        evidence.executable_quote_verified,
+        "evidence.executable_quote_verified",
+    )
+    _require_bool(
+        evidence.paper_fill_fidelity_verified,
+        "evidence.paper_fill_fidelity_verified",
+    )
+    return evidence
+
+
 @dataclass(frozen=True, slots=True)
 class ExperimentRunCell:
     case_id: str
@@ -990,8 +1039,7 @@ class ExperimentRunCell:
     def __post_init__(self) -> None:
         _require_text(self.case_id, "case_id")
         _require_text(self.candidate_id, "candidate_id")
-        if not isinstance(self.evidence, StrategyRunEvidence):
-            raise ValueError("evidence must be StrategyRunEvidence")
+        _validate_strategy_run_evidence_identity(self.evidence)
         if self.evidence.strategy_id != self.candidate_id:
             raise ValueError(
                 "strategy run evidence candidate mismatch: "

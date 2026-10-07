@@ -132,5 +132,26 @@ class Section2SourceProjectionDeltaExactTypeTests(unittest.TestCase):
         self.assertEqual(_HostileText.strip_calls, 0)
 
 
+    def test_collector_delta_root_rejects_hostile_provenance_before_strip_dispatch(self) -> None:
+        _HostileText.strip_calls = 0
+        delta = _delta(lawful_terms_ref=_HostileText("terms-section2"))
+        with self.assertRaisesRegex(
+            TypeError,
+            "lawful_terms_ref must be exact string identity text",
+        ):
+            delta.validate()
+        self.assertEqual(_HostileText.strip_calls, 0)
+
+    def test_collector_delta_root_rejects_hostile_correction_counter_before_comparison(self) -> None:
+        _HostileInt.compare_calls = 0
+        delta = _delta(revision_number=_HostileInt(0))
+        with self.assertRaisesRegex(
+            TypeError,
+            "revision_number must be an exact integer",
+        ):
+            delta.validate()
+        self.assertEqual(_HostileInt.compare_calls, 0)
+
+
 if __name__ == "__main__":
     unittest.main()

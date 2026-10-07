@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any
 
 from .domain import MarketEvent, _quote_identity
 from .forecasting import ForecastRecord, parse_iso_timestamp
@@ -171,11 +171,13 @@ class EvidenceRef:
 
 
 def _sorted_unique_evidence(
-    values: Iterable[EvidenceRef],
+    values: tuple[EvidenceRef, ...],
     field_name: str,
 ) -> tuple[EvidenceRef, ...]:
-    refs = tuple(values)
-    if any(not isinstance(item, EvidenceRef) for item in refs):
+    if type(values) is not tuple:
+        raise OpportunityContractError(f"{field_name} must be a tuple")
+    refs = values
+    if any(type(item) is not EvidenceRef for item in refs):
         raise OpportunityContractError(
             f"{field_name} must contain only EvidenceRef values"
         )
@@ -255,7 +257,7 @@ class QuoteRef:
         *,
         market_snapshot_hash: str | None = None,
     ) -> "QuoteRef":
-        if not isinstance(event, MarketEvent):
+        if type(event) is not MarketEvent:
             raise OpportunityContractError("quote source must be a MarketEvent")
         try:
             canonical = MarketEvent.from_dict(event.to_dict())
@@ -568,9 +570,7 @@ class ForecastRef:
                     "forecast uncertainty must be between 0 and 1"
                 )
         if self.predictive_eligibility is not None:
-            if not isinstance(
-                self.predictive_eligibility, PredictiveEligibilityEvidence
-            ):
+            if type(self.predictive_eligibility) is not PredictiveEligibilityEvidence:
                 raise OpportunityContractError(
                     "forecast predictive_eligibility must be typed evidence"
                 )
@@ -596,11 +596,11 @@ class ForecastRef:
         *,
         predictive_eligibility: PredictiveEligibilityEvidence | None = None,
     ) -> "ForecastRef":
-        if not isinstance(forecast, ForecastRecord):
+        if type(forecast) is not ForecastRecord:
             raise OpportunityContractError(
                 "forecast source must be a ForecastRecord"
             )
-        if not isinstance(quote, QuoteRef):
+        if type(quote) is not QuoteRef:
             raise OpportunityContractError("forecast quote must be a QuoteRef")
         if forecast.quote_key != quote.quote_key:
             raise OpportunityContractError(
@@ -800,11 +800,11 @@ class Opportunity:
     evidence_refs: tuple[EvidenceRef, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.strategy_class, StrategyClass):
+        if type(self.strategy_class) is not StrategyClass:
             raise OpportunityContractError(
                 "strategy_class must be a StrategyClass"
             )
-        if not isinstance(self.decision, OpportunityDecision):
+        if type(self.decision) is not OpportunityDecision:
             raise OpportunityContractError(
                 "decision must be an OpportunityDecision"
             )
@@ -827,12 +827,14 @@ class Opportunity:
                 "probability edge is supported only for PREDICTIVE_EDGE or HYBRID"
             )
 
-        quotes = tuple(self.quotes)
+        if type(self.quotes) is not tuple:
+            raise OpportunityContractError("opportunity quotes must be a tuple")
+        quotes = self.quotes
         if not quotes:
             raise OpportunityContractError(
                 "opportunity requires at least one quote"
             )
-        if any(not isinstance(item, QuoteRef) for item in quotes):
+        if any(type(item) is not QuoteRef for item in quotes):
             raise OpportunityContractError(
                 "opportunity quotes must be QuoteRef values"
             )
@@ -849,8 +851,10 @@ class Opportunity:
             )
         object.__setattr__(self, "quotes", quotes)
 
-        forecasts = tuple(self.forecasts)
-        if any(not isinstance(item, ForecastRef) for item in forecasts):
+        if type(self.forecasts) is not tuple:
+            raise OpportunityContractError("opportunity forecasts must be a tuple")
+        forecasts = self.forecasts
+        if any(type(item) is not ForecastRef for item in forecasts):
             raise OpportunityContractError(
                 "opportunity forecasts must be ForecastRef values"
             )
@@ -1030,12 +1034,14 @@ class OpportunitySet:
     opportunities: tuple[Opportunity, ...]
 
     def __post_init__(self) -> None:
-        values = tuple(self.opportunities)
+        if type(self.opportunities) is not tuple:
+            raise OpportunityContractError("opportunity set members must be a tuple")
+        values = self.opportunities
         if len(values) > _MAX_OPPORTUNITIES:
             raise OpportunityContractError(
                 f"opportunity set exceeds {_MAX_OPPORTUNITIES} members"
             )
-        if any(not isinstance(item, Opportunity) for item in values):
+        if any(type(item) is not Opportunity for item in values):
             raise OpportunityContractError(
                 "opportunity set must contain only Opportunity values"
             )
@@ -1161,14 +1167,16 @@ class PortfolioPlan:
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.opportunity_set, OpportunitySet):
+        if type(self.opportunity_set) is not OpportunitySet:
             raise OpportunityContractError(
                 "opportunity_set must be an OpportunitySet"
             )
 
-        allocations = tuple(self.allocations)
+        if type(self.allocations) is not tuple:
+            raise OpportunityContractError("allocations must be a tuple")
+        allocations = self.allocations
         if any(
-            not isinstance(item, PlanAllocation) for item in allocations
+            type(item) is not PlanAllocation for item in allocations
         ):
             raise OpportunityContractError(
                 "allocations must contain only PlanAllocation values"

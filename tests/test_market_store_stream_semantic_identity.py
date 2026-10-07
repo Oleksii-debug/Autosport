@@ -365,5 +365,25 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
                 store.close()
 
 
+    def test_durable_ingress_rejects_market_event_subclass_before_dispatch(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"sequence", "to_dict", "dedupe_key"}:
+                    raise AssertionError("MarketEvent subclass dispatch must not execute")
+                return super().__getattribute__(name)
+
+        canonical = self._event(sequence=52)
+        hostile = HostileMarketEvent(**canonical.to_dict())
+
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    store.append(hostile)
+                self.assertEqual(store.events(), [])
+            finally:
+                store.close()
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -29,6 +29,24 @@ class _TrapStr(str):
         raise AssertionError("str subclass encode must not execute")
 
 
+class _TrapFrozenSet(frozenset):
+    def __iter__(self):
+        raise AssertionError("frozenset subclass iteration must not execute")
+
+    def __contains__(self, item: object) -> bool:
+        raise AssertionError("frozenset subclass membership must not execute")
+
+
+class _TrapTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("tuple subclass iteration must not execute")
+
+
+class _TrapInt(int):
+    def __lt__(self, other: object) -> bool:
+        raise AssertionError("int subclass comparison must not execute")
+
+
 def _facts(*caps: BookmakerCapability) -> tuple[BookmakerCapabilityFact, ...]:
     return tuple(
         BookmakerCapabilityFact(cap, BookmakerCapabilityState.SUPPORTED)
@@ -132,6 +150,103 @@ def test_account_position_identifiers_reject_non_utf8_aliases(
 ) -> None:
     with pytest.raises(BookmakerCapabilityError, match="UTF-8 identity text"):
         factory(**{field_name: "identity\ud800"})
+
+
+def test_profile_rejects_profile_version_int_subclass_before_dispatch() -> None:
+    with pytest.raises(BookmakerCapabilityError, match="exact positive integer"):
+        _profile(profile_version=_TrapInt(1))
+
+
+def test_profile_revalidates_profile_version_after_post_init_mutation() -> None:
+    profile = _profile()
+    object.__setattr__(profile, "profile_version", True)
+
+    with pytest.raises(BookmakerCapabilityError, match="exact positive integer"):
+        profile.to_canonical_dict()
+
+
+def test_profile_rejects_facts_tuple_subclass_before_dispatch() -> None:
+    facts = _TrapTuple(
+        (
+            BookmakerCapabilityFact(
+                BookmakerCapability.BALANCE_READ,
+                BookmakerCapabilityState.SUPPORTED,
+            ),
+        )
+    )
+    with pytest.raises(BookmakerCapabilityError, match="exact tuple"):
+        _profile(facts=facts)
+
+
+def test_profile_rejects_capability_fact_subclass_before_dispatch() -> None:
+    class HostileFact(BookmakerCapabilityFact):
+        armed = False
+
+        def __getattribute__(self, name: str):
+            if type(self).armed and name in {"capability", "state"}:
+                raise AssertionError("capability fact subclass dispatch must not execute")
+            return super().__getattribute__(name)
+
+    fact = HostileFact(
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapabilityState.SUPPORTED,
+    )
+    HostileFact.armed = True
+    with pytest.raises(BookmakerCapabilityError, match="exact BookmakerCapabilityFact"):
+        _profile(facts=(fact,))
+
+
+def test_profile_revalidates_exact_fact_after_post_init_mutation() -> None:
+    fact = BookmakerCapabilityFact(
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapabilityState.SUPPORTED,
+    )
+    profile = _profile(facts=(fact,))
+    object.__setattr__(fact, "state", "supported")
+
+    with pytest.raises(BookmakerCapabilityError, match="BookmakerCapabilityState"):
+        profile.to_canonical_dict()
+    with pytest.raises(BookmakerCapabilityError, match="BookmakerCapabilityState"):
+        profile.state_of(BookmakerCapability.BALANCE_READ)
+
+
+def test_snapshot_rejects_observed_capabilities_subclass_before_dispatch() -> None:
+    observed = _TrapFrozenSet(
+        {
+            BookmakerCapability.BALANCE_READ,
+            BookmakerCapability.OPEN_POSITIONS_READ,
+        }
+    )
+
+    with pytest.raises(BookmakerCapabilityError, match="exact frozenset"):
+        BookmakerAccountSnapshot(
+            profile=_profile(),
+            observed_capabilities=observed,
+            observed_at=TS,
+            balance=_balance(),
+            open_positions=(_position(),),
+        )
+
+
+@pytest.mark.parametrize("field_name", ("open_positions", "settled_positions"))
+def test_snapshot_rejects_position_tuple_subclass_before_dispatch(
+    field_name: str,
+) -> None:
+    values: dict[str, object] = {
+        "profile": _profile(),
+        "observed_capabilities": frozenset(
+            {
+                BookmakerCapability.BALANCE_READ,
+                BookmakerCapability.OPEN_POSITIONS_READ,
+            }
+        ),
+        "observed_at": TS,
+        "balance": _balance(),
+    }
+    values[field_name] = _TrapTuple((_position(),))
+
+    with pytest.raises(BookmakerCapabilityError, match="exact tuple"):
+        BookmakerAccountSnapshot(**values)  # type: ignore[arg-type]
 
 
 def test_snapshot_revalidates_profile_identity_after_post_init_tamper() -> None:

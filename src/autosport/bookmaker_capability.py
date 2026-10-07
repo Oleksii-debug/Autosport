@@ -162,20 +162,19 @@ class BookmakerCapabilityProfile:
         _identity_text(self.account_id, "account_id")
         _identity_text(self.adapter_id, "adapter_id")
         _text(self.adapter_version, "adapter_version")
-        if (
-            not isinstance(self.profile_version, int)
-            or isinstance(self.profile_version, bool)
-            or self.profile_version < 1
-        ):
-            raise BookmakerCapabilityError("profile_version must be a positive integer")
-        if not isinstance(self.facts, tuple):
-            raise BookmakerCapabilityError("facts must be a tuple")
+        if type(self.profile_version) is not int or self.profile_version < 1:
+            raise BookmakerCapabilityError(
+                "profile_version must be an exact positive integer"
+            )
+        if type(self.facts) is not tuple:
+            raise BookmakerCapabilityError("facts must be an exact tuple")
         seen: set[BookmakerCapability] = set()
         for fact in self.facts:
-            if not isinstance(fact, BookmakerCapabilityFact):
+            if type(fact) is not BookmakerCapabilityFact:
                 raise BookmakerCapabilityError(
-                    "facts must contain only BookmakerCapabilityFact values"
+                    "facts must contain exact BookmakerCapabilityFact values"
                 )
+            BookmakerCapabilityFact.__post_init__(fact)
             if fact.capability in seen:
                 raise BookmakerCapabilityError(
                     f"duplicate capability fact: {fact.capability.value}"
@@ -194,6 +193,7 @@ class BookmakerCapabilityProfile:
         return sha256(encoded).hexdigest()
 
     def to_canonical_dict(self) -> dict[str, object]:
+        BookmakerCapabilityProfile.__post_init__(self)
         return {
             "account_id": self.account_id,
             "adapter_id": self.adapter_id,
@@ -210,6 +210,7 @@ class BookmakerCapabilityProfile:
         }
 
     def state_of(self, capability: BookmakerCapability) -> BookmakerCapabilityState:
+        BookmakerCapabilityProfile.__post_init__(self)
         if not isinstance(capability, BookmakerCapability):
             raise BookmakerCapabilityError(
                 "capability must be a BookmakerCapability value"
@@ -392,9 +393,9 @@ class BookmakerAccountSnapshot:
             snapshot_at,
             "profile",
         )
-        if not isinstance(self.observed_capabilities, frozenset):
+        if type(self.observed_capabilities) is not frozenset:
             raise BookmakerCapabilityError(
-                "observed_capabilities must be a frozenset"
+                "observed_capabilities must be an exact frozenset"
             )
         for capability in self.observed_capabilities:
             if not isinstance(capability, BookmakerCapability):
@@ -467,8 +468,8 @@ class BookmakerAccountSnapshot:
         field: str,
         snapshot_at: datetime,
     ) -> None:
-        if not isinstance(positions, tuple):
-            raise BookmakerCapabilityError(f"{field} must be a tuple")
+        if type(positions) is not tuple:
+            raise BookmakerCapabilityError(f"{field} must be an exact tuple")
         if positions and capability not in self.observed_capabilities:
             raise BookmakerCapabilityError(
                 f"{field} cannot contain observations unless {capability.value} "

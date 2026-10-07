@@ -31,6 +31,16 @@ class _ForecastRecordSubclass(ForecastRecord):
         raise AssertionError("ForecastRecord subclass serialization must not execute")
 
 
+class _TrapEvidenceList(list):
+    def __iter__(self):
+        raise AssertionError("evidence list subclass iteration must not execute")
+
+
+class _TrapEvidenceTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("evidence tuple subclass iteration must not execute")
+
+
 def _record(**overrides: object) -> ForecastRecord:
     payload: dict[str, object] = {
         "quote_key": "event-1|market-1|selection-1",
@@ -45,6 +55,16 @@ def _record(**overrides: object) -> ForecastRecord:
     }
     payload.update(overrides)
     return ForecastRecord(**payload)  # type: ignore[arg-type]
+
+
+def test_forecast_evidence_hashes_reject_container_subclass_before_dispatch() -> None:
+    digest = "a" * 64
+    for evidence_hashes in (
+        _TrapEvidenceList([digest]),
+        _TrapEvidenceTuple((digest,)),
+    ):
+        with pytest.raises(ValueError, match="exact list or tuple"):
+            _record(evidence_hashes=evidence_hashes)
 
 
 @pytest.mark.parametrize(

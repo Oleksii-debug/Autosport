@@ -133,9 +133,13 @@ def canonical_event_identity_aliases(identity: object) -> tuple[str, ...]:
     prefix = "sport-v2-"
     if not raw.startswith(prefix):
         if ":" not in raw:
-            return (raw,)
-        _source, local_event_id = raw.rsplit(":", 1)
+            local_event_id = _provider_event_identity_component(raw)
+            return (local_event_id,)
+        source_id, local_event_id = raw.rsplit(":", 1)
+        _source_identity_component(source_id)
         _provider_event_identity_component(local_event_id)
+        if _legacy_event_identity(source_id=source_id, event_id=local_event_id) != raw:
+            raise ValueError("legacy event identity is not in canonical scoped form")
         return (raw, local_event_id)
 
     token = raw[len(prefix) :]
@@ -243,9 +247,9 @@ class CatalogPage:
             raise ValueError("events must be a tuple")
         identities: set[str] = set()
         for event in self.events:
-            if not isinstance(event, CatalogEvent):
-                raise TypeError("events must contain CatalogEvent values")
-            event.validate()
+            if type(event) is not CatalogEvent:
+                raise TypeError("events must contain exact CatalogEvent values")
+            CatalogEvent.validate(event)
             if event.source_id != self.source_id:
                 raise ValueError("catalog page cannot mix source_id values")
             if event.identity in identities:
@@ -676,8 +680,10 @@ class ContinuousEventLifecycle:
         )
 
     def apply_page(self, page: CatalogPage, *, discovered_at: str) -> tuple[str, ...]:
+        if type(page) is not CatalogPage:
+            raise TypeError("page must be an exact CatalogPage")
         with durable_path_lock(self.path):
-            page.validate()
+            CatalogPage.validate(page)
             now = _instant(discovered_at, "discovered_at")
             for event in page.events:
                 if _instant(event.available_at, "available_at") > now:
@@ -751,8 +757,8 @@ class ContinuousEventLifecycle:
             raise TypeError("fetch_page must be callable")
         current = self.checkpoint(source_id)
         page = fetch_page(current)
-        if not isinstance(page, CatalogPage):
-            raise TypeError("fetch_page must return CatalogPage")
+        if type(page) is not CatalogPage:
+            raise TypeError("fetch_page must return an exact CatalogPage")
         if page.source_id != source_id:
             raise CatalogConflictError("catalog reader returned the wrong source_id")
         return self.apply_page(page, discovered_at=discovered_at)

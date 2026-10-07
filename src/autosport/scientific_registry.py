@@ -1142,6 +1142,30 @@ class ScientificRegistry:
                     validate_identity_shape(member, f"{path}[{index}]")
 
         validate_identity_shape(payload, f"{record_type}.payload")
+        if record_type == "DatasetSnapshot":
+            payload_available = _instant(
+                payload.get("available_at"),
+                "DatasetSnapshot.available_at",
+            )
+            envelope_available = _instant(
+                raw_entry["available_at"],
+                "DatasetSnapshot.envelope_available_at",
+            )
+            if payload_available != envelope_available:
+                raise ValueError(
+                    "DatasetSnapshot payload/envelope availability mismatch"
+                )
+            causal_cutoff = _instant(
+                payload.get("causal_cutoff"),
+                "DatasetSnapshot.causal_cutoff",
+            )
+            if causal_cutoff > payload_available:
+                raise ValueError(
+                    "DatasetSnapshot available_at must not precede causal_cutoff"
+                )
+            reveal_after = payload.get("outcome_reveal_after")
+            if reveal_after is not None:
+                _instant(reveal_after, "DatasetSnapshot.outcome_reveal_after")
         expected = _digest({"record_type": raw_entry["record_type"],
                             "record_id": raw_entry["record_id"],
                             "available_at": raw_entry["available_at"],

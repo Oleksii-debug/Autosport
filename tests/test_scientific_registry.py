@@ -354,6 +354,74 @@ def test_dataset_snapshot_rejects_availability_before_causal_cutoff() -> None:
         )
 
 
+def test_dataset_snapshot_restart_rejects_self_consistent_future_bearing_state(tmp_path) -> None:
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(
+        DatasetSnapshot(
+            "dataset-restart-future",
+            SHA_A,
+            "source",
+            "license",
+            T1,
+            T1,
+        )
+    )
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["causal_cutoff"] = T2
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="DatasetSnapshot available_at must not precede causal_cutoff",
+    ):
+        registry.causal_records("DatasetSnapshot", as_of=T2)
+
+
+def test_dataset_snapshot_restart_binds_payload_and_envelope_availability(tmp_path) -> None:
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(
+        DatasetSnapshot(
+            "dataset-restart-availability",
+            SHA_A,
+            "source",
+            "license",
+            T1,
+            T1,
+        )
+    )
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["available_at"] = T2
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="DatasetSnapshot payload/envelope availability mismatch",
+    ):
+        registry.causal_records("DatasetSnapshot", as_of=T2)
+
+
 def test_causal_lookup_honors_availability_and_outcome_reveal(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     registry.append(

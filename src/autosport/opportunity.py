@@ -469,6 +469,7 @@ class PredictiveEligibilityEvidence:
             )
         if (
             raw["schema"] != "autosport.predictive_forecast_eligibility"
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != 1
         ):
             raise OpportunityContractError(
@@ -748,6 +749,7 @@ class ForecastRef:
             )
         if (
             raw["schema"] != "autosport.forecast_ref"
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != 2
         ):
             raise OpportunityContractError(

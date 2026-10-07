@@ -336,6 +336,53 @@ def test_quote_identity_rejects_non_nul_control_characters(value: str) -> None:
         )
 
 
+
+def test_predictive_eligibility_schema_version_rejects_boolean_alias() -> None:
+    evidence = PredictiveEligibilityEvidence(
+        evaluation_id="evaluation-schema-version",
+        evaluation_sha256=_HASH,
+        protocol_sha256=_HASH,
+        admission_policy_sha256=_HASH,
+        model_id="model",
+        model_version="1",
+        strategy_version="1",
+        uncertainty_kind="absolute_probability_radius_v1",
+        sample_size=100,
+        minimum_sample_size=50,
+        maximum_uncertainty=Decimal("0.1"),
+        as_of="2026-09-16T15:00:00+00:00",
+        valid_until="2026-09-17T15:00:00+00:00",
+    )
+    payload = evidence.to_dict()
+    payload["schema_version"] = True
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="unsupported predictive eligibility evidence schema",
+    ):
+        PredictiveEligibilityEvidence.from_dict(payload)
+
+
+def test_forecast_ref_schema_version_rejects_float_alias() -> None:
+    quote = _quote()
+    forecast = ForecastRef(
+        forecast_id="forecast-schema-version",
+        forecast_hash=_HASH,
+        quote_key=quote.quote_key,
+        probability=Decimal("0.5"),
+        input_cutoff_ts=_TS,
+        market_snapshot_hash=_HASH,
+        quote_market_event_hash=_HASH,
+    )
+    payload = forecast.to_dict()
+    payload["schema_version"] = 2.0
+
+    with pytest.raises(
+        OpportunityContractError,
+        match="unsupported forecast reference schema",
+    ):
+        ForecastRef.from_dict(payload)
+
 def test_direct_identity_properties_reject_record_subclasses_before_virtual_dispatch() -> None:
     quote = _quote()
     hostile_opportunity = _OpportunitySubclass(

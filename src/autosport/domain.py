@@ -5,6 +5,7 @@ import binascii
 import copy
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -67,6 +68,14 @@ def _canonical_semantic_identity(value: object, field_name: str) -> str:
 
 def _timezone_aware_iso8601_value(value: object, field_name: str) -> str:
     timestamp = _canonical_string_value(value, field_name)
+    for match in re.finditer(r"[.,]([0-9]+)", timestamp):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{field_name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except ValueError as exc:

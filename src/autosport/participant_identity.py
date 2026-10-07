@@ -157,7 +157,9 @@ class AliasRecord:
 
     @property
     def record_id(self) -> str:
-        return _digest(self.payload())
+        if type(self) is not AliasRecord:
+            raise ParticipantIdentityError("alias record must be an exact AliasRecord")
+        return _digest(AliasRecord.payload(self))
 
     def payload(self) -> dict[str, str | None]:
         return {"source_id": self.source_id, "alias": self.alias, "entity_id": self.entity_id,
@@ -230,7 +232,9 @@ class EntityLineage:
 
     @property
     def record_id(self) -> str:
-        return _digest(self.payload())
+        if type(self) is not EntityLineage:
+            raise ParticipantIdentityError("entity lineage must be an exact EntityLineage")
+        return _digest(EntityLineage.payload(self))
 
     def payload(self) -> dict[str, str | None]:
         return {

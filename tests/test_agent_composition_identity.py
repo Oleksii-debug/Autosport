@@ -8,6 +8,7 @@ from autosport.agents import (
     AgentContext,
     AgentOrchestrator,
     MarketMirrorAgent,
+    _LatestQuotesView,
     agent_composition_sha256,
 )
 from autosport.paper import PaperBook
@@ -92,6 +93,28 @@ class AgentCompositionIdentityTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first), 64)
         self.assertNotEqual(first, reversed_hash)
+
+    def test_latest_quotes_rejects_identity_subclasses_before_hash_dispatch(self):
+        dispatch_calls = []
+
+        class HostileIdentity(str):
+            def __hash__(self):
+                dispatch_calls.append("hash")
+                raise AssertionError("latest quote identity hashed before exact admission")
+
+            def strip(self, *args, **kwargs):
+                dispatch_calls.append("strip")
+                raise AssertionError("latest quote identity stripped before exact admission")
+
+        view = _LatestQuotesView(())
+
+        with self.assertRaises(KeyError):
+            _ = view[HostileIdentity("quote")]
+        self.assertEqual(dispatch_calls, [])
+
+        with self.assertRaisesRegex(ValueError, "latest_quotes source_id"):
+            _ = view[(HostileIdentity("source"), "quote")]
+        self.assertEqual(dispatch_calls, [])
 
     def test_orchestrator_rejects_duplicate_agent_identity(self):
         context = AgentContext(PaperBook("100"))

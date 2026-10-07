@@ -253,6 +253,33 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             finally:
                 session.close()
 
+    def test_plan_source_sha256_identity_rejects_aliases_before_normalization(self):
+        raw = self._plan_dict()
+        canonical = ResearchStrategyPlan.from_dict(raw).source_sha256
+
+        with self.assertRaisesRegex(ValueError, "canonical lowercase SHA-256"):
+            ResearchStrategyPlan.from_dict(
+                raw,
+                source_sha256=canonical.upper(),
+            )
+
+        class HostileDigest(str):
+            def lower(self):
+                raise AssertionError("digest subclass normalization must not dispatch")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_sha256 must be exact non-empty canonical text",
+        ):
+            ResearchStrategyPlan.from_dict(
+                raw,
+                source_sha256=HostileDigest(canonical),
+            )
+
+        plan = ResearchStrategyPlan.from_dict(raw)
+        with self.assertRaisesRegex(ValueError, "canonical lowercase SHA-256"):
+            replace(plan, source_sha256=canonical.upper())
+
     def test_plan_hash_is_part_of_research_experiment_identity(self):
         first = ResearchStrategyPlan.from_dict(self._plan_dict(probability="0.60"))
         second = ResearchStrategyPlan.from_dict(self._plan_dict(probability="0.55"))

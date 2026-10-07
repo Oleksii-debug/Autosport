@@ -74,11 +74,13 @@ def _validate_evidence_identity_fields(
     available_at: object | None = None,
 ) -> None:
     _canonical_text(evidence_id, "evidence_id")
-    _aware_timestamp(as_of_ts, "as_of_ts")
+    evidence_as_of = _instant(as_of_ts, "as_of_ts")
     _canonical_text(source, "source")
     _canonical_text(kind, "kind")
     if available_at is not None:
-        _aware_timestamp(available_at, "available_at")
+        evidence_available = _instant(available_at, "available_at")
+        if evidence_as_of > evidence_available:
+            raise ValueError("evidence as_of_ts cannot be after available_at")
     if source_hash is not None:
         digest = _canonical_text(source_hash, "source_hash")
         if len(digest) != 64 or any(character not in _SHA256_HEX for character in digest):

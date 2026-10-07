@@ -57,6 +57,39 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
             cutoff=cutoff,
         )
 
+    def test_resolver_rejects_identity_control_alias_before_registry_read(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            with patch.object(
+                registry,
+                "_read",
+                side_effect=AssertionError("registry read must follow resolver identity admission"),
+            ):
+                with self.assertRaisesRegex(ValueError, "canonical spelling"):
+                    registry.outcome_revision_as_of(
+                        source_identity="official-results:\nserialization-test",
+                        record_id="event-results:2026-01-01",
+                        cutoff="2026-01-01T10:00:00Z",
+                    )
+
+    def test_resolver_rejects_invalid_cutoff_before_missing_binding_short_circuit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            with patch.object(
+                registry,
+                "_read",
+                side_effect=AssertionError("registry read must follow causal cutoff admission"),
+            ):
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "timestamp must be ISO-8601",
+                ):
+                    registry.outcome_revision_as_of(
+                        source_identity="official-results:missing",
+                        record_id="event-results:missing",
+                        cutoff="not-a-timestamp",
+                    )
+
     def test_two_instances_cannot_publish_from_the_same_stale_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "run_registry.json"

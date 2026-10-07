@@ -26,6 +26,7 @@ from .outcome_trust import (
     outcome_lineage_binding_from_payload,
     outcome_lineage_payload,
     resolve_outcome_revision_as_of,
+    _canonical_timestamp,
 )
 
 
@@ -1022,15 +1023,9 @@ class RunRegistry:
     ) -> TrustedOutcomeRevision | None:
         """Resolve only revision truth that this product had accepted by cutoff."""
 
-        for field, value in (
-            ("source_identity", source_identity),
-            ("record_id", record_id),
-            ("cutoff", cutoff),
-        ):
-            if type(value) is not str or not value or value.strip() != value:
-                raise ValueError(
-                    f"{field} must be an exact non-empty canonical string"
-                )
+        source_identity = _require_nonempty_string("source_identity", source_identity)
+        record_id = _require_nonempty_string("record_id", record_id)
+        cutoff = _canonical_timestamp(cutoff, field="outcome as-of cutoff")
         state = self._read()
         trusted = self._outcome_lineage_trust_bindings(state).get(
             (source_identity, record_id)

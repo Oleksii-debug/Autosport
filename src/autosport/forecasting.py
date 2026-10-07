@@ -112,8 +112,10 @@ class ForecastRecord:
         if contains_forbidden_future_key(provenance):
             raise ValueError("forecast provenance must not contain future-result fields")
         object.__setattr__(self, "provenance", provenance)
-        if not isinstance(self.evidence_hashes, (tuple, list)):
-            raise ValueError("evidence_hashes must be an ordered collection of SHA-256 digests")
+        if type(self.evidence_hashes) not in {tuple, list}:
+            raise ValueError(
+                "evidence_hashes must be an exact list or tuple of SHA-256 digests"
+            )
         evidence_hashes = tuple(
             _canonical_sha256(value, field_name="evidence hash")
             for value in self.evidence_hashes

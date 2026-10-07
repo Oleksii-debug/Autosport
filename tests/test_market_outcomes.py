@@ -286,6 +286,49 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             (authority.authority_sha256,),
         )
 
+    def test_authoritative_search_rejects_authority_subclass_before_identity_dispatch(self):
+        authority = self._authority(("away", "home"))
+
+        class HostileAuthority(MarketSettlementOutcomeAuthority):
+            __slots__ = ("_armed",)
+
+            def __getattribute__(self, name):
+                if name in {"identity", "authority_sha256"}:
+                    try:
+                        armed = object.__getattribute__(self, "_armed")
+                    except AttributeError:
+                        armed = False
+                    if armed:
+                        raise AssertionError(
+                            "authority member dispatch must not execute before exact admission"
+                        )
+                return super().__getattribute__(name)
+
+        hostile = HostileAuthority(
+            identity=authority.identity,
+            selection_ids=authority.selection_ids,
+            roster_basis=authority.roster_basis,
+            settlement_semantics=authority.settlement_semantics,
+            source_revision=authority.source_revision,
+            causal_cutoff=authority.causal_cutoff,
+            observed_at=authority.observed_at,
+            roster_provenance_sha256=authority.roster_provenance_sha256,
+            settlement_rules_sha256=authority.settlement_rules_sha256,
+            verification_protocol_sha256=authority.verification_protocol_sha256,
+            _verification_token=authority._verification_token,
+        )
+        object.__setattr__(hostile, "_armed", True)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "authoritative outcome analysis requires canonical market authorities",
+        ):
+            ScenarioSearchEngine().analyse_authoritative(
+                [],
+                [hostile],
+                decision_as_of=self.DECISION_AS_OF,
+            )
+
     def test_mixed_void_and_win_state_reuses_paper_settlement_economics(self):
         authority = self._authority(("away", "home"))
         book = PaperBook("100")

@@ -88,6 +88,7 @@ def test_constructor_rejects_half_structured_ticket_identity() -> None:
         )
 
 
+@pytest.mark.parametrize("field", ("event_id", "market_id", "selection_id"))
 def test_ticket_identity_rejects_str_subclass_before_virtual_method(field: str) -> None:
     leg = _leg()
     object.__setattr__(leg, field, _TrapStr(getattr(leg, field)))
@@ -183,3 +184,29 @@ def test_search_rejects_non_utf8_quote_key_before_identity_use() -> None:
 
     with pytest.raises(ValueError, match="quote_key must be a non-empty canonical string"):
         BeamParlayCandidateSearch().search([leg], minimum_legs=1)
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("event_id", "event-1\nforged"),
+        ("market_id", "market-1\tforged"),
+        ("selection_id", "selection-1\rforged"),
+        ("event_id", "event-1\x7fforged"),
+    ),
+)
+def test_candidate_identity_rejects_non_nul_control_aliases(
+    field: str,
+    value: str,
+) -> None:
+    kwargs: dict[str, object] = {
+        "quote_key": "event-1|market-1|selection-1",
+        "event_id": "event-1",
+        "decimal_odds": Decimal("2"),
+        "probability": Decimal("0.5"),
+        "market_id": "market-1",
+        "selection_id": "selection-1",
+    }
+    kwargs[field] = value
+    with pytest.raises(ValueError, match="canonical string"):
+        CandidateLeg(**kwargs)  # type: ignore[arg-type]

@@ -259,3 +259,44 @@ def test_registry_mutation_ingress_revalidates_tampered_exact_records(
     object.__setattr__(bad_lineage, "evidence_sha256", "A" * 64)
     with pytest.raises(ParticipantIdentityError, match="SHA-256 hex"):
         registry.add_lineage(bad_lineage)
+
+
+@pytest.mark.parametrize(
+    "entity_id",
+    (
+        "team:one\nforged",
+        "team:one\tforged",
+        "team:one\rforged",
+        "team:one\x7fforged",
+    ),
+)
+def test_participant_identity_rejects_non_nul_control_aliases(entity_id: str) -> None:
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        _identity(entity_id, EntityKind.TEAM)
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("source_id", "provider-a\nforged"),
+        ("alias", "team-a\tforged"),
+        ("entity_id", "team:a\x7fforged"),
+    ),
+)
+def test_alias_identity_rejects_non_nul_control_aliases(
+    field_name: str,
+    value: str,
+) -> None:
+    kwargs: dict[str, object] = {
+        "source_id": "provider-a",
+        "alias": "team-a",
+        "entity_id": "team:a",
+        "valid_from": T0,
+        "valid_until": None,
+        "available_at": T0,
+        "evidence_sha256": SHA,
+        "recorded_at": T0,
+    }
+    kwargs[field_name] = value
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        AliasRecord(**kwargs)  # type: ignore[arg-type]

@@ -655,19 +655,19 @@ def test_coordinated_cycle_reader_and_old_module_witness_rebind_fails_closed(
             raising=False,
         )
 
+        # Exercise the captured cycle-reader boundary directly. Calling the full
+        # builder after rebinding CollectorDeltaStore.collector_cycle_evidence can
+        # fail earlier in scheduled-source/source-universe verification, which is
+        # also safely fail-closed but does not test this guard specifically.
         with pytest.raises(
             AcquisitionDenominatorEvidenceError,
             match="collector cycle reader is class/code-rebound",
         ):
-            build_acquisition_denominator_evidence(
+            acquisition_denominator_evidence._cycle_evidence(
                 store,
-                source,
-                _universe(),
-                expected_store_path=path,
-                expected_source_id=SOURCE_ID,
-                expected_run_id=RUN_ID,
-                expected_start_slot_ordinal=0,
-                expected_end_slot_ordinal=0,
+                source_id=SOURCE_ID,
+                start_cycle_seq=cycle,
+                end_cycle_seq=cycle,
             )
 
         assert hostile_calls == []

@@ -1037,12 +1037,18 @@ class ScientificRegistry:
             "PromotionDecision": "promotion_decision_id",
             "PromotionEvidence": "promotion_evidence_id",
             "Postmortem": "postmortem_id",
+            "DriftFinding": "finding_id",
+            "PairedVOCEvaluation": "evaluation_id",
+            "VOCCohort": "cohort_id",
+            "ChampionEligibilityDecision": "decision_id",
         }.get(record_type)
         if identity_field is not None:
             payload_record_id = _text(
                 payload.get(identity_field),
                 f"{record_type}.{identity_field}",
             )
+        elif record_type in {"DriftReference", "DriftObservation"}:
+            payload_record_id = _digest(payload)
         elif record_type == "CounterfactualQualification":
             authority_id = _text(
                 payload.get("authority_id"),

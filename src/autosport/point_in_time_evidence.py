@@ -484,7 +484,11 @@ class HoldoutConsumptionLedger:
             payload = json.loads(raw)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise EvidenceLedgerCorruptError("holdout ledger is unreadable") from exc
-        if type(payload) is not dict or payload.get("schema_version") != _SCHEMA_VERSION:
+        if (
+            type(payload) is not dict
+            or type(payload.get("schema_version")) is not int
+            or payload.get("schema_version") != _SCHEMA_VERSION
+        ):
             raise EvidenceLedgerCorruptError("holdout ledger schema is unsupported")
         records_payload = payload.get("records")
         if type(records_payload) is not list or not records_payload:

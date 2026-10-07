@@ -6,6 +6,7 @@ import math
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 from .agents import AgentContext
@@ -216,14 +217,18 @@ def market_event_evidence_hash(event: MarketEvent) -> str:
 
 
 def research_market_snapshot_hash(
-    latest_quotes: dict[str, MarketEvent],
+    latest_quotes: Mapping[object, MarketEvent],
     quote_keys: Iterable[str],
 ) -> str:
-    if type(latest_quotes) is not dict:
-        raise TypeError("research latest_quotes must be an exact dict")
-    mapping_keys = tuple(dict.keys(latest_quotes))
-    for key in mapping_keys:
-        _exact_plan_text(key, field="latest quote mapping key")
+    if isinstance(latest_quotes, dict) and type(latest_quotes) is not dict:
+        raise TypeError("research latest_quotes dict must be exact")
+    if not isinstance(latest_quotes, Mapping):
+        raise TypeError("research latest_quotes must be a mapping")
+
+    if type(latest_quotes) is dict:
+        mapping_keys = tuple(dict.keys(latest_quotes))
+        for key in mapping_keys:
+            _exact_plan_text(key, field="latest quote mapping key")
 
     requested = tuple(quote_keys)
     canonical_requested = tuple(
@@ -233,9 +238,14 @@ def research_market_snapshot_hash(
     keys = tuple(sorted(set(canonical_requested)))
     projection: dict[str, dict[str, Any]] = {}
     for key in keys:
-        event = dict.get(latest_quotes, key)
-        if event is None:
-            raise ValueError(f"research snapshot missing replay quote: {key}")
+        try:
+            event = (
+                dict.__getitem__(latest_quotes, key)
+                if type(latest_quotes) is dict
+                else latest_quotes[key]
+            )
+        except KeyError as exc:
+            raise ValueError(f"research snapshot missing replay quote: {key}") from exc
         event_projection = _stable_event_projection(event)
         if event.quote_key != key:
             raise ValueError(

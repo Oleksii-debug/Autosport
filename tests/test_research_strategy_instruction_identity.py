@@ -1,3 +1,4 @@
+from collections.abc import Mapping
 from dataclasses import replace
 from decimal import Decimal
 
@@ -169,7 +170,7 @@ def test_snapshot_hash_rejects_mapping_subclass_before_get_dispatch() -> None:
         def get(self, *_args, **_kwargs):
             raise AssertionError("mapping get dispatched before exact admission")
 
-    with pytest.raises(TypeError, match="exact dict"):
+    with pytest.raises(TypeError, match="dict must be exact"):
         research_market_snapshot_hash(
             HostileQuotes({event.quote_key: event}),
             [event.quote_key],
@@ -192,3 +193,27 @@ def test_snapshot_hash_rejects_mapping_key_identity_mismatch() -> None:
             {"event-1|market-1|different-selection": event},
             ["event-1|market-1|different-selection"],
         )
+
+
+def test_snapshot_hash_accepts_read_only_canonical_mapping() -> None:
+    event = _market_event()
+
+    class ReadOnlyQuotes(Mapping):
+        def __init__(self, value: MarketEvent) -> None:
+            self._value = value
+        def __getitem__(self, key):
+            if key != self._value.quote_key:
+                raise KeyError(key)
+            return self._value
+        def __iter__(self):
+            return iter(((self._value.source_id, self._value.quote_key),))
+        def __len__(self):
+            return 1
+
+    assert research_market_snapshot_hash(
+        ReadOnlyQuotes(event),
+        [event.quote_key],
+    ) == research_market_snapshot_hash(
+        {event.quote_key: event},
+        [event.quote_key],
+    )

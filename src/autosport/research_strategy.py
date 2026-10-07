@@ -646,7 +646,7 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
             parsed_outcomes.append(
                 ScenarioOutcome(
                     _exact_plan_text(
-                        outcome.get("quote_key"),
+                        outcome["quote_key"],
                         field="scenario outcome quote_key",
                     ),
                     Decimal(str(outcome["probability"]))
@@ -657,7 +657,7 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         groups.append(
             ScenarioGroup(
                 _exact_plan_text(
-                    group_raw.get("group_id"),
+                    group_raw["group_id"],
                     field="scenario group_id",
                 ),
                 tuple(parsed_outcomes),
@@ -680,12 +680,12 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         else _risk_of_ruin_evidence_from_dict(risk_of_ruin_raw)
     )
     return ResearchReplayInstruction(
-        decision_id=_exact_plan_text(raw.get("decision_id"), field="decision_id"),
+        decision_id=_exact_plan_text(raw["decision_id"], field="decision_id"),
         trigger_quote_key=_exact_plan_text(
             raw.get("trigger_quote_key"),
             field="trigger_quote_key",
         ),
-        decision_ts=_exact_plan_text(raw.get("decision_ts"), field="decision_ts"),
+        decision_ts=_exact_plan_text(raw["decision_ts"], field="decision_ts"),
         stake=Decimal(str(raw["stake"])),
         candidate=candidate,
         groups=tuple(groups),
@@ -700,7 +700,7 @@ def _risk_of_ruin_evidence_from_dict(raw: Any) -> RiskOfRuinEvidence:
         raise ValueError("research risk_of_ruin_evidence must be an object")
     try:
         return RiskOfRuinEvidence(
-            evidence_id=_exact_plan_text(raw.get("evidence_id"), field="risk evidence_id"),
+            evidence_id=_exact_plan_text(raw["evidence_id"], field="risk evidence_id"),
             research_protocol_sha256=_exact_plan_text(
                 raw.get("research_protocol_sha256"),
                 field="risk research_protocol_sha256",
@@ -725,7 +725,7 @@ def _risk_of_ruin_evidence_from_dict(raw: Any) -> RiskOfRuinEvidence:
                 raw.get("bankroll_id"),
                 field="risk bankroll_id",
             ),
-            currency=_exact_plan_text(raw.get("currency"), field="risk currency"),
+            currency=_exact_plan_text(raw["currency"], field="risk currency"),
             base_portfolio_sha256=_exact_plan_text(
                 raw.get("base_portfolio_sha256"),
                 field="risk base_portfolio_sha256",
@@ -753,9 +753,9 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
     if any(type(item) is not str for item in evidence_hashes_raw):
         raise ValueError("ForecastRecord evidence_hashes must contain exact strings")
     return ForecastRecord(
-        quote_key=_exact_plan_text(raw.get("quote_key"), field="forecast quote_key"),
+        quote_key=_exact_plan_text(raw["quote_key"], field="forecast quote_key"),
         probability=Decimal(str(raw["probability"])),
-        model_id=_exact_plan_text(raw.get("model_id"), field="forecast model_id"),
+        model_id=_exact_plan_text(raw["model_id"], field="forecast model_id"),
         model_version=_exact_plan_text(
             raw.get("model_version"),
             field="forecast model_version",
@@ -808,11 +808,11 @@ def _evidence_from_dict(raw: Any) -> ResearchEvidence:
             "ResearchEvidence quality_flags must contain non-empty canonical strings"
         )
     return ResearchEvidence(
-        evidence_id=_exact_plan_text(raw.get("evidence_id"), field="evidence evidence_id"),
-        quote_key=_exact_plan_text(raw.get("quote_key"), field="evidence quote_key"),
-        source_id=_exact_plan_text(raw.get("source_id"), field="evidence source_id"),
-        observed_at=_exact_plan_text(raw.get("observed_at"), field="evidence observed_at"),
-        available_at=_exact_plan_text(raw.get("available_at"), field="evidence available_at"),
+        evidence_id=_exact_plan_text(raw["evidence_id"], field="evidence evidence_id"),
+        quote_key=_exact_plan_text(raw["quote_key"], field="evidence quote_key"),
+        source_id=_exact_plan_text(raw["source_id"], field="evidence source_id"),
+        observed_at=_exact_plan_text(raw["observed_at"], field="evidence observed_at"),
+        available_at=_exact_plan_text(raw["available_at"], field="evidence available_at"),
         decimal_odds=Decimal(str(raw["decimal_odds"])),
         content_sha256=_exact_plan_text(
             raw.get("content_sha256"),

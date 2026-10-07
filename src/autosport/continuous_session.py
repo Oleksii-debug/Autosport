@@ -974,6 +974,10 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
         if type(resolutions) is not tuple:
             raise TypeError("resolutions must be an exact tuple")
+        if SettlementEngine is not _settlement_engine_type:
+            raise ContinuousSessionError(
+                "settlement engine constructor origin changed"
+            )
         for resolution in resolutions:
             if type(resolution) is not SettlementResolution:
                 raise TypeError(
@@ -982,10 +986,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             resolution.validate(as_of=resolution.available_at)
         if not resolutions:
             return (), ()
-        if SettlementEngine is not _settlement_engine_type:
-            raise ContinuousSessionError(
-                "settlement engine constructor origin changed"
-            )
         unique: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
             unique.setdefault(resolution.evidence_id, resolution)

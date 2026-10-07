@@ -228,6 +228,7 @@ class ScientificProtocolBinding:
             _require_text(self.config_id, "config_id")
 
     def canonical_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         payload = {
             "protocol_version": self.protocol_version,
             "research_protocol_id": self.research_protocol_id,
@@ -308,6 +309,7 @@ class EvaluationCase:
 
     @property
     def identity(self) -> tuple[Any, ...]:
+        self.__post_init__()
         return (
             self.dataset_name,
             self.sport,
@@ -327,6 +329,7 @@ class EvaluationCase:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "case_id": self.case_id,
             "dataset_name": self.dataset_name,
@@ -364,6 +367,7 @@ class CandidateRef:
 
     @property
     def runtime_identity_sha256(self) -> str:
+        self.__post_init__()
         return _runtime_identity_sha256(
             self.canonical_strategy_id,
             self.agent_composition_sha256,
@@ -371,6 +375,7 @@ class CandidateRef:
         )
 
     def promotion_identity_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "candidate_id": self.candidate_id,
             "canonical_strategy_id": self.canonical_strategy_id,
@@ -379,6 +384,7 @@ class CandidateRef:
         }
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "candidate_id": self.candidate_id,
             "canonical_strategy_id": self.canonical_strategy_id,
@@ -398,6 +404,7 @@ class GuardrailRule:
     max_regression: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
+        _require_text(self.metric, "metric")
         if self.metric not in _SUPPORTED_METRICS:
             raise ValueError(f"unsupported guardrail metric: {self.metric}")
         _require_bool(self.higher_is_better, "higher_is_better")
@@ -406,6 +413,7 @@ class GuardrailRule:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "metric": self.metric,
             "higher_is_better": self.higher_is_better,
@@ -434,6 +442,7 @@ class ChampionChallengerProtocol:
         _require_text(self.hypothesis_id, "hypothesis_id")
         if type(self.scientific_protocol) is not ScientificProtocolBinding:
             raise ValueError("scientific_protocol must be an exact ScientificProtocolBinding")
+        self.scientific_protocol.__post_init__()
         if self.scientific_protocol.research_question_id != self.research_question_id:
             raise ValueError("scientific protocol research question identity mismatch")
         if self.scientific_protocol.hypothesis_id != self.hypothesis_id:
@@ -454,6 +463,13 @@ class ChampionChallengerProtocol:
             type(rule) is GuardrailRule for rule in self.guardrails
         ):
             raise ValueError("guardrails must be a tuple of GuardrailRule values")
+        self.champion.__post_init__()
+        for candidate in self.challengers:
+            candidate.__post_init__()
+        for case in self.cases:
+            case.__post_init__()
+        for rule in self.guardrails:
+            rule.__post_init__()
         if not self.challengers:
             raise ValueError("at least one challenger is required")
         if not self.cases:
@@ -494,6 +510,7 @@ class ChampionChallengerProtocol:
         those hashes must themselves bind this payload before any evaluation can
         produce a promotion-capable recommendation.
         """
+        self.__post_init__()
         return {
             "protocol_schema_version": self.protocol_schema_version,
             "experiment_id": self.experiment_id,
@@ -534,6 +551,7 @@ class ChampionChallengerProtocol:
         return expected
 
     def canonical_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "protocol_schema_version": self.protocol_schema_version,
             "experiment_id": self.experiment_id,

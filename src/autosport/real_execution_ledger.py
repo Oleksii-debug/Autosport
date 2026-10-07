@@ -826,24 +826,29 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "found reconciliation requires UNKNOWN"
                     )
-                evidence_id = event["payload"].get("evidence_id")
-                if not isinstance(evidence_id, str) or not evidence_id.strip():
-                    raise ExecutionLedgerIntegrityError(
-                        "found reconciliation lacks evidence identity"
+                try:
+                    evidence_id = _identity_text(
+                        event["payload"].get("evidence_id"),
+                        "evidence_id",
                     )
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation lacks canonical evidence identity"
+                    ) from exc
                 prior = found_reconciliations.get(evidence_id)
                 if prior is not None and prior != event["payload"]:
                     raise ExecutionLedgerIntegrityError(
                         "conflicting found reconciliation evidence"
                     )
-                external_receipt_id = event["payload"].get("external_receipt_id")
-                if (
-                    not isinstance(external_receipt_id, str)
-                    or not external_receipt_id.strip()
-                ):
-                    raise ExecutionLedgerIntegrityError(
-                        "found reconciliation lacks receipt identity"
+                try:
+                    external_receipt_id = _identity_text(
+                        event["payload"].get("external_receipt_id"),
+                        "external_receipt_id",
                     )
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation lacks canonical receipt identity"
+                    ) from exc
                 if (
                     found_receipt_id is not None
                     and found_receipt_id != external_receipt_id

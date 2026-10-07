@@ -3,6 +3,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
+from autosport.outcome_trust import OutcomeLineageBinding, TrustedOutcomeRevision
 from autosport.run_registry import RunRegistry
 
 
@@ -23,6 +24,26 @@ class _HostileIdentity(str):
 
     def __format__(self, spec: str) -> str:
         raise AssertionError("hostile identity __format__ dispatched")
+
+
+class _HostileLineage(OutcomeLineageBinding):
+    def __getattribute__(self, name: str):
+        if name in {
+            "source_identity",
+            "record_id",
+            "root_revision_id",
+            "root_record_sha256",
+            "revisions",
+        }:
+            raise AssertionError(f"hostile lineage {name} dispatched")
+        return super().__getattribute__(name)
+
+
+class _HostileRevision(TrustedOutcomeRevision):
+    def __getattribute__(self, name: str):
+        if name in {"revision", "revision_id", "record_sha256"}:
+            raise AssertionError(f"hostile revision {name} dispatched")
+        return super().__getattribute__(name)
 
 
 class RunRegistryIdentityExactTypeTests(unittest.TestCase):
@@ -66,6 +87,92 @@ class RunRegistryIdentityExactTypeTests(unittest.TestCase):
                     self.assertEqual(path.read_bytes(), baseline)
                     self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["runs"], {})
 
+
+    @staticmethod
+    def _valid_lineage() -> OutcomeLineageBinding:
+        return OutcomeLineageBinding(
+            source_identity="provider",
+            record_id="record",
+            root_revision_id="rev-1",
+            root_record_sha256="a" * 64,
+            revisions=(
+                TrustedOutcomeRevision(
+                    revision=1,
+                    revision_id="rev-1",
+                    record_sha256="a" * 64,
+                ),
+            ),
+        )
+
+    def test_lineage_subclass_is_rejected_before_identity_attribute_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+            baseline = path.read_bytes()
+            hostile = _HostileLineage(
+                source_identity="provider",
+                record_id="record",
+                root_revision_id="rev-1",
+                root_record_sha256="a" * 64,
+                revisions=(
+                    TrustedOutcomeRevision(
+                        revision=1,
+                        revision_id="rev-1",
+                        record_sha256="a" * 64,
+                    ),
+                ),
+            )
+
+            with self.assertRaisesRegex(ValueError, "exact OutcomeLineageBinding"):
+                registry.assert_outcome_lineage_compatible(hostile)
+            with self.assertRaisesRegex(ValueError, "exact OutcomeLineageBinding"):
+                registry.begin(
+                    "a" * 64,
+                    "b" * 64,
+                    "strategy",
+                    "run-1",
+                    outcome_lineage=hostile,
+                )
+            self.assertEqual(path.read_bytes(), baseline)
+
+    def test_lineage_rejects_hostile_identity_field_and_revision_subclass(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+            baseline = path.read_bytes()
+
+            hostile_identity = OutcomeLineageBinding(
+                source_identity=_HostileIdentity("provider"),
+                record_id="record",
+                root_revision_id="rev-1",
+                root_record_sha256="a" * 64,
+                revisions=self._valid_lineage().revisions,
+            )
+            with self.assertRaisesRegex(ValueError, "exact non-empty string"):
+                registry.assert_outcome_lineage_compatible(hostile_identity)
+
+            hostile_revision = OutcomeLineageBinding(
+                source_identity="provider",
+                record_id="record",
+                root_revision_id="rev-1",
+                root_record_sha256="a" * 64,
+                revisions=(
+                    _HostileRevision(
+                        revision=1,
+                        revision_id="rev-1",
+                        record_sha256="a" * 64,
+                    ),
+                ),
+            )
+            with self.assertRaisesRegex(ValueError, "exact TrustedOutcomeRevision"):
+                registry.begin(
+                    "a" * 64,
+                    "b" * 64,
+                    "strategy",
+                    "run-1",
+                    outcome_lineage=hostile_revision,
+                )
+            self.assertEqual(path.read_bytes(), baseline)
 
     def test_experiment_identity_rejects_subclasses_before_format_dispatch(self) -> None:
         cases = (

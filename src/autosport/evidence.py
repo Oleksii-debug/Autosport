@@ -4,7 +4,7 @@ import hashlib
 import json
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .causal_integrity import (
@@ -40,6 +40,11 @@ def _aware_timestamp(value: object, field_name: str) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must include an explicit timezone")
     return text
+
+
+def _instant(value: object, field_name: str) -> datetime:
+    text = _aware_timestamp(value, field_name)
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def _json_payload(value: Any) -> Any:
@@ -129,7 +134,7 @@ class ResearchPacket:
 
     def __post_init__(self) -> None:
         _canonical_text(self.event_id, "event_id")
-        _aware_timestamp(self.generated_at, "generated_at")
+        generated_at = _instant(self.generated_at, "generated_at")
         if type(self.evidence) is not tuple:
             raise ValueError("research packet evidence must be a tuple")
         seen_evidence_ids: set[str] = set()
@@ -143,6 +148,10 @@ class ResearchPacket:
                 kind=item.kind,
                 source_hash=item.source_hash,
             )
+            if _instant(item.as_of_ts, "evidence.as_of_ts") > generated_at:
+                raise ValueError(
+                    "research packet contains evidence from after generated_at"
+                )
             if item.evidence_id in seen_evidence_ids:
                 raise ValueError("research packet contains duplicate evidence identity")
             seen_evidence_ids.add(item.evidence_id)

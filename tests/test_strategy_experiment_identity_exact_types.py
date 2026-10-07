@@ -152,6 +152,24 @@ def test_candidate_identity_rejects_noncanonical_whitespace(field: str, value: s
         CandidateRef(**values)  # type: ignore[arg-type]
 
 
+@pytest.mark.parametrize(
+    "field",
+    ("agent_composition_sha256", "research_plan_sha256"),
+)
+def test_candidate_hash_identity_rejects_uppercase_alias(field: str) -> None:
+    values: dict[str, object] = {
+        "candidate_id": "candidate-1",
+        "canonical_strategy_id": "candidate-1",
+        "authority_fingerprint": "owner-authority-v1",
+        "agent_composition_sha256": SHA,
+        "research_plan_sha256": SHA,
+    }
+    values[field] = "A" * 64
+
+    with pytest.raises(ValueError, match="canonical lowercase SHA-256"):
+        CandidateRef(**values)  # type: ignore[arg-type]
+
+
 def test_scientific_binding_rejects_tuple_subclass() -> None:
     with pytest.raises(ValueError, match="exact tuple"):
         ScientificProtocolBinding(

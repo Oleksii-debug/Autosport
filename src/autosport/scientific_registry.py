@@ -1342,13 +1342,14 @@ class ScientificRegistry:
         return None
 
     def causal_records(self, record_type: str, *, as_of: str) -> tuple[RegistryEntry, ...]:
-        if record_type not in _RECORD_TYPES:
+        canonical_record_type = _text(record_type, "record_type")
+        if canonical_record_type not in _RECORD_TYPES:
             raise ValueError("unsupported record_type")
         cutoff = _instant(as_of, "as_of")
         values: list[RegistryEntry] = []
         state = self._read()
         for raw in state["records"]:
-            if raw["record_type"] != record_type:
+            if raw["record_type"] != canonical_record_type:
                 continue
             if raw["record_type"] == "PromotionEvidence":
                 try:

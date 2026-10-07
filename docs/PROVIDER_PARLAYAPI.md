@@ -20,6 +20,20 @@ The documented table-tennis sport key is `table_tennis`. The game-line endpoint 
 
 Authenticated calls pass the API key in the `X-API-Key` request header. Keys must come from runtime configuration/environment and must never be committed, logged, written into replay datasets, or included in release artifacts. Public preview mode requires no key and is suitable only for limited manual connectivity checks.
 
+### Runtime source-rights gate
+
+The product-owned operator source does not start from API accessibility or free-form terms text alone. In addition to `AUTOSPORT_PARLAY_API_KEY`, `AUTOSPORT_PRODUCT_WORKSPACE`, `AUTOSPORT_PARLAY_LAWFUL_TERMS_REF`, and `AUTOSPORT_PARLAY_RETENTION_REF`, runtime construction requires `AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST` to point to one exact source-rights manifest.
+
+For the shipped table-tennis source that manifest must authorize:
+
+- `source_identity=parlayapi:table_tennis`;
+- exact scope `provider.market_data.read`;
+- `privacy_classification=NON_PERSONAL_DATA`;
+- `evidence_class=HUMAN_APPROVED_SOURCE_RIGHTS`;
+- an active human-approved validity interval at construction time.
+
+`UNKNOWN` evidence/privacy, `PERSONAL_DATA_RESTRICTED`, missing/expired authority, source mismatch, scope mismatch, malformed JSON, or a replaced/tampered manifest fail closed before the enabled ProductSource is constructed. The manifest is an operational authorization/evidence gate, not a legal opinion and not real-money execution authority.
+
 ## Causal/time semantics
 
 `markets[].last_update` is preferred as source time; `bookmakers[].last_update` is the fallback. Autosport records local observation time separately. The source timestamp is converted into a stable integer sequence so repeated delivery of an unchanged provider snapshot remains idempotent in the append-only Market Store.

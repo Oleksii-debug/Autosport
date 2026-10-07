@@ -35,6 +35,14 @@ class _HostileSettlementResolution(SettlementResolution):
         type(self).validate_calls += 1
 
 
+class _HostileText(str):
+    compare_calls = 0
+
+    def __ne__(self, other):
+        type(self).compare_calls += 1
+        return super().__ne__(other)
+
+
 class Section2ContinuousSettlementIdentityTests(unittest.TestCase):
     def test_outcome_resolution_subclass_is_rejected_before_virtual_validation(self) -> None:
         _HostileSettlementResolution.validate_calls = 0
@@ -59,6 +67,31 @@ class Section2ContinuousSettlementIdentityTests(unittest.TestCase):
             )
 
         self.assertEqual(_HostileSettlementResolution.validate_calls, 0)
+
+
+    def test_resolution_identity_scalar_is_rejected_before_comparison_dispatch(self) -> None:
+        _HostileText.compare_calls = 0
+        resolution = SettlementResolution(
+            event_identity=_HostileText("event-section2"),
+            settlement_ref="provider-result:section2",
+            quote_outcomes={"quote-section2": "win"},
+            evidence_id="evidence-section2",
+            evidence_sha256="0" * 64,
+            available_at="2026-10-07T03:40:00+00:00",
+        )
+        coordinator = object.__new__(ContinuousSessionCoordinator)
+        coordinator.lifecycle = _Lifecycle()
+        coordinator.outcome_authority = _OutcomeAuthority(resolution)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "event_identity must be a non-empty trimmed string",
+        ):
+            coordinator._settlement_resolutions(
+                as_of="2026-10-07T03:45:00+00:00"
+            )
+
+        self.assertEqual(_HostileText.compare_calls, 0)
 
 
 if __name__ == "__main__":

@@ -417,5 +417,36 @@ class CalculationServiceTests(unittest.TestCase):
                     )
 
 
+    def test_market_event_subclass_is_rejected_before_hostile_attribute_dispatch(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"observed_ts", "ingest_ts", "source_ts", "event_id"}:
+                    raise AssertionError(
+                        "noncanonical MarketEvent attribute dispatch must never execute"
+                    )
+                return super().__getattribute__(name)
+
+        canonical = self._event()
+        hostile = HostileMarketEvent(
+            event_id=canonical.event_id,
+            market_id=canonical.market_id,
+            selection_id=canonical.selection_id,
+            decimal_odds=canonical.decimal_odds,
+            observed_ts=canonical.observed_ts,
+            source_id=canonical.source_id,
+            sequence=canonical.sequence,
+            market_type=canonical.market_type,
+            source_ts=canonical.source_ts,
+            ingest_ts=canonical.ingest_ts,
+            metadata={},
+        )
+
+        with self.assertRaisesRegex(ValueError, "event must be an exact MarketEvent"):
+            self.service.implied_probability_for_event(
+                hostile,
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

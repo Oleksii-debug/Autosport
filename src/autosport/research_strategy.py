@@ -60,6 +60,68 @@ def _exact_plan_text(value: object, *, field: str) -> str:
     return value
 
 
+def _validate_replay_candidate(candidate: object) -> tuple[str, ...]:
+    """Re-prove one research candidate before any identity hash/mapping use."""
+
+    if type(candidate) is not ParlayCandidate:
+        raise TypeError("research decision candidate must be exact ParlayCandidate")
+    if type(candidate.legs) is not tuple or not candidate.legs:
+        raise ValueError("research decision candidate legs must be a non-empty exact tuple")
+    quote_keys: list[str] = []
+    for leg in candidate.legs:
+        if type(leg) is not CandidateLeg:
+            raise TypeError(
+                "research decision candidate legs must contain exact CandidateLeg values"
+            )
+        CandidateLeg.__post_init__(leg)
+        leg.ticket_identity()
+        quote_keys.append(_exact_plan_text(leg.quote_key, field="candidate quote_key"))
+    if len(quote_keys) != len(set(quote_keys)):
+        raise ValueError("research decision candidate contains duplicate quote_key")
+    return tuple(quote_keys)
+
+
+def _validate_research_evidence_identity(
+    evidence: tuple[ResearchEvidence, ...],
+) -> None:
+    if type(evidence) is not tuple or not evidence:
+        raise ValueError("research decision evidence must be a non-empty exact tuple")
+    evidence_ids: list[str] = []
+    for item in evidence:
+        if type(item) is not ResearchEvidence:
+            raise TypeError(
+                "research decision evidence must contain exact ResearchEvidence values"
+            )
+        for field_name in (
+            "evidence_id", "quote_key", "source_id", "observed_at", "available_at"
+        ):
+            _exact_plan_text(getattr(item, field_name), field=f"evidence {field_name}")
+        for field_name in ("content_sha256", "market_snapshot_hash"):
+            value = getattr(item, field_name)
+            if value is None and field_name == "market_snapshot_hash":
+                continue
+            digest = _exact_plan_text(value, field=f"evidence {field_name}")
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError(
+                    f"research evidence {field_name} must be canonical lowercase SHA-256"
+                )
+        if type(item.quality_flags) is not tuple:
+            raise ValueError(
+                "research decision evidence quality_flags must remain an exact tuple"
+            )
+        flags = tuple(
+            _exact_plan_text(flag, field="evidence quality flag")
+            for flag in item.quality_flags
+        )
+        if len(flags) != len(set(flags)):
+            raise ValueError("research decision evidence has duplicate quality flag")
+        evidence_ids.append(item.evidence_id)
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ValueError("research decision has duplicate ResearchEvidence evidence_id")
+
+
 def _validate_strict_json_domain(raw: Any) -> None:
     """Fail closed on decoded values that cannot represent bounded strict JSON."""
 
@@ -187,12 +249,26 @@ class ResearchReplayInstruction:
         if amount <= 0:
             raise ValueError("research decision stake must be positive")
         object.__setattr__(self, "stake", amount)
-        candidate_keys = {leg.quote_key for leg in self.candidate.legs}
-        if not candidate_keys:
-            raise ValueError("research decision candidate requires at least one leg")
+
+        candidate_keys = set(_validate_replay_candidate(self.candidate))
         if self.trigger_quote_key not in candidate_keys:
             raise ValueError("research trigger_quote_key must be one of the candidate legs")
-        forecast_keys = [record.quote_key for record in self.forecasts]
+
+        if type(self.groups) is not tuple or not self.groups:
+            raise ValueError("research decision scenario groups must be a non-empty exact tuple")
+        for group in self.groups:
+            _validate_scenario_group_identity(group)
+
+        if type(self.forecasts) is not tuple or not self.forecasts:
+            raise ValueError("research decision forecasts must be a non-empty exact tuple")
+        forecast_keys: list[str] = []
+        for record in self.forecasts:
+            if type(record) is not ForecastRecord:
+                raise TypeError(
+                    "research decision forecasts must contain exact ForecastRecord values"
+                )
+            ForecastRecord.to_dict(record)
+            forecast_keys.append(record.quote_key)
         if len(forecast_keys) != len(set(forecast_keys)):
             raise ValueError("research decision has duplicate ForecastRecord quote_key")
         missing = candidate_keys.difference(forecast_keys)
@@ -201,15 +277,15 @@ class ResearchReplayInstruction:
                 "research decision lacks ForecastRecord for candidate quote(s): "
                 + ",".join(sorted(missing))
             )
-        if type(self.groups) is not tuple or not self.groups:
-            raise ValueError("research decision scenario groups must be a non-empty tuple")
-        for group in self.groups:
-            _validate_scenario_group_identity(group)
+
+        _validate_research_evidence_identity(self.evidence)
+
         if self.risk_of_ruin_evidence is not None:
-            if not isinstance(self.risk_of_ruin_evidence, RiskOfRuinEvidence):
+            if type(self.risk_of_ruin_evidence) is not RiskOfRuinEvidence:
                 raise TypeError(
-                    "research decision risk_of_ruin_evidence must be RiskOfRuinEvidence or None"
+                    "research decision risk_of_ruin_evidence must be exact RiskOfRuinEvidence or None"
                 )
+            RiskOfRuinEvidence.__post_init__(self.risk_of_ruin_evidence)
             decision_time = parse_iso_timestamp(self.decision_ts)
             causal_cutoff = parse_iso_timestamp(self.risk_of_ruin_evidence.causal_cutoff)
             evaluated_at = parse_iso_timestamp(self.risk_of_ruin_evidence.evaluated_at)
@@ -220,6 +296,7 @@ class ResearchReplayInstruction:
 
     @property
     def forecasts_by_quote(self) -> dict[str, ForecastRecord]:
+        ResearchReplayInstruction.__post_init__(self)
         return {record.quote_key: record for record in self.forecasts}
 
 
@@ -229,8 +306,16 @@ class ResearchStrategyPlan:
     source_sha256: str
 
     def __post_init__(self) -> None:
-        if not self.instructions:
-            raise ValueError("research strategy plan must contain at least one decision")
+        if type(self.instructions) is not tuple or not self.instructions:
+            raise ValueError(
+                "research strategy plan instructions must be a non-empty exact tuple"
+            )
+        for instruction in self.instructions:
+            if type(instruction) is not ResearchReplayInstruction:
+                raise TypeError(
+                    "research strategy plan instructions must contain exact ResearchReplayInstruction values"
+                )
+            ResearchReplayInstruction.__post_init__(instruction)
         source_sha256 = _exact_plan_text(self.source_sha256, field="source_sha256")
         if len(source_sha256) != 64 or any(
             character not in "0123456789abcdef" for character in source_sha256
@@ -291,6 +376,7 @@ class ResearchStrategyPlan:
     def preflight(self, events: Iterable[MarketEvent]) -> None:
         """Bind every planned decision to the same causal replay state before economic mutation."""
 
+        ResearchStrategyPlan.__post_init__(self)
         by_trigger = {
             (instruction.decision_ts, instruction.trigger_quote_key): instruction
             for instruction in self.instructions
@@ -357,6 +443,9 @@ class ResearchReplayAgent:
         plan: ResearchStrategyPlan,
         pipeline: ResearchDecisionPipeline | None = None,
     ) -> None:
+        if type(plan) is not ResearchStrategyPlan:
+            raise TypeError("research replay agent requires exact ResearchStrategyPlan")
+        ResearchStrategyPlan.__post_init__(plan)
         self.plan = plan
         self.pipeline = pipeline or ResearchDecisionPipeline()
         self._by_trigger = {
@@ -415,6 +504,9 @@ def _validate_market_binding(
     instruction: ResearchReplayInstruction,
     latest_quotes: dict[str, MarketEvent],
 ) -> None:
+    if type(instruction) is not ResearchReplayInstruction:
+        raise TypeError("market binding requires exact ResearchReplayInstruction")
+    ResearchReplayInstruction.__post_init__(instruction)
     decision_time = parse_iso_timestamp(instruction.decision_ts)
     _validate_scenario_space_binding(instruction.groups, latest_quotes, decision_time)
     candidate_keys = tuple(leg.quote_key for leg in instruction.candidate.legs)

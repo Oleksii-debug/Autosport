@@ -7,6 +7,11 @@ from autosport.paper import PaperBook
 from autosport.scenario_search import PortfolioDependencyIndex, ScenarioGroup, ScenarioOutcome, ScenarioSearchEngine
 
 
+class _ExplosiveQuoteKey(str):
+    def __hash__(self) -> int:
+        raise AssertionError("hostile quote_key hash dispatched before exact admission")
+
+
 class ScenarioSearchTests(unittest.TestCase):
     def test_exact_event_level_scenario_search_proves_extrema_and_expected_value(self):
         book = PaperBook("1000")
@@ -55,6 +60,58 @@ class ScenarioSearchTests(unittest.TestCase):
         self.assertEqual(ScenarioSearchEngine(seed=0).seed, 0)
         self.assertEqual(ScenarioSearchEngine(seed=-17).seed, -17)
 
+    def test_scenario_outcome_rejects_hostile_quote_key_before_hash_dispatch(self):
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario outcome quote_key must be a non-empty trimmed string",
+        ):
+            ScenarioOutcome(_ExplosiveQuoteKey("e1|winner|a"))
+
+    def test_scenario_group_revalidates_mutated_outcome_before_duplicate_hashing(self):
+        hostile = ScenarioOutcome("e1|winner|a")
+        object.__setattr__(
+            hostile,
+            "quote_key",
+            _ExplosiveQuoteKey("e1|winner|a"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario outcome quote_key must be a non-empty trimmed string",
+        ):
+            ScenarioGroup(
+                "e1-winner",
+                (
+                    hostile,
+                    ScenarioOutcome("e1|winner|b"),
+                ),
+            )
+
+    def test_scenario_search_revalidates_mutated_group_identity_at_use_boundary(self):
+        book = PaperBook("100")
+        a = TicketLeg("e1", "winner", "a", Decimal("2"))
+        b = TicketLeg("e1", "winner", "b", Decimal("2"))
+        ticket = book.open_ticket([a], "10")
+        first = ScenarioOutcome(a.quote_key)
+        group = ScenarioGroup(
+            "e1-winner",
+            (
+                first,
+                ScenarioOutcome(b.quote_key),
+            ),
+        )
+        object.__setattr__(
+            first,
+            "quote_key",
+            _ExplosiveQuoteKey(a.quote_key),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario outcome quote_key must be a non-empty trimmed string",
+        ):
+            ScenarioSearchEngine().analyse([ticket], [group])
+
     def test_dependency_index_returns_only_affected_tickets(self):
         book = PaperBook("100")
         a = TicketLeg("e1", "winner", "a", Decimal("2"))
@@ -63,6 +120,34 @@ class ScenarioSearchTests(unittest.TestCase):
         tb = book.open_ticket([b], "1")
         index = PortfolioDependencyIndex([ta, tb])
         self.assertEqual(index.affected_by({a.quote_key}), {ta.ticket_id})
+
+    def test_dependency_index_rejects_hostile_ticket_id_before_hash_dispatch(self):
+        book = PaperBook("100")
+        leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        ticket = book.open_ticket([leg], "1")
+        ticket.ticket_id = _ExplosiveQuoteKey(ticket.ticket_id)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio dependency ticket_id must be a non-empty trimmed string",
+        ):
+            PortfolioDependencyIndex([ticket])
+
+    def test_dependency_index_revalidates_mutated_leg_identity_before_publish(self):
+        book = PaperBook("100")
+        leg = TicketLeg("e1", "winner", "a", Decimal("2"))
+        ticket = book.open_ticket([leg], "1")
+        object.__setattr__(
+            leg,
+            "event_id",
+            _ExplosiveQuoteKey("e1"),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "event_id must be a non-empty trimmed string",
+        ):
+            PortfolioDependencyIndex([ticket])
 
     def test_beam_candidate_search_bounds_combinatorics(self):
         legs = [CandidateLeg(f"e{i}|winner|a", f"e{i}", Decimal("2.0"), Decimal("0.55")) for i in range(20)]

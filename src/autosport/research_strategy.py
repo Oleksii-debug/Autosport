@@ -18,7 +18,11 @@ from .research_pipeline import (
     ResearchEvidence,
 )
 from .risk import RiskOfRuinEvidence
-from .scenario_search import ScenarioGroup, ScenarioOutcome
+from .scenario_search import (
+    ScenarioGroup,
+    ScenarioOutcome,
+    _validate_scenario_group_identity,
+)
 
 
 RESEARCH_STRATEGY_ID = "research-replay-v1"
@@ -197,8 +201,10 @@ class ResearchReplayInstruction:
                 "research decision lacks ForecastRecord for candidate quote(s): "
                 + ",".join(sorted(missing))
             )
-        if not self.groups:
-            raise ValueError("research decision scenario groups are required")
+        if type(self.groups) is not tuple or not self.groups:
+            raise ValueError("research decision scenario groups must be a non-empty tuple")
+        for group in self.groups:
+            _validate_scenario_group_identity(group)
         if self.risk_of_ruin_evidence is not None:
             if not isinstance(self.risk_of_ruin_evidence, RiskOfRuinEvidence):
                 raise TypeError(
@@ -225,12 +231,13 @@ class ResearchStrategyPlan:
     def __post_init__(self) -> None:
         if not self.instructions:
             raise ValueError("research strategy plan must contain at least one decision")
-        if len(self.source_sha256) != 64:
-            raise ValueError("research strategy plan source_sha256 must be SHA-256")
-        try:
-            int(self.source_sha256, 16)
-        except ValueError as exc:
-            raise ValueError("research strategy plan source_sha256 must be hexadecimal") from exc
+        source_sha256 = _exact_plan_text(self.source_sha256, field="source_sha256")
+        if len(source_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in source_sha256
+        ):
+            raise ValueError(
+                "research strategy plan source_sha256 must be canonical lowercase SHA-256"
+            )
         ids = [item.decision_id for item in self.instructions]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate research decision_id")
@@ -279,7 +286,7 @@ class ResearchStrategyPlan:
         if source_sha256 is None:
             canonical = _canonical_plan_json(raw)
             source_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return cls(instructions, source_sha256.lower())
+        return cls(instructions, source_sha256)
 
     def preflight(self, events: Iterable[MarketEvent]) -> None:
         """Bind every planned decision to the same causal replay state before economic mutation."""
@@ -484,7 +491,8 @@ def _validate_scenario_future_identity(
 ) -> None:
     """Reject replay quote, event, or market identities not yet knowable at decision time."""
 
-    for group in groups:
+    for raw_group in groups:
+        group = _validate_scenario_group_identity(raw_group)
         for outcome in group.outcomes:
             first_observed = first_observed_quote_times.get(outcome.quote_key)
             if first_observed is not None and first_observed > decision_time:
@@ -545,7 +553,8 @@ def _validate_scenario_space_binding(
 ) -> None:
     """Bind observed replay-market outcomes without banning abstract complement scenarios."""
 
-    for group in groups:
+    for raw_group in groups:
+        group = _validate_scenario_group_identity(raw_group)
         outcome_keys = {outcome.quote_key for outcome in group.outcomes}
         observed_outcomes: list[MarketEvent] = []
         for quote_key in sorted(outcome_keys):

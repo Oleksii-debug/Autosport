@@ -546,7 +546,7 @@ def test_explicit_sweep_current_run_cannot_be_reclassified_by_validator_rebind(
     cancelled: list[int] = []
 
     class FixtureApi:
-        _WorkflowScopedGitHubApi__workflow_name = "CI"
+        _workflow_name = "CI"
 
     run = base_controller.WorkflowRun(
         run_id=123,

@@ -21,7 +21,7 @@ def _structured_leg(
     market_id: str = "market|spread",
     selection_id: str = "player|a",
 ) -> CandidateLeg:
-    quote_key = _quote_identity(event_id, market_id, selection_id)
+    quote_key = _quote_identity(event_id, market_id, selection_id, None)
     return CandidateLeg(
         quote_key,
         event_id,

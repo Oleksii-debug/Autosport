@@ -4,7 +4,7 @@ from decimal import Decimal
 
 import pytest
 
-from autosport.domain import MarketEvent, TicketLeg
+from autosport.domain import MarketEvent, MarketType, TicketLeg
 
 
 _TS = "2026-10-07T00:00:00+00:00"
@@ -298,3 +298,28 @@ def test_delimiter_bearing_dedupe_components_cannot_alias_boundaries() -> None:
     assert left.dedupe_key.startswith("component-boundary-v1-")
     assert right.dedupe_key.startswith("component-boundary-v1-")
 
+
+
+class _ExplosiveMarketType:
+    @property
+    def value(self) -> str:
+        raise AssertionError("noncanonical market_type member dispatch must not execute")
+
+
+def test_market_event_direct_constructor_requires_exact_market_type() -> None:
+    with pytest.raises(ValueError, match="canonical MarketType"):
+        _event(market_type=_ExplosiveMarketType())
+
+
+def test_market_event_to_dict_revalidates_market_type_before_member_dispatch() -> None:
+    event = _event(market_type=MarketType.WINNER)
+    object.__setattr__(event, "market_type", _ExplosiveMarketType())
+
+    with pytest.raises(ValueError, match="canonical MarketType"):
+        event.to_dict()
+
+
+def test_market_event_canonical_market_type_round_trips_unchanged() -> None:
+    event = _event(market_type=MarketType.TOTAL)
+
+    assert event.to_dict()["market_type"] == MarketType.TOTAL.value

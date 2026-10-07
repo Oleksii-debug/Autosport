@@ -227,10 +227,20 @@ def _candidate_leg_identity_key(
 
 
 def _canonical_candidate(candidate: ParlayCandidate) -> ParlayCandidate:
+    if type(candidate) is not ParlayCandidate:
+        raise ValueError("candidate must be an exact ParlayCandidate")
+    if type(candidate.legs) is not tuple:
+        raise ValueError("candidate legs must be an exact tuple")
     if not candidate.legs:
         raise ValueError("candidate requires at least one leg")
 
     for leg in candidate.legs:
+        if type(leg) is not CandidateLeg:
+            raise ValueError("candidate legs must contain exact CandidateLeg values")
+        try:
+            CandidateLeg.ticket_identity(leg)
+        except ValueError as exc:
+            raise ValueError(f"candidate leg identity is invalid: {exc}") from exc
         if not leg.decimal_odds.is_finite():
             raise ValueError("candidate decimal odds must be finite")
         if leg.decimal_odds <= 1:

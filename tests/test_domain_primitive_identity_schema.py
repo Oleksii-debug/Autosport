@@ -17,6 +17,9 @@ class _ExplosiveString(str):
     def encode(self, *args: object, **kwargs: object) -> bytes:
         raise AssertionError("str subclass encode() must not execute")
 
+    def __format__(self, spec: str) -> str:
+        raise AssertionError("str subclass formatting must not execute")
+
 
 def _event(**overrides: object) -> MarketEvent:
     payload: dict[str, object] = {
@@ -101,6 +104,27 @@ def test_ticket_leg_direct_constructor_rejects_noncanonical_identity(
     payload[field_name] = value
     with pytest.raises(ValueError):
         TicketLeg(**payload)  # type: ignore[arg-type]
+
+
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("source_id", "provider-1"),
+        ("event_id", "event-1"),
+        ("market_id", "market-1"),
+        ("selection_id", "selection-1"),
+    ),
+)
+def test_market_event_dedupe_key_rejects_post_construction_identity_subclass_before_dispatch(
+    field_name: str,
+    value: str,
+) -> None:
+    event = _event()
+    object.__setattr__(event, field_name, _ExplosiveString(value))
+
+    with pytest.raises(ValueError):
+        _ = event.dedupe_key
 
 
 def test_valid_delimiter_bearing_domain_identity_is_not_normalized_or_rewritten() -> None:

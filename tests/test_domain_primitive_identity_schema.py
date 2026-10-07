@@ -192,6 +192,7 @@ def test_valid_delimiter_bearing_domain_identity_is_not_normalized_or_rewritten(
     assert event.market_id == "market|spread"
     assert event.selection_id == "player|a"
     assert event.quote_key == leg.quote_key
+    assert event.quote_key.startswith("component-boundary-v1-")
 
 @pytest.mark.parametrize(
     ("field_name", "value"),
@@ -233,4 +234,33 @@ def test_market_event_to_dict_rejects_post_construction_noncanonical_sequence(
 
     with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
         event.to_dict()
+
+def test_delimiter_bearing_quote_components_cannot_alias_boundaries() -> None:
+    left = _event(event_id="a|b", market_id="c", selection_id="d")
+    right = _event(event_id="a", market_id="b|c", selection_id="d")
+
+    assert left.quote_key != right.quote_key
+    assert left.quote_key.startswith("component-boundary-v1-")
+    assert right.quote_key.startswith("component-boundary-v1-")
+
+
+def test_delimiter_bearing_dedupe_components_cannot_alias_boundaries() -> None:
+    left = _event(
+        source_id="provider|a",
+        event_id="b",
+        market_id="c",
+        selection_id="d",
+        sequence=1,
+    )
+    right = _event(
+        source_id="provider",
+        event_id="a|b",
+        market_id="c",
+        selection_id="d",
+        sequence=1,
+    )
+
+    assert left.dedupe_key != right.dedupe_key
+    assert left.dedupe_key.startswith("component-boundary-v1-")
+    assert right.dedupe_key.startswith("component-boundary-v1-")
 

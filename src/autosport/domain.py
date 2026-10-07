@@ -121,6 +121,23 @@ def _canonical_exchange_side(value: object, field_name: str = "exchange_side") -
     return side
 
 
+def _encoded_component_boundary_identity(kind: str, *components: object) -> str:
+    """Encode legacy identity components whose delimiter would otherwise alias boundaries.
+
+    Delimiter-free legacy identities stay byte-for-byte unchanged. This
+    namespace is used only when a canonical component contains '|'. Base64url
+    never contains '|', so encoded keys cannot collide with legacy pipe keys.
+    """
+    payload = json.dumps(
+        [kind, *components],
+        ensure_ascii=False,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    token = base64.urlsafe_b64encode(payload).decode("ascii").rstrip("=")
+    return f"component-boundary-v1-{token}"
+
+
 def _encoded_sport_identity(kind: str, *components: object) -> str:
     """Return an explicit-sport identity disjoint from every legacy pipe key.
 
@@ -188,6 +205,20 @@ def _quote_identity(
             canonical_side,
         )
     if sport is None:
+        if any(
+            "|" in component
+            for component in (
+                canonical_event_id,
+                canonical_market_id,
+                canonical_selection_id,
+            )
+        ):
+            return _encoded_component_boundary_identity(
+                "quote",
+                canonical_event_id,
+                canonical_market_id,
+                canonical_selection_id,
+            )
         return (
             f"{canonical_event_id}|{canonical_market_id}|{canonical_selection_id}"
         )
@@ -384,6 +415,23 @@ class MarketEvent:
                 canonical_sequence,
             )
         if self.sport is None:
+            if any(
+                "|" in component
+                for component in (
+                    canonical_source_id,
+                    canonical_event_id,
+                    canonical_market_id,
+                    canonical_selection_id,
+                )
+            ):
+                return _encoded_component_boundary_identity(
+                    "dedupe",
+                    canonical_source_id,
+                    canonical_event_id,
+                    canonical_market_id,
+                    canonical_selection_id,
+                    canonical_sequence,
+                )
             return (
                 f"{canonical_source_id}|{canonical_event_id}|{canonical_market_id}|"
                 f"{canonical_selection_id}|{canonical_sequence}"

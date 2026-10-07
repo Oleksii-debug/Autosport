@@ -641,7 +641,10 @@ class ParticipantIdentityRegistry:
                 raw_kind = item["kind"]
                 if (
                     loaded_version == _LEGACY_VERSION
-                    and raw_kind not in _LEGACY_ENTITY_KIND_VALUES
+                    and (
+                        type(raw_kind) is not str
+                        or raw_kind not in _LEGACY_ENTITY_KIND_VALUES
+                    )
                 ):
                     raise ParticipantIdentityError(
                         "legacy v1 identity registry contains unsupported entity kind"

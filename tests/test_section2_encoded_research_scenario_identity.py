@@ -138,7 +138,7 @@ def test_future_market_guard_keeps_sport_in_event_market_identity() -> None:
             {},
             {
                 ("soccer", "shared-event"): earlier,
-                ("tennis", "shared-event"): future,
+                ("tennis", "shared-event"): earlier,
             },
             {
                 ("soccer", "shared-event", "shared-market"): earlier,

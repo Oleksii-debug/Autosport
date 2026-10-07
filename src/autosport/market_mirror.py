@@ -159,6 +159,9 @@ class MarketMirror:
         """
         if type(event) is not MarketEvent:
             raise TypeError("event must be an exact MarketEvent")
+        # Frozen dataclasses can still be tampered with through object.__setattr__.
+        # Reconstruct the canonical value before any identity reaches tuple hashing.
+        event = self._snapshot_event(event)
 
         key = self._key(event)
         with self._lock:
@@ -433,9 +436,9 @@ class MarketMirror:
             sport,
             exchange_side,
         )
-        with self._lock:
-            event = self._latest.get((source_id, quote_key))
-            return None if event is None else self._snapshot_event(event)
+        # Reuse the exact source/quote lookup boundary instead of allowing caller-
+        # controlled str subclasses to reach tuple hashing in _latest directly.
+        return self.event_for_quote_key(source_id, quote_key)
 
     def active_snapshot(
         self,

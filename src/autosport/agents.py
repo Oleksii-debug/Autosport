@@ -159,18 +159,22 @@ class AgentContext:
                     "paper_provider_accounts must contain (source_id, account_id) tuples"
                 )
             source_id, account_id = binding
-            if (
-                type(source_id) is not str
-                or not source_id
-                or source_id.strip() != source_id
-                or type(account_id) is not str
-                or not account_id
-                or account_id.strip() != account_id
-            ):
+            try:
+                canonical_source_id = _canonical_string_value(
+                    source_id,
+                    "paper_provider_accounts source_id",
+                )
+                canonical_account_id = _canonical_string_value(
+                    account_id,
+                    "paper_provider_accounts account_id",
+                )
+            except ValueError as exc:
                 raise ValueError(
                     "paper_provider_accounts must contain canonical non-empty text"
-                )
-            normalized_accounts.append((source_id, account_id))
+                ) from exc
+            normalized_accounts.append(
+                (canonical_source_id, canonical_account_id)
+            )
         canonical_accounts = tuple(normalized_accounts)
         if (
             canonical_accounts != tuple(sorted(canonical_accounts))

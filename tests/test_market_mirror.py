@@ -257,6 +257,36 @@ class MarketMirrorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mirror.apply(self.event(sequence=3, odds="2.01"))
 
+    def test_delimiter_bearing_quote_components_do_not_alias_in_mirror(self) -> None:
+        mirror = MarketMirror()
+        left = self.event(
+            event="a|b",
+            market="c",
+            selection="d",
+            sequence=1,
+            odds="2.00",
+        )
+        right = self.event(
+            event="a",
+            market="b|c",
+            selection="d",
+            sequence=1,
+            odds="1.90",
+        )
+
+        self.assertNotEqual(left.quote_key, right.quote_key)
+        self.assertEqual(mirror.apply(left).status, MirrorUpdate.APPLIED)
+        self.assertEqual(mirror.apply(right).status, MirrorUpdate.APPLIED)
+        self.assertEqual(len(mirror), 2)
+        self.assertEqual(
+            mirror.get("provider-a", "a|b", "c", "d").decimal_odds,
+            Decimal("2.00"),
+        )
+        self.assertEqual(
+            mirror.get("provider-a", "a", "b|c", "d").decimal_odds,
+            Decimal("1.90"),
+        )
+
     def test_provider_identity_prevents_cross_provider_aliasing(self) -> None:
         mirror = MarketMirror()
         provider_a_result = mirror.apply(

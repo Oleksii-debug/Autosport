@@ -22,12 +22,16 @@ def validate_agent_names(agent_names: Iterable[object]) -> tuple[str, ...]:
     names = tuple(agent_names)
     if not names:
         raise ValueError("agent composition must contain at least one agent")
-    for name in names:
-        if not isinstance(name, str) or not name.strip() or name != name.strip():
-            raise ValueError("agent names must be non-empty canonical strings")
-    if len(set(names)) != len(names):
+    try:
+        canonical_names = tuple(
+            _canonical_string_value(name, f"agent_names[{index}]")
+            for index, name in enumerate(names)
+        )
+    except ValueError as exc:
+        raise ValueError("agent names must be non-empty canonical strings") from exc
+    if len(set(canonical_names)) != len(canonical_names):
         raise ValueError("agent composition contains duplicate agent names")
-    return names
+    return canonical_names
 
 
 def agent_composition_sha256(agent_names: Iterable[object]) -> str:

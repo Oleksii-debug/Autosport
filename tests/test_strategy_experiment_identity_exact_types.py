@@ -285,3 +285,42 @@ def test_experiment_cell_revalidates_exact_evidence_identity() -> None:
             candidate_id="champion",
             evidence=evidence,
         )
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    (
+        ("candidate_id", "candidate-1\nforged"),
+        ("canonical_strategy_id", "strategy-1\tforged"),
+        ("authority_fingerprint", "owner-authority-v1\rforged"),
+        ("candidate_id", "candidate-1\x7fforged"),
+    ),
+)
+def test_candidate_identity_rejects_non_nul_control_aliases(
+    field: str,
+    value: str,
+) -> None:
+    values: dict[str, object] = {
+        "candidate_id": "candidate-1",
+        "canonical_strategy_id": "candidate-1",
+        "authority_fingerprint": "owner-authority-v1",
+        "agent_composition_sha256": SHA,
+        "research_plan_sha256": SHA,
+    }
+    values[field] = value
+
+    with pytest.raises(ValueError, match="control characters"):
+        CandidateRef(**values)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    "value",
+    ("case-1\nforged", "case-1\tforged", "case-1\x7fforged"),
+)
+def test_experiment_cell_case_identity_rejects_control_aliases(value: str) -> None:
+    with pytest.raises(ValueError, match="control characters"):
+        ExperimentRunCell(
+            case_id=value,
+            candidate_id="champion",
+            evidence=_run_evidence(),
+        )

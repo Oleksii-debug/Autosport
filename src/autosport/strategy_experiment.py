@@ -24,6 +24,8 @@ def _require_text(value: Any, field: str) -> str:
         raise ValueError(f"{field} must be a non-empty trimmed string")
     if "\x00" in value:
         raise ValueError(f"{field} must not contain NUL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field} must not contain control characters")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:

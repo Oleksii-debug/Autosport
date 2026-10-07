@@ -91,7 +91,6 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
         self.assertNotEqual(first.environment_id, changed_config.environment_id)
         self.assertEqual(len(first.environment_id), 64)
 
-
     def test_learning_identity_scalar_aliases_fail_closed(self) -> None:
         class IntAlias(int):
             pass
@@ -159,7 +158,6 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
                 committed_decision_intents=checkpoint.committed_decision_intents,
             )
 
-
     def test_future_observation_is_rejected_at_decision_boundary(self) -> None:
         environment = self._environment()
         observation = self._observation(
@@ -172,6 +170,117 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
                 observation,
                 action_type="WAIT",
                 decision_at="2026-09-17T13:09:59+00:00",
+            )
+
+    def test_decision_boundary_rejects_observation_subclass_before_identity_dispatch(self) -> None:
+        class HostileObservation(Observation):
+            __slots__ = ()
+
+            @property
+            def observation_id(self) -> str:
+                raise AssertionError("Observation subclass identity dispatch must not execute")
+
+        environment = self._environment()
+        exact = self._observation(environment.environment_id)
+        hostile = HostileObservation(
+            environment_id=exact.environment_id,
+            observed_at=exact.observed_at,
+            available_at=exact.available_at,
+            evidence=exact.evidence,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact Observation"):
+            environment.act(
+                hostile,
+                action_type="WAIT",
+                decision_at="2026-09-17T13:00:02+00:00",
+            )
+
+
+
+    def test_resolution_boundary_rejects_evidence_subclasses_before_causal_dispatch(self) -> None:
+        class HostileOutcome(Outcome):
+            __slots__ = ("_armed",)
+
+            def __post_init__(self) -> None:
+                object.__setattr__(self, "_armed", False)
+                super().__post_init__()
+                object.__setattr__(self, "_armed", True)
+
+            def __getattribute__(self, name: str):
+                if name in {"_armed", "__class__", "__dict__"}:
+                    return object.__getattribute__(self, name)
+                try:
+                    armed = object.__getattribute__(self, "_armed")
+                except AttributeError:
+                    armed = False
+                if armed:
+                    raise AssertionError(
+                        f"Outcome subclass member dispatch must not execute: {name}"
+                    )
+                return object.__getattribute__(self, name)
+
+        class HostileReward(RewardEvidence):
+            __slots__ = ("_armed",)
+
+            def __post_init__(self) -> None:
+                object.__setattr__(self, "_armed", False)
+                super().__post_init__()
+                object.__setattr__(self, "_armed", True)
+
+            def __getattribute__(self, name: str):
+                if name in {"_armed", "__class__", "__dict__"}:
+                    return object.__getattribute__(self, name)
+                try:
+                    armed = object.__getattribute__(self, "_armed")
+                except AttributeError:
+                    armed = False
+                if armed:
+                    raise AssertionError(
+                        f"RewardEvidence subclass member dispatch must not execute: {name}"
+                    )
+                return object.__getattribute__(self, name)
+
+        environment = self._environment()
+        observation = self._observation(environment.environment_id)
+        action = environment.act(
+            observation,
+            action_type="WAIT",
+            decision_at="2026-09-17T13:00:02+00:00",
+        )
+        outcome, reward = self._observed_resolution(action)
+        hostile_outcome = HostileOutcome(
+            environment_id=outcome.environment_id,
+            action_id=outcome.action_id,
+            revealed_at=outcome.revealed_at,
+            truth=outcome.truth,
+            evidence=outcome.evidence,
+            simulation_model_id=outcome.simulation_model_id,
+        )
+        hostile_reward = HostileReward(
+            environment_id=reward.environment_id,
+            action_id=reward.action_id,
+            outcome_id=reward.outcome_id,
+            reward=reward.reward,
+            available_at=reward.available_at,
+            truth=reward.truth,
+            evidence=reward.evidence,
+            simulation_model_id=reward.simulation_model_id,
+        )
+
+        with self.assertRaisesRegex(TypeError, "exact canonical environment evidence"):
+            environment.resolve(
+                action.action_id,
+                outcome=hostile_outcome,
+                reward=reward,
+                resolved_at="2026-09-17T13:05:02+00:00",
+            )
+        with self.assertRaisesRegex(TypeError, "exact canonical environment evidence"):
+            environment.resolve(
+                action.action_id,
+                outcome=outcome,
+                reward=hostile_reward,
+                resolved_at="2026-09-17T13:05:02+00:00",
             )
 
 
@@ -280,7 +389,6 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
                 ),
                 checkpoint=checkpoint_subclass,
             )
-
 
     def test_policy_cannot_choose_outside_externally_admissible_action_set(self) -> None:
         environment = self._environment()

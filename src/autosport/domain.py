@@ -539,19 +539,34 @@ class MarketEvent:
             if self.exchange_side is None
             else _canonical_exchange_side(self.exchange_side)
         )
+        # Chronology is authority-bearing too. Frozen dataclasses can still be
+        # tampered with through object.__setattr__, so re-prove every causal
+        # timestamp at the public serialization boundary instead of publishing
+        # unchecked post-construction values.
+        canonical_observed_ts = _timezone_aware_iso8601_value(
+            self.observed_ts, "observed_ts"
+        )
+        canonical_ingest_ts = _timezone_aware_iso8601_value(
+            self.ingest_ts, "ingest_ts"
+        )
+        canonical_source_ts = (
+            None
+            if self.source_ts is None
+            else _timezone_aware_iso8601_value(self.source_ts, "source_ts")
+        )
 
         payload = {
             "event_id": canonical_event_id,
             "market_id": canonical_market_id,
             "selection_id": canonical_selection_id,
             "decimal_odds": str(self.decimal_odds),
-            "observed_ts": self.observed_ts,
+            "observed_ts": canonical_observed_ts,
             "source_id": canonical_source_id,
             "sequence": canonical_sequence,
             "market_type": self.market_type.value,
             "status": self.status,
-            "source_ts": self.source_ts,
-            "ingest_ts": self.ingest_ts,
+            "source_ts": canonical_source_ts,
+            "ingest_ts": canonical_ingest_ts,
             "score_state": self.score_state,
             "metadata": _serialized_metadata({"metadata": self.metadata}),
         }

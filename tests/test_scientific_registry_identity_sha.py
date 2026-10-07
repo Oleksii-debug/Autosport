@@ -181,9 +181,8 @@ def test_registry_restart_rejects_self_consistent_record_id_payload_mismatch(
         encoding="utf-8",
     )
 
-    reopened = ScientificRegistry(path)
     with pytest.raises(ValueError, match="record identity mismatch"):
-        reopened.get("DatasetSnapshot", "dataset-v1")
+        ScientificRegistry(path)
 
 
 @pytest.mark.parametrize(
@@ -196,6 +195,39 @@ def test_registry_restart_rejects_self_consistent_record_id_payload_mismatch(
         (_dataset, "source_identity", "source-v1\nforged"),
     ),
 )
+
+def test_registry_restart_rejects_self_consistent_nested_identity_type_drift(
+    tmp_path,
+) -> None:
+    path = tmp_path / "scientific-registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(_model())
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["dataset_snapshot_id"] = 7
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="canonical string"):
+        ScientificRegistry(path)
+
+
 def test_scientific_registry_text_identity_rejects_control_aliases(factory, field_name: str, value: str) -> None:
     with pytest.raises(ValueError, match="canonical string"):
         factory(**{field_name: value})

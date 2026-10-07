@@ -508,6 +508,161 @@ class PairedVOCEvaluation:
 
 
 @dataclass(frozen=True, slots=True)
+class VOCCohort:
+    """Typed immutable write authority for one frozen VOC evaluation cohort.
+
+    The cohort payload is derived from exact PairedVOCEvaluation members rather
+    than caller-authored identity dictionaries. This keeps ScientificRegistry
+    writes fail-closed while preserving the deployed VOCCohort payload schema.
+    """
+
+    cohort_id: str
+    members: tuple[PairedVOCEvaluation, ...]
+    decision_recorded_from: str
+    decision_recorded_through: str
+
+    def __post_init__(self) -> None:
+        if type(self) is not VOCCohort:
+            raise VOCEvaluationError("VOC cohort must be an exact VOCCohort")
+        _text("cohort_id", self.cohort_id)
+        if type(self.members) is not tuple or not self.members:
+            raise VOCEvaluationError("VOC cohort members must be a non-empty tuple")
+        for member in self.members:
+            if type(member) is not PairedVOCEvaluation:
+                raise VOCEvaluationError(
+                    "VOC cohort members must be exact PairedVOCEvaluation values"
+                )
+            PairedVOCEvaluation.__post_init__(member)
+
+        member_ids = [member.evaluation_id for member in self.members]
+        if len(member_ids) != len(set(member_ids)):
+            raise VOCEvaluationError("VOC cohort reuses evaluation identity")
+        if member_ids != sorted(member_ids):
+            raise VOCEvaluationError(
+                "VOC cohort members must use deterministic identity order"
+            )
+
+        recorded_from = _instant(
+            "decision_recorded_from", self.decision_recorded_from
+        )
+        recorded_through = _instant(
+            "decision_recorded_through", self.decision_recorded_through
+        )
+        if recorded_through < recorded_from:
+            raise VOCEvaluationError("VOC cohort eligibility window is reversed")
+        available = max(
+            _instant("member evaluated_at", member.evaluated_at)
+            for member in self.members
+        )
+        if available < recorded_through:
+            raise VOCEvaluationError(
+                "VOC cohort cannot freeze before its eligibility window closes"
+            )
+
+        first = self.members[0]
+        identity_fields = (
+            "research_protocol_id",
+            "research_protocol_sha256",
+            "scoring_rule_sha256",
+            "holdout_access_id",
+            "multiple_comparison_control_sha256",
+            "task_class",
+            "sport_id",
+            "league_id",
+            "regime_id",
+            "urgency_id",
+            "contradiction_state",
+            "baseline_candidate_id",
+            "baseline_backend_id",
+            "baseline_model_id",
+            "baseline_config_sha256",
+            "challenger_candidate_id",
+            "challenger_backend_id",
+            "challenger_model_id",
+            "challenger_config_sha256",
+        )
+        for member in self.members[1:]:
+            for field in identity_fields:
+                if getattr(member, field) != getattr(first, field):
+                    raise VOCEvaluationError(
+                        f"VOC cohort mixes incompatible {field} identities"
+                    )
+            if member.provenance is not first.provenance:
+                raise VOCEvaluationError(
+                    "VOC cohort mixes incompatible evidence provenance"
+                )
+
+    @property
+    def record_type(self) -> str:
+        return "VOCCohort"
+
+    @property
+    def record_id(self) -> str:
+        return self.cohort_id
+
+    @property
+    def available_at(self) -> str:
+        latest = max(
+            self.members,
+            key=lambda member: _instant("member evaluated_at", member.evaluated_at),
+        )
+        return _time("cohort available_at", latest.evaluated_at)
+
+    def to_payload(self) -> dict[str, Any]:
+        self.__post_init__()
+        first = self.members[0]
+        return {
+            "cohort_id": self.cohort_id,
+            "denominator": len(self.members),
+            "research_protocol_id": first.research_protocol_id,
+            "research_protocol_sha256": first.research_protocol_sha256,
+            "scoring_rule_sha256": first.scoring_rule_sha256,
+            "holdout_access_id": first.holdout_access_id,
+            "multiple_comparison_control_sha256": (
+                first.multiple_comparison_control_sha256
+            ),
+            "task_class": first.task_class,
+            "scope": {
+                "sport_id": first.sport_id,
+                "league_id": first.league_id,
+                "regime_id": first.regime_id,
+                "urgency_id": first.urgency_id,
+                "contradiction_state": first.contradiction_state,
+            },
+            "baseline_compute_identity": {
+                "candidate_id": first.baseline_candidate_id,
+                "backend_id": first.baseline_backend_id,
+                "model_id": first.baseline_model_id,
+                "config_sha256": first.baseline_config_sha256,
+            },
+            "challenger_compute_identity": {
+                "candidate_id": first.challenger_candidate_id,
+                "backend_id": first.challenger_backend_id,
+                "model_id": first.challenger_model_id,
+                "config_sha256": first.challenger_config_sha256,
+            },
+            "eligibility": {
+                "kind": "decision-ledger-window-v1",
+                "decision_recorded_from": _time(
+                    "decision_recorded_from", self.decision_recorded_from
+                ),
+                "decision_recorded_through": _time(
+                    "decision_recorded_through", self.decision_recorded_through
+                ),
+            },
+            "members": [
+                {
+                    "evaluation_id": member.evaluation_id,
+                    "evaluation_sha256": member.evaluation_sha256,
+                    "decision_context_sha256": member.decision_context_sha256,
+                    "decision_evidence_sha256": member.decision_evidence_sha256,
+                }
+                for member in self.members
+            ],
+        }
+
+
+@dataclass(frozen=True, slots=True)
 class OutcomeDerivedVOCScore:
     """Outcome-derived VOC arithmetic resolved independently of routed evidence.
 

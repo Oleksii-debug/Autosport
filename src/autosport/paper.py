@@ -608,7 +608,7 @@ class PaperBook:
 
     @staticmethod
     def _require_finite(value: object, label: str) -> None:
-        if not isinstance(value, Decimal) or not value.is_finite():
+        if type(value) is not Decimal or not value.is_finite():
             raise ValueError(f"PaperBook snapshot contains non-finite {label}")
 
     @staticmethod

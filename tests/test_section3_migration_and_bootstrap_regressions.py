@@ -107,3 +107,32 @@ def test_pristine_store_bootstrap_keeps_one_workspace_identity(
         assert availability_authority.authority_root_selection.validate_existing()
     finally:
         store.close()
+
+
+def test_pristine_store_restart_preserves_workspace_identity(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority_root = tmp_path / "machine-authority"
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    monkeypatch.setenv(
+        "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT",
+        str(authority_root.resolve()),
+    )
+
+    first = SQLiteMarketStore(workspace / "market.db")
+    try:
+        first_identity = first._market_append_authority().workspace_instance_id
+    finally:
+        first.close()
+
+    restarted = SQLiteMarketStore(workspace / "market.db")
+    try:
+        assert restarted._market_append_authority().workspace_instance_id == first_identity
+        assert (
+            restarted._market_append_availability_authority().workspace_instance_id
+            == first_identity
+        )
+    finally:
+        restarted.close()

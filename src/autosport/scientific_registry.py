@@ -1077,6 +1077,39 @@ class ScientificRegistry:
             payload_record_id = None
         if payload_record_id is not None and payload_record_id != raw_entry["record_id"]:
             raise ValueError("scientific registry record identity mismatch")
+
+        # Revalidate every persisted identity/version/hash-shaped member before
+        # accepting a self-consistent envelope digest.  The writer validates the
+        # canonical DTO before persistence, but restart must not let JSON type drift
+        # (for example dataset_snapshot_id=7) become a new spelling of the same
+        # identity merely because record_sha256 was honestly recomputed.
+        def validate_identity_shape(value: object, path: str) -> None:
+            if type(value) is dict:
+                for key, member in value.items():
+                    if type(key) is not str:
+                        raise ValueError(f"{path} keys must be canonical strings")
+                    member_path = f"{path}.{key}"
+                    if key == "schema_version":
+                        if type(member) is not int or member <= 0:
+                            raise ValueError(
+                                f"{member_path} must be a positive integer"
+                            )
+                    elif key.endswith("_sha256"):
+                        if member is not None:
+                            _sha256(member, member_path)
+                    elif (
+                        key.endswith("_id")
+                        or key.endswith("_identity")
+                        or key.endswith("_version")
+                    ):
+                        if member is not None:
+                            _text(member, member_path)
+                    validate_identity_shape(member, member_path)
+            elif type(value) is list:
+                for index, member in enumerate(value):
+                    validate_identity_shape(member, f"{path}[{index}]")
+
+        validate_identity_shape(payload, f"{record_type}.payload")
         expected = _digest({"record_type": raw_entry["record_type"],
                             "record_id": raw_entry["record_id"],
                             "available_at": raw_entry["available_at"],

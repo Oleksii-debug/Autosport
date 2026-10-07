@@ -124,3 +124,36 @@ def test_research_packet_rejects_duplicate_evidence_identity() -> None:
 
     with pytest.raises(ValueError, match="duplicate evidence_id"):
         ResearchPacket("event-1", TS, (first, second))
+
+
+def test_research_packet_rejects_evidence_after_generation_cutoff() -> None:
+    future = EvidenceItem(
+        evidence_id="future-evidence",
+        as_of_ts="2026-10-01T12:00:01Z",
+        source="provider-a",
+        kind="market-observation",
+        payload={},
+        source_hash=SHA,
+    )
+
+    with pytest.raises(ValueError, match="after generated_at"):
+        ResearchPacket("event-1", "2026-10-01T12:00:00Z", (future,))
+
+
+def test_research_packet_compares_timestamp_instants_not_lexical_offsets() -> None:
+    same_instant = EvidenceItem(
+        evidence_id="same-instant",
+        as_of_ts="2026-10-01T14:00:00+02:00",
+        source="provider-a",
+        kind="market-observation",
+        payload={},
+        source_hash=SHA,
+    )
+
+    packet = ResearchPacket(
+        "event-1",
+        "2026-10-01T12:00:00Z",
+        (same_instant,),
+    )
+
+    assert packet.evidence == (same_instant,)

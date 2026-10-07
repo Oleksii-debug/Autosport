@@ -488,14 +488,37 @@ def resolve_outcome_revision_as_of(
 ) -> TrustedOutcomeRevision | None:
     """Return the latest product-trusted revision genuinely available by cutoff."""
 
+    if type(binding) is not OutcomeLineageBinding:
+        raise OutcomeLineageTrustError(
+            "outcome causal lineage must be an exact OutcomeLineageBinding"
+        )
+    revisions = binding.revisions
+    if (
+        type(revisions) is not tuple
+        or not revisions
+        or any(type(revision) is not TrustedOutcomeRevision for revision in revisions)
+    ):
+        raise OutcomeLineageTrustError(
+            "outcome causal lineage revisions must be an exact tuple of TrustedOutcomeRevision"
+        )
+
+    # Frozen DTOs can still be changed through object.__setattr__. Rebuild the
+    # causal-use snapshot through the strict wire parser before any timestamp
+    # dispatch so post-construction aliases cannot move outcome availability.
+    binding = outcome_lineage_binding_from_payload(
+        outcome_lineage_payload(binding),
+        context="outcome causal lineage",
+    )
+    revisions = binding.revisions
+
     cutoff_dt = _parse_timestamp(
         _canonical_timestamp(cutoff, field="outcome as-of cutoff")
     )
     resolved: TrustedOutcomeRevision | None = None
     previous_available: datetime | None = None
-    for revision in binding.revisions:
+    for revision in revisions:
         if revision.first_available_at is None:
-            if any(item.first_available_at is not None for item in binding.revisions):
+            if any(item.first_available_at is not None for item in revisions):
                 raise OutcomeLineageTrustError(
                     "outcome lineage has incomplete product availability evidence"
                 )

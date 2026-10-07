@@ -414,3 +414,33 @@ def test_direct_identity_properties_reject_record_subclasses_before_virtual_disp
     hostile_plan = HostilePortfolioPlan(opportunity_set=exact_set)
     with pytest.raises(OpportunityContractError, match="exact PortfolioPlan"):
         _ = hostile_plan.plan_id
+
+
+def test_opportunity_enum_ingress_rejects_str_subclass_before_enum_dispatch() -> None:
+    opportunity = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.WAIT,
+        quotes=(_quote(),),
+    )
+    payload = opportunity.to_dict()
+    dispatch_calls: list[str] = []
+
+    class HostileEnumText(str):
+        def strip(self, *args: object, **kwargs: object) -> str:
+            dispatch_calls.append("strip")
+            raise AssertionError("hostile enum text strip dispatched")
+
+        def __hash__(self) -> int:
+            dispatch_calls.append("hash")
+            raise AssertionError("hostile enum text hash dispatched")
+
+        def __eq__(self, other: object) -> bool:
+            dispatch_calls.append("eq")
+            raise AssertionError("hostile enum text equality dispatched")
+
+    for field_name in ("strategy_class", "decision"):
+        hostile_payload = dict(payload)
+        hostile_payload[field_name] = HostileEnumText(payload[field_name])
+        with pytest.raises(OpportunityContractError):
+            Opportunity.from_dict(hostile_payload)
+        assert dispatch_calls == []

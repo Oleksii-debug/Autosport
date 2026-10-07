@@ -478,6 +478,31 @@ class ResearchEvidence:
         object.__setattr__(self, "quality_flags", flags)
 
 
+def _validate_research_evidence_causal_use(
+    item: object,
+    *,
+    decision_time,
+) -> None:
+    """Re-prove causal evidence chronology immediately before decision use."""
+
+    if type(item) is not ResearchEvidence:
+        raise TypeError("research evidence use requires exact ResearchEvidence values")
+    for label, value in (
+        ("evidence_id", item.evidence_id),
+        ("quote_key", item.quote_key),
+        ("source_id", item.source_id),
+        ("observed_at", item.observed_at),
+        ("available_at", item.available_at),
+    ):
+        _validate_canonical_string(value, label)
+    observed = parse_iso_timestamp(item.observed_at)
+    available = parse_iso_timestamp(item.available_at)
+    if available < observed:
+        raise ValueError("research evidence cannot be available before it was observed")
+    if available > decision_time:
+        raise ValueError("research evidence was not available by decision time")
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchDecisionPolicy:
     """Deterministic critic/data-quality policy. No LLM or network call is made here."""
@@ -596,8 +621,11 @@ class DeterministicResearchCritic:
         decision_time = parse_iso_timestamp(decision_ts)
         by_quote: dict[str, list[ResearchEvidence]] = {}
         for item in evidence:
-            if parse_iso_timestamp(item.available_at) <= decision_time:
-                by_quote.setdefault(item.quote_key, []).append(item)
+            _validate_research_evidence_causal_use(
+                item,
+                decision_time=decision_time,
+            )
+            by_quote.setdefault(item.quote_key, []).append(item)
 
         leg_reviews: list[ResearchLegReview] = []
         all_reasons: list[str] = []
@@ -727,8 +755,13 @@ class ResearchDecisionPipeline:
     ) -> ResearchDecision:
         _validate_canonical_string(replay_run_id, "replay_run_id")
         _validate_canonical_string(decision_ts, "decision_ts")
-        parse_iso_timestamp(decision_ts)
+        decision_time = parse_iso_timestamp(decision_ts)
         evidence_items = tuple(evidence)
+        for item in evidence_items:
+            _validate_research_evidence_causal_use(
+                item,
+                decision_time=decision_time,
+            )
         goal = self.risk_policy.economic_goal
         quote_items = tuple(market_quotes or ())
         proposal_context: ProposedTicketRiskContext | None = None

@@ -159,6 +159,75 @@ class PortfolioAwareCandidateOptimizerTests(unittest.TestCase):
 
 
 
+    def test_optimizer_rejects_input_list_subclasses_before_container_dispatch(self):
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError("list subclass iteration must not execute")
+
+            def __bool__(self):
+                raise AssertionError("list subclass truthiness must not execute")
+
+        leg = CandidateLeg("e1|winner|a", "e1", Decimal("2"), Decimal("0.5"))
+        candidate = _single_candidate(leg)
+        group = ScenarioGroup(
+            "e1",
+            (ScenarioOutcome(leg.quote_key), ScenarioOutcome("e1|winner|b")),
+        )
+        optimizer = PortfolioAwareCandidateOptimizer()
+
+        with self.assertRaisesRegex(ValueError, "existing_tickets must be an exact list"):
+            optimizer.evaluate_candidates(
+                HostileList(), [candidate], [group], stake="1"  # type: ignore[arg-type]
+            )
+        with self.assertRaisesRegex(ValueError, "candidates must be an exact list"):
+            optimizer.evaluate_candidates(
+                [], HostileList([candidate]), [group], stake="1"  # type: ignore[arg-type]
+            )
+        with self.assertRaisesRegex(ValueError, "groups must be an exact list"):
+            optimizer.evaluate_candidates(
+                [], [candidate], HostileList([group]), stake="1"  # type: ignore[arg-type]
+            )
+
+    def test_optimizer_rejects_existing_ticket_subclass_before_status_dispatch(self):
+        class HostileTicket(type(PaperBook("100").open_ticket(
+            [TicketLeg("fixture", "winner", "a", Decimal("2"))], "1"
+        ))):
+            def __getattribute__(self, name):
+                if name == "status":
+                    raise AssertionError("ticket subclass status dispatch must not execute")
+                return super().__getattribute__(name)
+
+        base = PaperBook("100").open_ticket(
+            [TicketLeg("e0", "winner", "a", Decimal("2"))], "1"
+        )
+        hostile = HostileTicket(
+            ticket_id=base.ticket_id,
+            stake=base.stake,
+            legs=base.legs,
+            placed_at=base.placed_at,
+            status=base.status,
+            payout=base.payout,
+            strategy_reason=base.strategy_reason,
+            provider_source_ids=base.provider_source_ids,
+            provider_accounts=base.provider_accounts,
+            bankroll_id=base.bankroll_id,
+            currency=base.currency,
+            settled_at=base.settled_at,
+        )
+        leg = CandidateLeg("e1|winner|a", "e1", Decimal("2"), Decimal("0.5"))
+        group = ScenarioGroup(
+            "e1",
+            (ScenarioOutcome(leg.quote_key), ScenarioOutcome("e1|winner|b")),
+        )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "existing_tickets must contain exact PaperTicket values",
+        ):
+            PortfolioAwareCandidateOptimizer().evaluate_candidates(
+                [hostile], [_single_candidate(leg)], [group], stake="1"
+            )
+
     def test_optimizer_rejects_parlay_candidate_subclass_before_member_dispatch(self):
         class HostileCandidate(ParlayCandidate):
             def __getattribute__(self, name):

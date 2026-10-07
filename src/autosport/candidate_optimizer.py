@@ -91,6 +91,18 @@ class PortfolioAwareCandidateOptimizer:
         *,
         stake: Decimal | str,
     ) -> list[CandidatePortfolioImpact]:
+        if type(existing_tickets) is not list:
+            raise ValueError("existing_tickets must be an exact list")
+        if type(candidates) is not list:
+            raise ValueError("candidates must be an exact list")
+        if type(groups) is not list:
+            raise ValueError("groups must be an exact list")
+        for ticket in existing_tickets:
+            if type(ticket) is not PaperTicket:
+                raise ValueError(
+                    "existing_tickets must contain exact PaperTicket values"
+                )
+
         amount = Decimal(str(stake))
         if not amount.is_finite():
             raise ValueError("stake must be finite")

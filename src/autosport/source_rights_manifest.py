@@ -14,11 +14,17 @@ _MANIFEST_KIND = "autosport_source_rights_manifest"
 _MAX_TEXT_LENGTH = 4096
 _MAX_MANIFEST_BYTES = 64 * 1024
 _MAX_AUTHORIZED_SCOPES = 256
+_PRIVACY_CLASSIFICATIONS = frozenset(
+    {"NON_PERSONAL_DATA", "PERSONAL_DATA_RESTRICTED", "UNKNOWN"}
+)
+_EVIDENCE_CLASSES = frozenset({"HUMAN_APPROVED_SOURCE_RIGHTS", "UNKNOWN"})
 _REQUIRED_FIELDS = {
     "schema_version",
     "kind",
     "source_identity",
     "authorized_scopes",
+    "privacy_classification",
+    "evidence_class",
     "effective_at",
     "expires_at",
     "human_approved",
@@ -46,6 +52,8 @@ class SourceRightsManifest:
     manifest_sha256: str
     source_identity: str
     authorized_scopes: tuple[str, ...]
+    privacy_classification: str
+    evidence_class: str
     effective_at: datetime
     expires_at: datetime
     approved_by: str
@@ -62,6 +70,8 @@ class SourceRightsAuthorization:
     required_scope: str
     checked_at: datetime
     manifest_sha256: str
+    privacy_classification: str
+    evidence_class: str
     approved_by: str
     approval_reference: str
 
@@ -83,6 +93,8 @@ def _install_source_rights_authorization_seal(
         "required_scope",
         "checked_at",
         "manifest_sha256",
+        "privacy_classification",
+        "evidence_class",
         "approved_by",
         "approval_reference",
     )
@@ -112,6 +124,8 @@ def _install_source_rights_authorization_seal(
         required_scope: str,
         checked_at: datetime,
         manifest_sha256: str,
+        privacy_classification: str,
+        evidence_class: str,
         approved_by: str,
         approval_reference: str,
         _issuer: object | None = None,
@@ -137,6 +151,8 @@ def _install_source_rights_authorization_seal(
             required_scope,
             checked_at,
             manifest_sha256,
+            privacy_classification,
+            evidence_class,
             approved_by,
             approval_reference,
         )
@@ -182,6 +198,8 @@ def _build_source_rights_authorization_issuer(
         required_scope: str,
         checked_at: datetime,
         manifest_sha256: str,
+        privacy_classification: str,
+        evidence_class: str,
         approved_by: str,
         approval_reference: str,
     ) -> SourceRightsAuthorization:
@@ -190,6 +208,8 @@ def _build_source_rights_authorization_issuer(
             required_scope=required_scope,
             checked_at=checked_at,
             manifest_sha256=manifest_sha256,
+            privacy_classification=privacy_classification,
+            evidence_class=evidence_class,
             approved_by=approved_by,
             approval_reference=approval_reference,
             _issuer=_issuer_token,
@@ -246,6 +266,22 @@ def _canonical_text(
             f"{field_name} must be a non-empty canonical string without surrounding whitespace"
         )
     return value
+
+
+def _classification(
+    value: object,
+    *,
+    field_name: str,
+    allowed: frozenset[str],
+    _canonical_text_impl=_canonical_text,
+    _error_type=SourceRightsManifestError,
+) -> str:
+    classification = _canonical_text_impl(value, field_name=field_name)
+    if classification not in allowed:
+        raise _error_type(
+            f"{field_name} is unsupported; expected one of {sorted(allowed)}"
+        )
+    return classification
 
 
 def _timestamp(
@@ -404,6 +440,9 @@ def _validated_projection(
     _manifest_kind=_MANIFEST_KIND,
     _canonical_text_impl=_canonical_text,
     _scopes_impl=_scopes,
+    _classification_impl=_classification,
+    _privacy_classes=_PRIVACY_CLASSIFICATIONS,
+    _evidence_classes=_EVIDENCE_CLASSES,
     _timestamp_impl=_timestamp,
     _error_type=SourceRightsManifestError,
     _dict_type=dict,
@@ -411,7 +450,7 @@ def _validated_projection(
     _int_type=int,
     _sorted=sorted,
     _type=type,
-) -> tuple[str, tuple[str, ...], datetime, datetime, str, str, datetime]:
+) -> tuple[str, tuple[str, ...], str, str, datetime, datetime, str, str, datetime]:
     payload = _bounded_impl(payload)
     try:
         raw = _json_loads(
@@ -471,6 +510,16 @@ def _validated_projection(
         field_name="source_identity",
     )
     authorized_scopes = _scopes_impl(raw["authorized_scopes"])
+    privacy_classification = _classification_impl(
+        raw["privacy_classification"],
+        field_name="privacy_classification",
+        allowed=_privacy_classes,
+    )
+    evidence_class = _classification_impl(
+        raw["evidence_class"],
+        field_name="evidence_class",
+        allowed=_evidence_classes,
+    )
     effective_at = _timestamp_impl(
         raw["effective_at"],
         field_name="effective_at",
@@ -504,6 +553,8 @@ def _validated_projection(
     return (
         source_identity,
         authorized_scopes,
+        privacy_classification,
+        evidence_class,
         effective_at,
         expires_at,
         approved_by,
@@ -518,9 +569,12 @@ def _validated_manifest_snapshot(
     _bounded_impl=_bounded_manifest_bytes,
     _canonical_text_impl=_canonical_text,
     _runtime_scopes_impl=_runtime_scopes,
+    _classification_impl=_classification,
+    _privacy_classes=_PRIVACY_CLASSIFICATIONS,
+    _evidence_classes=_EVIDENCE_CLASSES,
     _runtime_timestamp_impl=_runtime_timestamp,
     _error_type=SourceRightsManifestError,
-) -> tuple[str, tuple[str, ...], datetime, datetime, str, str, datetime]:
+) -> tuple[str, tuple[str, ...], str, str, datetime, datetime, str, str, datetime]:
     _bounded_impl(manifest.manifest_bytes)
     digest = _canonical_text_impl(
         manifest.manifest_sha256,
@@ -539,6 +593,16 @@ def _validated_manifest_snapshot(
             field_name="manifest source_identity",
         ),
         _runtime_scopes_impl(manifest.authorized_scopes),
+        _classification_impl(
+            manifest.privacy_classification,
+            field_name="manifest privacy_classification",
+            allowed=_privacy_classes,
+        ),
+        _classification_impl(
+            manifest.evidence_class,
+            field_name="manifest evidence_class",
+            allowed=_evidence_classes,
+        ),
         _runtime_timestamp_impl(
             manifest.effective_at,
             field_name="manifest effective_at",
@@ -593,6 +657,8 @@ def _build_source_rights_loader(
         (
             source_identity,
             authorized_scopes,
+            privacy_classification,
+            evidence_class,
             effective_at,
             expires_at,
             approved_by,
@@ -605,6 +671,8 @@ def _build_source_rights_loader(
             manifest_sha256=_sha256_constructor(payload).hexdigest(),
             source_identity=source_identity,
             authorized_scopes=authorized_scopes,
+            privacy_classification=privacy_classification,
+            evidence_class=evidence_class,
             effective_at=effective_at,
             expires_at=expires_at,
             approved_by=approved_by,
@@ -688,6 +756,14 @@ def _build_authorize_source_use(
             raise _error_type(
                 "source_identity is not authorized by this manifest"
             )
+        if manifest.privacy_classification != "NON_PERSONAL_DATA":
+            raise _error_type(
+                "privacy classification does not permit autonomous source use"
+            )
+        if manifest.evidence_class != "HUMAN_APPROVED_SOURCE_RIGHTS":
+            raise _error_type(
+                "evidence class does not support positive source-rights authorization"
+            )
         if scope not in manifest.authorized_scopes:
             raise _error_type(
                 "required_scope is not explicitly authorized by this manifest"
@@ -706,6 +782,8 @@ def _build_authorize_source_use(
             required_scope=scope,
             checked_at=checked_at,
             manifest_sha256=manifest.manifest_sha256,
+            privacy_classification=manifest.privacy_classification,
+            evidence_class=manifest.evidence_class,
             approved_by=manifest.approved_by,
             approval_reference=manifest.approval_reference,
         )

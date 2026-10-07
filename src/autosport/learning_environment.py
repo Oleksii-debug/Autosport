@@ -510,8 +510,8 @@ class CausalLearningEnvironment:
         policy_id: str,
         admissible_actions: frozenset[str],
     ) -> None:
-        if not isinstance(identity, EnvironmentIdentity):
-            raise TypeError("identity must be EnvironmentIdentity")
+        if type(identity) is not EnvironmentIdentity:
+            raise TypeError("identity must be an exact EnvironmentIdentity")
         actions = _canonical_set("admissible_actions", admissible_actions)
         self.identity = identity
         self.episode = Episode(
@@ -708,8 +708,8 @@ class CausalLearningEnvironment:
         admissible_actions: frozenset[str],
         checkpoint: EnvironmentCheckpoint,
     ) -> "CausalLearningEnvironment":
-        if not isinstance(checkpoint, EnvironmentCheckpoint):
-            raise TypeError("checkpoint must be EnvironmentCheckpoint")
+        if type(checkpoint) is not EnvironmentCheckpoint:
+            raise TypeError("checkpoint must be an exact EnvironmentCheckpoint")
         environment = cls(
             identity,
             episode_key=episode_key,

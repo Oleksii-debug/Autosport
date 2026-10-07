@@ -217,6 +217,112 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
             )
 
 
+    def test_learning_identity_and_restart_boundaries_reject_record_subclasses(self) -> None:
+        class IdentitySubclass(EnvironmentIdentity):
+            __slots__ = ()
+
+        class ObservationSubclass(Observation):
+            __slots__ = ()
+
+        class OutcomeSubclass(Outcome):
+            __slots__ = ()
+
+        class RewardSubclass(RewardEvidence):
+            __slots__ = ()
+
+        exact_identity = self._identity()
+        identity_subclass = IdentitySubclass(
+            source_id=exact_identity.source_id,
+            config_id=exact_identity.config_id,
+            data_id=exact_identity.data_id,
+            protocol_id=exact_identity.protocol_id,
+            cutoff_ts=exact_identity.cutoff_ts,
+            seed=exact_identity.seed,
+        )
+        with self.assertRaisesRegex(TypeError, "exact EnvironmentIdentity"):
+            self._environment(identity=identity_subclass)
+
+        environment = self._environment()
+        exact_observation = self._observation(environment.environment_id)
+        observation_subclass = ObservationSubclass(
+            environment_id=exact_observation.environment_id,
+            observed_at=exact_observation.observed_at,
+            available_at=exact_observation.available_at,
+            evidence=exact_observation.evidence,
+        )
+        with self.assertRaisesRegex(TypeError, "exact Observation"):
+            environment.act(
+                observation_subclass,
+                action_type="WAIT",
+                decision_at="2026-09-17T13:00:02+00:00",
+            )
+
+        action = environment.act(
+            exact_observation,
+            action_type="WAIT",
+            decision_at="2026-09-17T13:00:02+00:00",
+        )
+        exact_outcome, exact_reward = self._observed_resolution(action)
+        outcome_subclass = OutcomeSubclass(
+            environment_id=exact_outcome.environment_id,
+            action_id=exact_outcome.action_id,
+            revealed_at=exact_outcome.revealed_at,
+            truth=exact_outcome.truth,
+            evidence=exact_outcome.evidence,
+            simulation_model_id=exact_outcome.simulation_model_id,
+        )
+        reward_subclass = RewardSubclass(
+            environment_id=exact_reward.environment_id,
+            action_id=exact_reward.action_id,
+            outcome_id=exact_reward.outcome_id,
+            reward=exact_reward.reward,
+            available_at=exact_reward.available_at,
+            truth=exact_reward.truth,
+            evidence=exact_reward.evidence,
+            simulation_model_id=exact_reward.simulation_model_id,
+        )
+        with self.assertRaisesRegex(TypeError, "exact canonical environment evidence"):
+            environment.resolve(
+                action.action_id,
+                outcome=outcome_subclass,
+                reward=exact_reward,
+                resolved_at="2026-09-17T13:05:02+00:00",
+            )
+        with self.assertRaisesRegex(TypeError, "exact canonical environment evidence"):
+            environment.resolve(
+                action.action_id,
+                outcome=exact_outcome,
+                reward=reward_subclass,
+                resolved_at="2026-09-17T13:05:02+00:00",
+            )
+
+        restart_environment = self._environment()
+        checkpoint = restart_environment.checkpoint()
+
+        class CheckpointSubclass(type(checkpoint)):
+            __slots__ = ()
+
+        checkpoint_subclass = CheckpointSubclass(
+            environment_id=checkpoint.environment_id,
+            episode_id=checkpoint.episode_id,
+            policy_id=checkpoint.policy_id,
+            step_index=checkpoint.step_index,
+            chain_sha256=checkpoint.chain_sha256,
+            last_transition_id=checkpoint.last_transition_id,
+            committed_action_ids=checkpoint.committed_action_ids,
+            committed_decision_intents=checkpoint.committed_decision_intents,
+        )
+        with self.assertRaisesRegex(TypeError, "exact EnvironmentCheckpoint"):
+            CausalLearningEnvironment.resume(
+                restart_environment.identity,
+                episode_key="episode-001",
+                policy_id="policy-transparent-v1",
+                admissible_actions=frozenset(
+                    {"OBSERVE_MORE", "PAPER_PROPOSAL", "WAIT"}
+                ),
+                checkpoint=checkpoint_subclass,
+            )
+
     def test_policy_cannot_choose_outside_externally_admissible_action_set(self) -> None:
         environment = self._environment()
         observation = self._observation(environment.environment_id)

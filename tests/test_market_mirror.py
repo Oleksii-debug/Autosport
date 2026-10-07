@@ -733,5 +733,28 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
 
+    def test_view_rejects_str_subclass_selector_before_hash_dispatch(self) -> None:
+        hash_calls: list[str] = []
+
+        class HostileSelector(str):
+            def __hash__(self) -> int:
+                hash_calls.append("hash")
+                raise AssertionError("selector hash dispatched before exact-type admission")
+
+            def __eq__(self, other: object) -> bool:
+                raise AssertionError("selector equality dispatched before exact-type admission")
+
+        mirror = MarketMirror()
+        hostile = HostileSelector("provider-a")
+        for selector in (hostile, [hostile]):
+            with self.subTest(selector_type=type(selector).__name__):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "source_ids entries must be non-empty strings",
+                ):
+                    mirror.view(source_ids=selector)
+                self.assertEqual(hash_calls, [])
+
+
 if __name__ == "__main__":
     unittest.main()

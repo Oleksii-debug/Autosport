@@ -1197,6 +1197,15 @@ class ScientificRegistry:
             raise PromotionEvidenceError(
                 "promotion decisions must be recorded through record_promotion"
             )
+        return self._append(
+            record,
+            allow_repeat_experiment=allow_repeat_experiment,
+        )
+
+    def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
+        """Private canonical append authority retained for frozen cross-module callers."""
+
+        entry = self._entry(record)
         if type(allow_repeat_experiment) is not bool:
             raise ValueError("allow_repeat_experiment must be boolean")
         with WorkspaceEconomicLock(self.path.parent):

@@ -94,6 +94,17 @@ def _delta(**overrides):
 
 
 class Section2SourceProjectionDeltaExactTypeTests(unittest.TestCase):
+    def test_active_epoch_append_rejects_delta_subclass_before_virtual_validation(self) -> None:
+        _HostileCollectorDelta.validate_calls = 0
+        store = object.__new__(CollectorDeltaStore)
+        hostile = object.__new__(_HostileCollectorDelta)
+        with self.assertRaisesRegex(TypeError, "delta must be exact CollectorDelta"):
+            store._append_with_runtime_stream_epoch(
+                hostile,
+                activated_at="2026-10-07T03:40:03+00:00",
+            )
+        self.assertEqual(_HostileCollectorDelta.validate_calls, 0)
+
     def test_collector_store_get_rejects_hostile_delta_id_before_strip_dispatch(self) -> None:
         _HostileText.strip_calls = 0
         store = object.__new__(CollectorDeltaStore)

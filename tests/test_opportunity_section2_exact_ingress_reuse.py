@@ -444,3 +444,33 @@ def test_opportunity_enum_ingress_rejects_str_subclass_before_enum_dispatch() ->
         with pytest.raises(OpportunityContractError):
             Opportunity.from_dict(hostile_payload)
         assert dispatch_calls == []
+
+
+def test_opportunity_ingress_rejects_hostile_key_before_hash_dispatch() -> None:
+    payload = _opportunity_payload = Opportunity(
+        strategy_class=StrategyClass.ARBITRAGE,
+        decision=OpportunityDecision.WAIT,
+        quotes=(_quote(),),
+    ).to_dict()
+
+    class HostileKey(str):
+        armed = False
+
+        def __hash__(self) -> int:
+            if self.armed:
+                raise AssertionError("hostile opportunity key hashed before exact admission")
+            return str.__hash__(self)
+
+        def __eq__(self, other: object) -> bool:
+            if self.armed:
+                raise AssertionError("hostile opportunity key compared before exact admission")
+            return str.__eq__(self, other)
+
+    hostile = dict(payload)
+    key = HostileKey("decision")
+    value = hostile.pop("decision")
+    hostile[key] = value
+    key.armed = True
+
+    with pytest.raises(OpportunityContractError, match="canonical fields"):
+        Opportunity.from_dict(hostile)

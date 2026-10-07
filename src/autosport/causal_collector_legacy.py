@@ -924,6 +924,9 @@ class DesktopDeltaConsumer:
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
         delivered: list[str] = []
         for delta in available:
+            if type(delta) is not CollectorDelta:
+                raise TypeError("collector feed must contain exact CollectorDelta")
+            delta.validate()
             if delta.gap_state is GapState.DETECTED:
                 recovered = any(
                     item.gap_state is GapState.RECOVERED
@@ -951,6 +954,10 @@ class DesktopDeltaConsumer:
 
                 durable_receipt = self.lookup_application_receipt(delta)
                 if durable_receipt is not None:
+                    if type(durable_receipt) is not DesktopApplicationReceipt:
+                        raise ApplicationReceiptError(
+                            "lookup_application_receipt must return an exact durable DesktopApplicationReceipt"
+                        )
                     durable_receipt.validate()
                     if durable_receipt.canonical_event_digest != delta.canonical_event_digest:
                         raise ApplicationReceiptError(
@@ -969,8 +976,10 @@ class DesktopDeltaConsumer:
                 if digest != delta.canonical_event_digest:
                     raise DeltaConflictError(f"canonical event digest mismatch for delta {delta.delta_id}")
                 receipt = self.apply_event(delta, event)
-                if not isinstance(receipt, DesktopApplicationReceipt):
-                    raise ApplicationReceiptError("apply_event must return a durable DesktopApplicationReceipt")
+                if type(receipt) is not DesktopApplicationReceipt:
+                    raise ApplicationReceiptError(
+                        "apply_event must return an exact durable DesktopApplicationReceipt"
+                    )
                 receipt.validate()
                 if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")

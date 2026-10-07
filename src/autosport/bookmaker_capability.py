@@ -109,8 +109,8 @@ def _money(value: Decimal, field: str, *, positive: bool = False) -> Decimal:
     return value
 
 
-def _sha256(value: str, field: str) -> str:
-    _text(value, field)
+def _sha256(value: object, field: str) -> str:
+    value = _identity_text(value, field)
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
         raise BookmakerCapabilityError(
             f"{field} must be a lowercase 64-character SHA-256 hex digest"

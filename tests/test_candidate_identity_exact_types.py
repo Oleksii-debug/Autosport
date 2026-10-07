@@ -163,12 +163,8 @@ def test_ticket_identity_rejects_noncanonical_identity_bytes(
 def test_legacy_ticket_suffix_cannot_mint_noncanonical_structured_identity(
     quote_key: str,
 ) -> None:
-    leg = CandidateLeg(
-        quote_key=quote_key,
-        event_id="event-1",
-        decimal_odds=Decimal("2"),
-        probability=Decimal("0.5"),
-    )
+    leg = _leg()
+    object.__setattr__(leg, "quote_key", quote_key)
 
     with pytest.raises(ValueError, match="canonical string"):
         leg.ticket_identity()

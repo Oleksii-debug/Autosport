@@ -69,6 +69,24 @@ MATERIAL_ACTION_ID_PAYLOAD_KEY = "material_action_id"
 _MAX_DECISION_LEDGER_BYTES = 64 * 1024 * 1024
 
 
+def _canonical_decision_text(value: object, field_name: str) -> str:
+    """Require one exact lossless top-level decision identity spelling."""
+
+    if (
+        type(value) is not str
+        or not value
+        or str.strip(value) != value
+        or "\x00" in value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{field_name} must be a non-empty canonical string")
+    try:
+        str.encode(value, "utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 text") from exc
+    return value
+
+
 def _require_canonical_decision_id(
     value: object,
     *,
@@ -123,6 +141,16 @@ class DecisionRecord:
     decision_kind: str = GENERAL_DECISION_KIND
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "replay_run_id",
+            "agent",
+            "observed_ts",
+            "action",
+            "context_hash",
+            "recorded_at",
+            "decision_kind",
+        ):
+            _canonical_decision_text(getattr(self, field_name), field_name)
         _require_canonical_decision_id(self.decision_id)
         payload = _freeze_decision_payload(self.payload)
         if contains_forbidden_future_key(payload):
@@ -508,19 +536,32 @@ class JsonlDecisionLedger:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record schema is invalid{location}"
             )
+        # Exact-fence top-level identity text before the generic JSON walk so a
+        # hostile str subclass cannot execute virtual encode/strip/hash behavior first.
+        for field_name in cls._STRING_FIELDS:
+            value = record.get(field_name)
+            if field_name == "decision_id":
+                _require_canonical_decision_id(value, location=location)
+                continue
+            try:
+                _canonical_decision_text(value, field_name)
+            except ValueError as exc:
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger record field {field_name!r} is invalid{location}"
+                ) from exc
+        if "decision_kind" in record:
+            try:
+                _canonical_decision_text(record["decision_kind"], "decision_kind")
+            except ValueError as exc:
+                raise DecisionLedgerIntegrityError(
+                    f"Decision Ledger decision_kind is invalid{location}"
+                ) from exc
         try:
             cls._validate_json_value(record, path="record")
         except RecursionError as exc:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger record nesting is too deep{location}"
             ) from exc
-        _require_canonical_decision_id(record.get("decision_id"), location=location)
-        for field_name in cls._STRING_FIELDS:
-            value = record.get(field_name)
-            if not isinstance(value, str) or not value.strip():
-                raise DecisionLedgerIntegrityError(
-                    f"Decision Ledger record field {field_name!r} is invalid{location}"
-                )
         if "decision_kind" in record and record["decision_kind"] != ECONOMIC_DECISION_KIND:
             raise DecisionLedgerIntegrityError(
                 f"Decision Ledger decision_kind is invalid{location}"

@@ -205,3 +205,38 @@ def test_evaluation_rejects_forecast_and_outcome_subclasses_before_virtual_dispa
 
     with pytest.raises(ValueError, match="exact ForecastRecord"):
         evaluate_forecast_window((subclass_record,), (fact,), _evaluation_window())
+
+
+@pytest.mark.parametrize("value", ("", " padded", "padded ", "line\nbreak", "\x7f", "\ud800"))
+def test_evaluation_window_identity_rejects_noncanonical_spelling(value: str) -> None:
+    with pytest.raises(ValueError, match="window_id"):
+        TemporalEvaluationWindow(
+            window_id=value,
+            training_end_ts="2026-10-06T21:00:00+00:00",
+            evaluation_start_ts="2026-10-06T23:30:00+00:00",
+            evaluation_end_ts="2026-10-07T00:30:00+00:00",
+        )
+
+
+def test_evaluation_window_identity_rejects_string_subclass_before_dispatch() -> None:
+    with pytest.raises(ValueError, match="window_id"):
+        TemporalEvaluationWindow(
+            window_id=_ExplosiveString("window-1"),
+            training_end_ts="2026-10-06T21:00:00+00:00",
+            evaluation_start_ts="2026-10-06T23:30:00+00:00",
+            evaluation_end_ts="2026-10-07T00:30:00+00:00",
+        )
+
+
+def test_evaluation_revalidates_post_init_window_identity() -> None:
+    record = _record(generated_at="2026-10-07T00:00:00+00:00")
+    fact = ForecastOutcomeFact(
+        forecast_id="forecast-1",
+        outcome=1,
+        revealed_at="2026-10-07T00:10:00+00:00",
+    )
+    window = _evaluation_window()
+    object.__setattr__(window, "window_id", " window-1")
+
+    with pytest.raises(ValueError, match="window_id"):
+        evaluate_forecast_window((record,), (fact,), window)

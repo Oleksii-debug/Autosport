@@ -221,8 +221,22 @@ class CatalogEvent:
     def from_dict(cls, raw: object) -> "CatalogEvent":
         if type(raw) is not dict:
             raise ValueError("catalog event must be a JSON object")
+        expected = {
+            "source_id",
+            "sport",
+            "event_id",
+            "phase",
+            "available_at",
+            "scheduled_start_at",
+            "completion_ref",
+            "settlement_ref",
+        }
+        raw_keys = tuple(raw.keys())
+        if any(type(key) is not str for key in raw_keys) or set(raw_keys) != expected:
+            raise ValueError("catalog event fields mismatch")
+        phase = _text(raw["phase"], "catalog event phase")
         value = dict(raw)
-        value["phase"] = EventPhase(value["phase"])
+        value["phase"] = EventPhase(phase)
         item = cls(**value)
         item.validate()
         return item
@@ -397,8 +411,13 @@ class EventLifecycleRecord:
             "completion_discovered_at",
             "settlement_discovered_at",
         }
-        if set(raw) not in (expected, prior_causal_expected, legacy_expected):
+        raw_keys = tuple(raw.keys())
+        if (
+            any(type(key) is not str for key in raw_keys)
+            or set(raw_keys) not in (expected, prior_causal_expected, legacy_expected)
+        ):
             raise ValueError("lifecycle record fields mismatch")
+        phase = _text(raw["phase"], "lifecycle record phase")
         value = dict(raw)
         value.setdefault("completion_discovered_at", None)
         value.setdefault("settlement_discovered_at", None)
@@ -414,7 +433,7 @@ class EventLifecycleRecord:
                 known,
                 key=lambda item: _instant(item, "legacy_discovery_boundary"),
             )
-        value["phase"] = EventPhase(value["phase"])
+        value["phase"] = EventPhase(phase)
         return cls(**value)
 
     def to_dict(self) -> dict[str, object]:

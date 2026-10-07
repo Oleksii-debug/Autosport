@@ -227,7 +227,7 @@ class ScenarioSearchEngine:
                 "authoritative outcome analysis requires market authorities"
             )
         if any(
-            not isinstance(authority, MarketSettlementOutcomeAuthority)
+            type(authority) is not MarketSettlementOutcomeAuthority
             for authority in authorities
         ):
             raise ValueError(
@@ -428,6 +428,8 @@ class ScenarioSearchEngine:
         )
 
     def _validate_and_map(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> dict[str, int]:
+        if type(groups) is not list:
+            raise ValueError("scenario groups must be an exact list")
         if not groups:
             raise ValueError("scenario groups required")
         mapping: dict[str, int] = {}

@@ -101,6 +101,22 @@ def _identity_text(value: object, name: str) -> str:
     return value
 
 
+def _exact_dict_fields(
+    value: object,
+    expected_fields: set[str],
+    error_message: str,
+) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ExecutionLedgerIntegrityError(error_message)
+    raw_keys = tuple(value.keys())
+    if (
+        any(type(key) is not str for key in raw_keys)
+        or set(raw_keys) != expected_fields
+    ):
+        raise ExecutionLedgerIntegrityError(error_message)
+    return value
+
+
 def _sha256_text(value: str, name: str) -> str:
     _text(value, name)
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
@@ -996,17 +1012,20 @@ class RealExecutionLedger:
 
     @classmethod
     def _plan_from_dict(cls, value: object) -> ExecutionPlan:
-        if not isinstance(value, dict) or set(value) != {
-            "schema_version",
-            "plan_id",
-            "bookmaker_profile_version",
-            "decision_id",
-            "approval_id",
-            "created_at",
-            "actions",
-        }:
-            raise ExecutionLedgerIntegrityError("stored plan schema is invalid")
-        if not isinstance(value["actions"], list):
+        value = _exact_dict_fields(
+            value,
+            {
+                "schema_version",
+                "plan_id",
+                "bookmaker_profile_version",
+                "decision_id",
+                "approval_id",
+                "created_at",
+                "actions",
+            },
+            "stored plan schema is invalid",
+        )
+        if type(value["actions"]) is not list:
             raise ExecutionLedgerIntegrityError("stored plan actions are invalid")
         actions: list[ExecutionAction] = []
         expected_action_fields = {
@@ -1025,10 +1044,11 @@ class RealExecutionLedger:
         }
         try:
             for raw in value["actions"]:
-                if not isinstance(raw, dict) or set(raw) != expected_action_fields:
-                    raise ExecutionLedgerIntegrityError(
-                        "stored action schema is invalid"
-                    )
+                raw = _exact_dict_fields(
+                    raw,
+                    expected_action_fields,
+                    "stored action schema is invalid",
+                )
                 actions.append(ExecutionAction(**raw))
             return ExecutionPlan(
                 plan_id=value["plan_id"],
@@ -1055,15 +1075,20 @@ class RealExecutionLedger:
             "accepted_stake",
             "reconciliation_evidence_id",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored acknowledgement schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored acknowledgement schema is invalid",
+        )
         try:
+            status = _identity_text(
+                value["status"],
+                "acknowledgement status",
+            )
             acknowledgement = ExternalAcknowledgement(
                 attempt_id=value["attempt_id"],
                 external_receipt_id=value["external_receipt_id"],
-                status=AcknowledgementStatus(value["status"]),
+                status=AcknowledgementStatus(status),
                 acknowledged_at=value["acknowledged_at"],
                 accepted_odds=value["accepted_odds"],
                 accepted_stake=value["accepted_stake"],
@@ -1090,10 +1115,11 @@ class RealExecutionLedger:
             "observed_at",
             "source",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored found reconciliation schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored found reconciliation schema is invalid",
+        )
         try:
             reconciliation = ExternalEffectReconciliation(**value)
         except (TypeError, ValueError) as exc:
@@ -1117,10 +1143,11 @@ class RealExecutionLedger:
             "external_effect_found",
             "source",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored not-found reconciliation schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored not-found reconciliation schema is invalid",
+        )
         try:
             snapshot = ReconciliationSnapshot(**value)
         except (TypeError, ValueError) as exc:

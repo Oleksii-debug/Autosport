@@ -263,6 +263,58 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             ):
                 service.run_cycle()
 
+    def test_delta_batch_tuple_subclass_fails_before_container_dispatch(self):
+        class HostileTuple(tuple):
+            def __len__(self):
+                raise AssertionError(
+                    "hostile delta batch length dispatched before exact-tuple admission"
+                )
+
+            def __iter__(self):
+                raise AssertionError(
+                    "hostile delta batch iteration dispatched before exact-tuple admission"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource(
+                [page],
+                [HostileTuple((make_delta(),))],
+            )
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "source.fetch_deltas must return an exact tuple",
+            ):
+                service.run_cycle()
+
+    def test_collector_delta_subclass_fails_before_validate_dispatch(self):
+        class HostileDelta(CollectorDelta):
+            def validate(self):
+                raise AssertionError(
+                    "hostile CollectorDelta.validate dispatched before exact-type admission"
+                )
+
+        base = make_delta()
+        hostile = HostileDelta(
+            **{
+                name: getattr(base, name)
+                for name in base.__dataclass_fields__
+            }
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [(hostile,)])
+            service = self.make_service(tmp, source)
+
+            with self.assertRaisesRegex(
+                TypeError,
+                "source.fetch_deltas must return canonical CollectorDelta values",
+            ):
+                service.run_cycle()
+
     def test_cycle_accepts_provider_scoped_delta_for_canonical_lifecycle_event(self):
         with tempfile.TemporaryDirectory() as tmp:
             source = FakeCollectorSource(

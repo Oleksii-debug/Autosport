@@ -197,3 +197,65 @@ def test_registry_mutation_ingress_rejects_record_subclasses(tmp_path: Path) -> 
                 evidence_sha256=SHA,
             )
         )
+
+
+def test_registry_mutation_ingress_revalidates_tampered_exact_records(
+    tmp_path: Path,
+) -> None:
+    from autosport.participant_identity import (
+        EntityLineage,
+        LineageRelation,
+        RosterMembership,
+    )
+
+    path = tmp_path / "identity.json"
+    registry = ParticipantIdentityRegistry.initialize_pristine(path)
+    team_a = _identity("team:a", EntityKind.TEAM)
+    team_b = _identity("team:b", EntityKind.TEAM)
+    registry.add_entity(team_a)
+    registry.add_entity(team_b)
+
+    bad_entity = _identity("team:tampered", EntityKind.TEAM)
+    object.__setattr__(bad_entity, "entity_id", " team:tampered")
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        registry.add_entity(bad_entity)
+
+    bad_alias = AliasRecord(
+        source_id="provider-a",
+        alias="team-a",
+        entity_id=team_a.entity_id,
+        valid_from=T0,
+        valid_until=None,
+        available_at=T0,
+        evidence_sha256=SHA,
+        recorded_at=T0,
+    )
+    object.__setattr__(bad_alias, "alias", " team-a")
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        registry.add_alias(bad_alias)
+
+    bad_membership = RosterMembership(
+        event_id="event-1",
+        source_id="provider-a",
+        entity_id=team_a.entity_id,
+        member_from=T0,
+        member_until=None,
+        available_at=T0,
+        evidence_sha256=SHA,
+    )
+    object.__setattr__(bad_membership, "source_id", " provider-a")
+    with pytest.raises(ParticipantIdentityError, match="canonical string"):
+        registry.add_roster_membership(bad_membership)
+
+    bad_lineage = EntityLineage(
+        predecessor_entity_id=team_a.entity_id,
+        successor_entity_id=team_b.entity_id,
+        relation=LineageRelation.SUPERSEDES,
+        effective_from=T0,
+        available_at=T0,
+        recorded_at=T0,
+        evidence_sha256=SHA,
+    )
+    object.__setattr__(bad_lineage, "evidence_sha256", "A" * 64)
+    with pytest.raises(ParticipantIdentityError, match="SHA-256 hex"):
+        registry.add_lineage(bad_lineage)

@@ -65,6 +65,16 @@ def _digest(payload: Mapping[str, Any]) -> str:
     return evidence._digest(payload)
 
 
+def _exact_dict_fields(payload: object) -> frozenset[str] | None:
+    """Return exact built-in string keys without hashing caller-controlled subtypes."""
+    if type(payload) is not dict:
+        return None
+    keys = tuple(payload.keys())
+    if any(type(key) is not str for key in keys):
+        return None
+    return frozenset(keys)
+
+
 @dataclass(frozen=True, slots=True)
 class FeatureArtifactProvenance:
     """Typed commitment joining one dataset snapshot to one exact feature artifact.
@@ -200,7 +210,7 @@ class FeatureArtifactProvenance:
             "feature_payload_sha256",
             "provenance_sha256",
         }
-        if type(payload) is not dict or set(payload) != expected:
+        if _exact_dict_fields(payload) != frozenset(expected):
             raise evidence.PointInTimeEvidenceError(
                 "feature artifact provenance fields mismatch"
             )

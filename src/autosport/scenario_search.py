@@ -12,10 +12,30 @@ from .market_outcomes import MarketSettlementOutcomeAuthority
 from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
 
 
+def _canonical_scenario_text(value: object, field: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"scenario {field} must be exact non-empty canonical text")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(
+            f"scenario {field} must be exact non-empty canonical text"
+        ) from exc
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ScenarioOutcome:
     quote_key: str
     probability: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        _canonical_scenario_text(self.quote_key, "outcome quote_key")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,9 +44,19 @@ class ScenarioGroup:
     outcomes: tuple[ScenarioOutcome, ...]
 
     def __post_init__(self) -> None:
+        _canonical_scenario_text(self.group_id, "group_id")
+        if type(self.outcomes) is not tuple:
+            raise ValueError("scenario group outcomes must be a canonical tuple")
         if len(self.outcomes) < 2:
             raise ValueError("scenario group requires at least two outcomes")
-        keys = [item.quote_key for item in self.outcomes]
+        keys: list[str] = []
+        for item in self.outcomes:
+            if type(item) is not ScenarioOutcome:
+                raise ValueError(
+                    "scenario group outcomes must contain exact ScenarioOutcome values"
+                )
+            ScenarioOutcome.__post_init__(item)
+            keys.append(item.quote_key)
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate outcome quote_key")
         probabilities = [item.probability for item in self.outcomes]
@@ -38,6 +68,15 @@ class ScenarioGroup:
                 raise ValueError("scenario group probabilities must sum to 1")
             if any(value is not None and (value < 0 or value > 1) for value in probabilities):
                 raise ValueError("invalid outcome probability")
+
+
+def _validate_scenario_group_identity(group: object) -> ScenarioGroup:
+    """Re-prove scenario identity before any hash/mapping use boundary."""
+
+    if type(group) is not ScenarioGroup:
+        raise ValueError("scenario groups must contain exact ScenarioGroup values")
+    ScenarioGroup.__post_init__(group)
+    return group
 
 
 @dataclass(frozen=True, slots=True)
@@ -361,7 +400,8 @@ class ScenarioSearchEngine:
         if not groups:
             raise ValueError("scenario groups required")
         mapping: dict[str, int] = {}
-        for index, group in enumerate(groups):
+        for index, raw_group in enumerate(groups):
+            group = _validate_scenario_group_identity(raw_group)
             for outcome in group.outcomes:
                 if outcome.quote_key in mapping:
                     raise ValueError("quote_key appears in multiple scenario groups")

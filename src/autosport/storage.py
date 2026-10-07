@@ -537,6 +537,126 @@ def _ensure_canonical_secondary_indexes(connection: sqlite3.Connection) -> None:
             )
 
 
+def _legacy_component_boundary_keys(event: MarketEvent) -> tuple[str, str] | None:
+    """Return the exact pre-component-boundary pipe keys, only when migration applies."""
+    if event.sport is not None or event.exchange_side is not None:
+        return None
+    quote_components = (event.event_id, event.market_id, event.selection_id)
+    dedupe_components = (
+        event.source_id,
+        event.event_id,
+        event.market_id,
+        event.selection_id,
+    )
+    if not any("|" in component for component in (*dedupe_components,)):
+        return None
+    legacy_quote = "|".join(quote_components)
+    legacy_dedupe = (
+        f"{event.source_id}|{event.event_id}|{event.market_id}|"
+        f"{event.selection_id}|{event.sequence}"
+    )
+    if legacy_quote == event.quote_key and legacy_dedupe == event.dedupe_key:
+        return None
+    return legacy_dedupe, legacy_quote
+
+
+def _migrate_legacy_component_boundary_history_keys(
+    connection: sqlite3.Connection,
+) -> None:
+    """Rewrite only provable predecessor composite keys from canonical payload truth.
+
+    Historical payload_json is the authoritative event witness. The migration accepts
+    exactly the former pipe-delimited quote/dedupe encoding for delimiter-bearing,
+    no-sport/no-exchange identities. Every other redundant column remains fail-closed.
+    """
+    connection.execute("BEGIN IMMEDIATE")
+    try:
+        rows = connection.execute(
+            f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+        ).fetchall()
+        migrations: list[tuple[str, str, str]] = []
+        for row in rows:
+            if len(row) != len(_HISTORY_COLUMNS):
+                raise ValueError("market event history row has unexpected shape")
+            (
+                dedupe_key,
+                quote_key,
+                event_id,
+                market_id,
+                selection_id,
+                decimal_odds,
+                observed_ts,
+                source_id,
+                sequence,
+                payload_json,
+            ) = row
+            event = _event_from_current_payload(payload_json)
+
+            non_key_expected = (
+                ("event_id", event_id, event.event_id),
+                ("market_id", market_id, event.market_id),
+                ("selection_id", selection_id, event.selection_id),
+                ("decimal_odds", decimal_odds, str(event.decimal_odds)),
+                ("observed_ts", observed_ts, event.observed_ts),
+                ("source_id", source_id, event.source_id),
+                ("sequence", sequence, event.sequence),
+            )
+            for field_name, persisted, canonical in non_key_expected:
+                if not _typed_equal(persisted, canonical):
+                    raise ValueError(
+                        f"market event history row identity mismatch: {field_name}"
+                    )
+
+            dedupe_matches = _typed_equal(dedupe_key, event.dedupe_key)
+            quote_matches = _typed_equal(quote_key, event.quote_key)
+            if dedupe_matches and quote_matches:
+                continue
+
+            legacy = _legacy_component_boundary_keys(event)
+            if (
+                legacy is not None
+                and _typed_equal(dedupe_key, legacy[0])
+                and _typed_equal(quote_key, legacy[1])
+            ):
+                migrations.append((legacy[0], event.dedupe_key, event.quote_key))
+                continue
+
+            if not dedupe_matches:
+                raise ValueError(
+                    "market event history row identity mismatch: dedupe_key"
+                )
+            raise ValueError("market event history row identity mismatch: quote_key")
+
+        for legacy_dedupe, canonical_dedupe, canonical_quote in migrations:
+            try:
+                cursor = connection.execute(
+                    """UPDATE market_events
+                       SET dedupe_key=?, quote_key=?
+                       WHERE dedupe_key=?""",
+                    (canonical_dedupe, canonical_quote, legacy_dedupe),
+                )
+            except sqlite3.IntegrityError as exc:
+                raise ValueError(
+                    "legacy component-boundary identity migration collides with "
+                    "existing canonical history"
+                ) from exc
+            if cursor.rowcount != 1:
+                raise ValueError(
+                    "legacy component-boundary history row changed during migration"
+                )
+
+        # Re-read with the normal strict decoder before committing the one-way rewrite.
+        for row in connection.execute(
+            f"SELECT {_HISTORY_COLUMNS_SQL} FROM market_events"
+        ).fetchall():
+            _event_from_history_row(row)
+    except Exception:
+        connection.rollback()
+        raise
+    else:
+        connection.commit()
+
+
 class SQLiteMarketStore:
     """Crash-safe append-only normalized market history plus current quote projection.
 
@@ -615,6 +735,8 @@ class SQLiteMarketStore:
         # Validate any pre-existing tables before creating anything else. Exact
         # four-column current_quotes is the only accepted legacy migration shape.
         legacy_current = _validate_existing_canonical_tables(self.connection)
+        if _schema_object(self.connection, "market_events") is not None:
+            _migrate_legacy_component_boundary_history_keys(self.connection)
 
         self.connection.execute(
             """CREATE TABLE IF NOT EXISTS market_events (

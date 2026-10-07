@@ -621,6 +621,26 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
 
+    def test_apply_revalidates_post_construction_identity_before_hashing(self) -> None:
+        hash_calls: list[str] = []
+
+        class HostileIdentity(str):
+            def __hash__(self) -> int:
+                hash_calls.append("hash")
+                raise AssertionError("mutated identity reached hash dispatch")
+
+            def __eq__(self, other: object) -> bool:
+                raise AssertionError("mutated identity reached equality dispatch")
+
+        event = self.event(sequence=90)
+        object.__setattr__(event, "source_id", HostileIdentity(event.source_id))
+
+        mirror = MarketMirror()
+        with self.assertRaises(ValueError):
+            mirror.apply(event)
+        self.assertEqual(hash_calls, [])
+        self.assertEqual(len(mirror), 0)
+
     def test_apply_rejects_market_event_subclass_before_live_dispatch(self) -> None:
         class HostileMarketEvent(MarketEvent):
             def __getattribute__(self, name: str):

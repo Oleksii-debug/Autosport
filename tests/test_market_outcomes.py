@@ -268,6 +268,72 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 verified_authority=reverified,
             )
 
+    def test_settlement_authority_read_boundaries_revalidate_mutated_semantics(self):
+        accessors = (
+            lambda authority: authority.quote_keys,
+            lambda authority: authority.terminal_state_count,
+            lambda authority: authority.terminal_space_exact,
+            lambda authority: authority.terminal_states,
+            lambda authority: authority.assert_available_as_of(self.DECISION_AS_OF),
+            lambda authority: authority.authority_sha256,
+            lambda authority: authority.to_dict(),
+        )
+        for accessor in accessors:
+            with self.subTest(accessor=accessor):
+                authority = self._authority(("away", "home"))
+                object.__setattr__(
+                    authority,
+                    "settlement_semantics",
+                    "forged-settlement-semantics",
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "settlement_semantics must be SettlementSemantics",
+                ):
+                    accessor(authority)
+
+    def test_durable_readback_rejects_verified_authority_subclass_before_dispatch(self):
+        authority = self._authority(("away", "home"))
+
+        class HostileAuthority(MarketSettlementOutcomeAuthority):
+            __slots__ = ("_armed",)
+
+            def __getattribute__(self, name):
+                if name == "to_dict":
+                    try:
+                        armed = object.__getattribute__(self, "_armed")
+                    except AttributeError:
+                        armed = False
+                    if armed:
+                        raise AssertionError(
+                            "verified authority subclass dispatched before exact admission"
+                        )
+                return super().__getattribute__(name)
+
+        hostile = HostileAuthority(
+            identity=authority.identity,
+            selection_ids=authority.selection_ids,
+            roster_basis=authority.roster_basis,
+            settlement_semantics=authority.settlement_semantics,
+            source_revision=authority.source_revision,
+            causal_cutoff=authority.causal_cutoff,
+            observed_at=authority.observed_at,
+            roster_provenance_sha256=authority.roster_provenance_sha256,
+            settlement_rules_sha256=authority.settlement_rules_sha256,
+            verification_protocol_sha256=authority.verification_protocol_sha256,
+            _verification_token=authority._verification_token,
+        )
+        object.__setattr__(hostile, "_armed", True)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "requires separately verified source authority",
+        ):
+            MarketSettlementOutcomeAuthority.from_dict(
+                authority.to_dict(),
+                verified_authority=hostile,
+            )
+
     def test_authority_rejects_future_evidence_at_decision_boundary(self):
         authority = self._authority()
         with self.assertRaisesRegex(

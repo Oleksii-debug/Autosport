@@ -204,6 +204,7 @@ class MarketTerminalState:
             raise ValueError("terminal settlements must use canonical selection order")
 
     def to_dict(self) -> dict[str, object]:
+        MarketTerminalState.__post_init__(self)
         return {
             "state_id": self.state_id,
             "settlements": [
@@ -283,6 +284,7 @@ class MarketSettlementOutcomeAuthority:
 
     @property
     def quote_keys(self) -> tuple[str, ...]:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         return tuple(
             self.identity.quote_key(selection_id)
             for selection_id in self.selection_ids
@@ -290,6 +292,7 @@ class MarketSettlementOutcomeAuthority:
 
     @property
     def terminal_state_count(self) -> int:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         if (
             self.settlement_semantics
             is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
@@ -304,6 +307,7 @@ class MarketSettlementOutcomeAuthority:
 
     @property
     def terminal_space_exact(self) -> bool:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         return (
             self.settlement_semantics
             is not SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
@@ -311,6 +315,7 @@ class MarketSettlementOutcomeAuthority:
 
     @property
     def terminal_states(self) -> tuple[MarketTerminalState, ...]:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         if (
             self.settlement_semantics
             is SettlementSemantics.CANONICAL_WIN_LOSS_VOID_SUPERSET
@@ -367,6 +372,7 @@ class MarketSettlementOutcomeAuthority:
         return tuple(states)
 
     def assert_available_as_of(self, decision_as_of: datetime) -> None:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         if not isinstance(decision_as_of, datetime):
             raise TypeError("decision_as_of must be a datetime")
         if (
@@ -386,8 +392,10 @@ class MarketSettlementOutcomeAuthority:
             )
 
     def _state_is_derived(self, state: MarketTerminalState) -> bool:
-        if not isinstance(state, MarketTerminalState):
+        MarketSettlementOutcomeAuthority.__post_init__(self)
+        if type(state) is not MarketTerminalState:
             return False
+        MarketTerminalState.__post_init__(state)
         actual_ids = tuple(
             selection_id for selection_id, _ in state.settlements
         )
@@ -434,8 +442,10 @@ class MarketSettlementOutcomeAuthority:
     def settlement_by_quote(
         self, state: MarketTerminalState
     ) -> dict[str, str]:
-        if not isinstance(state, MarketTerminalState):
+        MarketSettlementOutcomeAuthority.__post_init__(self)
+        if type(state) is not MarketTerminalState:
             raise TypeError("state must be MarketTerminalState")
+        MarketTerminalState.__post_init__(state)
         if not self._state_is_derived(state):
             raise ValueError(
                 "terminal state is not derived from this outcome authority"
@@ -446,6 +456,7 @@ class MarketSettlementOutcomeAuthority:
         }
 
     def _identity_payload(self) -> dict[str, object]:
+        MarketSettlementOutcomeAuthority.__post_init__(self)
         return {
             "schema": "autosport.market_settlement_outcome_authority",
             "schema_version": 1,
@@ -487,11 +498,12 @@ class MarketSettlementOutcomeAuthority:
         supply that independently derived authority here; durable data then proves
         identity/equality only.
         """
-        if not isinstance(verified_authority, cls):
+        if type(verified_authority) is not MarketSettlementOutcomeAuthority:
             raise ValueError(
                 "durable market outcome authority readback requires separately "
                 "verified source authority"
             )
+        MarketSettlementOutcomeAuthority.__post_init__(verified_authority)
         canonical = verified_authority.to_dict()
         expected = set(canonical)
         if type(raw) is not dict or set(raw) != expected:

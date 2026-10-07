@@ -88,6 +88,31 @@ class RunRegistryIdentityExactTypeTests(unittest.TestCase):
                     self.assertEqual(json.loads(path.read_text(encoding="utf-8"))["runs"], {})
 
 
+    def test_begin_rejects_noncanonical_identity_alias_spellings_before_persisting(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "run_registry.json"
+            registry = RunRegistry.initialize_pristine(path)
+            baseline = path.read_bytes()
+
+            cases = (
+                ("strategy_id", " strategy"),
+                ("strategy_id", "strategy\nvariant"),
+                ("run_id", "run-1 "),
+                ("run_id", "run-\x7f1"),
+            )
+            for field, malformed in cases:
+                with self.subTest(field=field, malformed=repr(malformed)):
+                    kwargs = {
+                        "market_sha256": "a" * 64,
+                        "results_sha256": "b" * 64,
+                        "strategy_id": "strategy",
+                        "run_id": "run-1",
+                    }
+                    kwargs[field] = malformed
+                    with self.assertRaisesRegex(ValueError, "exact canonical"):
+                        registry.begin(**kwargs)
+                    self.assertEqual(path.read_bytes(), baseline)
+
     @staticmethod
     def _valid_lineage() -> OutcomeLineageBinding:
         return OutcomeLineageBinding(

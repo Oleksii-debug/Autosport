@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import autosport.dataset_snapshot_lineage as lineage_module
+
 from autosport.dataset_snapshot_lineage import (
     DatasetSnapshotLineageAuthority,
     DatasetSnapshotUnprovenError,
@@ -679,3 +681,8 @@ def test_local_publish_before_commit_is_recovered_with_exact_semantic_proof(
         ).committed_state_sha256
         == state
     )
+
+
+def test_dataset_lineage_rejects_nonzero_submicrosecond_causal_timestamp() -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        lineage_module._instant("2026-09-01T00:00:00.1234561Z", "causal_cutoff")

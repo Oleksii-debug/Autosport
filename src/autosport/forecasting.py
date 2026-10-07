@@ -165,6 +165,21 @@ class ForecastRecord:
             "strategy_version",
         ):
             _canonical_identity_text(getattr(self, field_name), field_name=field_name)
+        if type(self.evidence_hashes) is not tuple:
+            raise ValueError(
+                "evidence_hashes must remain an exact tuple of SHA-256 digests"
+            )
+        evidence_hashes = tuple(
+            _canonical_sha256(value, field_name="evidence hash")
+            for value in self.evidence_hashes
+        )
+        if len(set(evidence_hashes)) != len(evidence_hashes):
+            raise ValueError("duplicate evidence hashes")
+        if self.market_snapshot_hash is not None:
+            _canonical_sha256(
+                self.market_snapshot_hash,
+                field_name="market_snapshot_hash",
+            )
         return {
             "forecast_id": self.forecast_id,
             "quote_key": self.quote_key,
@@ -232,8 +247,8 @@ class TemporalEvaluationWindow:
 
     def __post_init__(self) -> None:
         _canonical_identity_text(self.window_id, field_name="window_id")
-        if self.split not in _ALLOWED_SPLITS:
-            raise ValueError("split must be validation or holdout")
+        if type(self.split) is not str or self.split not in _ALLOWED_SPLITS:
+            raise ValueError("split must be exact validation or holdout text")
         training_end = parse_iso_timestamp(self.training_end_ts)
         evaluation_start = parse_iso_timestamp(self.evaluation_start_ts)
         evaluation_end = parse_iso_timestamp(self.evaluation_end_ts)

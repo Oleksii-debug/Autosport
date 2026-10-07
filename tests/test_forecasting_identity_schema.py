@@ -336,3 +336,51 @@ def test_walk_forward_rejects_window_subclass_before_attribute_dispatch() -> Non
 
     with pytest.raises(ValueError, match="exact TemporalEvaluationWindow"):
         evaluate_walk_forward((), (), (window,))
+
+def test_forecast_use_boundary_revalidates_evidence_reference_identities() -> None:
+    digest = "a" * 64
+    record = _record(evidence_hashes=(digest,), market_snapshot_hash="b" * 64)
+
+    object.__setattr__(record, "evidence_hashes", [digest])
+    with pytest.raises(ValueError, match="exact tuple"):
+        record.to_dict()
+
+    object.__setattr__(record, "evidence_hashes", ("A" * 64,))
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        record.to_dict()
+
+    object.__setattr__(record, "evidence_hashes", (digest, digest))
+    with pytest.raises(ValueError, match="duplicate evidence hashes"):
+        record.to_dict()
+
+    object.__setattr__(record, "evidence_hashes", (digest,))
+    object.__setattr__(record, "market_snapshot_hash", _ExplosiveString("b" * 64))
+    with pytest.raises(ValueError, match="market_snapshot_hash"):
+        record.to_dict()
+
+
+def test_forecast_ledger_rejects_mutated_evidence_identity_before_append(tmp_path) -> None:
+    record = _record(evidence_hashes=("a" * 64,))
+    object.__setattr__(record, "evidence_hashes", ("A" * 64,))
+    ledger = JsonlForecastLedger(tmp_path / "forecasts.jsonl")
+
+    with pytest.raises(ValueError, match="lowercase SHA-256"):
+        ledger.append(record)
+
+    assert not (tmp_path / "forecasts.jsonl").exists()
+
+
+def test_evaluation_window_split_rejects_string_subclass_before_hash_dispatch() -> None:
+    class HostileSplit(str):
+        def __hash__(self):
+            raise AssertionError("split alias hash must not execute")
+
+    with pytest.raises(ValueError, match="exact validation or holdout"):
+        TemporalEvaluationWindow(
+            window_id="window-1",
+            training_end_ts="2026-10-06T21:00:00+00:00",
+            evaluation_start_ts="2026-10-06T23:30:00+00:00",
+            evaluation_end_ts="2026-10-07T00:30:00+00:00",
+            split=HostileSplit("holdout"),
+        )
+

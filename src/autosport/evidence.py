@@ -2,9 +2,10 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import datetime, timezone
 from typing import Any
 
 from .causal_integrity import (
@@ -33,6 +34,14 @@ def _canonical_text(value: object, field_name: str) -> str:
 
 def _aware_timestamp(value: object, field_name: str) -> str:
     text = _canonical_text(value, field_name)
+    for match in re.finditer(r"[.,]([0-9]+)", text):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{field_name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -40,6 +49,11 @@ def _aware_timestamp(value: object, field_name: str) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must include an explicit timezone")
     return text
+
+
+def _instant(value: object, field_name: str) -> datetime:
+    text = _aware_timestamp(value, field_name)
+    return datetime.fromisoformat(text.replace("Z", "+00:00")).astimezone(timezone.utc)
 
 
 def _json_payload(value: Any) -> Any:
@@ -57,11 +71,14 @@ def _validate_evidence_identity_fields(
     source: object,
     kind: object,
     source_hash: object,
+    available_at: object | None = None,
 ) -> None:
     _canonical_text(evidence_id, "evidence_id")
     _aware_timestamp(as_of_ts, "as_of_ts")
     _canonical_text(source, "source")
     _canonical_text(kind, "kind")
+    if available_at is not None:
+        _aware_timestamp(available_at, "available_at")
     if source_hash is not None:
         digest = _canonical_text(source_hash, "source_hash")
         if len(digest) != 64 or any(character not in _SHA256_HEX for character in digest):
@@ -90,6 +107,7 @@ class EvidenceItem:
     kind: str
     payload: dict[str, Any]
     source_hash: str | None = None
+    available_at: str | None = None
 
     def __post_init__(self) -> None:
         _validate_evidence_identity_fields(
@@ -98,6 +116,7 @@ class EvidenceItem:
             source=self.source,
             kind=self.kind,
             source_hash=self.source_hash,
+            available_at=self.available_at,
         )
         payload = _validated_evidence_payload(self.payload)
         object.__setattr__(self, "payload", payload)
@@ -110,6 +129,7 @@ class EvidenceItem:
             source=self.source,
             kind=self.kind,
             source_hash=self.source_hash,
+            available_at=self.available_at,
         )
         payload = _validated_evidence_payload(self.payload)
         raw = {
@@ -120,6 +140,10 @@ class EvidenceItem:
             "payload": _json_payload(payload),
             "source_hash": self.source_hash,
         }
+        # Preserve legacy standalone EvidenceItem hashes when no availability
+        # witness exists, while binding causal availability whenever it is present.
+        if self.available_at is not None:
+            raw["available_at"] = self.available_at
         canonical = json.dumps(
             raw,
             ensure_ascii=False,
@@ -138,7 +162,7 @@ class ResearchPacket:
 
     def __post_init__(self) -> None:
         _canonical_text(self.event_id, "event_id")
-        _aware_timestamp(self.generated_at, "generated_at")
+        generated_at = _instant(self.generated_at, "generated_at")
         if type(self.evidence) is not tuple:
             raise ValueError("research packet evidence must be a tuple")
         seen_evidence_ids: set[str] = set()
@@ -151,8 +175,25 @@ class ResearchPacket:
                 source=item.source,
                 kind=item.kind,
                 source_hash=item.source_hash,
+                available_at=item.available_at,
             )
             _validated_evidence_payload(item.payload)
+            if item.available_at is None:
+                raise ValueError(
+                    "research packet evidence requires explicit available_at"
+                )
+            evidence_as_of = _instant(item.as_of_ts, "evidence.as_of_ts")
+            evidence_available = _instant(
+                item.available_at, "evidence.available_at"
+            )
+            if evidence_as_of > evidence_available:
+                raise ValueError(
+                    "research packet evidence as_of_ts cannot be after available_at"
+                )
+            if evidence_available > generated_at:
+                raise ValueError(
+                    "research packet contains evidence unavailable at generated_at"
+                )
             if item.evidence_id in seen_evidence_ids:
                 raise ValueError("research packet contains duplicate evidence identity")
             seen_evidence_ids.add(item.evidence_id)

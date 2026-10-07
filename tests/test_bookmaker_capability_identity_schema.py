@@ -147,6 +147,51 @@ def test_account_position_identifiers_reject_non_utf8_aliases(
         factory(**{field_name: "identity\ud800"})
 
 
+def test_profile_rejects_facts_tuple_subclass_before_dispatch() -> None:
+    facts = _TrapTuple(
+        (
+            BookmakerCapabilityFact(
+                BookmakerCapability.BALANCE_READ,
+                BookmakerCapabilityState.SUPPORTED,
+            ),
+        )
+    )
+    with pytest.raises(BookmakerCapabilityError, match="exact tuple"):
+        _profile(facts=facts)
+
+
+def test_profile_rejects_capability_fact_subclass_before_dispatch() -> None:
+    class HostileFact(BookmakerCapabilityFact):
+        armed = False
+
+        def __getattribute__(self, name: str):
+            if type(self).armed and name in {"capability", "state"}:
+                raise AssertionError("capability fact subclass dispatch must not execute")
+            return super().__getattribute__(name)
+
+    fact = HostileFact(
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapabilityState.SUPPORTED,
+    )
+    HostileFact.armed = True
+    with pytest.raises(BookmakerCapabilityError, match="exact BookmakerCapabilityFact"):
+        _profile(facts=(fact,))
+
+
+def test_profile_revalidates_exact_fact_after_post_init_mutation() -> None:
+    fact = BookmakerCapabilityFact(
+        BookmakerCapability.BALANCE_READ,
+        BookmakerCapabilityState.SUPPORTED,
+    )
+    profile = _profile(facts=(fact,))
+    object.__setattr__(fact, "state", "supported")
+
+    with pytest.raises(BookmakerCapabilityError, match="BookmakerCapabilityState"):
+        profile.to_canonical_dict()
+    with pytest.raises(BookmakerCapabilityError, match="BookmakerCapabilityState"):
+        profile.state_of(BookmakerCapability.BALANCE_READ)
+
+
 def test_snapshot_rejects_observed_capabilities_subclass_before_dispatch() -> None:
     observed = _TrapFrozenSet(
         {

@@ -1097,6 +1097,14 @@ class ScientificRegistry:
                     elif key.endswith("_sha256"):
                         if member is not None:
                             _sha256(member, member_path)
+                    elif key in {
+                        "baseline_compute_identity",
+                        "challenger_compute_identity",
+                    }:
+                        if type(member) is not dict:
+                            raise ValueError(
+                                f"{member_path} must be a canonical identity object"
+                            )
                     elif (
                         key.endswith("_id")
                         or key.endswith("_identity")

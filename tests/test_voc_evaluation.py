@@ -26,10 +26,12 @@ from autosport.sport_domain_fitness import (
     SportDomainFitnessObservation,
 )
 from autosport.decision_ledger import DecisionRecord, JsonlDecisionLedger
+from autosport.scientific_registry import ScientificRegistry
 from autosport.voc_evaluation import (
     CanonicalVOCAuthorityResolver,
     OutcomeDerivedVOCScore,
     PairedVOCEvaluation,
+    VOCCohort,
     VOCEvaluationError,
     VOCEvaluationProvenance,
     VOCEvaluationStore,
@@ -104,6 +106,25 @@ def evaluation(**overrides):
     )
     values.update(overrides)
     return PairedVOCEvaluation(**values)
+
+
+def test_voc_cohort_structured_compute_identity_survives_registry_restart(tmp_path):
+    path = tmp_path / "scientific-registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    cohort = VOCCohort(
+        cohort_id="voc-cohort-structured-identity",
+        members=(evaluation(),),
+        decision_recorded_from=T0,
+        decision_recorded_through=T1,
+    )
+
+    registry.append(cohort)
+    reopened = ScientificRegistry(path)
+    stored = reopened.get("VOCCohort", cohort.cohort_id)
+
+    assert stored is not None
+    assert stored.payload["baseline_compute_identity"]["candidate_id"] == "local"
+    assert stored.payload["challenger_compute_identity"]["candidate_id"] == "cloud"
 
 
 def voc(value=None):

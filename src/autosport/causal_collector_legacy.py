@@ -732,6 +732,8 @@ class CollectorDeltaStore(_JsonAtomicStore):
         if type(source_id) is not str:
             raise TypeError("source_id must be exact string identity text")
         _text(source_id, "source_id")
+        if after_delta_id is not None and type(after_delta_id) is not str:
+            raise TypeError("after_delta_id must be exact string identity text or None")
         if (
             isinstance(max_items, bool)
             or not isinstance(max_items, int)
@@ -745,8 +747,6 @@ class CollectorDeltaStore(_JsonAtomicStore):
         ]
         start = 0
         if after_delta_id is not None:
-            if type(after_delta_id) is not str:
-                raise TypeError("after_delta_id must be exact string identity text or None")
             _text(after_delta_id, "after_delta_id")
             for index, item in enumerate(items):
                 if item.delta_id == after_delta_id:

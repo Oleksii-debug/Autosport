@@ -24,3 +24,10 @@ A worker discovering a non-gating improvement in a closed Section must place it 
 Normal workers must skip Sections 0 and 1 and select the earliest unfinished Section after them.
 
 Owner directive recorded 2026-10-07.
+
+
+## Active frozen candidate
+
+| Section | State | Exact candidate | Worker rule |
+| --- | --- | --- | --- |
+| Section 2 — Канонічні доменні ідентичності та versioned schemas | CANDIDATE_FROZEN_NO_TOUCH | `3870483b7810852b6f777f6c8b3d12c0e785d537` | Do not mutate the canonical finisher while exact-SHA CI / Windows Candidate / Endurance qualification is running. Only a demonstrated acceptance-relevant gate failure may authorize the smallest repair; otherwise preserve the exact SHA through integration. |

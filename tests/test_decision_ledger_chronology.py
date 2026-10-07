@@ -140,3 +140,19 @@ def test_restart_rejects_hash_valid_naive_decision_timestamp() -> None:
             match="chronology is invalid",
         ):
             JsonlDecisionLedger(path).verify_integrity()
+
+@pytest.mark.parametrize("field", ("observed_ts", "recorded_at"))
+def test_decision_record_rejects_nonzero_submicrosecond_precision(field: str) -> None:
+    kwargs = {"observed_ts": OBSERVED, "recorded_at": RECORDED}
+    kwargs[field] = "2026-01-01T00:00:00.0000001+00:00"
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        _record(**kwargs)
+
+
+def test_submicrosecond_future_observation_cannot_round_back_to_recorded_at() -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        _record(
+            observed_ts="2026-01-01T00:00:00.0000001+00:00",
+            recorded_at="2026-01-01T00:00:00.0000000+00:00",
+        )
+

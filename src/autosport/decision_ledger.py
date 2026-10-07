@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import uuid
 from collections.abc import Mapping
@@ -135,6 +136,14 @@ def _decision_instant(value: object, field_name: str) -> datetime:
     """Parse one exact causal ledger timestamp using the product timestamp contract."""
 
     canonical = _timezone_aware_iso8601_value(value, field_name)
+    for match in re.finditer(r"[.,]([0-9]+)", canonical):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{field_name} precision finer than microseconds is unsupported"
+            )
     return datetime.fromisoformat(canonical.replace("Z", "+00:00"))
 
 

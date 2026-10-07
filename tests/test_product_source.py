@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from decimal import Decimal
@@ -26,6 +27,31 @@ from autosport.providers import ProviderBatch, ProviderQuote
 
 
 _SOURCE_ID = "parlayapi:table_tennis"
+
+
+def _write_source_rights_manifest(root: Path, *, privacy: str = "NON_PERSONAL_DATA", evidence_class: str = "HUMAN_APPROVED_SOURCE_RIGHTS") -> Path:
+    path = root / "parlay-source-rights.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "autosport_source_rights_manifest",
+                "source_identity": _SOURCE_ID,
+                "authorized_scopes": ["provider.market_data.read"],
+                "privacy_classification": privacy,
+                "evidence_class": evidence_class,
+                "effective_at": "2026-09-01T00:00:00Z",
+                "expires_at": "2026-12-01T00:00:00Z",
+                "human_approved": True,
+                "approved_by": "release-owner",
+                "approval_reference": "entitlement-record:parlay-fixture",
+                "approved_at": "2026-08-31T12:00:00Z",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 class _Provider:
@@ -426,6 +452,67 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 create_parlay_product_source()
 
 
+    def test_factory_requires_verified_source_rights_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = str(Path(directory) / "workspace")
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": workspace,
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_rejects_unknown_privacy_source_rights(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root, privacy="UNKNOWN")
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "source rights authorization failed",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_rejects_unknown_evidence_class_source_rights(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root, evidence_class="UNKNOWN")
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "source rights authorization failed",
+                ):
+                    create_parlay_product_source()
+
     def test_factory_constructor_dependencies_are_import_composed(self) -> None:
         class AttackerProvider:
             source_id = _SOURCE_ID
@@ -446,7 +533,9 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
         canonical_factory = create_parlay_product_source
         with tempfile.TemporaryDirectory() as directory:
-            workspace = str(Path(directory) / "workspace")
+            root = Path(directory)
+            workspace = str(root / "workspace")
+            rights = _write_source_rights_manifest(root)
             with (
                 patch.object(
                     product_source_module,
@@ -468,6 +557,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                     {
                         "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
                         "AUTOSPORT_PRODUCT_WORKSPACE": workspace,
+                        "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
                         "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
                         "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
                         "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(

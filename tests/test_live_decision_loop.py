@@ -50,6 +50,7 @@ from autosport.portfolio_plan import (
 from autosport.providers import ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
+from autosport import storage as storage_module
 from autosport.storage import SQLiteMarketStore
 
 
@@ -85,7 +86,16 @@ class _DurableObserver:
         try:
             bus = MarketEventBus(store)
             bus.subscribe(updates.accept_persisted)
-            bus.publish_many(item)
+            for event in item:
+                # These are synthetic historical fixtures. Bind durable product
+                # availability to ingestion time without teaching production
+                # storage to infer product knowledge from provider timestamps.
+                with patch.object(
+                    storage_module,
+                    "_market_product_utc_now",
+                    return_value=event.ingest_ts,
+                ):
+                    bus.publish(event)
         finally:
             store.close()
         return object()

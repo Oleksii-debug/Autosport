@@ -133,9 +133,13 @@ def canonical_event_identity_aliases(identity: object) -> tuple[str, ...]:
     prefix = "sport-v2-"
     if not raw.startswith(prefix):
         if ":" not in raw:
-            return (raw,)
-        _source, local_event_id = raw.rsplit(":", 1)
+            local_event_id = _provider_event_identity_component(raw)
+            return (local_event_id,)
+        source_id, local_event_id = raw.rsplit(":", 1)
+        _source_identity_component(source_id)
         _provider_event_identity_component(local_event_id)
+        if _legacy_event_identity(source_id=source_id, event_id=local_event_id) != raw:
+            raise ValueError("legacy event identity is not in canonical scoped form")
         return (raw, local_event_id)
 
     token = raw[len(prefix) :]

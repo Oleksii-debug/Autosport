@@ -841,6 +841,18 @@ class CanonicalEventIdentityAliasTests(unittest.TestCase):
             ("provider:region:event-1", "event-1"),
         )
 
+    def test_provider_local_legacy_alias_revalidates_provider_event_identity(self) -> None:
+        self.assertEqual(
+            canonical_event_identity_aliases("event-1"),
+            ("event-1",),
+        )
+        with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
+            canonical_event_identity_aliases("event|forged")
+
+    def test_scoped_legacy_alias_revalidates_source_identity(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
+            canonical_event_identity_aliases("provider|forged:event-1")
+
     def test_noncanonical_schema_v2_encoding_fails_closed(self) -> None:
         identity = canonical_event_identity(
             source_id="provider-a",

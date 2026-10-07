@@ -63,7 +63,7 @@ class ProviderObservationIntegrityError(ProviderObservationAuthorityError):
 
 
 def _text(value: object, name: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip() or "\x00" in value:
+    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise ProviderObservationIntegrityError(f"{name} must be non-empty canonical text")
     value.encode("utf-8")
     return value
@@ -132,17 +132,17 @@ class CompleteGameBoardRequest:
 
     def __post_init__(self) -> None:
         object.__setattr__(self, "sport_key", _provider_identity(self.sport_key, "sport_key"))
-        if not isinstance(self.bookmakers, tuple) or not self.bookmakers:
-            raise ProviderObservationIntegrityError("bookmakers must be a non-empty tuple")
+        if type(self.bookmakers) is not tuple or not self.bookmakers:
+            raise ProviderObservationIntegrityError("bookmakers must be an exact non-empty tuple")
         books = tuple(sorted(_provider_identity(book, "bookmaker") for book in self.bookmakers))
         if len(books) != len(set(books)):
             raise ProviderObservationIntegrityError("bookmakers must be unique")
         object.__setattr__(self, "bookmakers", books)
-        if not isinstance(self.markets, tuple) or self.markets != GAME_LINE_MARKETS:
+        if type(self.markets) is not tuple or self.markets != GAME_LINE_MARKETS:
             raise ProviderObservationUnsupportedError(
                 "complete game-board authority requires h2h, spreads and totals together"
             )
-        if self.kind != "game":
+        if type(self.kind) is not str or self.kind != "game":
             raise ProviderObservationUnsupportedError(
                 "complete provider authority is limited to kind=game"
             )
@@ -211,11 +211,11 @@ class CompleteGameBoardSnapshot:
     frame_json: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.request, CompleteGameBoardRequest):
-            raise ProviderObservationIntegrityError("request must be CompleteGameBoardRequest")
+        if type(self.request) is not CompleteGameBoardRequest:
+            raise ProviderObservationIntegrityError("request must be exact CompleteGameBoardRequest")
         object.__setattr__(self, "captured_at", _instant(self.captured_at, "captured_at"))
-        if not isinstance(self.frame_json, str):
-            raise ProviderObservationIntegrityError("frame_json must be text")
+        if type(self.frame_json) is not str:
+            raise ProviderObservationIntegrityError("frame_json must be exact text")
         try:
             frame = strict_json_loads(self.frame_json)
         except (TypeError, ValueError) as exc:
@@ -394,7 +394,7 @@ def _remember(snapshot: CompleteGameBoardSnapshot) -> CompleteGameBoardSnapshot:
 
 
 def assert_complete_game_board_authoritative(snapshot: CompleteGameBoardSnapshot) -> None:
-    if not isinstance(snapshot, CompleteGameBoardSnapshot):
+    if type(snapshot) is not CompleteGameBoardSnapshot:
         raise ProviderObservationUnsupportedError(
             "complete provider authority requires CompleteGameBoardSnapshot"
         )
@@ -506,8 +506,8 @@ def capture_parlay_complete_game_board(
         raise ValueError("api_key must be non-empty trimmed text")
     if any(character.isspace() for character in api_key):
         raise ValueError("api_key must not contain whitespace")
-    if not isinstance(request, CompleteGameBoardRequest):
-        raise TypeError("request must be CompleteGameBoardRequest")
+    if type(request) is not CompleteGameBoardRequest:
+        raise TypeError("request must be exact CompleteGameBoardRequest")
     if isinstance(timeout_seconds, bool) or not isinstance(timeout_seconds, (int, float)):
         raise ValueError("timeout_seconds must be a positive finite number")
     timeout = float(timeout_seconds)

@@ -59,6 +59,72 @@ class PortfolioEngineConfigurationIntegrityTests(unittest.TestCase):
         ):
             PortfolioEngine.affected_tickets([ticket], leg.quote_key)
 
+    def test_affected_tickets_rejects_hostile_quote_identity_before_dispatch(self) -> None:
+        class HostileQuoteKey(str):
+            def strip(self) -> str:
+                raise AssertionError(
+                    "hostile quote identity dispatched before exact-type admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio quote_key must be a non-empty trimmed string",
+        ):
+            PortfolioEngine.affected_tickets([ticket], HostileQuoteKey(leg.quote_key))
+
+    def test_scenario_profit_rejects_hostile_winning_quote_before_membership(self) -> None:
+        class HostileQuoteKey(str):
+            def strip(self) -> str:
+                raise AssertionError(
+                    "hostile winning quote dispatched before exact-type admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            r"portfolio winning_quote_keys\[0\] must be a non-empty trimmed string",
+        ):
+            PortfolioEngine.scenario_profit(
+                [ticket],
+                {HostileQuoteKey(leg.quote_key)},
+            )
+
+    def test_portfolio_snapshot_revalidates_mutated_ticket_leg_identity(self) -> None:
+        class HostileEventId(str):
+            def encode(self, *args, **kwargs):
+                raise AssertionError(
+                    "hostile event identity encoded before exact-type admission"
+                )
+
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+        object.__setattr__(leg, "event_id", HostileEventId(leg.event_id))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "PaperBook event_id.* must be an exact string",
+        ):
+            PortfolioEngine().analyse([ticket])
+
+    def test_scenario_profit_rejects_noncanonical_winner_container(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "portfolio winning_quote_keys must be an exact set of quote keys",
+        ):
+            PortfolioEngine.scenario_profit([ticket], [leg.quote_key])  # type: ignore[arg-type]
+
     def test_empty_exclusive_group_fails_before_scenario_enumeration(self) -> None:
         book = PaperBook("100")
         leg = TicketLeg("event", "winner", "alice", Decimal("2"))

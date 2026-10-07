@@ -200,3 +200,70 @@ def test_execution_plan_fingerprint_rejects_subclass_before_virtual_serializatio
 
     with pytest.raises(ValueError, match="exact ExecutionPlan"):
         _ = plan.fingerprint
+
+
+def test_plan_readback_rejects_dict_subclass_before_mapping_dispatch() -> None:
+    plan = _plan()
+
+    class HostileDict(dict):
+        def keys(self):
+            raise AssertionError("dict subclass keys must not execute")
+
+        def __iter__(self):
+            raise AssertionError("dict subclass iteration must not execute")
+
+    with pytest.raises(ExecutionLedgerIntegrityError, match="stored plan schema is invalid"):
+        RealExecutionLedger._plan_from_dict(HostileDict(plan.to_dict()))
+
+
+def test_plan_readback_rejects_hostile_action_key_before_hash_dispatch() -> None:
+    raw = _plan().to_dict()
+
+    class HostileKey(str):
+        armed = False
+
+        def __hash__(self):
+            if self.armed:
+                raise AssertionError("hostile action key hashed before exact admission")
+            return str.__hash__(self)
+
+        def __eq__(self, other):
+            if self.armed:
+                raise AssertionError("hostile action key compared before exact admission")
+            return str.__eq__(self, other)
+
+    action = raw["actions"][0]
+    key = HostileKey("action_id")
+    value = action.pop("action_id")
+    action[key] = value
+    key.armed = True
+
+    with pytest.raises(ExecutionLedgerIntegrityError, match="stored action schema is invalid"):
+        RealExecutionLedger._plan_from_dict(raw)
+
+
+def test_acknowledgement_readback_rejects_hostile_status_before_enum_dispatch() -> None:
+    acknowledgement = ExternalAcknowledgement(
+        attempt_id="attempt-1",
+        external_receipt_id="receipt-1",
+        status=AcknowledgementStatus.REJECTED,
+        acknowledged_at=T0,
+    )
+    raw = acknowledgement.to_dict()
+
+    class HostileStatus(str):
+        def __hash__(self):
+            raise AssertionError("hostile status hashed before exact admission")
+
+        def __eq__(self, other):
+            raise AssertionError("hostile status compared before exact admission")
+
+        def strip(self, *args: object, **kwargs: object):
+            raise AssertionError("hostile status stripped before exact admission")
+
+    raw["status"] = HostileStatus(raw["status"])
+    with pytest.raises(
+        ExecutionLedgerIntegrityError,
+        match="stored acknowledgement values are invalid",
+    ):
+        RealExecutionLedger._acknowledgement_from_dict(raw)

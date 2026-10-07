@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.causal_collector_legacy import CollectorDeltaStore as LegacyCollectorDeltaStore
+
 from autosport.causal_collector import (
     AckConflictError,
     CanonicalDesktopApplication,
@@ -24,7 +26,6 @@ from autosport.causal_collector import (
     canonical_event_digest,
     digest_source_payload,
 )
-from autosport.causal_collector_legacy import CollectorDeltaStore as LegacyCollectorDeltaStore
 from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
 from autosport.market_bus import MarketEventBus

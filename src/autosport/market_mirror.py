@@ -466,8 +466,8 @@ class MarketMirror:
         clocks fail closed. The reconstructed mirror then applies the same canonical
         status/freshness/selectors contract as a live active_view.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         boundary, age_limit = cls._decision_boundary(as_of=as_of, max_age=max_age)
 
         # Validate and materialize every request selector before issuing the durable
@@ -509,8 +509,8 @@ class MarketMirror:
         Replaying ``store.events()`` reconstructs source-local sequence protection after
         restart without letting this mirror mutate the store's shared current projection.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
         mirror = cls()
         for event in store.events():
             mirror.apply(event)

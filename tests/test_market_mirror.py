@@ -123,6 +123,25 @@ class MarketMirrorTests(unittest.TestCase):
             Decimal("1.80"),
         )
 
+    def test_restore_and_replay_reject_store_subclass_before_dispatch(self) -> None:
+        class HostileStore(SQLiteMarketStore):
+            def events(self):
+                raise AssertionError("store subclass history dispatch must not execute")
+
+            def replay_events_at_frozen_cutoff(self, *, as_of: str):
+                raise AssertionError("store subclass replay dispatch must not execute")
+
+        hostile = object.__new__(HostileStore)
+
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            MarketMirror.from_store(hostile)
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            MarketMirror.replay_view_from_store(
+                hostile,
+                as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
     def test_sport_aware_lookup_survives_store_restore_and_replay(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"

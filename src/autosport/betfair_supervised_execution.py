@@ -16,6 +16,7 @@ import json
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
+from . import supervised_execution as _supervised_execution_runtime
 from .betfair_account_readonly import (
     BETTING_JSON_RPC_ENDPOINT,
     BetfairExecutionReadbackEnvelope,
@@ -33,17 +34,25 @@ from .bookmaker_capability import (
 from .economic_goal import AutomationLevel, EconomicGoalContractError
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import EconomicGoalStore
+from .execution_stop_authority import (
+    ExecutionStopAuthority,
+    ExecutionStopAuthorityError,
+)
 from .workspace_lock import WorkspaceEconomicLock
 from .real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
+    EventType,
     ExecutionAction,
+    ExecutionStateError,
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,
+    _require_approval,
+    _require_durable_approval,
     begin_supervised_attempt,
 )
 
@@ -51,6 +60,439 @@ PLACE_ORDERS_METHOD = "SportsAPING/v1.0/placeOrders"
 WRITE_ADAPTER_ID = "betfair-exchange-jsonrpc-supervised-placeorders"
 WRITE_ADAPTER_VERSION = "1"
 _MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
+
+_CANONICAL_EXECUTION_STOP_AUTHORITY = ExecutionStopAuthority
+_CANONICAL_EXECUTION_STOP_ADMISSION_LEASE = ExecutionStopAuthority.admission_lease
+_CANONICAL_EXECUTION_STOP_ADMISSION_LEASE_CODE = (
+    _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE.__code__
+)
+
+# Terminal provider-effect authority must not depend on caller-rebindable method
+# dispatch.  These product-owned implementations are captured once and are used
+# non-virtually by execute_betfair_supervised_action().
+_CANONICAL_URLLIB_BETFAIR_HTTP_POST = UrllibBetfairHttpTransport.post
+_CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
+)
+_CANONICAL_URLLIB_BETFAIR_REQUEST = (
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__["Request"]
+)
+_CANONICAL_URLLIB_BETFAIR_URLOPEN = (
+    _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__["urlopen"]
+)
+# Keep the actual stdlib urlopen dependency graph distinct from the mutable
+# compatibility seam above. Tests may temporarily replace the account module's
+# urlopen binding; terminal production execution must never trust the process-
+# global urllib.request._opener behind the original urlopen function.
+_ORIGINAL_URLLIB_BETFAIR_URLOPEN = _CANONICAL_URLLIB_BETFAIR_URLOPEN
+_CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS = (
+    _ORIGINAL_URLLIB_BETFAIR_URLOPEN.__globals__
+)
+_CANONICAL_URLLIB_BETFAIR_BUILD_OPENER = (
+    _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS["build_opener"]
+)
+_CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__code__
+)
+_CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER = (
+    _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER.__globals__["HTTPRedirectHandler"]
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR = (
+    _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS["OpenerDirector"]
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_OPEN = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.open
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN.__code__
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._open
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN.__code__
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._call_chain
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN.__code__
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_ERROR = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.error
+)
+_CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE = (
+    _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR.__code__
+)
+
+
+def _capture_private_opener_dispatch(
+    opener: object,
+) -> tuple[tuple[str, object, tuple[object, ...]], ...] | None:
+    """Freeze the application-owned urllib dispatch graph by object identity."""
+
+    records: list[tuple[str, object, tuple[object, ...]]] = []
+    for map_name in ("handle_open", "process_request", "process_response"):
+        mapping = getattr(opener, map_name, None)
+        if type(mapping) is not dict:
+            return None
+        for key, handlers in mapping.items():
+            if type(key) not in (str, int) or type(handlers) is not list:
+                return None
+            records.append((map_name, key, tuple(handlers)))
+
+    error_mapping = getattr(opener, "handle_error", None)
+    if type(error_mapping) is not dict:
+        return None
+    for protocol, by_code in error_mapping.items():
+        if type(protocol) not in (str, int) or type(by_code) is not dict:
+            return None
+        for code, handlers in by_code.items():
+            if type(code) not in (str, int) or type(handlers) is not list:
+                return None
+            records.append(
+                (f"handle_error:{protocol}", code, tuple(handlers))
+            )
+
+    records.sort(
+        key=lambda item: (item[0], type(item[1]).__name__, str(item[1]))
+    )
+    return tuple(records)
+
+
+def _capture_private_opener_method_dispatch(
+    dispatch: tuple[tuple[str, object, tuple[object, ...]], ...],
+) -> tuple[tuple[object, str, object, object | None], ...]:
+    """Capture handler methods reached by the frozen open/request/response maps."""
+
+    records: list[tuple[object, str, object, object | None]] = []
+    seen: set[tuple[int, str]] = set()
+    suffixes = {
+        "handle_open": "_open",
+        "process_request": "_request",
+        "process_response": "_response",
+    }
+    for map_name, key, handlers in dispatch:
+        suffix = suffixes.get(map_name)
+        if suffix is not None and type(key) is str:
+            method_name = f"{key}{suffix}"
+        elif map_name.startswith("handle_error:") and type(key) in (str, int):
+            protocol = map_name.split(":", 1)[1]
+            method_name = f"{protocol}_error_{key}"
+            suffix = None
+        else:
+            continue
+        for handler in handlers:
+            candidate_names = [method_name]
+            if suffix == "_open" and hasattr(type(handler), "do_open"):
+                candidate_names.append("do_open")
+            for candidate_name in candidate_names:
+                identity = (id(handler), candidate_name)
+                if identity in seen:
+                    continue
+                handler_dict = getattr(handler, "__dict__", None)
+                if type(handler_dict) is not dict:
+                    continue
+                if candidate_name in handler_dict:
+                    method = handler_dict[candidate_name]
+                else:
+                    method = getattr(type(handler), candidate_name, None)
+                if method is None:
+                    continue
+                seen.add(identity)
+                records.append(
+                    (
+                        handler,
+                        candidate_name,
+                        method,
+                        getattr(method, "__code__", None),
+                    )
+                )
+    for _, _, handlers in dispatch:
+        for handler in handlers:
+            identity = (id(handler), "redirect_request")
+            if identity in seen:
+                continue
+            handler_dict = getattr(handler, "__dict__", None)
+            if (
+                type(handler_dict) is not dict
+                or "redirect_request" not in handler_dict
+            ):
+                continue
+            method = handler_dict["redirect_request"]
+            seen.add(identity)
+            records.append(
+                (
+                    handler,
+                    "redirect_request",
+                    method,
+                    getattr(method, "__code__", None),
+                )
+            )
+    return tuple(records)
+
+
+def _private_opener_graph_matches(
+    opener: object,
+    expected_handlers: tuple[object, ...],
+    expected_dispatch: tuple[tuple[str, object, tuple[object, ...]], ...],
+    expected_methods: tuple[tuple[object, str, object, object | None], ...],
+) -> bool:
+    """Verify the exact product-created urllib handler graph without equality hooks."""
+
+    handlers = getattr(opener, "handlers", None)
+    if type(handlers) is not list or len(handlers) != len(expected_handlers):
+        return False
+    if any(
+        current is not expected
+        for current, expected in zip(handlers, expected_handlers)
+    ):
+        return False
+
+    current_records: list[tuple[str, object, tuple[object, ...]]] = []
+    for map_name in ("handle_open", "process_request", "process_response"):
+        mapping = getattr(opener, map_name, None)
+        if type(mapping) is not dict:
+            return False
+        for key, mapped_handlers in mapping.items():
+            if type(key) not in (str, int) or type(mapped_handlers) is not list:
+                return False
+            current_records.append((map_name, key, tuple(mapped_handlers)))
+
+    error_mapping = getattr(opener, "handle_error", None)
+    if type(error_mapping) is not dict:
+        return False
+    for protocol, by_code in error_mapping.items():
+        if type(protocol) not in (str, int) or type(by_code) is not dict:
+            return False
+        for code, mapped_handlers in by_code.items():
+            if type(code) not in (str, int) or type(mapped_handlers) is not list:
+                return False
+            current_records.append(
+                (f"handle_error:{protocol}", code, tuple(mapped_handlers))
+            )
+
+    current_records.sort(
+        key=lambda item: (item[0], type(item[1]).__name__, str(item[1]))
+    )
+    current_dispatch = tuple(current_records)
+    if len(current_dispatch) != len(expected_dispatch):
+        return False
+    for current, expected in zip(current_dispatch, expected_dispatch):
+        if current[0] != expected[0] or current[1] != expected[1]:
+            return False
+        if len(current[2]) != len(expected[2]):
+            return False
+        if any(
+            current_handler is not expected_handler
+            for current_handler, expected_handler in zip(
+                current[2], expected[2]
+            )
+        ):
+            return False
+
+    for handler, method_name, expected_method, expected_code in expected_methods:
+        handler_dict = getattr(handler, "__dict__", None)
+        if type(handler_dict) is not dict:
+            return False
+        if method_name in handler_dict:
+            current_method = handler_dict[method_name]
+        else:
+            current_method = getattr(type(handler), method_name, None)
+        if current_method is not expected_method:
+            return False
+        if (
+            expected_code is not None
+            and getattr(expected_method, "__code__", None) is not expected_code
+        ):
+            return False
+    return True
+
+
+_CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES = _private_opener_graph_matches
+_CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES_CODE = (
+    _CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES.__code__
+)
+
+
+def _make_product_owned_provider_http_post() -> Callable[..., bytes]:
+    """Build a private urllib opener that ambient process state cannot replace."""
+
+    private_opener = _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER()
+    redirect_handler_type = _CANONICAL_URLLIB_BETFAIR_HTTP_REDIRECT_HANDLER
+    redirect_handlers = [
+        handler
+        for handler in private_opener.handlers
+        if type(handler) is redirect_handler_type
+    ]
+    if len(redirect_handlers) != 1:
+        raise RuntimeError(
+            "canonical Betfair private opener redirect policy is invalid"
+        )
+
+    def reject_authenticated_redirect(
+        request,
+        response,
+        code,
+        message,
+        headers,
+        new_url,
+    ):
+        # Never follow an authenticated provider-write redirect.  Returning
+        # None keeps urllib on the original origin and lets its normal error
+        # chain fail closed for 30x responses.
+        return None
+
+    redirect_handlers[0].redirect_request = reject_authenticated_redirect
+    opener_type = _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+    opener_open = _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
+    opener_internal_open = _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN
+    opener_internal_open_code = (
+        _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN_CODE
+    )
+    opener_call_chain = _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN
+    opener_call_chain_code = (
+        _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
+    )
+    opener_error = _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR
+    opener_error_code = _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE
+    request_type = _CANONICAL_URLLIB_BETFAIR_REQUEST
+    private_opener_handlers = tuple(private_opener.handlers)
+    private_opener_dispatch = _capture_private_opener_dispatch(private_opener)
+    if private_opener_dispatch is None:
+        raise RuntimeError("canonical Betfair private opener graph is invalid")
+    private_opener_methods = _capture_private_opener_method_dispatch(
+        private_opener_dispatch
+    )
+    opener_graph_matches = _CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES
+    opener_graph_matches_code = _CANONICAL_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+
+    def product_owned_provider_http_post(
+        transport: UrllibBetfairHttpTransport,
+        url: str,
+        *,
+        headers: Mapping[str, str],
+        body: bytes,
+        timeout_seconds: float,
+    ) -> bytes:
+        # Terminal provider truth always uses the product-owned private opener.
+        # Deterministic tests intercept below this application trust boundary;
+        # mutable account-module urlopen state never selects provider bytes.
+        private_dispatch = getattr(private_opener, "__dict__", {})
+        if (
+            type(private_opener) is not opener_type
+            or getattr(opener_type, "_open", None) is not opener_internal_open
+            or getattr(opener_internal_open, "__code__", None)
+            is not opener_internal_open_code
+            or getattr(opener_type, "_call_chain", None)
+            is not opener_call_chain
+            or getattr(opener_call_chain, "__code__", None)
+            is not opener_call_chain_code
+            or getattr(opener_type, "error", None) is not opener_error
+            or getattr(opener_error, "__code__", None) is not opener_error_code
+            or "_open" in private_dispatch
+            or "_call_chain" in private_dispatch
+            or "error" in private_dispatch
+            or getattr(opener_graph_matches, "__code__", None)
+            is not opener_graph_matches_code
+            or not opener_graph_matches(
+                private_opener,
+                private_opener_handlers,
+                private_opener_dispatch,
+                private_opener_methods,
+            )
+        ):
+            raise BetfairReadOnlyError(
+                "Betfair private opener dispatch authority changed"
+            )
+        request = request_type(
+            url,
+            data=body,
+            headers=dict(headers),
+            method="POST",
+        )
+        with opener_open(
+            private_opener,
+            request,
+            timeout=timeout_seconds,
+        ) as response:
+            payload = response.read(transport._max_response_bytes + 1)
+        private_dispatch = getattr(private_opener, "__dict__", {})
+        if (
+            type(private_opener) is not opener_type
+            or getattr(opener_type, "_open", None) is not opener_internal_open
+            or getattr(opener_internal_open, "__code__", None)
+            is not opener_internal_open_code
+            or getattr(opener_type, "_call_chain", None)
+            is not opener_call_chain
+            or getattr(opener_call_chain, "__code__", None)
+            is not opener_call_chain_code
+            or getattr(opener_type, "error", None) is not opener_error
+            or getattr(opener_error, "__code__", None) is not opener_error_code
+            or "_open" in private_dispatch
+            or "_call_chain" in private_dispatch
+            or "error" in private_dispatch
+            or getattr(opener_graph_matches, "__code__", None)
+            is not opener_graph_matches_code
+            or not opener_graph_matches(
+                private_opener,
+                private_opener_handlers,
+                private_opener_dispatch,
+                private_opener_methods,
+            )
+        ):
+            raise BetfairReadOnlyError(
+                "Betfair private opener dispatch authority changed"
+            )
+        if len(payload) > transport._max_response_bytes:
+            raise BetfairReadOnlyError(
+                "Betfair response exceeded the size limit"
+            )
+        return payload
+
+    return product_owned_provider_http_post
+
+
+_PROVIDER_HTTP_POST = _make_product_owned_provider_http_post()
+_CANONICAL_PROVIDER_HTTP_POST = _PROVIDER_HTTP_POST
+_CANONICAL_PROVIDER_HTTP_POST_CODE = _CANONICAL_PROVIDER_HTTP_POST.__code__
+_CANONICAL_PROVIDER_HTTP_POST_FREEVARS = (
+    _CANONICAL_PROVIDER_HTTP_POST.__code__.co_freevars
+)
+_CANONICAL_PROVIDER_HTTP_POST_CLOSURE = tuple(
+    cell.cell_contents
+    for cell in (_CANONICAL_PROVIDER_HTTP_POST.__closure__ or ())
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener_handlers")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener_dispatch")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener_methods")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("opener_graph_matches")
+    ]
+)
+_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE = (
+    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+        _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("opener_graph_matches_code")
+    ]
+)
 
 
 class BetfairSupervisedExecutionError(RuntimeError):
@@ -60,11 +502,25 @@ class BetfairSupervisedExecutionError(RuntimeError):
 class BetfairPlaceOrdersAmbiguous(BetfairSupervisedExecutionError):
     """The provider effect is unknown and requires readback before retry."""
 
+    def __init__(
+        self,
+        message: str,
+        *,
+        request_sha256: str | None = None,
+        response_sha256: str | None = None,
+        observed_at: str | None = None,
+    ) -> None:
+        super().__init__(message)
+        self.request_sha256 = request_sha256
+        self.response_sha256 = response_sha256
+        self.observed_at = observed_at
+
 
 class PlaceOrdersOutcome(str, Enum):
     ACCEPTED = "ACCEPTED"
     PARTIAL = "PARTIAL"
     REJECTED = "REJECTED"
+    PLACED_UNMATCHED = "PLACED_UNMATCHED"
     UNKNOWN = "UNKNOWN"
 
 
@@ -149,6 +605,20 @@ def _digest(value: object) -> str:
 
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _provider_observation_now() -> str:
+    """Capture product-owned UTC time for terminal provider response evidence."""
+
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+_CANONICAL_PROVIDER_OBSERVATION_CLOCK = _provider_observation_now
+_CANONICAL_PROVIDER_OBSERVATION_CLOCK_CODE = (
+    _CANONICAL_PROVIDER_OBSERVATION_CLOCK.__code__
+)
+_CANONICAL_PROVIDER_OBSERVATION_DATETIME = datetime
+_CANONICAL_PROVIDER_OBSERVATION_TIMEZONE = timezone
 
 
 def _decode_provider_json(payload: bytes) -> object:
@@ -381,6 +851,7 @@ class BetfairInstructionReport:
     placed_date: str | None
     average_price_matched: Decimal
     size_matched: Decimal
+    order_status: str | None = None
 
     def __post_init__(self) -> None:
         if self.status not in {"SUCCESS", "FAILURE"}:
@@ -391,6 +862,12 @@ class BetfairInstructionReport:
             _text(self.error_code, "instruction error_code")
         if self.bet_id is not None:
             _text(self.bet_id, "bet_id")
+        if self.order_status is not None:
+            _text(self.order_status, "order_status")
+            if self.order_status not in {"EXECUTABLE", "EXECUTION_COMPLETE"}:
+                raise BetfairSupervisedExecutionError(
+                    "unsupported Betfair order_status"
+                )
         if self.placed_date is not None:
             _time(self.placed_date, "placed_date")
         object.__setattr__(
@@ -411,9 +888,9 @@ class BetfairInstructionReport:
                 raise BetfairSupervisedExecutionError(
                     "failed instruction requires provider error_code"
                 )
-            if self.size_matched != 0:
+            if self.size_matched != 0 or self.average_price_matched != 0:
                 raise BetfairSupervisedExecutionError(
-                    "failed instruction cannot claim a matched stake"
+                    "failed instruction cannot claim matched economics"
                 )
         elif self.error_code is not None:
             raise BetfairSupervisedExecutionError(
@@ -495,6 +972,7 @@ class BetfairPlaceExecutionReport:
                     "status": self.instruction.status,
                     "error_code": self.instruction.error_code,
                     "bet_id": self.instruction.bet_id,
+                    "order_status": self.instruction.order_status,
                     "placed_date": self.instruction.placed_date,
                     "average_price_matched": str(
                         self.instruction.average_price_matched
@@ -505,6 +983,30 @@ class BetfairPlaceExecutionReport:
                 },
             }
         )
+
+
+_CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE = BetfairInstructionReport
+_CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT = (
+    BetfairInstructionReport.__post_init__
+)
+_CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT_CODE = (
+    _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT.__code__
+)
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE = BetfairPlaceExecutionReport
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT = (
+    BetfairPlaceExecutionReport.__post_init__
+)
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT_CODE = (
+    _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT.__code__
+)
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER = (
+    BetfairPlaceExecutionReport.evidence_id.fget
+)
+if _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER is None:
+    raise RuntimeError("BetfairPlaceExecutionReport.evidence_id getter missing")
+_CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER_CODE = (
+    _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER.__code__
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -598,6 +1100,10 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None = None,
+        _transport_post: Callable[..., bytes] | None = None,
+        _response_parser: Callable[..., BetfairPlaceExecutionReport] | None = None,
+        _observation_clock: Callable[[], str] | None = None,
     ) -> BetfairPlaceExecutionReport:
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
@@ -652,30 +1158,83 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
-        try:
-            payload = self._transport.post(
-                BETTING_JSON_RPC_ENDPOINT,
-                headers=headers,
-                body=body,
-                timeout_seconds=self._timeout_seconds,
+        if (
+            ExecutionStopAuthority is not _CANONICAL_EXECUTION_STOP_AUTHORITY
+            or _CANONICAL_EXECUTION_STOP_AUTHORITY.admission_lease
+            is not _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE
+            or getattr(
+                _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE,
+                "__code__",
+                None,
             )
-        except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
-            raise BetfairPlaceOrdersAmbiguous(
-                "placeOrders transport outcome is ambiguous; "
-                "authoritative readback required"
+            is not _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE_CODE
+        ):
+            raise BetfairSupervisedExecutionError(
+                "execution STOP admission authority changed"
+            )
+        stop_authority = _CANONICAL_EXECUTION_STOP_AUTHORITY(
+            Path(execution_workspace) / "execution-stop.jsonl"
+        )
+        try:
+            with _CANONICAL_EXECUTION_STOP_ADMISSION_LEASE(stop_authority):
+                if _before_transport is not None:
+                    _before_transport(request_sha256)
+                try:
+                    if _transport_post is None:
+                        payload = self._transport.post(
+                            BETTING_JSON_RPC_ENDPOINT,
+                            headers=headers,
+                            body=body,
+                            timeout_seconds=self._timeout_seconds,
+                        )
+                    else:
+                        payload = _transport_post(
+                            self._transport,
+                            BETTING_JSON_RPC_ENDPOINT,
+                            headers=headers,
+                            body=body,
+                            timeout_seconds=self._timeout_seconds,
+                        )
+                except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
+                    raise BetfairPlaceOrdersAmbiguous(
+                        "placeOrders transport outcome is ambiguous; "
+                        "authoritative readback required"
+                    ) from exc
+        except ExecutionStopAuthorityError as exc:
+            raise BetfairSupervisedExecutionError(
+                "execution STOP authority denied provider write"
             ) from exc
         if not isinstance(payload, bytes):
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport returned non-bytes response"
             )
-        return _parse_place_orders_response(
-            payload,
-            request_id=request_id,
-            request_sha256=request_sha256,
-            action=action,
-            provider_order_ref=provider_ref,
-            observed_at=self._clock(),
+        parser = _parse_place_orders_response if _response_parser is None else _response_parser
+        observation_clock = (
+            self._clock
+            if _observation_clock is None
+            else _observation_clock
         )
+        observed_at = observation_clock()
+        try:
+            return parser(
+                payload,
+                request_id=request_id,
+                request_sha256=request_sha256,
+                action=action,
+                provider_order_ref=provider_ref,
+                observed_at=observed_at,
+            )
+        except BetfairPlaceOrdersAmbiguous as exc:
+            raise BetfairPlaceOrdersAmbiguous(
+                str(exc),
+                request_sha256=request_sha256,
+                response_sha256=sha256(payload).hexdigest(),
+                observed_at=observed_at,
+            ) from exc
+
+
+_CANONICAL_BETFAIR_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
+_CANONICAL_BETFAIR_PLACE_ACTION_CODE = _CANONICAL_BETFAIR_PLACE_ACTION.__code__
 
 
 def _mapping(
@@ -716,6 +1275,27 @@ def _optional_provider_text(
     return value
 
 
+def _provider_response_decimal(
+    value: object,
+    field: str,
+    *,
+    positive: bool,
+) -> Decimal:
+    """Accept only provider JSON numeric wire values, never coercible strings/bools."""
+
+    if isinstance(value, bool) or not isinstance(value, (int, Decimal)):
+        raise BetfairPlaceOrdersAmbiguous(
+            f"{field} must be a JSON number"
+        )
+    parsed = Decimal(value)
+    if not parsed.is_finite() or (parsed <= 0 if positive else parsed < 0):
+        constraint = "> 0" if positive else ">= 0"
+        raise BetfairPlaceOrdersAmbiguous(
+            f"{field} must be finite and {constraint}"
+        )
+    return parsed
+
+
 def _parse_place_orders_response(
     payload: bytes,
     *,
@@ -734,9 +1314,21 @@ def _parse_place_orders_response(
             )
         decoded = decoded[0]
     envelope = _mapping(decoded, "placeOrders response")
+    response_id = envelope.get("id")
+    response_id_matches = False
+    if (
+        not isinstance(response_id, bool)
+        and isinstance(response_id, (int, Decimal))
+    ):
+        response_id_number = Decimal(response_id)
+        response_id_matches = (
+            response_id_number.is_finite()
+            and response_id_number == response_id_number.to_integral_value()
+            and int(response_id_number) == request_id
+        )
     if (
         envelope.get("jsonrpc") != "2.0"
-        or envelope.get("id") != request_id
+        or not response_id_matches
     ):
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders response does not bind exact JSON-RPC request"
@@ -754,13 +1346,13 @@ def _parse_place_orders_response(
             "placeOrders report market does not match execution action"
         )
     status = result.get("status")
-    if status not in {
-        "SUCCESS",
-        "FAILURE",
-        "PROCESSED_WITH_ERRORS",
-    }:
+    if status not in {"SUCCESS", "FAILURE", "PROCESSED_WITH_ERRORS"}:
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders report has unsupported/nonterminal status"
+        )
+    if status == "SUCCESS" and result.get("errorCode") is not None:
+        raise BetfairPlaceOrdersAmbiguous(
+            "successful placeOrders execution must not include errorCode"
         )
     reports = _sequence(
         result.get("instructionReports"),
@@ -783,25 +1375,59 @@ def _parse_place_orders_response(
         echoed.get("limitOrder"),
         "echoed limitOrder",
     )
-    try:
-        echoed_selection = int(echoed.get("selectionId"))
-    except (TypeError, ValueError) as exc:
+    if "customerOrderRef" in echoed:
+        echoed_customer_order_ref = _optional_provider_text(
+            echoed.get("customerOrderRef"),
+            "echoed customerOrderRef",
+        )
+        if echoed_customer_order_ref != provider_order_ref:
+            raise BetfairPlaceOrdersAmbiguous(
+                "placeOrders echoed customerOrderRef does not bind exact request"
+            )
+    raw_selection = echoed.get("selectionId")
+    if (
+        isinstance(raw_selection, bool)
+        or not isinstance(raw_selection, (int, Decimal))
+    ):
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders echoed selection is malformed"
-        ) from exc
+        )
+    selection_number = Decimal(raw_selection)
+    if (
+        not selection_number.is_finite()
+        or selection_number <= 0
+        or selection_number != selection_number.to_integral_value()
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders echoed selection is malformed"
+        )
+    echoed_selection = int(selection_number)
+
+    raw_handicap = echoed.get("handicap")
+    handicap_matches = (
+        not isinstance(raw_handicap, bool)
+        and isinstance(raw_handicap, (int, Decimal))
+        and Decimal(raw_handicap).is_finite()
+        and Decimal(raw_handicap) == 0
+    )
     try:
         exact_echo = (
             str(echoed_selection) == action.selection_id
             and echoed.get("side") == action.side
             and echoed.get("orderType") == "LIMIT"
-            and _positive_decimal(
+            and handicap_matches
+            and limit.get("persistenceType") == "LAPSE"
+            and set(limit) == {"size", "price", "persistenceType"}
+            and _provider_response_decimal(
                 limit.get("price"),
                 "echoed price",
+                positive=True,
             )
             == action.requested_odds
-            and _positive_decimal(
+            and _provider_response_decimal(
                 limit.get("size"),
                 "echoed size",
+                positive=True,
             )
             == action.requested_stake
         )
@@ -818,6 +1444,41 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders instruction status is unsupported/nonterminal"
         )
+    if (
+        status == "PROCESSED_WITH_ERRORS"
+        and instruction_status != "FAILURE"
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders PROCESSED_WITH_ERRORS requires "
+            "a failed sole instruction"
+        )
+    if "sizeMatched" not in item:
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders instruction report omits sizeMatched; "
+            "external effect is ambiguous"
+        )
+    average_price_matched = _provider_response_decimal(
+        item.get("averagePriceMatched", 0),
+        "averagePriceMatched",
+        positive=False,
+    )
+    size_matched = _provider_response_decimal(
+        item["sizeMatched"],
+        "sizeMatched",
+        positive=False,
+    )
+    if (
+        instruction_status == "FAILURE"
+        and (size_matched != 0 or average_price_matched != 0)
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders instruction report is internally inconsistent: "
+            "failed placeOrders instruction contradicts matched execution economics"
+        )
+    if size_matched == 0 and average_price_matched != 0:
+        raise BetfairPlaceOrdersAmbiguous(
+            "zero matched stake cannot claim positive average price"
+        )
     try:
         instruction = BetfairInstructionReport(
             status=instruction_status,
@@ -829,23 +1490,28 @@ def _parse_place_orders_response(
                 item.get("betId"),
                 "betId",
             ),
+            order_status=_optional_provider_text(
+                item.get("orderStatus"),
+                "orderStatus",
+            ),
             placed_date=_optional_provider_text(
                 item.get("placedDate"),
                 "placedDate",
             ),
-            average_price_matched=_nonnegative_decimal(
-                item.get("averagePriceMatched", 0),
-                "averagePriceMatched",
-            ),
-            size_matched=_nonnegative_decimal(
-                item.get("sizeMatched", 0),
-                "sizeMatched",
-            ),
+            average_price_matched=average_price_matched,
+            size_matched=size_matched,
         )
     except BetfairSupervisedExecutionError as exc:
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders instruction report is internally inconsistent"
         ) from exc
+    if (
+        instruction.bet_id is not None
+        and instruction.placed_date is None
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "synchronous placeOrders report with betId omits placedDate"
+        )
     if (
         (status == "SUCCESS" and instruction.status != "SUCCESS")
         or (
@@ -856,6 +1522,23 @@ def _parse_place_orders_response(
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders execution/instruction statuses conflict"
         )
+    if (
+        instruction.status == "FAILURE"
+        and (
+            instruction.size_matched != 0
+            or instruction.average_price_matched != 0
+        )
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "failed placeOrders instruction contradicts matched execution economics"
+        )
+    if (
+        instruction.status == "FAILURE"
+        and instruction.order_status == "EXECUTABLE"
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "failed placeOrders instruction contradicts live EXECUTABLE order state"
+        )
     if status == "FAILURE" and result.get("errorCode") is None:
         raise BetfairPlaceOrdersAmbiguous(
             "failed placeOrders execution requires provider errorCode"
@@ -863,6 +1546,20 @@ def _parse_place_orders_response(
     if instruction.size_matched > action.requested_stake:
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders report matched stake exceeds requested stake"
+        )
+    if (
+        instruction.size_matched == 0
+        and instruction.average_price_matched != 0
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "zero matched stake cannot claim positive average price"
+        )
+    if (
+        instruction.order_status == "EXECUTABLE"
+        and instruction.size_matched == action.requested_stake
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "placeOrders EXECUTABLE order cannot already be fully matched"
         )
     if (
         instruction.size_matched > 0
@@ -873,11 +1570,20 @@ def _parse_place_orders_response(
         )
     if (
         instruction.size_matched > 0
+        and action.side == "BACK"
         and instruction.average_price_matched < action.requested_odds
     ):
         raise BetfairPlaceOrdersAmbiguous(
             "matched placeOrders report average price is below requested "
             "BACK LIMIT price"
+        )
+    if (
+        instruction.size_matched > 0
+        and action.side == "LAY"
+        and instruction.average_price_matched > action.requested_odds
+    ):
+        raise BetfairPlaceOrdersAmbiguous(
+            "matched LAY price is worse than requested limit"
         )
     return BetfairPlaceExecutionReport(
         bookmaker_id=action.bookmaker_id,
@@ -898,18 +1604,142 @@ def _parse_place_orders_response(
     )
 
 
+_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE = _parse_place_orders_response
+_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE = (
+    _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
+)
+
+
 def _report_outcome(
     report: BetfairPlaceExecutionReport,
     action: ExecutionAction,
 ) -> PlaceOrdersOutcome:
     instruction = report.instruction
     if instruction.status == "FAILURE":
+        # A terminal REJECTED fact needs the narrow provider rejection shape
+        # that is actually qualified for this synchronous one-instruction seam.
+        # Availability/matcher/regulator failures and unknown/future code
+        # combinations do not prove zero external effect, even if a betId-like
+        # identity is present; keep those UNKNOWN until canonical readback.
+        if (
+            instruction.bet_id is None
+            or report.error_code != "BET_ACTION_ERROR"
+            or instruction.error_code != "BET_TAKEN_OR_LAPSED"
+            or instruction.order_status != "EXECUTION_COMPLETE"
+        ):
+            return PlaceOrdersOutcome.UNKNOWN
         return PlaceOrdersOutcome.REJECTED
     if instruction.size_matched == action.requested_stake:
         return PlaceOrdersOutcome.ACCEPTED
     if instruction.size_matched > 0:
-        return PlaceOrdersOutcome.PARTIAL
+        # Standard LIMIT partial fills can leave a live unmatched remainder.
+        # Only explicit provider proof that no unmatched part remains makes
+        # the immediate report terminal PARTIAL.
+        if instruction.order_status == "EXECUTION_COMPLETE":
+            return PlaceOrdersOutcome.PARTIAL
+        return PlaceOrdersOutcome.UNKNOWN
+    if (
+        instruction.bet_id is not None
+        and instruction.order_status == "EXECUTABLE"
+    ):
+        # A provider order identity alone does not prove a live unmatched
+        # remainder. EXECUTION_COMPLETE explicitly means there is no
+        # remaining unmatched portion; missing status is also insufficient.
+        return PlaceOrdersOutcome.PLACED_UNMATCHED
     return PlaceOrdersOutcome.UNKNOWN
+
+
+
+_CANONICAL_REPORT_OUTCOME = _report_outcome
+_CANONICAL_REPORT_OUTCOME_CODE = _CANONICAL_REPORT_OUTCOME.__code__
+
+
+def _existing_execution_attempt_view(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    *,
+    action_id: str,
+    attempt_id: str,
+):
+    """Resolve a durable prior attempt without reopening current-time admission."""
+
+    try:
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+    except KeyError:
+        return None
+    if view.plan_fingerprint != bound.execution_plan.fingerprint:
+        raise BetfairSupervisedExecutionError(
+            "durable execution-plan fingerprint mismatches bound plan"
+        )
+    matches = tuple(
+        item
+        for item in view.attempts
+        if item.attempt.attempt_id == attempt_id
+    )
+    if not matches:
+        return None
+    if len(matches) != 1:
+        raise BetfairSupervisedExecutionError(
+            "attempt is not uniquely present in verified execution view"
+        )
+    attempt_view = matches[0]
+    if attempt_view.action.action_id != action_id:
+        raise BetfairSupervisedExecutionError(
+            "attempt_id belongs to a different execution action"
+        )
+    return attempt_view
+
+
+def _require_bound_approval_identity(
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+) -> None:
+    """Verify immutable approval identity without re-running current-time admission."""
+
+    if type(approval) is not SupervisedApproval:
+        raise TypeError("approval must be exact SupervisedApproval")
+    bound.verify_binding()
+    if (
+        approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
+        or approval.intent_id != bound.intent_id
+        or approval.fingerprint != bound.approval_fingerprint
+        or approval.ledger_identity != bound.execution_plan.approval_id
+    ):
+        raise BetfairSupervisedExecutionError(
+            "approval identity mismatches bound execution plan"
+        )
+
+
+def _attempt_causal_observation_time(
+    ledger: RealExecutionLedger,
+    *,
+    plan_id: str,
+    attempt_id: str,
+) -> str:
+    """Return a product-clock timestamp not earlier than durable attempt facts."""
+
+    candidate = _supervised_execution_runtime._trusted_now()
+    _time(candidate, "trusted execution time")
+    view = ledger.verified_execution_view(plan_id)
+    matches = tuple(
+        item
+        for item in view.attempts
+        if item.attempt.attempt_id == attempt_id
+    )
+    if len(matches) != 1:
+        raise BetfairSupervisedExecutionError(
+            "attempt is not uniquely present in verified execution view"
+        )
+    attempt_view = matches[0]
+    boundaries = [candidate, attempt_view.attempt.reserved_at]
+    if attempt_view.submitted_at is not None:
+        boundaries.append(attempt_view.submitted_at)
+    if attempt_view.provider_evidence is not None:
+        boundaries.append(attempt_view.provider_evidence.observed_at)
+    return max(
+        boundaries,
+        key=lambda raw: _time(raw, "attempt causal boundary"),
+    )
 
 
 def read_betfair_supervised_action_readback(
@@ -923,8 +1753,8 @@ def read_betfair_supervised_action_readback(
 ) -> BetfairExecutionReadbackEnvelope:
     """Query the exact durable provider order reference used by placeOrders."""
 
-    if not isinstance(client, BetfairReadOnlyClient):
-        raise TypeError("client must be BetfairReadOnlyClient")
+    if type(client) is not BetfairReadOnlyClient:
+        raise TypeError("client must be exact BetfairReadOnlyClient")
     saga = ledger.saga(bound.execution_plan.plan_id)
     action_id = saga.attempt_action_ids.get(attempt_id)
     if action_id is None:
@@ -940,13 +1770,162 @@ def read_betfair_supervised_action_readback(
         raise BetfairSupervisedExecutionError(
             "attempt lacks durable provider order reference"
         )
-    return client.read_execution_readback(
+    capture = client.read_execution_readback(
         action_id=action.action_id,
         provider_order_ref=provider_order_ref,
         market_id=action.market_id,
         page_size=page_size,
         max_pages=max_pages,
     )
+    try:
+        capture.assert_authoritative()
+    except BetfairReadOnlyError as exc:
+        raise BetfairSupervisedExecutionError(
+            "supervised Betfair readback lacks authenticated product origin"
+        ) from exc
+    return capture
+
+
+def _place_action_with_final_durable_authority(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+    approval: SupervisedApproval,
+    *,
+    action: ExecutionAction,
+    attempt_id: str,
+    profile: BookmakerCapabilityProfile,
+    client: BetfairSupervisedPlaceOrdersClient,
+    provider_order_ref: str,
+    execution_workspace: Path,
+) -> BetfairPlaceExecutionReport:
+    """Hold durable attempt/approval authority through the irreversible send."""
+
+    def operation() -> BetfairPlaceExecutionReport:
+        client_namespace = object.__getattribute__(client, "__dict__")
+        if (
+            type(client_namespace) is not dict
+            or "place_action" in client_namespace
+        ):
+            raise BetfairSupervisedExecutionError(
+                "Betfair client shadows canonical place_action dispatch"
+            )
+        view = ledger.verified_execution_view(bound.execution_plan.plan_id)
+        if view.plan_fingerprint != bound.execution_plan.fingerprint:
+            raise ExecutionStateError(
+                "durable execution-plan fingerprint changed before final send"
+            )
+        attempts = tuple(
+            item
+            for item in view.attempts
+            if item.attempt.attempt_id == attempt_id
+        )
+        if len(attempts) != 1:
+            raise ExecutionStateError(
+                "final supervised send requires one durable attempt"
+            )
+        attempt = attempts[0]
+        if (
+            attempt.state is not AttemptState.RESERVED
+            or attempt.attempt.action_id != action.action_id
+            or attempt.action != action
+        ):
+            raise ExecutionStateError(
+                "final supervised send requires the exact RESERVED action"
+            )
+        if attempt.provider_order_ref != provider_order_ref:
+            raise ExecutionStateError(
+                "final supervised send provider order reference drifted"
+            )
+
+        _require_durable_approval(ledger, bound, approval)
+        _validate_betfair_place_action(action)
+        client._gate.require(
+            action=action,
+            profile=profile,
+            bound=bound,
+            execution_workspace=execution_workspace,
+        )
+        provider_ref = _text(provider_order_ref, "provider_order_ref")
+        if len(provider_ref) > 32 or any(
+            character not in "0123456789abcdef"
+            for character in provider_ref
+        ):
+            raise BetfairSupervisedExecutionError(
+                "provider_order_ref must be <=32 lowercase hex characters"
+            )
+
+        submitted = False
+        submitted_request_sha256: str | None = None
+
+        def authorize_and_submit(request_sha256: str) -> None:
+            nonlocal submitted, submitted_request_sha256
+            request_digest = _sha(
+                request_sha256,
+                "submitted request_sha256",
+            )
+            send_at = _supervised_execution_runtime._trusted_now()
+            _require_approval(bound, approval, send_at)
+            _require_durable_approval(ledger, bound, approval)
+            if _time(send_at, "final send time") < _time(
+                attempt.attempt.reserved_at,
+                "attempt reserved_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "final send time precedes attempt reservation"
+                )
+            if _time(send_at, "final send time") >= _time(
+                action.expires_at,
+                "action expires_at",
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders final send is at/after quote expiry"
+                )
+            ledger._append(
+                EventType.ATTEMPT_SUBMITTED,
+                bound.execution_plan.plan_id,
+                action.action_id,
+                attempt_id,
+                {
+                    "submitted_at": send_at,
+                    "request_sha256": request_digest,
+                },
+            )
+            submitted_request_sha256 = request_digest
+            submitted = True
+
+        try:
+            report = _CANONICAL_BETFAIR_PLACE_ACTION(
+                client,
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref=provider_ref,
+                execution_workspace=execution_workspace,
+                _before_transport=authorize_and_submit,
+                _transport_post=_CANONICAL_PROVIDER_HTTP_POST,
+                _response_parser=_CANONICAL_PARSE_PLACE_ORDERS_RESPONSE,
+                _observation_clock=_CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+            )
+            if (
+                submitted_request_sha256 is None
+                or report.request_sha256 != submitted_request_sha256
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "placeOrders report request digest mismatches durable submission"
+                )
+            return report
+        except BetfairPlaceOrdersAmbiguous:
+            raise
+        except Exception as exc:
+            if not submitted:
+                raise
+            raise BetfairPlaceOrdersAmbiguous(
+                "placeOrders dispatch failed after durable submission; "
+                "authoritative readback required",
+                request_sha256=submitted_request_sha256,
+            ) from exc
+
+    return ledger._mutate(operation)
 
 
 def execute_betfair_supervised_action(
@@ -964,16 +1943,18 @@ def execute_betfair_supervised_action(
 
     if not isinstance(ledger, RealExecutionLedger):
         raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(
-        client,
-        BetfairSupervisedPlaceOrdersClient,
-    ):
+    if type(client) is not BetfairSupervisedPlaceOrdersClient:
         raise TypeError(
-            "client must be BetfairSupervisedPlaceOrdersClient"
+            "client must be exact BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
-    now = clock or _now
+    _require_bound_approval_identity(bound, approval)
+    # Retain the public compatibility parameter, but never execute caller
+    # code to timestamp an authority-bearing provider write or uncertainty
+    # transition. The same product-owned clock domain used by supervised
+    # reservation owns those durable times.
+    _ = clock
     execution_workspace = ledger.path.parent.resolve()
 
     # Serialize the current owner authority through the actual provider-write
@@ -986,46 +1967,343 @@ def execute_betfair_supervised_action(
     # held. This prevents a known local authority denial from being mislabeled
     # as provider-effect uncertainty.
     with WorkspaceEconomicLock(execution_workspace):
+        existing_attempt = _existing_execution_attempt_view(
+            ledger,
+            bound,
+            action_id=action_id,
+            attempt_id=attempt_id,
+        )
+        if (
+            existing_attempt is not None
+            and existing_attempt.state is not AttemptState.RESERVED
+        ):
+            provider_evidence_id = (
+                None
+                if existing_attempt.provider_evidence is None
+                else existing_attempt.provider_evidence.evidence_id
+            )
+            if existing_attempt.state is AttemptState.SUBMITTED:
+                provider_order_ref = ledger.provider_order_reference(
+                    attempt_id=attempt_id,
+                    provider_id=action.bookmaker_id,
+                )
+                if provider_order_ref is None:
+                    raise BetfairSupervisedExecutionError(
+                        "submitted Betfair attempt lacks durable provider order reference"
+                    )
+                ledger.mark_unknown(
+                    attempt_id,
+                    reason=(
+                        "betfair_placeOrders_existing_submitted_"
+                        "requires_readback"
+                    ),
+                    observed_at=_attempt_causal_observation_time(
+                        ledger,
+                        plan_id=bound.execution_plan.plan_id,
+                        attempt_id=attempt_id,
+                    ),
+                )
+                return BetfairSupervisedExecutionResult(
+                    PlaceOrdersOutcome.UNKNOWN,
+                    attempt_id,
+                    ledger.attempt_state(attempt_id),
+                    provider_evidence_id,
+                    None,
+                )
+            if existing_attempt.state in {
+                AttemptState.UNKNOWN,
+                AttemptState.RECONCILED_NOT_FOUND,
+            }:
+                reconciliation_evidence_id = (
+                    None
+                    if existing_attempt.not_found_reconciliation is None
+                    else existing_attempt.not_found_reconciliation.evidence_id
+                )
+                return BetfairSupervisedExecutionResult(
+                    PlaceOrdersOutcome.UNKNOWN,
+                    attempt_id,
+                    existing_attempt.state,
+                    provider_evidence_id or reconciliation_evidence_id,
+                    None,
+                )
+            terminal_outcomes = {
+                AttemptState.ACCEPTED: PlaceOrdersOutcome.ACCEPTED,
+                AttemptState.PARTIAL: PlaceOrdersOutcome.PARTIAL,
+                AttemptState.REJECTED: PlaceOrdersOutcome.REJECTED,
+            }
+            terminal_outcome = terminal_outcomes.get(existing_attempt.state)
+            if terminal_outcome is None:
+                raise BetfairSupervisedExecutionError(
+                    "unsupported durable Betfair attempt state"
+                )
+            acknowledgement = existing_attempt.acknowledgement
+            if acknowledgement is None:
+                raise BetfairSupervisedExecutionError(
+                    "terminal durable Betfair attempt lacks acknowledgement"
+                )
+            return BetfairSupervisedExecutionResult(
+                terminal_outcome,
+                attempt_id,
+                existing_attempt.state,
+                (
+                    acknowledgement.reconciliation_evidence_id
+                    or provider_evidence_id
+                ),
+                acknowledgement.external_receipt_id,
+            )
+
+        ambient_urllib_opener = (
+            _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("_opener")
+        )
         client._gate.require(
             action=action,
             profile=profile,
             bound=bound,
             execution_workspace=execution_workspace,
         )
-        begin_supervised_attempt(
+        if (
+            type(client._transport) is not UrllibBetfairHttpTransport
+            or BetfairSupervisedPlaceOrdersClient.place_action
+            is not _CANONICAL_BETFAIR_PLACE_ACTION
+            or _CANONICAL_BETFAIR_PLACE_ACTION.__code__
+            is not _CANONICAL_BETFAIR_PLACE_ACTION_CODE
+            or UrllibBetfairHttpTransport.post
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("Request")
+            is not _CANONICAL_URLLIB_BETFAIR_REQUEST
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
+            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            or _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            is not _ORIGINAL_URLLIB_BETFAIR_URLOPEN
+            or _ORIGINAL_URLLIB_BETFAIR_URLOPEN.__globals__
+            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS
+            or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("build_opener")
+            is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_CODE
+            or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("OpenerDirector")
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.open
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._open
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._call_chain
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.error
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE
+            or type(_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER)
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+            or "_open" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or "_call_chain" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or "error" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_handlers"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_dispatch"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_methods"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "opener_graph_matches"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "opener_graph_matches_code"
+                )
+            ]
+            or getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+            or not _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS,
+            )
+            or _PROVIDER_HTTP_POST is not _CANONICAL_PROVIDER_HTTP_POST
+            or getattr(_CANONICAL_PROVIDER_HTTP_POST, "__code__", None)
+            is not _CANONICAL_PROVIDER_HTTP_POST_CODE
+            or _CANONICAL_PROVIDER_HTTP_POST.__code__.co_freevars
+            != _CANONICAL_PROVIDER_HTTP_POST_FREEVARS
+            or _CANONICAL_PROVIDER_HTTP_POST.__closure__ is None
+            or len(_CANONICAL_PROVIDER_HTTP_POST.__closure__)
+            != len(_CANONICAL_PROVIDER_HTTP_POST_CLOSURE)
+            or any(
+                cell.cell_contents is not expected
+                for cell, expected in zip(
+                    _CANONICAL_PROVIDER_HTTP_POST.__closure__,
+                    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE,
+                )
+            )
+            or (
+                ambient_urllib_opener is not None
+                and (
+                    type(ambient_urllib_opener)
+                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+                    or type(ambient_urllib_opener).open
+                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
+                    or getattr(
+                        type(ambient_urllib_opener).open,
+                        "__code__",
+                        None,
+                    )
+                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE
+                )
+            )
+            or _parse_place_orders_response
+            is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
+            or _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
+            is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
+            or BetfairInstructionReport
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE
+            or _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE.__post_init__
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT
+            or getattr(
+                _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT_CODE
+            or BetfairPlaceExecutionReport
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE
+            or _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE.__post_init__
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT
+            or getattr(
+                _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT_CODE
+            or _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE.evidence_id.fget
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER
+            or getattr(
+                _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER_CODE
+            or _report_outcome is not _CANONICAL_REPORT_OUTCOME
+            or getattr(_CANONICAL_REPORT_OUTCOME, "__code__", None)
+            is not _CANONICAL_REPORT_OUTCOME_CODE
+            or _provider_observation_now
+            is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK_CODE
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__globals__",
+                {},
+            ).get("datetime")
+            is not _CANONICAL_PROVIDER_OBSERVATION_DATETIME
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__globals__",
+                {},
+            ).get("timezone")
+            is not _CANONICAL_PROVIDER_OBSERVATION_TIMEZONE
+        ):
+            raise BetfairSupervisedExecutionError(
+                "terminal Betfair execution requires canonical client, transport, and parser authority; executable code authority changed"
+            )
+        execution_attempt = begin_supervised_attempt(
             ledger,
             bound,
             approval,
             action_id=action_id,
             attempt_id=attempt_id,
         )
-        provider_order_ref = ledger.bind_provider_order_reference(
-            attempt_id=attempt_id,
-            provider_id=action.bookmaker_id,
-        )
-        ledger.mark_submitted(
-            attempt_id,
-            submitted_at=now(),
-        )
-        try:
-            report = client.place_action(
-                action,
-                profile=profile,
-                bound=bound,
-                provider_order_ref=provider_order_ref,
-                execution_workspace=execution_workspace,
+        attempt_state = ledger.attempt_state(attempt_id)
+        if attempt_state is AttemptState.SUBMITTED:
+            # SUBMITTED is a durable uncertainty boundary. Re-entering the
+            # same attempt after a crash must never transmit placeOrders again:
+            # the previous process may have reached Betfair before dying.
+            provider_order_ref = ledger.provider_order_reference(
+                attempt_id=attempt_id,
+                provider_id=action.bookmaker_id,
             )
-        except (
-            BetfairPlaceOrdersAmbiguous,
-            BetfairSupervisedExecutionError,
-        ):
+            if provider_order_ref is None:
+                raise BetfairSupervisedExecutionError(
+                    "submitted Betfair attempt lacks durable provider order reference"
+                )
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
-                    "betfair_placeOrders_ambiguous_effect_"
+                    "betfair_placeOrders_existing_submitted_"
                     "requires_readback"
                 ),
-                observed_at=now(),
+                observed_at=_attempt_causal_observation_time(
+                    ledger,
+                    plan_id=bound.execution_plan.plan_id,
+                    attempt_id=attempt_id,
+                ),
             )
             return BetfairSupervisedExecutionResult(
                 PlaceOrdersOutcome.UNKNOWN,
@@ -1034,18 +2312,363 @@ def execute_betfair_supervised_action(
                 None,
                 None,
             )
+        provider_order_ref = ledger.bind_provider_order_reference(
+            attempt_id=attempt_id,
+            provider_id=action.bookmaker_id,
+        )
+        submitted_at = execution_attempt.reserved_at
+
+        try:
+            report = _place_action_with_final_durable_authority(
+                ledger,
+                bound,
+                approval,
+                action=action,
+                attempt_id=attempt_id,
+                profile=profile,
+                client=client,
+                provider_order_ref=provider_order_ref,
+                execution_workspace=execution_workspace,
+            )
+            submitted_view = ledger.verified_execution_view(
+                bound.execution_plan.plan_id
+            )
+            submitted_attempt = next(
+                item
+                for item in submitted_view.attempts
+                if item.attempt.attempt_id == attempt_id
+            )
+            if submitted_attempt.submitted_at is None:
+                raise ExecutionStateError(
+                    "final Betfair send lacks durable submission timestamp"
+                )
+            submitted_at = submitted_attempt.submitted_at
+        except BetfairPlaceOrdersAmbiguous as exc:
+            ambiguous_evidence_id: str | None = None
+            ambiguous_observed_at = exc.observed_at
+            if (
+                exc.request_sha256 is not None
+                and exc.response_sha256 is not None
+                and ambiguous_observed_at is not None
+            ):
+                request_sha256 = _sha(
+                    exc.request_sha256,
+                    "ambiguous request_sha256",
+                )
+                response_sha256 = _sha(
+                    exc.response_sha256,
+                    "ambiguous response_sha256",
+                )
+                _time(
+                    ambiguous_observed_at,
+                    "ambiguous observed_at",
+                )
+                ambiguous_evidence_id = _digest(
+                    {
+                        "schema": "autosport.betfair_place_ambiguous_response",
+                        "schema_version": 1,
+                        "bookmaker_id": action.bookmaker_id,
+                        "account_id": action.account_id,
+                        "action_id": action.action_id,
+                        "provider_order_ref": provider_order_ref,
+                        "request_sha256": request_sha256,
+                        "response_sha256": response_sha256,
+                        "observed_at": ambiguous_observed_at,
+                    }
+                )
+                ledger.bind_provider_evidence(
+                    attempt_id=attempt_id,
+                    evidence_id=ambiguous_evidence_id,
+                    observed_at=ambiguous_observed_at,
+                    source=(
+                        "betfair:placeOrders:ambiguous:"
+                        f"{response_sha256}"
+                    ),
+                    request_sha256=request_sha256,
+                )
+            unknown_observed_at = (
+                ambiguous_observed_at
+                if ambiguous_observed_at is not None
+                else submitted_at
+            )
+            ledger.mark_unknown(
+                attempt_id,
+                reason=(
+                    "betfair_placeOrders_ambiguous_effect_"
+                    "requires_readback"
+                ),
+                observed_at=unknown_observed_at,
+            )
+            return BetfairSupervisedExecutionResult(
+                PlaceOrdersOutcome.UNKNOWN,
+                attempt_id,
+                ledger.attempt_state(attempt_id),
+                ambiguous_evidence_id,
+                None,
+            )
+        # After placeOrders may have produced an external effect, authority drift is
+        # uncertainty evidence, not a pre-effect configuration error. The descriptor
+        # intentionally raises on drift when reached by the canonical executor, so
+        # collapse that postflight signal to a boolean and durably mark UNKNOWN below.
+        try:
+            canonical_place_action_after_provider = (
+                BetfairSupervisedPlaceOrdersClient.place_action
+                is _CANONICAL_BETFAIR_PLACE_ACTION
+            )
+        except BetfairSupervisedExecutionError:
+            canonical_place_action_after_provider = False
+
+        ambient_urllib_opener = (
+            _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("_opener")
+        )
+        if (
+            not canonical_place_action_after_provider
+            or _CANONICAL_BETFAIR_PLACE_ACTION.__code__
+            is not _CANONICAL_BETFAIR_PLACE_ACTION_CODE
+            or UrllibBetfairHttpTransport.post
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__code__
+            is not _CANONICAL_URLLIB_BETFAIR_HTTP_POST_CODE
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("Request")
+            is not _CANONICAL_URLLIB_BETFAIR_REQUEST
+            or _CANONICAL_URLLIB_BETFAIR_HTTP_POST.__globals__.get("urlopen")
+            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            or _CANONICAL_URLLIB_BETFAIR_URLOPEN
+            is not _ORIGINAL_URLLIB_BETFAIR_URLOPEN
+            or _ORIGINAL_URLLIB_BETFAIR_URLOPEN.__globals__
+            is not _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS
+            or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("build_opener")
+            is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_BUILD_OPENER_CODE
+            or _CANONICAL_URLLIB_BETFAIR_URLOPEN_GLOBALS.get("OpenerDirector")
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.open
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._open
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_INTERNAL_OPEN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR._call_chain
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_CALL_CHAIN_CODE
+            or _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR.error
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR
+            or getattr(
+                _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_ERROR_CODE
+            or type(_CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER)
+            is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+            or "_open" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or "_call_chain" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or "error" in getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                "__dict__",
+                {},
+            )
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index("private_opener")
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_handlers"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_dispatch"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "private_opener_methods"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "opener_graph_matches"
+                )
+            ]
+            or _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+            is not _CANONICAL_PROVIDER_HTTP_POST_CLOSURE[
+                _CANONICAL_PROVIDER_HTTP_POST_FREEVARS.index(
+                    "opener_graph_matches_code"
+                )
+            ]
+            or getattr(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES_CODE
+            or not _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_GRAPH_MATCHES(
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_HANDLERS,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_DISPATCH,
+                _CANONICAL_PROVIDER_HTTP_PRIVATE_OPENER_METHODS,
+            )
+            or _PROVIDER_HTTP_POST is not _CANONICAL_PROVIDER_HTTP_POST
+            or getattr(_CANONICAL_PROVIDER_HTTP_POST, "__code__", None)
+            is not _CANONICAL_PROVIDER_HTTP_POST_CODE
+            or _CANONICAL_PROVIDER_HTTP_POST.__code__.co_freevars
+            != _CANONICAL_PROVIDER_HTTP_POST_FREEVARS
+            or _CANONICAL_PROVIDER_HTTP_POST.__closure__ is None
+            or len(_CANONICAL_PROVIDER_HTTP_POST.__closure__)
+            != len(_CANONICAL_PROVIDER_HTTP_POST_CLOSURE)
+            or any(
+                cell.cell_contents is not expected
+                for cell, expected in zip(
+                    _CANONICAL_PROVIDER_HTTP_POST.__closure__,
+                    _CANONICAL_PROVIDER_HTTP_POST_CLOSURE,
+                )
+            )
+            or (
+                ambient_urllib_opener is not None
+                and (
+                    type(ambient_urllib_opener)
+                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_DIRECTOR
+                    or type(ambient_urllib_opener).open
+                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN
+                    or getattr(
+                        type(ambient_urllib_opener).open,
+                        "__code__",
+                        None,
+                    )
+                    is not _CANONICAL_URLLIB_BETFAIR_OPENER_OPEN_CODE
+                )
+            )
+            or _parse_place_orders_response
+            is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE
+            or _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE.__code__
+            is not _CANONICAL_PARSE_PLACE_ORDERS_RESPONSE_CODE
+            or BetfairInstructionReport
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE
+            or _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE.__post_init__
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT
+            or getattr(
+                _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_POST_INIT_CODE
+            or BetfairPlaceExecutionReport
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE
+            or _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE.__post_init__
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT
+            or getattr(
+                _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_POST_INIT_CODE
+            or _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE.evidence_id.fget
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER
+            or getattr(
+                _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_EVIDENCE_GETTER_CODE
+            or _report_outcome is not _CANONICAL_REPORT_OUTCOME
+            or getattr(_CANONICAL_REPORT_OUTCOME, "__code__", None)
+            is not _CANONICAL_REPORT_OUTCOME_CODE
+            or type(report)
+            is not _CANONICAL_BETFAIR_PLACE_EXECUTION_REPORT_TYPE
+            or type(report.instruction)
+            is not _CANONICAL_BETFAIR_INSTRUCTION_REPORT_TYPE
+            or _provider_observation_now
+            is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__code__",
+                None,
+            )
+            is not _CANONICAL_PROVIDER_OBSERVATION_CLOCK_CODE
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__globals__",
+                {},
+            ).get("datetime")
+            is not _CANONICAL_PROVIDER_OBSERVATION_DATETIME
+            or getattr(
+                _CANONICAL_PROVIDER_OBSERVATION_CLOCK,
+                "__globals__",
+                {},
+            ).get("timezone")
+            is not _CANONICAL_PROVIDER_OBSERVATION_TIMEZONE
+        ):
+            evidence_id = report.evidence_id
+            ledger.bind_provider_evidence(
+                attempt_id=attempt_id,
+                evidence_id=evidence_id,
+                observed_at=report.observed_at,
+                source=f"betfair:placeOrders:{report.response_sha256}",
+                request_sha256=report.request_sha256,
+            )
+            ledger.mark_unknown(
+                attempt_id,
+                reason=(
+                    "betfair_placeOrders_code_authority_changed_"
+                    "requires_readback"
+                ),
+                observed_at=report.observed_at,
+            )
+            return BetfairSupervisedExecutionResult(
+                PlaceOrdersOutcome.UNKNOWN,
+                attempt_id,
+                ledger.attempt_state(attempt_id),
+                evidence_id,
+                None,
+            )
 
     evidence_id = report.evidence_id
-    ledger.bind_provider_evidence(
-        attempt_id=attempt_id,
-        evidence_id=evidence_id,
-        observed_at=report.observed_at,
-        source=f"betfair:placeOrders:{report.response_sha256}",
-    )
-    outcome = _report_outcome(report, action)
+    evidence_source = f"betfair:placeOrders:{report.response_sha256}"
+    outcome = _CANONICAL_REPORT_OUTCOME(report, action)
     receipt = report.instruction.bet_id
 
     if outcome is PlaceOrdersOutcome.UNKNOWN:
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=report.observed_at,
+            source=evidence_source,
+            request_sha256=report.request_sha256,
+        )
         ledger.mark_unknown(
             attempt_id,
             reason="betfair_placeOrders_report_requires_readback",
@@ -1059,16 +2682,77 @@ def execute_betfair_supervised_action(
             receipt,
         )
 
+    if outcome is PlaceOrdersOutcome.PLACED_UNMATCHED:
+        ledger.bind_provider_evidence(
+            attempt_id=attempt_id,
+            evidence_id=evidence_id,
+            observed_at=report.observed_at,
+            source=evidence_source,
+            request_sha256=report.request_sha256,
+        )
+        if receipt is None:
+            raise BetfairSupervisedExecutionError(
+                "placed-unmatched provider order requires betId identity"
+            )
+        ledger.mark_unknown(
+            attempt_id,
+            reason=(
+                "betfair_placeOrders_known_unmatched_order_"
+                "requires_readback"
+            ),
+            observed_at=report.observed_at,
+        )
+        return BetfairSupervisedExecutionResult(
+            outcome,
+            attempt_id,
+            ledger.attempt_state(attempt_id),
+            evidence_id,
+            receipt,
+        )
+
+    acknowledgement_receipt = receipt
     if outcome is PlaceOrdersOutcome.REJECTED:
-        receipt = receipt or provider_order_ref
+        # Rejection acknowledgement must carry a real provider identity.
+        # Never launder Autosport's internal evidence hash into the external
+        # receipt namespace.
+        if acknowledgement_receipt is None:
+            ledger.bind_provider_evidence(
+                attempt_id=attempt_id,
+                evidence_id=evidence_id,
+                observed_at=report.observed_at,
+                source=evidence_source,
+                request_sha256=report.request_sha256,
+            )
+            ledger.mark_unknown(
+                attempt_id,
+                reason=(
+                    "betfair_placeOrders_rejection_missing_receipt_"
+                    "requires_readback"
+                ),
+                observed_at=report.observed_at,
+            )
+            return BetfairSupervisedExecutionResult(
+                PlaceOrdersOutcome.UNKNOWN,
+                attempt_id,
+                ledger.attempt_state(attempt_id),
+                evidence_id,
+                None,
+            )
         acknowledgement = ExternalAcknowledgement(
             attempt_id=attempt_id,
-            external_receipt_id=receipt,
+            external_receipt_id=acknowledgement_receipt,
             status=AcknowledgementStatus.REJECTED,
             acknowledged_at=report.observed_at,
         )
     else:
         if receipt is None:
+            ledger.bind_provider_evidence(
+                attempt_id=attempt_id,
+                evidence_id=evidence_id,
+                observed_at=report.observed_at,
+                source=evidence_source,
+                request_sha256=report.request_sha256,
+            )
             ledger.mark_unknown(
                 attempt_id,
                 reason=(
@@ -1096,6 +2780,14 @@ def execute_betfair_supervised_action(
             accepted_odds=report.instruction.average_price_matched,
             accepted_stake=report.instruction.size_matched,
         )
+    ledger._bind_provider_acknowledgement_evidence(
+        attempt_id=attempt_id,
+        evidence_id=evidence_id,
+        observed_at=report.observed_at,
+        source=evidence_source,
+        request_sha256=report.request_sha256,
+        acknowledgement=acknowledgement,
+    )
     ledger.acknowledge(acknowledgement)
     return BetfairSupervisedExecutionResult(
         outcome,

@@ -665,6 +665,8 @@ class PaperBook:
         text = cls._require_utf8_string(value, label)
         if not text or text.strip() != text:
             raise ValueError(f"PaperBook {label} must be a non-empty trimmed string")
+        if any(ord(character) < 32 or ord(character) == 127 for character in text):
+            raise ValueError(f"PaperBook {label} must not contain control characters")
         if forbid_quote_key_delimiter and "|" in text:
             raise ValueError(f"PaperBook {label} must not contain quote-key delimiter '|'")
         return text

@@ -231,6 +231,37 @@ class HeadlessCollectorServiceTests(unittest.TestCase):
             ):
                 self.make_service(tmp, source)
 
+    def test_run_and_feed_identity_subclasses_fail_before_text_dispatch(self):
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError(
+                    "hostile collector identity strip dispatched before exact-type admission"
+                )
+
+            def __eq__(self, other):
+                raise AssertionError(
+                    "hostile collector identity equality dispatched before exact-type admission"
+                )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            page = catalog_page(1, "event-1")
+            source = FakeCollectorSource([page], [()])
+            with self.assertRaisesRegex(
+                ValueError,
+                "run_id must be a non-empty string",
+            ):
+                self.make_service(tmp, source, run_id=HostileText("run-1"))
+
+            store = CollectorDeltaStore(Path(tmp) / "feed-collector.json")
+            with self.assertRaisesRegex(
+                ValueError,
+                "source_id must be a non-empty string",
+            ):
+                ReadOnlyCollectorDeltaFeed(
+                    store,
+                    source_id=HostileText("source-x"),
+                )
+
     def test_mutated_source_identity_subclasses_fail_before_runtime_dispatch(self):
         class HostileText(str):
             def strip(self, *args, **kwargs):

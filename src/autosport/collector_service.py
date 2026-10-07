@@ -216,7 +216,7 @@ class ReadOnlyCollectorDeltaFeed:
     def __init__(self, store: CollectorDeltaStore, *, source_id: str) -> None:
         if not isinstance(store, CollectorDeltaStore):
             raise TypeError("store must be CollectorDeltaStore")
-        if not isinstance(source_id, str) or not source_id.strip():
+        if type(source_id) is not str or not source_id or source_id != source_id.strip():
             raise ValueError("source_id must be a non-empty string")
         self.store = store
         self.source_id = source_id
@@ -294,7 +294,7 @@ class _CollectorServiceState:
 
     @staticmethod
     def _text(value: object, name: str) -> str:
-        if not isinstance(value, str) or not value.strip():
+        if type(value) is not str or not value or value != value.strip():
             raise ValueError(f"{name} must be a non-empty string")
         return value
 

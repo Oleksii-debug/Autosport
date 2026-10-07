@@ -953,9 +953,21 @@ class RunRegistry:
 
     def assert_outcome_lineage_compatible(self, binding: OutcomeLineageBinding) -> None:
         """Reject a restart/fork before any new economic base is materialized."""
-        if not isinstance(binding, OutcomeLineageBinding):
-            raise ValueError("outcome lineage binding must be an OutcomeLineageBinding")
-        self._assert_outcome_lineage_compatible_state(self._read(), binding)
+        if type(binding) is not OutcomeLineageBinding:
+            raise ValueError("outcome lineage binding must be an exact OutcomeLineageBinding")
+        if (
+            type(binding.revisions) is not tuple
+            or not binding.revisions
+            or any(type(revision) is not TrustedOutcomeRevision for revision in binding.revisions)
+        ):
+            raise ValueError(
+                "outcome lineage revisions must be a non-empty exact tuple of TrustedOutcomeRevision values"
+            )
+        canonical = outcome_lineage_binding_from_payload(
+            outcome_lineage_payload(binding),
+            context="outcome lineage compatibility input",
+        )
+        self._assert_outcome_lineage_compatible_state(self._read(), canonical)
 
     def outcome_revision_as_of(
         self,

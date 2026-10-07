@@ -461,5 +461,34 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
         )
 
 
+    def test_compatibility_check_rejects_lineage_subclass_before_identity_dispatch(self) -> None:
+        class HostileBinding(OutcomeLineageBinding):
+            @property
+            def source_identity(self):
+                raise AssertionError("lineage subclass identity dispatch must not execute")
+
+        exact = self._binding("r1")
+        hostile = object.__new__(HostileBinding)
+        for field in OutcomeLineageBinding.__dataclass_fields__:
+            object.__setattr__(hostile, field, getattr(exact, field))
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            with self.assertRaisesRegex(ValueError, "exact OutcomeLineageBinding"):
+                registry.assert_outcome_lineage_compatible(hostile)
+
+    def test_compatibility_check_revalidates_tampered_revision_identity(self) -> None:
+        binding = self._binding("r1")
+        object.__setattr__(binding.revisions[0], "revision_id", " results-r1")
+
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            with self.assertRaisesRegex(
+                OutcomeLineageTrustError,
+                "revision_id.*canonical",
+            ):
+                registry.assert_outcome_lineage_compatible(binding)
+
+
 if __name__ == "__main__":
     unittest.main()

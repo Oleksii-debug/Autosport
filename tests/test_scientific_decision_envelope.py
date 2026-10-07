@@ -278,3 +278,45 @@ class ScientificDecisionEnvelopeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class _TupleSubclass(tuple):
+    pass
+
+
+def test_snapshot_helper_rejects_tuple_subclass_before_iteration():
+    with pytest.raises(DecisionEnvelopeError, match="exact tuple"):
+        evidence_snapshot_sha256(
+            _TupleSubclass((feature(), market())),
+            EvidenceKind.FEATURE,
+        )
+
+
+def test_sealed_envelope_hash_revalidates_post_init_identity_tamper():
+    sealed = envelope()
+    object.__setattr__(sealed, "decision_id", " decision-1")
+
+    with pytest.raises(DecisionEnvelopeError, match="decision_id.*canonical"):
+        _ = sealed.envelope_sha256
+
+
+def test_sealed_envelope_hash_rejects_post_init_evidence_tuple_subclass():
+    sealed = envelope()
+    object.__setattr__(sealed, "evidence", _TupleSubclass(sealed.evidence))
+
+    with pytest.raises(DecisionEnvelopeError, match="non-empty exact tuple"):
+        _ = sealed.envelope_sha256
+
+
+def test_outcome_verification_revalidates_append_identity_after_tamper():
+    sealed = envelope()
+    append_record = DecisionOutcomeAppend.attach(
+        sealed,
+        outcome_id="outcome-1",
+        outcome_sha256=SHA_A,
+        revealed_at=T4,
+    )
+    object.__setattr__(append_record, "outcome_id", "outcome-1 ")
+
+    with pytest.raises(DecisionEnvelopeError, match="outcome_id.*canonical"):
+        append_record.verify_envelope(sealed)

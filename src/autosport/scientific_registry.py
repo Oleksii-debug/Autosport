@@ -77,8 +77,8 @@ def _instant(value: object, name: str) -> datetime:
 
 
 def _text_tuple(value: object, name: str, *, allow_empty: bool = False) -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise ValueError(f"{name} must be a tuple")
+    if type(value) is not tuple:
+        raise ValueError(f"{name} must be an exact tuple")
     items = tuple(_text(item, f"{name} item") for item in value)
     if not allow_empty and not items:
         raise ValueError(f"{name} must not be empty")

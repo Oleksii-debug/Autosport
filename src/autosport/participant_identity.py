@@ -580,6 +580,7 @@ class ParticipantIdentityRegistry:
             type(raw) is not dict
             or set(raw) != expected_fields
             or raw.get("schema") != _SCHEMA
+            or type(raw.get("version")) is not int
             or raw.get("version") not in {_LEGACY_VERSION, _VERSION}
             or any(
                 type(raw[field]) is not list

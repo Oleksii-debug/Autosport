@@ -130,6 +130,23 @@ def test_forecast_ledger_revalidates_mutated_identity_before_durable_append(
     assert not (tmp_path / "forecasts.jsonl").exists()
 
 
+def test_forecast_hash_rejects_subclass_before_virtual_serialization() -> None:
+    record = _ForecastRecordSubclass(
+        quote_key="event-1|market-1|selection-1",
+        probability=Decimal("0.5"),
+        model_id="model-1",
+        model_version="model-version-1",
+        strategy_version="strategy-version-1",
+        model_training_cutoff_ts="2026-10-06T22:00:00+00:00",
+        input_cutoff_ts="2026-10-06T23:00:00+00:00",
+        generated_at=_TS,
+        forecast_id="forecast-subclass-hash",
+    )
+
+    with pytest.raises(ValueError, match="exact ForecastRecord"):
+        _ = record.canonical_hash
+
+
 def test_forecast_ledger_rejects_subclass_before_virtual_serialization(
     tmp_path,
 ) -> None:

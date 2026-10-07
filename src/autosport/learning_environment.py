@@ -94,7 +94,7 @@ def _metadata(name: str, value: object) -> Metadata:
 
 
 def _canonical_set(name: str, value: object) -> frozenset[str]:
-    if not isinstance(value, frozenset) or not value:
+    if type(value) is not frozenset or not value:
         raise LearningEnvironmentError(f"{name} must be a non-empty frozenset")
     for item in value:
         _canonical_text(f"{name} member", item)
@@ -138,17 +138,20 @@ class EnvironmentIdentity:
     schema_version: int = ENVIRONMENT_SCHEMA_VERSION
 
     def __post_init__(self) -> None:
-        if self.schema != ENVIRONMENT_SCHEMA:
+        if type(self.schema) is not str or self.schema != ENVIRONMENT_SCHEMA:
             raise LearningEnvironmentError("unsupported learning environment schema")
-        if self.schema_version != ENVIRONMENT_SCHEMA_VERSION:
+        if (
+            type(self.schema_version) is not int
+            or self.schema_version != ENVIRONMENT_SCHEMA_VERSION
+        ):
             raise LearningEnvironmentError("unsupported learning environment schema version")
         _canonical_text("source_id", self.source_id)
         _canonical_text("config_id", self.config_id)
         _canonical_text("data_id", self.data_id)
         _canonical_text("protocol_id", self.protocol_id)
         _timestamp("cutoff_ts", self.cutoff_ts)
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
-            raise LearningEnvironmentError("seed must be a non-negative integer")
+        if type(self.seed) is not int or self.seed < 0:
+            raise LearningEnvironmentError("seed must be a non-negative exact integer")
 
     @property
     def environment_id(self) -> str:
@@ -333,8 +336,8 @@ class Transition:
             "reward_id",
         ):
             _sha256_hex(name, getattr(self, name))
-        if isinstance(self.step_index, bool) or not isinstance(self.step_index, int):
-            raise LearningEnvironmentError("step_index must be an integer")
+        if type(self.step_index) is not int:
+            raise LearningEnvironmentError("step_index must be an exact integer")
         if self.step_index <= 0:
             raise LearningEnvironmentError("step_index must be positive")
         decision = _timestamp("decision_at", self.decision_at)
@@ -410,8 +413,8 @@ class EnvironmentCheckpoint:
         _sha256_hex("environment_id", self.environment_id)
         _sha256_hex("episode_id", self.episode_id)
         _canonical_text("policy_id", self.policy_id)
-        if isinstance(self.step_index, bool) or not isinstance(self.step_index, int):
-            raise LearningEnvironmentError("checkpoint step_index must be an integer")
+        if type(self.step_index) is not int:
+            raise LearningEnvironmentError("checkpoint step_index must be an exact integer")
         if self.step_index < 0:
             raise LearningEnvironmentError("checkpoint step_index must be non-negative")
         _sha256_hex("chain_sha256", self.chain_sha256)

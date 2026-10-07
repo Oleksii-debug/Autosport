@@ -1058,3 +1058,33 @@ def test_promotion_evidence_constructor_rejects_subclass_before_payload_dispatch
     }
     with pytest.raises(ValueError, match="exact PromotionEvidence"):
         HostilePromotionEvidence(**fields)
+
+
+def test_research_protocol_rejects_binding_subclass_before_identity_dispatch():
+    exact = _binding()
+
+    class HostileBinding(ScientificProtocolBinding):
+        __slots__ = ("_armed",)
+
+        def __getattribute__(self, name):
+            if name in {"_armed", "__class__", "__dict__"}:
+                return object.__getattribute__(self, name)
+            try:
+                armed = object.__getattribute__(self, "_armed")
+            except AttributeError:
+                armed = False
+            if armed and name == "research_protocol_id":
+                raise AssertionError(
+                    "ScientificProtocolBinding subclass identity dispatch must not execute"
+                )
+            return object.__getattribute__(self, name)
+
+    fields = {
+        field: getattr(exact, field)
+        for field in ScientificProtocolBinding.__dataclass_fields__
+    }
+    hostile = HostileBinding(**fields)
+    object.__setattr__(hostile, "_armed", True)
+
+    with pytest.raises(ValueError, match="exact ScientificProtocolBinding"):
+        ResearchProtocol(hostile, SHA_C, SHA_D, SHA_A, T0)

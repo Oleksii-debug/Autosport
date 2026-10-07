@@ -53,6 +53,28 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         self._authority_env.stop()
         self._authority_directory.cleanup()
 
+    def test_fresh_store_accepts_canonical_integer_rowid_primary_keys(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.sqlite")
+            try:
+                for table_name in (
+                    "market_append_commit_times",
+                    "market_append_availability",
+                ):
+                    index_rows = store.connection.execute(
+                        f"PRAGMA index_list({table_name})"
+                    ).fetchall()
+                    self.assertEqual(
+                        [row for row in index_rows if len(row) >= 5 and row[3] == "pk"],
+                        [],
+                    )
+                    storage_module._validate_canonical_table(
+                        store.connection,
+                        table_name,
+                    )
+            finally:
+                store.close()
+
     @staticmethod
     def event(
         *,

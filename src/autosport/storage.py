@@ -847,14 +847,26 @@ def _validate_table_shape(
 
     index_rows = connection.execute(f"PRAGMA index_list({_quoted_identifier(table_name)})").fetchall()
     primary_indexes = [row for row in index_rows if len(row) >= 5 and row[3] == "pk"]
-    if len(primary_indexes) != 1:
-        raise ValueError(f"{table_name} schema is not canonical: primary-key index mismatch")
-    primary_index = primary_indexes[0]
-    if primary_index[2] != 1 or primary_index[4] != 0:
-        raise ValueError(f"{table_name} schema is not canonical: primary-key index mismatch")
-    primary_terms = _canonical_index_terms(connection, primary_index[1])
-    if primary_terms != expected_primary_key:
-        raise ValueError(f"{table_name} schema is not canonical: primary-key definition mismatch")
+    canonical_rowid_primary_key = (
+        len(primary_indexes) == 0
+        and len(expected_primary_key) == 1
+        and any(
+            row[1] == expected_primary_key[0]
+            and row[2] == "INTEGER"
+            and row[5] == 1
+            and row[6] == 0
+            for row in actual_xinfo
+        )
+    )
+    if not canonical_rowid_primary_key:
+        if len(primary_indexes) != 1:
+            raise ValueError(f"{table_name} schema is not canonical: primary-key index mismatch")
+        primary_index = primary_indexes[0]
+        if primary_index[2] != 1 or primary_index[4] != 0:
+            raise ValueError(f"{table_name} schema is not canonical: primary-key index mismatch")
+        primary_terms = _canonical_index_terms(connection, primary_index[1])
+        if primary_terms != expected_primary_key:
+            raise ValueError(f"{table_name} schema is not canonical: primary-key definition mismatch")
 
     for index_row in index_rows:
         if len(index_row) < 5:

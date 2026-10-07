@@ -174,6 +174,10 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
 
+# Lawful-use composition depends on exact durable owner-approval semantics. Seal
+# internal store dispatch before downstream governance captures its resolver.
+from . import _provider_owner_approval_dispatch_guard as _provider_owner_approval_dispatch_guard  # noqa: F401,E402
+
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical
 # existing issuer hash and send only that detached product-owned value.

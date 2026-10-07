@@ -15,6 +15,13 @@ _SQLITE_SEQUENCE_MAX = (1 << 63) - 1
 _EXCHANGE_SIDES = frozenset({"back", "lay"})
 
 
+def _require_strict_utf8(value: str, name: str) -> None:
+    try:
+        str.encode(value, "utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be valid UTF-8 text") from exc
+
+
 def _validate_source_id(source_id: object) -> str:
     if type(source_id) is not str:
         raise TypeError("source_id must be str")
@@ -24,6 +31,7 @@ def _validate_source_id(source_id: object) -> str:
         raise ValueError("source_id must not contain reserved identity delimiter '|'")
     if any(ord(character) < 32 or ord(character) == 127 for character in source_id):
         raise ValueError("source_id must not contain control characters")
+    _require_strict_utf8(source_id, "source_id")
     return source_id
 
 
@@ -36,6 +44,7 @@ def _validate_provider_component(value: object, name: str) -> str:
         raise ValueError(f"{name} must not contain reserved identity delimiter '|'")
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ValueError(f"{name} must not contain control characters")
+    _require_strict_utf8(value, name)
     return value
 
 
@@ -63,6 +72,7 @@ def _validate_provider_text(value: object, name: str) -> str:
         raise ValueError(f"{name} must be non-empty and trimmed")
     if any(ord(character) < 32 or ord(character) == 127 for character in value):
         raise ValueError(f"{name} must not contain control characters")
+    _require_strict_utf8(value, name)
     return value
 
 
@@ -232,6 +242,7 @@ class ProviderBatch:
                 for character in self.cursor
             ):
                 raise ValueError("provider batch cursor must not contain control characters")
+            _require_strict_utf8(self.cursor, "provider batch cursor")
         if type(self.quality_flags) is not tuple:
             raise TypeError("provider batch quality_flags must be a tuple of strings")
         for flag in self.quality_flags:

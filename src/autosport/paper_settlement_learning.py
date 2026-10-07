@@ -23,6 +23,7 @@ from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import PaperTicket, TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
+from .event_lifecycle import canonical_event_identity_aliases
 from .learning_environment import (
     Action,
     CausalLearningEnvironment,
@@ -870,9 +871,14 @@ class PaperSettlementLearningBridge:
             }
             if not scoped:
                 continue
-            identity_parts = {resolution.event_identity}
-            if ":" in resolution.event_identity:
-                identity_parts.add(resolution.event_identity.split(":", 1)[1])
+            try:
+                identity_parts = set(
+                    canonical_event_identity_aliases(resolution.event_identity)
+                )
+            except ValueError as exc:
+                raise PaperSettlementLearningBridgeError(
+                    "settlement evidence event identity is not canonical"
+                ) from exc
             for key in scoped:
                 if leg_by_key[key].event_id not in identity_parts:
                     raise PaperSettlementLearningBridgeError(

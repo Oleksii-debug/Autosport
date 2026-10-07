@@ -315,6 +315,83 @@ class StorageDedupeIntegrityTests(unittest.TestCase):
             self.assertEqual(reopened.current()[first.quote_key], first)
             reopened.close()
 
+    def test_reopen_migrates_exact_legacy_delimiter_component_keys(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            event = replace(
+                self._event(event_id="a|b"),
+                market_id="c",
+                selection_id="d",
+                source_id="provider|x",
+            )
+            legacy_quote = (
+                f"{event.event_id}|{event.market_id}|{event.selection_id}"
+            )
+            legacy_dedupe = (
+                f"{event.source_id}|{event.event_id}|{event.market_id}|"
+                f"{event.selection_id}|{event.sequence}"
+            )
+            self.assertNotEqual(legacy_quote, event.quote_key)
+            self.assertNotEqual(legacy_dedupe, event.dedupe_key)
+
+            store = SQLiteMarketStore(db_path)
+            self.assertTrue(store.append(event))
+            store.close()
+
+            connection = sqlite3.connect(db_path)
+            try:
+                connection.execute(
+                    """UPDATE market_events
+                       SET dedupe_key=?, quote_key=?
+                       WHERE dedupe_key=?""",
+                    (legacy_dedupe, legacy_quote, event.dedupe_key),
+                )
+                connection.execute(
+                    """UPDATE current_quotes
+                       SET quote_key=?
+                       WHERE source_id=? AND quote_key=?""",
+                    (legacy_quote, event.source_id, event.quote_key),
+                )
+                connection.commit()
+            finally:
+                connection.close()
+
+            reopened = SQLiteMarketStore(db_path)
+            self.assertEqual(reopened.events(), [event])
+            self.assertEqual(
+                reopened.current_by_source()[(event.source_id, event.quote_key)],
+                event,
+            )
+            row = reopened.connection.execute(
+                "SELECT dedupe_key, quote_key FROM market_events"
+            ).fetchone()
+            self.assertEqual(row, (event.dedupe_key, event.quote_key))
+            projection = reopened.connection.execute(
+                "SELECT source_id, quote_key FROM current_quotes"
+            ).fetchone()
+            self.assertEqual(projection, (event.source_id, event.quote_key))
+            reopened.close()
+
+    def test_reopen_does_not_migrate_arbitrary_delimiter_key_tamper(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            db_path = Path(tmp) / "market.db"
+            event = replace(
+                self._event(event_id="a|b"),
+                market_id="c",
+                selection_id="d",
+            )
+            store = SQLiteMarketStore(db_path)
+            self.assertTrue(store.append(event))
+            store.close()
+
+            self._tamper(db_path, "dedupe_key", "not-the-legacy-key")
+            with self.assertRaisesRegex(
+                ValueError,
+                "market event history row identity mismatch: dedupe_key",
+            ):
+                SQLiteMarketStore(db_path)
+
+
     def test_reopen_rejects_duplicate_keys_in_persisted_payload(self):
         with tempfile.TemporaryDirectory() as tmp:
             db_path = Path(tmp) / "market.db"

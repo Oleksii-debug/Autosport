@@ -13,20 +13,7 @@ from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
 
 
 def _canonical_scenario_text(value: object, field: str) -> str:
-    if (
-        type(value) is not str
-        or not value
-        or value.strip() != value
-        or any(ord(character) < 32 or ord(character) == 127 for character in value)
-    ):
-        raise ValueError(f"scenario {field} must be exact non-empty canonical text")
-    try:
-        value.encode("utf-8")
-    except UnicodeEncodeError as exc:
-        raise ValueError(
-            f"scenario {field} must be exact non-empty canonical text"
-        ) from exc
-    return value
+    return _canonical_string_value(value, f"scenario {field}")
 
 
 @dataclass(frozen=True, slots=True)

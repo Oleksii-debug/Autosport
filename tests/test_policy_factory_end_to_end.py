@@ -395,25 +395,28 @@ def _foundation(tmp_path, *, artifact_directory: str = "artifacts"):
             notes="test fixture represents an already-qualified durable champion",
         )
     )
-    # This fixture models a champion that predates the holdout trial exercised by
-    # this test.  It is appended through the private immutable-record primitive so
-    # the test does not consume the very holdout whose single-use behavior it tests.
-    registry._append(
-        PromotionDecision(
-            "promotion-policy-bootstrap",
-            PromotionAction.PROMOTE,
-            predecessor.policy_id,
-            PROTOCOL_ID,
-            protocol.protocol_sha256,
-            predecessor_evaluation_id,
-            predecessor_evaluation_sha,
-            BOOTSTRAP_DECIDED,
-            predecessor_strategy_version_id=None,
-            candidate_model_version_id=predecessor_model_id,
-            promotion_evidence_id=None,
-            reason="pre-existing champion fixture",
-        )
+    # This fixture models a champion that predates the typed PromotionEvidence
+    # authority. New product writes must use record_promotion(); the fixture instead
+    # persists one canonical historical envelope so the holdout under test remains
+    # unconsumed while restart validation still verifies exact identity and digest.
+    bootstrap_decision = PromotionDecision(
+        "promotion-policy-bootstrap",
+        PromotionAction.PROMOTE,
+        predecessor.policy_id,
+        PROTOCOL_ID,
+        protocol.protocol_sha256,
+        predecessor_evaluation_id,
+        predecessor_evaluation_sha,
+        BOOTSTRAP_DECIDED,
+        predecessor_strategy_version_id=None,
+        candidate_model_version_id=predecessor_model_id,
+        promotion_evidence_id=None,
+        reason="pre-existing champion fixture",
     )
+    bootstrap_state = registry._read()
+    bootstrap_state["records"].append(registry._entry(bootstrap_decision))
+    registry_module.atomic_write_json(registry.path, bootstrap_state)
+    ScientificRegistry(registry.path)
     return (
         registry,
         registry_path,

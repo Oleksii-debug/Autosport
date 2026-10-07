@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 
 import autosport.strategies as strategies
@@ -11,6 +12,7 @@ from autosport.agents import (
     _LatestQuotesView,
     agent_composition_sha256,
 )
+from autosport.domain import MarketEvent
 from autosport.paper import PaperBook
 from autosport.strategies import available_strategies, build_strategy_agents
 
@@ -114,6 +116,26 @@ class AgentCompositionIdentityTests(unittest.TestCase):
 
         with self.assertRaisesRegex(ValueError, "latest_quotes source_id"):
             _ = view[(HostileIdentity("source"), "quote")]
+        self.assertEqual(dispatch_calls, [])
+
+        with self.assertRaisesRegex(ValueError, "latest_quotes quote_key"):
+            _ = view[("source", HostileIdentity("quote"))]
+        self.assertEqual(dispatch_calls, [])
+
+        event = MarketEvent(
+            event_id="event",
+            market_id="market",
+            selection_id="selection",
+            decimal_odds=Decimal("2.0"),
+            observed_ts="2026-10-07T00:00:00+00:00",
+            source_id="source",
+            sequence=1,
+            ingest_ts="2026-10-07T00:00:01+00:00",
+        )
+        object.__setattr__(event, "source_id", HostileIdentity("source"))
+
+        with self.assertRaisesRegex(ValueError, "latest_quotes source_id"):
+            _LatestQuotesView((event,))
         self.assertEqual(dispatch_calls, [])
 
     def test_orchestrator_rejects_duplicate_agent_identity(self):

@@ -162,12 +162,10 @@ class BookmakerCapabilityProfile:
         _identity_text(self.account_id, "account_id")
         _identity_text(self.adapter_id, "adapter_id")
         _text(self.adapter_version, "adapter_version")
-        if (
-            not isinstance(self.profile_version, int)
-            or isinstance(self.profile_version, bool)
-            or self.profile_version < 1
-        ):
-            raise BookmakerCapabilityError("profile_version must be a positive integer")
+        if type(self.profile_version) is not int or self.profile_version < 1:
+            raise BookmakerCapabilityError(
+                "profile_version must be an exact positive integer"
+            )
         if type(self.facts) is not tuple:
             raise BookmakerCapabilityError("facts must be an exact tuple")
         seen: set[BookmakerCapability] = set()

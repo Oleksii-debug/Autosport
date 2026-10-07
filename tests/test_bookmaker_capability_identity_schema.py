@@ -42,6 +42,11 @@ class _TrapTuple(tuple):
         raise AssertionError("tuple subclass iteration must not execute")
 
 
+class _TrapInt(int):
+    def __lt__(self, other: object) -> bool:
+        raise AssertionError("int subclass comparison must not execute")
+
+
 def _facts(*caps: BookmakerCapability) -> tuple[BookmakerCapabilityFact, ...]:
     return tuple(
         BookmakerCapabilityFact(cap, BookmakerCapabilityState.SUPPORTED)
@@ -145,6 +150,19 @@ def test_account_position_identifiers_reject_non_utf8_aliases(
 ) -> None:
     with pytest.raises(BookmakerCapabilityError, match="UTF-8 identity text"):
         factory(**{field_name: "identity\ud800"})
+
+
+def test_profile_rejects_profile_version_int_subclass_before_dispatch() -> None:
+    with pytest.raises(BookmakerCapabilityError, match="exact positive integer"):
+        _profile(profile_version=_TrapInt(1))
+
+
+def test_profile_revalidates_profile_version_after_post_init_mutation() -> None:
+    profile = _profile()
+    object.__setattr__(profile, "profile_version", True)
+
+    with pytest.raises(BookmakerCapabilityError, match="exact positive integer"):
+        profile.to_canonical_dict()
 
 
 def test_profile_rejects_facts_tuple_subclass_before_dispatch() -> None:

@@ -24,6 +24,7 @@ from autosport.causal_collector import (
     canonical_event_digest,
     digest_source_payload,
 )
+from autosport.causal_collector_legacy import CollectorDeltaStore as LegacyCollectorDeltaStore
 from autosport.domain import MarketEvent
 from autosport.ingestion_health import SourceHealthStore
 from autosport.market_bus import MarketEventBus
@@ -146,7 +147,7 @@ class CollectorDeltaTests(unittest.TestCase):
     def test_store_reopen_rejects_boolean_schema_version_without_rewrite(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "collector.json"
-            CollectorDeltaStore(path)
+            LegacyCollectorDeltaStore(path)
             raw = json.loads(path.read_text(encoding="utf-8"))
             raw["schema_version"] = True
             path.write_text(
@@ -159,7 +160,7 @@ class CollectorDeltaTests(unittest.TestCase):
                 ValueError,
                 "unsupported causal collector store schema",
             ):
-                CollectorDeltaStore(path)
+                LegacyCollectorDeltaStore(path)
 
             self.assertEqual(path.read_bytes(), forged)
 

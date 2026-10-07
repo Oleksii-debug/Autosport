@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -314,6 +315,12 @@ def _causal_cutoff(value: str) -> tuple[datetime, str]:
 def _timestamp(value: object, *, field: str) -> datetime:
     if type(value) is not str or not value or value.strip() != value:
         raise ValueError(f"{field} must be a non-empty trimmed timezone-aware ISO timestamp")
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(f"{field} precision finer than microseconds is unsupported")
     try:
         return parse_iso_timestamp(value)
     except (AttributeError, TypeError, ValueError) as exc:

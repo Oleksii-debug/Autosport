@@ -219,6 +219,28 @@ class CalculationServiceTests(unittest.TestCase):
                 causal_cutoff_ts=cutoff,
             )
 
+    def test_causal_cutoff_rejects_nonzero_submicrosecond_precision(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal_cutoff_ts precision finer than microseconds",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(),
+                causal_cutoff_ts="2026-09-14T12:00:00.0000001+00:00",
+            )
+
+    def test_quote_timestamp_rejects_nonzero_submicrosecond_precision(self) -> None:
+        event = self._event()
+        object.__setattr__(event, "ingest_ts", "2026-09-14T12:00:00.0000001+00:00")
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts precision finer than microseconds",
+        ):
+            self.service.implied_probability_for_event(
+                event,
+                causal_cutoff_ts="2026-09-14T12:00:01+00:00",
+            )
+
     def test_ingest_timestamp_before_observation_is_rejected_as_invalid_chronology(self) -> None:
         with self.assertRaisesRegex(
             ValueError,

@@ -74,11 +74,16 @@ def _now() -> str:
 
 
 def _text(value: str, name: str) -> str:
-    # Authority-bearing durable text must not accept caller-defined str
-    # subclasses whose virtual methods/comparisons can disagree with the
-    # underlying bytes that json.dumps persists.
-    if type(value) is not str or not value.strip():
-        raise ValueError(f"{name} must be non-empty text")
+    # Authority-bearing durable text has one caller-visible spelling. Reject
+    # subclasses, surrounding whitespace and NUL rather than silently treating
+    # byte-distinct aliases as the same execution/account/receipt identity.
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or "\x00" in value
+    ):
+        raise ValueError(f"{name} must be non-empty canonical text")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -322,12 +327,24 @@ class ExecutionAttempt:
     effect_fingerprint: str
     reserved_at: str
 
+    def __post_init__(self) -> None:
+        _text(self.attempt_id, "attempt_id")
+        _text(self.plan_id, "plan_id")
+        _text(self.action_id, "action_id")
+        _sha256_text(self.effect_fingerprint, "effect_fingerprint")
+        _timestamp(self.reserved_at, "reserved_at")
+
 
 @dataclass(frozen=True, slots=True)
 class ExternalReceiptIdentity:
     bookmaker_id: str
     account_id: str
     external_receipt_id: str
+
+    def __post_init__(self) -> None:
+        _text(self.bookmaker_id, "bookmaker_id")
+        _text(self.account_id, "account_id")
+        _text(self.external_receipt_id, "external_receipt_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -602,23 +619,20 @@ class RealExecutionLedger:
             )
         if type(event["schema_version"]) is not int or event["schema_version"] != SCHEMA_VERSION:
             raise ExecutionLedgerIntegrityError(f"unsupported event schema{where}")
-        for name in ("event_id", "event_type", "recorded_at", "plan_id"):
-            if type(event[name]) is not str or not event[name].strip():
-                raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
         try:
+            for name in ("event_id", "event_type", "recorded_at", "plan_id"):
+                _text(event[name], name)
             _timestamp(event["recorded_at"], "recorded_at")
-        except ValueError as exc:
+            for name in ("action_id", "attempt_id"):
+                value = event[name]
+                if value is not None:
+                    _text(value, name)
+        except (TypeError, ValueError) as exc:
             raise ExecutionLedgerIntegrityError(
-                f"invalid recorded_at{where}"
+                f"invalid execution event identity{where}"
             ) from exc
         if event["event_type"] not in {item.value for item in EventType}:
             raise ExecutionLedgerIntegrityError(f"unknown event type{where}")
-        for name in ("action_id", "attempt_id"):
-            value = event[name]
-            if value is not None and (
-                type(value) is not str or not value.strip()
-            ):
-                raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
         if not isinstance(event["payload"], dict):
             raise ExecutionLedgerIntegrityError(f"invalid payload{where}")
         try:

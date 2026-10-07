@@ -121,6 +121,62 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             "win",
         )
 
+    def test_market_outcome_identity_readback_rejects_hostile_market_type_value(self):
+        class HostileMarketType(str):
+            def __hash__(self):
+                raise AssertionError(
+                    "hostile serialized market_type hashed before exact admission"
+                )
+
+            def __eq__(self, other):
+                raise AssertionError(
+                    "hostile serialized market_type compared before exact admission"
+                )
+
+        payload = self._raw_identity().to_dict()
+        payload["market_type"] = HostileMarketType(payload["market_type"])
+        with self.assertRaisesRegex(
+            ValueError,
+            "serialized market outcome identity is invalid",
+        ):
+            MarketOutcomeIdentity.from_dict(payload)
+
+    def test_betfair_runner_identity_rejects_virtual_string_coercion(self):
+        class HostileRunnerId(int):
+            def __str__(self):
+                raise AssertionError(
+                    "runner identity must not dispatch virtual string coercion"
+                )
+
+        market_definition = self._market_definition(("away", "home"))
+        market_definition["runners"] = [
+            {"id": HostileRunnerId(101)},
+            {"id": 202},
+        ]
+        with self.assertRaisesRegex(
+            ValueError,
+            r"marketDefinition\.runners\[0\]\.id must be a canonical string or integer",
+        ):
+            assess_betfair_historical_market_definition_authority(
+                market_id="match_odds",
+                market_definition=market_definition,
+                provider_publish_at="2026-09-18T15:00:00Z",
+                observed_at="2026-09-18T15:00:01Z",
+            )
+
+    def test_betfair_runner_identity_accepts_exact_integer_ids_without_aliasing(self):
+        market_definition = self._market_definition(("away", "home"))
+        market_definition["runners"] = [{"id": 202}, {"id": 101}]
+        assessment = assess_betfair_historical_market_definition_authority(
+            market_id="match_odds",
+            market_definition=market_definition,
+            provider_publish_at="2026-09-18T15:00:00Z",
+            observed_at="2026-09-18T15:00:01Z",
+        )
+        self.assertEqual(assessment.status, OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE)
+        self.assertIsNotNone(assessment.authority)
+        self.assertEqual(assessment.authority.selection_ids, ("101", "202"))
+
     def test_market_outcome_identity_readback_rejects_subclass_constructor(self):
         class HostileIdentity(MarketOutcomeIdentity):
             pass

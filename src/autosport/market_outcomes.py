@@ -61,6 +61,14 @@ def _canonical_text(name: str, value: object) -> str:
     return value
 
 
+def _canonical_provider_selection_id(name: str, value: object) -> str:
+    if type(value) is int:
+        return str(value)
+    if type(value) is str:
+        return _canonical_text(name, value)
+    raise ValueError(f"{name} must be a canonical string or integer")
+
+
 def _canonical_timestamp(name: str, value: object) -> tuple[str, datetime]:
     raw = _canonical_text(name, value)
     try:
@@ -162,15 +170,22 @@ class MarketOutcomeIdentity:
         if cls is not MarketOutcomeIdentity:
             raise TypeError("market outcome identity readback requires canonical type")
         expected = {"sport", "event_id", "market_id", "source_id", "market_type"}
-        if type(raw) is not dict or set(raw) != expected:
+        if type(raw) is not dict:
+            raise ValueError("serialized market outcome identity must contain canonical fields")
+        raw_keys = tuple(raw.keys())
+        if any(type(key) is not str for key in raw_keys) or set(raw_keys) != expected:
             raise ValueError("serialized market outcome identity must contain canonical fields")
         try:
+            market_type = _canonical_text(
+                "serialized market outcome market_type",
+                raw["market_type"],
+            )
             return MarketOutcomeIdentity(
                 sport=raw["sport"],
                 event_id=raw["event_id"],
                 market_id=raw["market_id"],
                 source_id=raw["source_id"],
-                market_type=MarketType(raw["market_type"]),
+                market_type=MarketType(market_type),
             )
         except (TypeError, ValueError) as exc:
             raise ValueError("serialized market outcome identity is invalid") from exc
@@ -698,9 +713,9 @@ def assess_betfair_historical_market_definition_authority(
                 f"marketDefinition.runners[{index}] requires id"
             )
         selection_ids.append(
-            _canonical_text(
+            _canonical_provider_selection_id(
                 f"marketDefinition.runners[{index}].id",
-                str(runner["id"]),
+                runner["id"],
             )
         )
     if len(selection_ids) != len(set(selection_ids)):

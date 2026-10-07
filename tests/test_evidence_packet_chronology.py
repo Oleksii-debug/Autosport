@@ -64,3 +64,23 @@ def test_research_packet_rejects_one_future_member_in_mixed_evidence() -> None:
             generated_at="2026-10-01T12:00:00Z",
             evidence=(known, future),
         )
+
+
+def test_research_packet_rejects_nonzero_submicrosecond_future_evidence() -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        future = _item("2026-10-01T12:00:00.0000001Z")
+        ResearchPacket(
+            event_id="event-1",
+            generated_at="2026-10-01T12:00:00Z",
+            evidence=(future,),
+        )
+
+
+def test_research_packet_rejects_nonzero_submicrosecond_generation_time() -> None:
+    exact = _item("2026-10-01T12:00:00Z")
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        ResearchPacket(
+            event_id="event-1",
+            generated_at="2026-10-01T12:00:00.0000001Z",
+            evidence=(exact,),
+        )

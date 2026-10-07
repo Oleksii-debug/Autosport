@@ -190,6 +190,44 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
                 "2026-01-01T11:00:00.000000Z",
             )
 
+    def test_product_acceptance_rejects_nonzero_submicrosecond_precision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            before = registry.path.read_bytes()
+            with patch(
+                "autosport.run_registry._utc_now",
+                return_value="2026-01-01T10:00:00.0000001Z",
+            ):
+                with self.assertRaisesRegex(
+                    OutcomeLineageTrustError,
+                    "precision finer than microseconds",
+                ):
+                    registry.begin(
+                        self._sha("market-submicrosecond"),
+                        self._sha("results-submicrosecond"),
+                        "baseline-v1",
+                        "submicrosecond-acceptance",
+                        outcome_lineage=self._binding("r1"),
+                    )
+            self.assertEqual(registry.path.read_bytes(), before)
+
+    def test_as_of_cutoff_rejects_nonzero_submicrosecond_precision(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
+            self._accept(
+                registry,
+                self._binding("r1"),
+                run_id="submicrosecond-cutoff",
+                market="market-submicrosecond-cutoff",
+                results="results-submicrosecond-cutoff",
+                accepted_at=self.t1,
+            )
+            with self.assertRaisesRegex(
+                OutcomeLineageTrustError,
+                "precision finer than microseconds",
+            ):
+                self._resolve(registry, "2026-01-01T10:00:00.0000001Z")
+
     def test_as_of_cutoff_rejects_string_subclass_before_virtual_replace(self) -> None:
         class ForgedCutoff(str):
             replace_calls = 0

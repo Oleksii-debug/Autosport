@@ -367,9 +367,11 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
 
 
     def test_durable_ingress_rejects_market_event_subclass_before_dispatch(self) -> None:
+        armed = False
+
         class HostileMarketEvent(MarketEvent):
             def __getattribute__(self, name: str):
-                if name in {"sequence", "to_dict", "dedupe_key"}:
+                if armed and name in {"sequence", "to_dict", "dedupe_key"}:
                     raise AssertionError("MarketEvent subclass dispatch must not execute")
                 return super().__getattribute__(name)
 
@@ -378,6 +380,7 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
         hostile_payload["market_type"] = canonical.market_type
         hostile_payload["decimal_odds"] = canonical.decimal_odds
         hostile = HostileMarketEvent(**hostile_payload)
+        armed = True
 
         with tempfile.TemporaryDirectory() as temp_dir:
             store = SQLiteMarketStore(Path(temp_dir) / "market.db")

@@ -1721,6 +1721,7 @@ class RealExecutionLedger:
         revoked_at: str,
         revocation_evidence_sha256: str,
     ) -> None:
+        _identity_text(plan_id, "plan_id")
         _identity_text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
         _timestamp(revoked_at, "revoked_at")
@@ -1788,6 +1789,9 @@ class RealExecutionLedger:
         approval_id: str,
         approval_fingerprint: str,
     ) -> bool:
+        _identity_text(plan_id, "plan_id")
+        _identity_text(approval_id, "approval_id")
+        _sha256_text(approval_fingerprint, "approval_fingerprint")
         events = self._events()
         bindings = [
             event

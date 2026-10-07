@@ -448,7 +448,16 @@ def evaluate_walk_forward(
     window_values = tuple(windows)
     if not window_values:
         raise ValueError("walk-forward windows required")
-    ordered = sorted(window_values, key=lambda item: parse_iso_timestamp(item.evaluation_start_ts))
+    for window in window_values:
+        if type(window) is not TemporalEvaluationWindow:
+            raise ValueError(
+                "walk-forward windows must contain exact TemporalEvaluationWindow values"
+            )
+        TemporalEvaluationWindow.__post_init__(window)
+    ordered = sorted(
+        window_values,
+        key=lambda item: parse_iso_timestamp(item.evaluation_start_ts),
+    )
     previous_end: datetime | None = None
     for window in ordered:
         start = parse_iso_timestamp(window.evaluation_start_ts)

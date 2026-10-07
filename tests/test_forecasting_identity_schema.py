@@ -10,6 +10,7 @@ from autosport.forecasting import (
     JsonlForecastLedger,
     TemporalEvaluationWindow,
     evaluate_forecast_window,
+    evaluate_walk_forward,
 )
 
 
@@ -304,3 +305,23 @@ def test_forecast_canonical_hash_rejects_subclass_before_virtual_serialization()
 
     with pytest.raises(ValueError, match="exact ForecastRecord"):
         _ = record.canonical_hash
+
+def test_walk_forward_rejects_window_subclass_before_attribute_dispatch() -> None:
+    class HostileWindow(TemporalEvaluationWindow):
+        __slots__ = ()
+
+        def __getattribute__(self, name: str):
+            if name == "evaluation_start_ts":
+                raise AssertionError("window subclass attribute dispatch must not execute")
+            return super().__getattribute__(name)
+
+    window = HostileWindow(
+        window_id="window-hostile",
+        training_end_ts="2026-10-06T21:00:00+00:00",
+        evaluation_start_ts="2026-10-06T23:30:00+00:00",
+        evaluation_end_ts="2026-10-07T00:30:00+00:00",
+    )
+
+    with pytest.raises(ValueError, match="exact TemporalEvaluationWindow"):
+        evaluate_walk_forward((), (), (window,))
+

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import re
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
@@ -273,6 +274,12 @@ def _text(value: object, field: str) -> str:
 
 def _instant(value: object, field: str) -> datetime:
     raw = _text(value, field)
+    for match in re.finditer(r"[.,]([0-9]+)", raw):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(f"{field} precision finer than microseconds is unsupported")
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:

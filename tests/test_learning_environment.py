@@ -584,3 +584,21 @@ class CausalLearningEnvironmentTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_learning_chronology_rejects_nonzero_submicrosecond_timestamp_precision() -> None:
+    with unittest.TestCase().assertRaisesRegex(
+        LearningEnvironmentError, "precision finer than microseconds"
+    ):
+        CausalLearningEnvironmentTests._identity(
+            cutoff_ts="2026-09-17T14:00:00.1234561+00:00"
+        )
+
+    identity = CausalLearningEnvironmentTests._identity()
+    with unittest.TestCase().assertRaisesRegex(
+        LearningEnvironmentError, "precision finer than microseconds"
+    ):
+        CausalLearningEnvironmentTests._observation(
+            identity.environment_id,
+            observed_at="2026-09-17T13:00:00.1234561+00:00",
+        )

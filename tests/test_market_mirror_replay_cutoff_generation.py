@@ -2661,6 +2661,21 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     commits[0].tx_id,
                     r"^append-1-2-[0-9a-f]{32}$",
                 )
+                commit_times = store.connection.execute(
+                    """SELECT start_append_generation,
+                              end_append_generation,
+                              append_tx_id,
+                              committed_at
+                       FROM market_append_commit_times"""
+                ).fetchall()
+                self.assertEqual(len(commit_times), 1)
+                self.assertEqual(commit_times[0][:3], (1, 2, commits[0].tx_id))
+                self.assertEqual(
+                    commit_times[0][3],
+                    storage_module._canonical_product_time(
+                        self._product_now.isoformat()
+                    ),
+                )
                 self.assertEqual(len(self.replay(store).events), 1)
                 self.assertEqual(self.replay(store).events[0].sequence, 2)
             finally:
@@ -2689,6 +2704,12 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 self.assertEqual(
                     store.connection.execute(
                         "SELECT COUNT(*) FROM market_events"
+                    ).fetchone(),
+                    (0,),
+                )
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_append_commit_times"
                     ).fetchone(),
                     (0,),
                 )
@@ -2746,6 +2767,15 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                             )
                         )
 
+                commit_row = store.connection.execute(
+                    """SELECT start_append_generation,
+                              end_append_generation,
+                              append_tx_id,
+                              committed_at
+                       FROM market_append_commit_times"""
+                ).fetchone()
+                self.assertIsNotNone(commit_row)
+                self.assertEqual(commit_row[:2], (1, 1))
                 self.assertEqual(len(store.events()), 1)
             finally:
                 store.close()
@@ -2756,8 +2786,57 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 self.assertEqual(len(snapshot.events), 1)
                 history = reopened._market_append_authority().read_history()
                 self.assertEqual(history[-1].phase.value, "COMMIT")
+                self.assertEqual(
+                    reopened.connection.execute(
+                        """SELECT start_append_generation,
+                                  end_append_generation,
+                                  append_tx_id,
+                                  committed_at
+                           FROM market_append_commit_times"""
+                    ).fetchone(),
+                    commit_row,
+                )
             finally:
                 reopened.close()
+
+    def test_append_commit_time_tamper_breaks_existing_append_binding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            try:
+                self.assertTrue(
+                    store.append(
+                        self.event(
+                            sequence=1,
+                            odds="2.00",
+                            observed_ts="2026-09-16T18:59:00+00:00",
+                        )
+                    )
+                )
+                forged = storage_module._canonical_product_time(
+                    (self.CUTOFF - timedelta(seconds=2)).isoformat()
+                )
+                store.connection.execute(
+                    "DROP TRIGGER market_append_commit_times_no_update"
+                )
+                store.connection.execute(
+                    """UPDATE market_append_commit_times
+                       SET committed_at=?""",
+                    (forged,),
+                )
+                store.connection.execute(
+                    storage_module._APPEND_COMMIT_TIME_IMMUTABILITY_TRIGGERS[
+                        "market_append_commit_times_no_update"
+                    ]
+                )
+                store.connection.commit()
+
+                with self.assertRaisesRegex(
+                    MonotonicAuthorityRollbackError,
+                    "positive market append authority semantic binding is invalid",
+                ):
+                    store.events()
+            finally:
+                store.close()
 
     def test_restart_during_live_append_issuance_does_not_recover_writer(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

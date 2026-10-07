@@ -107,7 +107,262 @@ class _RecordingScenarioEngine(ScenarioSearchEngine):
         return super().analyse(tickets, groups)
 
 
+class _ExternalCollectionMutationEngine(ScenarioSearchEngine):
+    def __init__(self, candidates, groups, extra_candidate) -> None:
+        super().__init__()
+        self.candidates = candidates
+        self.groups = groups
+        self.extra_candidate = extra_candidate
+        self.calls = 0
+
+    def analyse(self, tickets, groups):
+        report = super().analyse(tickets, groups)
+        self.calls += 1
+        if self.calls == 1:
+            self.candidates.append(self.extra_candidate)
+            self.groups.clear()
+        return report
+
+
 class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
+    def test_candidate_economic_dtos_require_exact_runtime_types(self) -> None:
+        leg = CandidateLeg(
+            "e1|winner|a",
+            "e1",
+            Decimal("2"),
+            Decimal("0.5"),
+        )
+        canonical = _candidate("e1")
+        group = _groups()[0]
+        optimizer = PortfolioAwareCandidateOptimizer()
+
+        class CandidateSubclass(ParlayCandidate):
+            pass
+
+        class LegSubclass(CandidateLeg):
+            pass
+
+        class DecimalSubclass(Decimal):
+            pass
+
+        candidate_subclass = CandidateSubclass(
+            canonical.legs,
+            canonical.combined_odds,
+            canonical.independent_probability,
+            canonical.expected_profit_per_unit,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact canonical ParlayCandidate type",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [candidate_subclass],
+                [group],
+                stake="1",
+            )
+
+        list_backed = ParlayCandidate(
+            [leg],  # type: ignore[arg-type]
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "canonical non-empty leg tuple",
+        ):
+            optimizer.evaluate_candidates([], [list_backed], [group], stake="1")
+
+        subclass_leg = LegSubclass(
+            leg.quote_key,
+            leg.event_id,
+            leg.decimal_odds,
+            leg.probability,
+        )
+        subclass_leg_candidate = ParlayCandidate(
+            (subclass_leg,),
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact canonical CandidateLeg type",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [subclass_leg_candidate],
+                [group],
+                stake="1",
+            )
+
+        odds_subclass_leg = CandidateLeg(
+            leg.quote_key,
+            leg.event_id,
+            DecimalSubclass("2"),
+            Decimal("0.5"),
+        )
+        odds_subclass_candidate = ParlayCandidate(
+            (odds_subclass_leg,),
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal odds must be an exact Decimal",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [odds_subclass_candidate],
+                [group],
+                stake="1",
+            )
+
+        probability_subclass_leg = CandidateLeg(
+            leg.quote_key,
+            leg.event_id,
+            Decimal("2"),
+            DecimalSubclass("0.5"),
+        )
+        probability_subclass_candidate = ParlayCandidate(
+            (probability_subclass_leg,),
+            Decimal("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "leg probability must be an exact Decimal",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [probability_subclass_candidate],
+                [group],
+                stake="1",
+            )
+
+        summary_subclass = ParlayCandidate(
+            (leg,),
+            DecimalSubclass("2"),
+            Decimal("0.5"),
+            Decimal("0"),
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "combined_odds must be an exact finite Decimal",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [summary_subclass],
+                [group],
+                stake="1",
+            )
+
+        class HostileText(str):
+            def strip(self, *args, **kwargs):
+                raise AssertionError("candidate identity string methods must not dispatch")
+
+            def startswith(self, *args, **kwargs):
+                raise AssertionError("candidate identity string methods must not dispatch")
+
+        hostile_identity_cases = (
+            CandidateLeg(
+                HostileText(leg.quote_key),
+                leg.event_id,
+                Decimal("2"),
+                Decimal("0.5"),
+            ),
+            CandidateLeg(
+                leg.quote_key,
+                HostileText(leg.event_id),
+                Decimal("2"),
+                Decimal("0.5"),
+            ),
+            CandidateLeg(
+                leg.quote_key,
+                leg.event_id,
+                Decimal("2"),
+                Decimal("0.5"),
+                market_id=HostileText("winner"),
+                selection_id="a",
+            ),
+        )
+        for hostile_leg in hostile_identity_cases:
+            with self.subTest(hostile_field=repr(hostile_leg)):
+                hostile_candidate = ParlayCandidate(
+                    (hostile_leg,),
+                    Decimal("2"),
+                    Decimal("0.5"),
+                    Decimal("0"),
+                )
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must be exact canonical text",
+                ):
+                    optimizer.evaluate_candidates(
+                        [],
+                        [hostile_candidate],
+                        [group],
+                        stake="1",
+                    )
+
+        impact = optimizer.evaluate_candidates(
+            [],
+            [canonical],
+            [group],
+            stake=Decimal("1"),
+        )[0]
+        self.assertEqual(impact.candidate, canonical)
+        self.assertEqual(impact.stake, Decimal("1"))
+
+    def test_optimizer_uses_canonical_scenario_snapshot_before_ranking(self) -> None:
+        candidate = _candidate("e1")
+        canonical_group = _groups()[0]
+        optimizer = PortfolioAwareCandidateOptimizer()
+
+        class ScenarioGroupSubclass(ScenarioGroup):
+            pass
+
+        group_subclass = ScenarioGroupSubclass(
+            canonical_group.group_id,
+            canonical_group.outcomes,
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "exact ScenarioGroup",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [candidate],
+                [group_subclass],
+                stake="1",
+            )
+
+        class HostileGroupList(list):
+            def __iter__(self):
+                raise AssertionError("non-canonical group container must not be iterated")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "scenario groups must be a list or tuple",
+        ):
+            optimizer.evaluate_candidates(
+                [],
+                [candidate],
+                HostileGroupList([canonical_group]),  # type: ignore[arg-type]
+                stake="1",
+            )
+
+        impact = optimizer.evaluate_candidates(
+            [],
+            [candidate],
+            [canonical_group],
+            stake="1",
+        )[0]
+        self.assertEqual(impact.candidate, candidate)
+
     def test_result_limit_requires_positive_non_boolean_integer(self) -> None:
         for invalid in (True, False, 1.5, Decimal("2"), "2", None):
             with self.subTest(value=repr(invalid)):
@@ -214,6 +469,27 @@ class CandidateOptimizerInputDeterminismTests(unittest.TestCase):
         self.assertEqual(hostile[0].candidate.legs[0].probability, Decimal("0.10"))
         self.assertEqual(normal[0].standalone_expected_profit, Decimal("-0.80"))
         self.assertEqual(hostile[0].standalone_expected_profit, Decimal("-0.80"))
+
+    def test_top_level_candidate_and_group_mutation_cannot_change_inflight_evaluation(self) -> None:
+        candidates = [_candidate("e1")]
+        groups = _groups()
+        extra = _candidate("e2")
+        engine = _ExternalCollectionMutationEngine(candidates, groups, extra)
+
+        impacts = PortfolioAwareCandidateOptimizer(
+            scenario_engine=engine,
+            result_limit=5,
+        ).evaluate_candidates(
+            [],
+            candidates,
+            groups,
+            stake="1",
+        )
+
+        self.assertEqual(len(candidates), 2)
+        self.assertEqual(groups, [])
+        self.assertEqual(len(impacts), 1)
+        self.assertEqual(impacts[0].candidate.legs[0].quote_key, "e1|winner|a")
 
     def test_equal_rank_candidates_have_input_order_independent_limit_selection(self) -> None:
         first = _candidate("e1")

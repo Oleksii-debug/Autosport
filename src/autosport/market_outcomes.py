@@ -6,6 +6,7 @@ import json
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from enum import Enum
+from weakref import ref
 
 from .domain import MarketType, _canonical_sport_value, _quote_identity
 
@@ -209,7 +210,7 @@ class MarketTerminalState:
         }
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class MarketSettlementOutcomeAuthority:
     """Canonical exhaustive terminal-outcome authority for supported market semantics.
 
@@ -230,13 +231,16 @@ class MarketSettlementOutcomeAuthority:
     verification_protocol_sha256: str
     _verification_token: object = field(repr=False, compare=False)
 
-    def __post_init__(self) -> None:
-        if self._verification_token is not _VERIFIED_AUTHORITY_TOKEN:
+    def __post_init__(
+        self,
+        _verified_authority_token: object = _VERIFIED_AUTHORITY_TOKEN,
+    ) -> None:
+        if self._verification_token is not _verified_authority_token:
             raise TypeError(
                 "MarketSettlementOutcomeAuthority must come from verified evidence"
             )
-        if not isinstance(self.identity, MarketOutcomeIdentity):
-            raise TypeError("identity must be MarketOutcomeIdentity")
+        if type(self.identity) is not MarketOutcomeIdentity:
+            raise TypeError("identity must be the exact MarketOutcomeIdentity type")
         if self.identity.market_type is not MarketType.WINNER:
             raise ValueError(
                 "authoritative terminal outcome semantics currently support winner markets only"
@@ -254,14 +258,14 @@ class MarketSettlementOutcomeAuthority:
         for selection_id in selections:
             self.identity.quote_key(selection_id)
 
-        if not isinstance(self.roster_basis, OutcomeRosterBasis):
-            raise ValueError("roster_basis must be an OutcomeRosterBasis")
+        if type(self.roster_basis) is not OutcomeRosterBasis:
+            raise ValueError("roster_basis must be the exact OutcomeRosterBasis type")
         if self.roster_basis is OutcomeRosterBasis.OBSERVED_ROWS_ONLY:
             raise ValueError(
                 "observed quote rows cannot establish exhaustive market outcome authority"
             )
-        if not isinstance(self.settlement_semantics, SettlementSemantics):
-            raise ValueError("settlement_semantics must be SettlementSemantics")
+        if type(self.settlement_semantics) is not SettlementSemantics:
+            raise ValueError("settlement_semantics must be the exact SettlementSemantics type")
 
         _canonical_text("source_revision", self.source_revision)
         _, cutoff = _canonical_timestamp("causal_cutoff", self.causal_cutoff)
@@ -362,8 +366,8 @@ class MarketSettlementOutcomeAuthority:
         return tuple(states)
 
     def assert_available_as_of(self, decision_as_of: datetime) -> None:
-        if not isinstance(decision_as_of, datetime):
-            raise TypeError("decision_as_of must be a datetime")
+        if type(decision_as_of) is not datetime:
+            raise TypeError("decision_as_of must be an exact datetime")
         if (
             decision_as_of.tzinfo is None
             or decision_as_of.utcoffset() is None
@@ -482,11 +486,18 @@ class MarketSettlementOutcomeAuthority:
         supply that independently derived authority here; durable data then proves
         identity/equality only.
         """
-        if not isinstance(verified_authority, cls):
+        if cls is not MarketSettlementOutcomeAuthority or type(verified_authority) is not cls:
             raise ValueError(
                 "durable market outcome authority readback requires separately "
                 "verified source authority"
             )
+        try:
+            assert_market_settlement_outcome_authoritative(verified_authority)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "durable market outcome authority readback requires separately "
+                "verified source authority"
+            ) from exc
         canonical = verified_authority.to_dict()
         expected = set(canonical)
         if type(raw) is not dict or set(raw) != expected:
@@ -494,7 +505,10 @@ class MarketSettlementOutcomeAuthority:
                 "serialized market outcome authority must contain canonical fields"
             )
         if (
-            raw["schema"] != "autosport.market_settlement_outcome_authority"
+            type(raw["schema"]) is not str
+            or raw["schema"] != "autosport.market_settlement_outcome_authority"
+            or type(raw["schema_version"]) is not int
+            or isinstance(raw["schema_version"], bool)
             or raw["schema_version"] != 1
         ):
             raise ValueError("unsupported market outcome authority schema")
@@ -515,7 +529,14 @@ class MarketSettlementOutcomeAuthority:
             )
         if raw["authority_sha256"] != canonical["authority_sha256"]:
             raise ValueError("market outcome authority hash mismatch")
-        if raw != canonical:
+        try:
+            raw_canonical_json = _canonical_json(raw)
+            verified_canonical_json = _canonical_json(canonical)
+        except (TypeError, ValueError) as exc:
+            raise ValueError(
+                "serialized market outcome authority must contain canonical JSON data"
+            ) from exc
+        if raw_canonical_json != verified_canonical_json:
             raise ValueError(
                 "serialized market outcome authority does not match separately "
                 "verified source evidence"
@@ -531,13 +552,13 @@ class MarketOutcomeAuthorityAssessment:
     refusal_reason: str | None
 
     def __post_init__(self) -> None:
-        if not isinstance(self.identity, MarketOutcomeIdentity):
-            raise TypeError("assessment identity must be MarketOutcomeIdentity")
-        if not isinstance(self.status, OutcomeAuthorityStatus):
-            raise ValueError("assessment status must be OutcomeAuthorityStatus")
+        if type(self.identity) is not MarketOutcomeIdentity:
+            raise TypeError("assessment identity must be exact MarketOutcomeIdentity")
+        if type(self.status) is not OutcomeAuthorityStatus:
+            raise ValueError("assessment status must be exact OutcomeAuthorityStatus")
         if self.status is OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE:
             if (
-                not isinstance(self.authority, MarketSettlementOutcomeAuthority)
+                type(self.authority) is not MarketSettlementOutcomeAuthority
                 or self.refusal_reason is not None
             ):
                 raise ValueError("proven assessment requires authority and no refusal")
@@ -564,10 +585,10 @@ def assess_market_outcome_authority(
 ) -> MarketOutcomeAuthorityAssessment:
     """Refuse raw caller assertions; exhaustive authority needs verified source evidence."""
 
-    if not isinstance(identity, MarketOutcomeIdentity):
-        raise TypeError("identity must be MarketOutcomeIdentity")
-    if not isinstance(roster_basis, OutcomeRosterBasis):
-        raise ValueError("roster_basis must be OutcomeRosterBasis")
+    if type(identity) is not MarketOutcomeIdentity:
+        raise TypeError("identity must be exact MarketOutcomeIdentity")
+    if type(roster_basis) is not OutcomeRosterBasis:
+        raise ValueError("roster_basis must be exact OutcomeRosterBasis")
     if roster_basis is OutcomeRosterBasis.OBSERVED_ROWS_ONLY:
         reason = "observed_rows_do_not_prove_exhaustive_selection_roster"
     elif identity.market_type is not MarketType.WINNER:
@@ -584,12 +605,13 @@ def assess_market_outcome_authority(
     )
 
 
-def assess_betfair_historical_market_definition_authority(
+def _assess_betfair_historical_market_definition_authority_unsealed(
     *,
     market_id: str,
     market_definition: dict[str, object],
     provider_publish_at: str,
     observed_at: str,
+    _verified_authority_token: object = _VERIFIED_AUTHORITY_TOKEN,
 ) -> MarketOutcomeAuthorityAssessment:
     """Derive conservative exhaustive authority from Betfair marketDefinition evidence.
 
@@ -610,6 +632,17 @@ def assess_betfair_historical_market_definition_authority(
         raise ValueError("provider_publish_at must not be after observed_at")
     if type(market_definition) is not dict:
         raise ValueError("market_definition must be a JSON object")
+    try:
+        first_definition_json = _canonical_json(market_definition)
+        second_definition_json = _canonical_json(market_definition)
+    except (TypeError, ValueError) as exc:
+        raise ValueError("market_definition must contain canonical JSON data") from exc
+    if first_definition_json != second_definition_json:
+        raise ValueError("market_definition changed during canonical snapshot")
+    detached_definition = json.loads(first_definition_json)
+    if type(detached_definition) is not dict:
+        raise ValueError("market_definition canonical snapshot must be a JSON object")
+    market_definition = detached_definition
 
     event_id = _canonical_text(
         "marketDefinition.eventId",
@@ -727,7 +760,7 @@ def assess_betfair_historical_market_definition_authority(
         roster_provenance_sha256=roster_provenance_sha256,
         settlement_rules_sha256=settlement_rules_sha256,
         verification_protocol_sha256=verification_protocol_sha256,
-        _verification_token=_VERIFIED_AUTHORITY_TOKEN,
+        _verification_token=_verified_authority_token,
     )
     return MarketOutcomeAuthorityAssessment(
         identity=identity,
@@ -735,3 +768,106 @@ def assess_betfair_historical_market_definition_authority(
         authority=authority,
         refusal_reason=None,
     )
+
+
+# Bind provider-derived authority to the exact object issued by the canonical
+# verifier and to the exact semantics-bearing payload present at issuance.
+# This is an API-level provenance fence inside a trusted Python process; arbitrary
+# same-interpreter reflection/code mutation remains outside the boundary.
+def _install_market_settlement_outcome_authority():
+    issued: dict[int, tuple[object, str]] = {}
+    raw_assess = _assess_betfair_historical_market_definition_authority_unsealed
+    raw_assess_code = raw_assess.__code__
+    authority_type = MarketSettlementOutcomeAuthority
+    assessment_type = MarketOutcomeAuthorityAssessment
+    proven_status = OutcomeAuthorityStatus.PROVEN_EXHAUSTIVE
+    post_init = authority_type.__post_init__
+    post_init_code = post_init.__code__
+    identity_payload = authority_type._identity_payload
+    identity_payload_code = identity_payload.__code__
+
+    def fingerprint(authority: MarketSettlementOutcomeAuthority) -> str:
+        if type(authority) is not authority_type:
+            raise TypeError(
+                "market outcome authority must be the exact canonical authority type"
+            )
+        if (
+            authority_type.__post_init__ is not post_init
+            or post_init.__code__ is not post_init_code
+            or authority_type._identity_payload is not identity_payload
+            or identity_payload.__code__ is not identity_payload_code
+        ):
+            raise RuntimeError("canonical market outcome authority semantics changed")
+        post_init(authority)
+        return _sha256_payload(
+            {
+                "schema": "autosport.market_settlement_outcome_issuance.v1",
+                "authority": identity_payload(authority),
+            }
+        )
+
+    def assess(
+        *,
+        market_id: str,
+        market_definition: dict[str, object],
+        provider_publish_at: str,
+        observed_at: str,
+    ) -> MarketOutcomeAuthorityAssessment:
+        if raw_assess.__code__ is not raw_assess_code:
+            raise RuntimeError("canonical market outcome verifier changed")
+        result = raw_assess(
+            market_id=market_id,
+            market_definition=market_definition,
+            provider_publish_at=provider_publish_at,
+            observed_at=observed_at,
+        )
+        if type(result) is not assessment_type:
+            raise TypeError("canonical market outcome verifier returned invalid assessment type")
+        if result.status is proven_status:
+            authority = result.authority
+            if type(authority) is not authority_type:
+                raise TypeError("canonical market outcome verifier returned invalid authority type")
+            authority_fingerprint = fingerprint(authority)
+            authority_id = id(authority)
+
+            def forget(current: object, *, authority_id: int = authority_id) -> None:
+                existing = issued.get(authority_id)
+                if existing is not None and existing[0] is current:
+                    issued.pop(authority_id, None)
+
+            reference = ref(authority, forget)
+            issued[authority_id] = (reference, authority_fingerprint)
+        elif result.authority is not None:
+            raise ValueError("refused market outcome assessment cannot carry authority")
+        return result
+
+    def assert_authoritative(
+        authority: MarketSettlementOutcomeAuthority,
+    ) -> None:
+        if type(authority) is not authority_type:
+            raise TypeError(
+                "market outcome authority must be the exact canonical authority type"
+            )
+        current = issued.get(id(authority))
+        if current is None or current[0]() is not authority:
+            raise ValueError(
+                "market outcome authority was not issued by the canonical provider verifier"
+            )
+        try:
+            current_fingerprint = fingerprint(authority)
+        except Exception as exc:
+            raise ValueError("market outcome authority is invalid after issuance") from exc
+        if current[1] != current_fingerprint:
+            raise ValueError("market outcome authority changed after issuance")
+
+    return assess, assert_authoritative
+
+
+(
+    assess_betfair_historical_market_definition_authority,
+    assert_market_settlement_outcome_authoritative,
+) = _install_market_settlement_outcome_authority()
+
+# Ordinary imports should not expose either the raw mint or its constructor token.
+del _assess_betfair_historical_market_definition_authority_unsealed
+del _VERIFIED_AUTHORITY_TOKEN

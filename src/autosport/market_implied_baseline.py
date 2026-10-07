@@ -24,7 +24,10 @@ from .external_validity_baseline import (
     FrozenBaselineProtocol,
 )
 from .market_mirror import MarketMirror
-from .market_outcomes import MarketSettlementOutcomeAuthority
+from .market_outcomes import (
+    MarketSettlementOutcomeAuthority,
+    assert_market_settlement_outcome_authoritative,
+)
 from .opportunity import QuoteRef
 from .storage import SQLiteMarketStore
 
@@ -45,6 +48,7 @@ _STORE_TYPE = SQLiteMarketStore
 _STORE_EVENTS = _STORE_TYPE.events
 _OUTCOME_AUTHORITY_TYPE = MarketSettlementOutcomeAuthority
 _OUTCOME_ASSERT_AVAILABLE = _OUTCOME_AUTHORITY_TYPE.assert_available_as_of
+_OUTCOME_ASSERT_ISSUED = assert_market_settlement_outcome_authoritative
 
 
 def _text(value: object, name: str) -> str:
@@ -311,6 +315,12 @@ def _require_canonical_inputs(
         raise MarketImpliedBaselineError(
             "market outcome availability authority was rebound"
         )
+    try:
+        _OUTCOME_ASSERT_ISSUED(outcome_authority)
+    except (TypeError, ValueError) as exc:
+        raise MarketImpliedBaselineError(
+            "outcome_authority is not canonically issued provider evidence"
+        ) from exc
 
 
 def build_market_implied_baseline_evidence(

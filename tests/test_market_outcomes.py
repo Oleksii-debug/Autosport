@@ -286,6 +286,49 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
             (authority.authority_sha256,),
         )
 
+    def test_settlement_authority_rejects_identity_subclass_before_member_dispatch(self):
+        authority = self._authority(("away", "home"))
+
+        class HostileIdentity(MarketOutcomeIdentity):
+            __slots__ = ("_armed",)
+
+            def __getattribute__(self, name):
+                if name in {"market_type", "quote_key"}:
+                    try:
+                        armed = object.__getattribute__(self, "_armed")
+                    except AttributeError:
+                        armed = False
+                    if armed:
+                        raise AssertionError(
+                            "market identity member dispatch must not execute before exact admission"
+                        )
+                return super().__getattribute__(name)
+
+        base_identity = authority.identity
+        hostile_identity = HostileIdentity(
+            sport=base_identity.sport,
+            event_id=base_identity.event_id,
+            market_id=base_identity.market_id,
+            source_id=base_identity.source_id,
+            market_type=base_identity.market_type,
+        )
+        object.__setattr__(hostile_identity, "_armed", True)
+
+        with self.assertRaisesRegex(TypeError, "identity must be MarketOutcomeIdentity"):
+            MarketSettlementOutcomeAuthority(
+                identity=hostile_identity,
+                selection_ids=authority.selection_ids,
+                roster_basis=authority.roster_basis,
+                settlement_semantics=authority.settlement_semantics,
+                source_revision=authority.source_revision,
+                causal_cutoff=authority.causal_cutoff,
+                observed_at=authority.observed_at,
+                roster_provenance_sha256=authority.roster_provenance_sha256,
+                settlement_rules_sha256=authority.settlement_rules_sha256,
+                verification_protocol_sha256=authority.verification_protocol_sha256,
+                _verification_token=authority._verification_token,
+            )
+
     def test_authoritative_search_rejects_authority_subclass_before_identity_dispatch(self):
         authority = self._authority(("away", "home"))
 

@@ -136,8 +136,10 @@ class ForecastRecord:
 
     @property
     def canonical_hash(self) -> str:
+        if type(self) is not ForecastRecord:
+            raise ValueError("forecast record must be an exact ForecastRecord")
         canonical = json.dumps(
-            self.to_dict(),
+            ForecastRecord.to_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),

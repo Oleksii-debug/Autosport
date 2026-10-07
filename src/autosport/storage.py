@@ -1478,6 +1478,9 @@ class SQLiteMarketStore:
                 "market append availability exceeds committed append authority"
             )
 
+        commit_times_by_end = {
+            row[1]: row[3] for row in self._validated_append_commit_time_rows()
+        }
         rows: list[tuple[int, str, str, str]] = []
         previous_available_at: datetime | None = None
         for index, raw_row in enumerate(raw_rows):
@@ -1524,6 +1527,15 @@ class SQLiteMarketStore:
             ):
                 raise MonotonicAuthorityRollbackError(
                     "market append availability product clock moved backwards"
+                )
+            committed_at = commit_times_by_end.get(max_generation)
+            if (
+                committed_at is not None
+                and available_instant
+                < _timezone_aware_instant(committed_at, "append committed_at")
+            ):
+                raise MonotonicAuthorityRollbackError(
+                    "market append availability precedes product commit time"
                 )
             previous_available_at = available_instant
             rows.append(
@@ -2879,21 +2891,52 @@ class SQLiteMarketStore:
                         )
                         expected_generation += 1
                     entry_tuple = tuple(entries)
-                    binding_sha256 = _append_binding_sha256(
-                        previous_state_sha256=committed_state_sha256,
-                        intended_state_sha256=intended_state_sha256,
-                        entries=entry_tuple,
-                    )
                     start_generation = entry_tuple[0][0]
                     end_generation = entry_tuple[-1][0]
                     tx_id = (
                         f"append-{start_generation}-{end_generation}-{uuid.uuid4().hex}"
+                    )
+                    committed_at = _canonical_product_time(
+                        _market_product_utc_now()
+                    )
+                    timed_rows = self._validated_append_commit_time_rows()
+                    if (
+                        timed_rows
+                        and _timezone_aware_instant(
+                            committed_at, "append committed_at"
+                        )
+                        < _timezone_aware_instant(
+                            timed_rows[-1][3], "previous append committed_at"
+                        )
+                    ):
+                        raise MonotonicAuthorityRollbackError(
+                            "market append commit-time product clock moved backwards"
+                        )
+                    binding_sha256 = _append_binding_sha256(
+                        previous_state_sha256=committed_state_sha256,
+                        intended_state_sha256=intended_state_sha256,
+                        entries=entry_tuple,
+                        committed_at=committed_at,
                     )
                     authority.prepare(
                         tx_id=tx_id,
                         observed_state_sha256=committed_state_sha256,
                         intended_state_sha256=intended_state_sha256,
                         semantic_binding_sha256=binding_sha256,
+                    )
+                    self.connection.execute(
+                        """INSERT INTO market_append_commit_times
+                           (end_append_generation,
+                            start_append_generation,
+                            append_tx_id,
+                            committed_at)
+                           VALUES (?, ?, ?, ?)""",
+                        (
+                            end_generation,
+                            start_generation,
+                            tx_id,
+                            committed_at,
+                        ),
                     )
                     prepared = (tx_id, binding_sha256)
                     self._commit_stable_database_path()

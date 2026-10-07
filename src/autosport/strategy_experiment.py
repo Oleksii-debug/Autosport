@@ -20,15 +20,25 @@ _MAX_PROTOCOL_JSON_DEPTH = 32
 
 
 def _require_text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be a non-empty string")
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"{field} must be a non-empty trimmed string")
+    if "\x00" in value:
+        raise ValueError(f"{field} must not contain NUL")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8") from exc
     return value
 
 
 def _require_sha256(value: Any, field: str) -> str:
-    text = _require_text(value, field).lower()
-    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
-        raise ValueError(f"{field} must be a SHA-256 hex digest")
+    text = _require_text(value, field)
+    if (
+        text != text.lower()
+        or len(text) != 64
+        or any(char not in "0123456789abcdef" for char in text)
+    ):
+        raise ValueError(f"{field} must be a canonical lowercase SHA-256 hex digest")
     return text
 
 
@@ -100,8 +110,8 @@ def _require_bool(value: Any, field: str) -> bool:
 
 
 def _require_text_tuple(value: Any, field: str) -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise ValueError(f"{field} must be a tuple of strings")
+    if type(value) is not tuple:
+        raise ValueError(f"{field} must be an exact tuple of strings")
     normalized = tuple(
         _require_text(item, f"{field}[{index}]") for index, item in enumerate(value)
     )
@@ -222,6 +232,7 @@ class ScientificProtocolBinding:
             _require_text(self.config_id, "config_id")
 
     def canonical_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         payload = {
             "protocol_version": self.protocol_version,
             "research_protocol_id": self.research_protocol_id,
@@ -302,6 +313,7 @@ class EvaluationCase:
 
     @property
     def identity(self) -> tuple[Any, ...]:
+        self.__post_init__()
         return (
             self.dataset_name,
             self.sport,
@@ -321,6 +333,7 @@ class EvaluationCase:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "case_id": self.case_id,
             "dataset_name": self.dataset_name,
@@ -358,6 +371,7 @@ class CandidateRef:
 
     @property
     def runtime_identity_sha256(self) -> str:
+        self.__post_init__()
         return _runtime_identity_sha256(
             self.canonical_strategy_id,
             self.agent_composition_sha256,
@@ -365,6 +379,7 @@ class CandidateRef:
         )
 
     def promotion_identity_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "candidate_id": self.candidate_id,
             "canonical_strategy_id": self.canonical_strategy_id,
@@ -373,6 +388,7 @@ class CandidateRef:
         }
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "candidate_id": self.candidate_id,
             "canonical_strategy_id": self.canonical_strategy_id,
@@ -392,6 +408,7 @@ class GuardrailRule:
     max_regression: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
+        _require_text(self.metric, "metric")
         if self.metric not in _SUPPORTED_METRICS:
             raise ValueError(f"unsupported guardrail metric: {self.metric}")
         _require_bool(self.higher_is_better, "higher_is_better")
@@ -400,6 +417,7 @@ class GuardrailRule:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "metric": self.metric,
             "higher_is_better": self.higher_is_better,
@@ -426,28 +444,36 @@ class ChampionChallengerProtocol:
         _require_text(self.experiment_id, "experiment_id")
         _require_text(self.research_question_id, "research_question_id")
         _require_text(self.hypothesis_id, "hypothesis_id")
-        if not isinstance(self.scientific_protocol, ScientificProtocolBinding):
-            raise ValueError("scientific_protocol must be a ScientificProtocolBinding")
+        if type(self.scientific_protocol) is not ScientificProtocolBinding:
+            raise ValueError("scientific_protocol must be an exact ScientificProtocolBinding")
+        self.scientific_protocol.__post_init__()
         if self.scientific_protocol.research_question_id != self.research_question_id:
             raise ValueError("scientific protocol research question identity mismatch")
         if self.scientific_protocol.hypothesis_id != self.hypothesis_id:
             raise ValueError("scientific protocol hypothesis identity mismatch")
         if type(self.protocol_schema_version) is not int or self.protocol_schema_version != 1:
             raise ValueError("protocol_schema_version must be 1")
-        if not isinstance(self.champion, CandidateRef):
-            raise ValueError("champion must be a CandidateRef")
-        if not isinstance(self.challengers, tuple) or not all(
-            isinstance(candidate, CandidateRef) for candidate in self.challengers
+        if type(self.champion) is not CandidateRef:
+            raise ValueError("champion must be an exact CandidateRef")
+        if type(self.challengers) is not tuple or not all(
+            type(candidate) is CandidateRef for candidate in self.challengers
         ):
             raise ValueError("challengers must be a tuple of CandidateRef values")
-        if not isinstance(self.cases, tuple) or not all(
-            isinstance(case, EvaluationCase) for case in self.cases
+        if type(self.cases) is not tuple or not all(
+            type(case) is EvaluationCase for case in self.cases
         ):
             raise ValueError("cases must be a tuple of EvaluationCase values")
-        if not isinstance(self.guardrails, tuple) or not all(
-            isinstance(rule, GuardrailRule) for rule in self.guardrails
+        if type(self.guardrails) is not tuple or not all(
+            type(rule) is GuardrailRule for rule in self.guardrails
         ):
             raise ValueError("guardrails must be a tuple of GuardrailRule values")
+        self.champion.__post_init__()
+        for candidate in self.challengers:
+            candidate.__post_init__()
+        for case in self.cases:
+            case.__post_init__()
+        for rule in self.guardrails:
+            rule.__post_init__()
         if not self.challengers:
             raise ValueError("at least one challenger is required")
         if not self.cases:
@@ -488,6 +514,7 @@ class ChampionChallengerProtocol:
         those hashes must themselves bind this payload before any evaluation can
         produce a promotion-capable recommendation.
         """
+        self.__post_init__()
         return {
             "protocol_schema_version": self.protocol_schema_version,
             "experiment_id": self.experiment_id,
@@ -528,6 +555,7 @@ class ChampionChallengerProtocol:
         return expected
 
     def canonical_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "protocol_schema_version": self.protocol_schema_version,
             "experiment_id": self.experiment_id,

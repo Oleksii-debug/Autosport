@@ -1,6 +1,6 @@
-"""Causal, restart-safe participant identity and alias lineage.
+"""Causal, restart-safe sport/competition/participant identity and alias lineage.
 
-This is deliberately an identity authority only.  It does not score participants,
+This is deliberately an identity authority only.  It does not score entities,
 infer behaviour, replace provider event identity, or grant strategy/execution power.
 """
 
@@ -22,9 +22,11 @@ _VERSION = 1
 
 
 class EntityKind(StrEnum):
+    SPORT = "SPORT"
+    LEAGUE = "LEAGUE"
+    SEASON = "SEASON"
     PARTICIPANT = "PARTICIPANT"
     TEAM = "TEAM"
-    LEAGUE = "LEAGUE"
 
 
 class IdentityView(StrEnum):
@@ -74,6 +76,18 @@ def _time_text(name: str, value: object) -> str:
 def _digest(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate authority-bearing JSON keys at every object depth."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ParticipantIdentityError(
+                f"duplicate identity registry JSON key: {key}"
+            )
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -276,6 +290,10 @@ class ParticipantIdentityRegistry:
                 raise ParticipantIdentityError("alias correction must preserve source and alias")
             if target.entity_id == alias.entity_id:
                 raise ParticipantIdentityError("alias correction must change entity")
+            if self._entities[target.entity_id].kind is not self._entities[alias.entity_id].kind:
+                raise ParticipantIdentityError(
+                    "alias correction identities must have the same EntityKind"
+                )
             if not _overlap(target.valid_from, target.valid_until, alias.valid_from, alias.valid_until):
                 raise ParticipantIdentityError("alias correction must overlap superseded interval")
             if _instant("available_at", alias.available_at) <= _instant("available_at", target.available_at):
@@ -323,6 +341,11 @@ class ParticipantIdentityRegistry:
             raise TypeError("membership must be RosterMembership")
         if membership.entity_id not in self._entities:
             raise ParticipantIdentityError("roster membership references unknown entity")
+        entity = self._entities[membership.entity_id]
+        if entity.kind not in {EntityKind.PARTICIPANT, EntityKind.TEAM}:
+            raise ParticipantIdentityError(
+                "event roster membership requires PARTICIPANT or TEAM identity"
+            )
         if membership in self._rosters:
             return
         candidate_rosters = [*self._rosters, membership]
@@ -522,28 +545,125 @@ class ParticipantIdentityRegistry:
 
     def _load(self) -> None:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = json.loads(
+                self.path.read_text(encoding="utf-8"),
+                object_pairs_hook=_unique_json_object,
+            )
+        except ParticipantIdentityError:
+            raise
         except (OSError, json.JSONDecodeError) as exc:
             raise ParticipantIdentityError(f"cannot load identity registry: {exc}") from exc
-        if not isinstance(raw, dict) or raw.get("schema") != _SCHEMA or raw.get("version") != _VERSION:
+        expected_fields = {
+            "schema",
+            "version",
+            "entities",
+            "aliases",
+            "rosters",
+            "lineages",
+        }
+        if (
+            type(raw) is not dict
+            or set(raw) != expected_fields
+            or raw.get("schema") != _SCHEMA
+            or raw.get("version") != _VERSION
+            or any(
+                type(raw[field]) is not list
+                for field in ("entities", "aliases", "rosters", "lineages")
+            )
+        ):
             raise ParticipantIdentityError("unsupported identity registry schema")
+        record_fields = {
+            "entities": {
+                "entity_id",
+                "kind",
+                "source_reference",
+                "evidence_sha256",
+                "first_known_at",
+                "available_at",
+            },
+            "aliases": {
+                "source_id",
+                "alias",
+                "entity_id",
+                "valid_from",
+                "valid_until",
+                "available_at",
+                "evidence_sha256",
+                "recorded_at",
+                "relation",
+                "supersedes_record_id",
+            },
+            "rosters": {
+                "event_id",
+                "source_id",
+                "entity_id",
+                "member_from",
+                "member_until",
+                "available_at",
+                "evidence_sha256",
+            },
+            "lineages": {
+                "predecessor_entity_id",
+                "successor_entity_id",
+                "relation",
+                "effective_from",
+                "available_at",
+                "recorded_at",
+                "evidence_sha256",
+                "valid_until",
+            },
+        }
+        for collection, expected in record_fields.items():
+            seen_records: set[str] = set()
+            for item in raw[collection]:
+                if type(item) is not dict or set(item) != expected:
+                    raise ParticipantIdentityError(
+                        f"unsupported identity registry {collection} record schema"
+                    )
+                canonical_record = json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if canonical_record in seen_records:
+                    raise ParticipantIdentityError(
+                        f"duplicate identity registry {collection} record"
+                    )
+                seen_records.add(canonical_record)
+
         self._loading = True
         try:
-            for item in raw.get("entities", []):
-                entity = EntityIdentity(item["entity_id"], EntityKind(item["kind"]), item["source_reference"], item["evidence_sha256"], item["first_known_at"], item["available_at"])
+            for item in raw["entities"]:
+                try:
+                    kind = EntityKind(item["kind"])
+                except ValueError as exc:
+                    raise ParticipantIdentityError("unsupported entity identity kind") from exc
+                entity = EntityIdentity(
+                    item["entity_id"],
+                    kind,
+                    item["source_reference"],
+                    item["evidence_sha256"],
+                    item["first_known_at"],
+                    item["available_at"],
+                )
                 if entity.entity_id in self._entities:
                     raise ParticipantIdentityError("duplicate entity identity")
                 self._entities[entity.entity_id] = entity
-            for item in raw.get("aliases", []):
+            for item in raw["aliases"]:
                 self.add_alias(AliasRecord(**item))
-            for item in raw.get("rosters", []):
+            for item in raw["rosters"]:
                 self.add_roster_membership(RosterMembership(**item))
-            for item in raw.get("lineages", []):
+            for item in raw["lineages"]:
+                try:
+                    relation = LineageRelation(item["relation"])
+                except ValueError as exc:
+                    raise ParticipantIdentityError("unsupported identity lineage relation") from exc
                 self.add_lineage(EntityLineage(
                     item["predecessor_entity_id"], item["successor_entity_id"],
-                    LineageRelation(item["relation"]), item["effective_from"],
+                    relation, item["effective_from"],
                     item["available_at"], item["recorded_at"], item["evidence_sha256"],
-                    item.get("valid_until"),
+                    item["valid_until"],
                 ))
         finally:
             self._loading = False

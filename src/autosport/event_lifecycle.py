@@ -8,8 +8,8 @@ from enum import StrEnum
 from pathlib import Path
 from typing import Callable, Iterable
 
-from .domain import _canonical_sport_value
-from .integrity import atomic_write_json
+from .domain import _canonical_sport_value, _encoded_sport_identity
+from .integrity import atomic_write_json, durable_path_lock
 from .json_integrity import strict_json_loads
 from .providers import _scoped_identity
 from .storage import SQLiteMarketStore
@@ -74,12 +74,38 @@ def _canonical_digest(payload: object) -> str:
     ).hexdigest()
 
 
-def canonical_event_identity(*, source_id: str, sport: str, event_id: str) -> str:
-    """Reuse the persisted MarketEvent identity from the provider boundary."""
-    _canonical_sport_value(sport)
+def _source_identity_component(value: object) -> str:
+    source_id = _text(value, "source_id")
+    if "|" in source_id:
+        raise ValueError("source_id must not contain reserved identity delimiter '|'")
+    return source_id
+
+
+def _provider_event_identity_component(value: object) -> str:
+    event_id = _text(value, "event_id")
+    if "|" in event_id:
+        raise ValueError("event_id must not contain reserved identity delimiter '|'")
+    if ":" in event_id:
+        raise ValueError(
+            "event_id must not contain reserved source-scope delimiter ':'"
+        )
+    return event_id
+
+
+def _legacy_event_identity(*, source_id: str, event_id: str) -> str:
     return _scoped_identity(
-        _text(source_id, "source_id"),
-        _text(event_id, "event_id"),
+        _source_identity_component(source_id),
+        _provider_event_identity_component(event_id),
+    )
+
+
+def canonical_event_identity(*, source_id: str, sport: str, event_id: str) -> str:
+    """Return a sport-scoped catalog identity compatible with deployed selectors."""
+    return _encoded_sport_identity(
+        "catalog-event",
+        _canonical_sport_value(sport),
+        _source_identity_component(source_id),
+        _provider_event_identity_component(event_id),
     )
 
 
@@ -95,9 +121,9 @@ class CatalogEvent:
     settlement_ref: str | None = None
 
     def validate(self) -> None:
-        _text(self.source_id, "source_id")
+        _source_identity_component(self.source_id)
         _canonical_sport_value(self.sport)
-        _text(self.event_id, "event_id")
+        _provider_event_identity_component(self.event_id)
         if not isinstance(self.phase, EventPhase):
             try:
                 EventPhase(self.phase)
@@ -150,7 +176,7 @@ class CatalogPage:
     epoch_changed: bool = False
 
     def validate(self) -> None:
-        _text(self.source_id, "source_id")
+        _source_identity_component(self.source_id)
         _text(self.stream_epoch, "stream_epoch")
         _text(self.cursor, "cursor")
         if type(self.position) is not int or self.position < 0:
@@ -192,7 +218,7 @@ class CatalogCheckpoint:
     page_sha256: str
 
     def __post_init__(self) -> None:
-        _text(self.source_id, "source_id")
+        _source_identity_component(self.source_id)
         _text(self.stream_epoch, "stream_epoch")
         _text(self.cursor, "cursor")
         if type(self.position) is not int or self.position < 0:
@@ -221,9 +247,9 @@ class EventLifecycleRecord:
 
     def __post_init__(self) -> None:
         _text(self.identity, "identity")
-        _text(self.source_id, "source_id")
+        _source_identity_component(self.source_id)
         _canonical_sport_value(self.sport)
-        _text(self.event_id, "event_id")
+        _provider_event_identity_component(self.event_id)
         if not isinstance(self.phase, EventPhase):
             raise ValueError("phase must be EventPhase")
         first_discovered = _instant(self.first_discovered_at, "first_discovered_at")
@@ -358,7 +384,8 @@ class ContinuousEventLifecycle:
     """
 
     _SCHEMA = "autosport.continuous_event_lifecycle"
-    _VERSION = 1
+    _VERSION = 2
+    _LEGACY_VERSION = 1
     _PHASE_RANK = {
         EventPhase.PRE_MATCH: 0,
         EventPhase.LIVE: 1,
@@ -368,9 +395,12 @@ class ContinuousEventLifecycle:
     def __init__(self, path: str | Path) -> None:
         self.path = Path(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
-        if not self.path.exists():
-            atomic_write_json(self.path, self._empty())
-        self._read()
+        with durable_path_lock(self.path):
+            if not self.path.exists():
+                atomic_write_json(self.path, self._empty())
+            else:
+                self._migrate_legacy_state()
+            self._read()
 
     @classmethod
     def _empty(cls) -> dict[str, object]:
@@ -380,6 +410,76 @@ class ContinuousEventLifecycle:
             "sources": {},
             "events": {},
         }
+
+    def _migrate_legacy_state(self) -> None:
+        """One-way migrate exact schema-v1 records using their durable sport field."""
+
+        try:
+            raw = strict_json_loads(self.path.read_text(encoding="utf-8"))
+        except (OSError, TypeError, ValueError) as exc:
+            raise CatalogLifecycleError("cannot verify catalog lifecycle state") from exc
+        if type(raw) is not dict:
+            raise CatalogLifecycleError("unsupported catalog lifecycle state")
+        version = raw.get("schema_version")
+        if version == self._VERSION:
+            return
+        if (
+            set(raw) != {"schema", "schema_version", "sources", "events"}
+            or raw.get("schema") != self._SCHEMA
+            or version != self._LEGACY_VERSION
+            or type(raw.get("sources")) is not dict
+            or type(raw.get("events")) is not dict
+        ):
+            raise CatalogLifecycleError("unsupported catalog lifecycle state")
+
+        try:
+            for source_key, checkpoint in raw["sources"].items():
+                if type(checkpoint) is not dict or source_key != checkpoint.get("source_id"):
+                    raise ValueError("catalog checkpoint source key mismatch")
+                CatalogCheckpoint(**checkpoint)
+
+            migrated_events: dict[str, dict[str, object]] = {}
+            for legacy_identity, record in raw["events"].items():
+                if type(record) is not dict or legacy_identity != record.get("identity"):
+                    raise ValueError("catalog event identity key mismatch")
+                source_id = _text(record.get("source_id"), "source_id")
+                sport = _canonical_sport_value(record.get("sport"))
+                event_id = _text(record.get("event_id"), "event_id")
+                expected_legacy = _legacy_event_identity(
+                    source_id=source_id,
+                    event_id=event_id,
+                )
+                if legacy_identity != expected_legacy:
+                    raise CatalogConflictError(
+                        "legacy lifecycle identity does not match durable source/event identity"
+                    )
+                new_identity = canonical_event_identity(
+                    source_id=source_id,
+                    sport=sport,
+                    event_id=event_id,
+                )
+                if new_identity in migrated_events:
+                    raise CatalogConflictError(
+                        "legacy lifecycle migration would alias distinct durable events"
+                    )
+                migrated = dict(record)
+                migrated["identity"] = new_identity
+                verified = EventLifecycleRecord.from_dict(migrated)
+                migrated_events[new_identity] = verified.to_dict()
+        except (
+            AttributeError,
+            KeyError,
+            TypeError,
+            ValueError,
+            CatalogLifecycleError,
+        ) as exc:
+            raise CatalogLifecycleError(
+                "catalog lifecycle legacy migration contains invalid evidence"
+            ) from exc
+
+        raw["schema_version"] = self._VERSION
+        raw["events"] = migrated_events
+        atomic_write_json(self.path, raw)
 
     def _read(self) -> dict[str, object]:
         try:
@@ -518,67 +618,68 @@ class ContinuousEventLifecycle:
         )
 
     def apply_page(self, page: CatalogPage, *, discovered_at: str) -> tuple[str, ...]:
-        page.validate()
-        now = _instant(discovered_at, "discovered_at")
-        for event in page.events:
-            if _instant(event.available_at, "available_at") > now:
-                raise CatalogLifecycleError(
-                    "catalog evidence cannot be available after discovery cutoff"
-                )
-
-        raw = self._read()
-        sources = raw["sources"]
-        events = raw["events"]
-        previous_raw = sources.get(page.source_id)
-        previous = None if previous_raw is None else CatalogCheckpoint(**previous_raw)
-        if previous is not None:
-            if page.stream_epoch == previous.stream_epoch:
-                if page.position == previous.position:
-                    if (
-                        page.cursor == previous.cursor
-                        and page.digest == previous.page_sha256
-                    ):
-                        return ()
-                    raise CatalogCursorError(
-                        "equal catalog position conflicts with durable page evidence"
+        with durable_path_lock(self.path):
+            page.validate()
+            now = _instant(discovered_at, "discovered_at")
+            for event in page.events:
+                if _instant(event.available_at, "available_at") > now:
+                    raise CatalogLifecycleError(
+                        "catalog evidence cannot be available after discovery cutoff"
                     )
-                if page.position != previous.position + 1:
-                    raise CatalogCursorError("catalog cursor gap or regression detected")
-            elif not page.epoch_changed:
-                raise CatalogCursorError(
-                    "catalog stream epoch changed without explicit epoch_changed evidence"
+
+            raw = self._read()
+            sources = raw["sources"]
+            events = raw["events"]
+            previous_raw = sources.get(page.source_id)
+            previous = None if previous_raw is None else CatalogCheckpoint(**previous_raw)
+            if previous is not None:
+                if page.stream_epoch == previous.stream_epoch:
+                    if page.position == previous.position:
+                        if (
+                            page.cursor == previous.cursor
+                            and page.digest == previous.page_sha256
+                        ):
+                            return ()
+                        raise CatalogCursorError(
+                            "equal catalog position conflicts with durable page evidence"
+                        )
+                    if page.position != previous.position + 1:
+                        raise CatalogCursorError("catalog cursor gap or regression detected")
+                elif not page.epoch_changed:
+                    raise CatalogCursorError(
+                        "catalog stream epoch changed without explicit epoch_changed evidence"
+                    )
+            elif page.epoch_changed:
+                raise CatalogCursorError("first catalog page cannot claim an epoch change")
+
+            changed: list[str] = []
+            for event in page.events:
+                previous_event_raw = events.get(event.identity)
+                previous_event = (
+                    None
+                    if previous_event_raw is None
+                    else EventLifecycleRecord.from_dict(previous_event_raw)
                 )
-        elif page.epoch_changed:
-            raise CatalogCursorError("first catalog page cannot claim an epoch change")
+                candidate = self._event_record(
+                    event,
+                    discovered_at=discovered_at,
+                    previous=previous_event,
+                )
+                if previous_event != candidate:
+                    events[event.identity] = candidate.to_dict()
+                    changed.append(event.identity)
 
-        changed: list[str] = []
-        for event in page.events:
-            previous_event_raw = events.get(event.identity)
-            previous_event = (
-                None
-                if previous_event_raw is None
-                else EventLifecycleRecord.from_dict(previous_event_raw)
+            sources[page.source_id] = asdict(
+                CatalogCheckpoint(
+                    source_id=page.source_id,
+                    stream_epoch=page.stream_epoch,
+                    cursor=page.cursor,
+                    position=page.position,
+                    page_sha256=page.digest,
+                )
             )
-            candidate = self._event_record(
-                event,
-                discovered_at=discovered_at,
-                previous=previous_event,
-            )
-            if previous_event != candidate:
-                events[event.identity] = candidate.to_dict()
-                changed.append(event.identity)
-
-        sources[page.source_id] = asdict(
-            CatalogCheckpoint(
-                source_id=page.source_id,
-                stream_epoch=page.stream_epoch,
-                cursor=page.cursor,
-                position=page.position,
-                page_sha256=page.digest,
-            )
-        )
-        atomic_write_json(self.path, raw)
-        return tuple(changed)
+            atomic_write_json(self.path, raw)
+            return tuple(changed)
 
     def refresh_once(
         self,
@@ -758,6 +859,19 @@ class ContinuousEventLifecycle:
             if record is None:
                 raise CatalogLifecycleError(f"unknown catalog event {identity!r}")
             input_id = f"catalog:{record.identity}"
+            legacy_input_id = (
+                "catalog:"
+                + _legacy_event_identity(
+                    source_id=record.source_id,
+                    event_id=record.event_id,
+                )
+            )
+            # Schema-v1 used the provider-scoped event identity as the dependency
+            # input key.  After the v2 sport-scoped migration, retire that legacy
+            # routing key before evaluating/registering the new identity so a
+            # restart cannot leave both aliases active in the live dependency index.
+            if retire_input is not None and legacy_input_id != input_id:
+                retire_input(legacy_input_id)
             assessment = self.assess_evidence(
                 identity,
                 store,
@@ -777,7 +891,10 @@ class ContinuousEventLifecycle:
                 input_id,
                 source_ids=record.source_id,
                 sports=record.sport,
-                event_ids=record.identity,
+                event_ids=_legacy_event_identity(
+                    source_id=record.source_id,
+                    event_id=record.event_id,
+                ),
             )
             registered.append(input_id)
         return tuple(registered)

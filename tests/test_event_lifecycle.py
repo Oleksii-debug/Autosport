@@ -1,14 +1,19 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
+import autosport.event_lifecycle as event_lifecycle_module
 from autosport.domain import MarketEvent
 from autosport.event_lifecycle import (
     CatalogConflictError,
+    CatalogLifecycleError,
     CatalogCursorError,
     CatalogEvent,
     CatalogPage,
@@ -100,32 +105,93 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             epoch_changed=epoch_changed,
         )
 
-    def test_same_provider_event_id_across_sports_fails_closed(self) -> None:
+    def test_lifecycle_read_modify_write_uses_existing_durable_path_lock(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            ContinuousEventLifecycle(path)
+
+            depth = 0
+            real_read = ContinuousEventLifecycle._read
+            real_migrate = ContinuousEventLifecycle._migrate_legacy_state
+            real_atomic_write = event_lifecycle_module.atomic_write_json
+
+            @contextmanager
+            def observed_lock(candidate: str | Path):
+                nonlocal depth
+                self.assertEqual(Path(candidate), path)
+                depth += 1
+                try:
+                    yield
+                finally:
+                    depth -= 1
+
+            def guarded_read(instance: ContinuousEventLifecycle):
+                self.assertGreater(depth, 0)
+                return real_read(instance)
+
+            def guarded_migrate(instance: ContinuousEventLifecycle):
+                self.assertGreater(depth, 0)
+                return real_migrate(instance)
+
+            def guarded_atomic_write(candidate: str | Path, payload: dict):
+                self.assertGreater(depth, 0)
+                return real_atomic_write(candidate, payload)
+
+            with (
+                patch.object(event_lifecycle_module, "durable_path_lock", observed_lock),
+                patch.object(ContinuousEventLifecycle, "_read", guarded_read),
+                patch.object(
+                    ContinuousEventLifecycle,
+                    "_migrate_legacy_state",
+                    guarded_migrate,
+                ),
+                patch.object(
+                    event_lifecycle_module,
+                    "atomic_write_json",
+                    guarded_atomic_write,
+                ),
+            ):
+                lifecycle = ContinuousEventLifecycle(path)
+                event = self._catalog_event(available_offset=1)
+                changed = lifecycle.apply_page(
+                    self._page(1, event),
+                    discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+                )
+                self.assertEqual(changed, (event.identity,))
+
+            reopened = ContinuousEventLifecycle(path)
+            self.assertIsNotNone(reopened.get(event.identity))
+
+    def test_same_provider_event_id_across_sports_remains_distinct(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
+            table_tennis = self._catalog_event(
+                sport="table_tennis",
+                available_offset=1,
+            )
+            soccer = self._catalog_event(
+                sport="soccer",
+                available_offset=2,
+            )
             lifecycle.apply_page(
-                self._page(
-                    1,
-                    self._catalog_event(
-                        sport="table_tennis",
-                        available_offset=1,
-                    ),
-                ),
+                self._page(1, table_tennis),
                 discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
             )
-            with self.assertRaises(CatalogConflictError):
-                lifecycle.apply_page(
-                    self._page(
-                        2,
-                        self._catalog_event(
-                            sport="soccer",
-                            available_offset=2,
-                        ),
-                    ),
-                    discovered_at=(self.START + timedelta(seconds=2)).isoformat(),
-                )
+            lifecycle.apply_page(
+                self._page(2, soccer),
+                discovered_at=(self.START + timedelta(seconds=2)).isoformat(),
+            )
 
-    def test_lifecycle_identity_reuses_provider_scoped_market_event_identity(self) -> None:
+            records = {record.sport: record for record in lifecycle.records()}
+            self.assertEqual(set(records), {"table_tennis", "soccer"})
+            self.assertEqual(records["table_tennis"].event_id, "event-1")
+            self.assertEqual(records["soccer"].event_id, "event-1")
+            self.assertNotEqual(
+                records["table_tennis"].identity,
+                records["soccer"].identity,
+            )
+
+    def test_lifecycle_identity_is_sport_scoped_and_deterministic(self) -> None:
         table_tennis = canonical_event_identity(
             source_id="provider-a",
             sport="table_tennis",
@@ -136,14 +202,126 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             sport="soccer",
             event_id="event-1",
         )
-        self.assertEqual(table_tennis, "provider-a:event-1")
-        self.assertEqual(soccer, table_tennis)
+        self.assertTrue(table_tennis.startswith("sport-v2-"))
+        self.assertTrue(soccer.startswith("sport-v2-"))
+        self.assertNotEqual(table_tennis, soccer)
+        self.assertEqual(
+            table_tennis,
+            canonical_event_identity(
+                source_id="provider-a",
+                sport="table_tennis",
+                event_id="event-1",
+            ),
+        )
+
+    def test_schema_v1_migrates_only_from_its_exact_durable_sport(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            lifecycle = ContinuousEventLifecycle(path)
+            event = self._catalog_event(
+                sport="table_tennis",
+                available_offset=1,
+            )
+            lifecycle.apply_page(
+                self._page(1, event),
+                discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            record = raw["events"].pop(event.identity)
+            legacy_identity = "provider-a:event-1"
+            record["identity"] = legacy_identity
+            raw["events"][legacy_identity] = record
+            raw["schema_version"] = 1
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            restarted = ContinuousEventLifecycle(path)
+            migrated = restarted.get(event.identity)
+            self.assertIsNotNone(migrated)
+            assert migrated is not None
+            self.assertEqual(migrated.sport, "table_tennis")
+            self.assertIsNone(restarted.get(legacy_identity))
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["schema_version"], 2)
+            self.assertEqual(set(persisted["events"]), {event.identity})
+
+    def test_schema_v1_without_durable_sport_fails_closed_without_rewrite(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "catalog.json"
+            lifecycle = ContinuousEventLifecycle(path)
+            event = self._catalog_event(
+                sport="table_tennis",
+                available_offset=1,
+            )
+            lifecycle.apply_page(
+                self._page(1, event),
+                discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+            )
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            record = raw["events"].pop(event.identity)
+            legacy_identity = "provider-a:event-1"
+            record["identity"] = legacy_identity
+            del record["sport"]
+            raw["events"][legacy_identity] = record
+            raw["schema_version"] = 1
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                CatalogLifecycleError,
+                "legacy migration contains invalid evidence",
+            ):
+                ContinuousEventLifecycle(path)
+            persisted = json.loads(path.read_text(encoding="utf-8"))
+            self.assertEqual(persisted["schema_version"], 1)
+            self.assertNotIn("sport", persisted["events"][legacy_identity])
+
+    def test_event_id_with_source_scope_delimiter_fails_before_persistence(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
+            ambiguous = self._catalog_event(event_id="scope:event")
+            with self.assertRaisesRegex(ValueError, "source-scope delimiter"):
+                lifecycle.apply_page(
+                    self._page(1, ambiguous),
+                    discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+                )
+            self.assertEqual(lifecycle.records(), ())
+
+    def test_pipe_delimiters_are_rejected_from_selector_components(self) -> None:
+        with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
+            canonical_event_identity(
+                source_id="provider|a",
+                sport="table_tennis",
+                event_id="event-1",
+            )
+        with self.assertRaisesRegex(ValueError, "reserved identity delimiter"):
+            canonical_event_identity(
+                source_id="provider-a",
+                sport="table_tennis",
+                event_id="event|1",
+            )
+
+    def test_colon_bearing_source_id_remains_valid_with_provider_event_id(self) -> None:
+        value = canonical_event_identity(
+            source_id="parlayapi:table_tennis",
+            sport="table_tennis",
+            event_id="event-1",
+        )
+        self.assertTrue(value.startswith("sport-v2-"))
 
     def test_completed_state_is_hidden_before_local_discovery_time(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             lifecycle = ContinuousEventLifecycle(Path(directory) / "catalog.json")
             pre = self._event()
-            identity = pre.source_id + ":" + pre.event_id
+            identity = canonical_event_identity(
+                source_id=pre.source_id,
+                sport=pre.sport,
+                event_id=pre.event_id,
+            )
             lifecycle.apply_page(
                 self._page(1, self._catalog_event()),
                 discovered_at=(self.START + timedelta(seconds=2)).isoformat(),
@@ -345,17 +523,51 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             finally:
                 store.close()
 
+    def test_register_eligible_retires_schema_v1_dependency_while_v2_waits(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            lifecycle = ContinuousEventLifecycle(root / "catalog.json")
+            event = self._catalog_event(
+                sport="table_tennis",
+                event_id="event-1",
+                available_offset=1,
+            )
+            lifecycle.apply_page(
+                self._page(1, event),
+                discovered_at=(self.START + timedelta(seconds=1)).isoformat(),
+            )
+            store = SQLiteMarketStore(root / "market.db")
+            try:
+                registered: list[str] = []
+                retired: list[str] = []
+                result = lifecycle.register_eligible(
+                    store,
+                    as_of=(self.START + timedelta(seconds=5)).isoformat(),
+                    required_history=timedelta(0),
+                    register_input=lambda input_id, **_: registered.append(input_id),
+                    retire_input=retired.append,
+                )
+                self.assertEqual(result, ())
+                self.assertEqual(registered, [])
+                self.assertEqual(retired, ["catalog:provider-a:event-1"])
+                self.assertNotEqual(
+                    retired[0],
+                    f"catalog:{event.identity}",
+                )
+            finally:
+                store.close()
+
     def test_register_eligible_uses_existing_sport_aware_live_dependency_seam(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             lifecycle = ContinuousEventLifecycle(root / "catalog.json")
             table_tennis = self._catalog_event(
                 sport="table_tennis",
-                event_id="table-tennis-event",
+                event_id="shared-event",
             )
             soccer = self._catalog_event(
                 sport="soccer",
-                event_id="soccer-event",
+                event_id="shared-event",
             )
             lifecycle.apply_page(
                 CatalogPage(
@@ -372,7 +584,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 store.append(
                     self._event(
                         sport="table_tennis",
-                        event_id=self._stored_event_id("table-tennis-event"),
+                        event_id=self._stored_event_id("shared-event"),
                         observed_offset=0,
                         ingest_offset=0,
                     )
@@ -380,7 +592,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 store.append(
                     self._event(
                         sport="soccer",
-                        event_id=self._stored_event_id("soccer-event"),
+                        event_id=self._stored_event_id("shared-event"),
                         observed_offset=0,
                         ingest_offset=0,
                     )
@@ -404,8 +616,8 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                 self.assertEqual(
                     selectors,
                     {
-                        "soccer": "provider-a:soccer-event",
-                        "table_tennis": "provider-a:table-tennis-event",
+                        "soccer": "provider-a:shared-event",
+                        "table_tennis": "provider-a:shared-event",
                     },
                 )
             finally:
@@ -552,7 +764,7 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
                         (input_id, selectors)
                     ),
                 )
-                self.assertEqual(registered, ("catalog:provider-a:event-1",))
+                self.assertEqual(registered, (f"catalog:{event.identity}",))
                 self.assertEqual(calls[0][1]["event_ids"], persisted[0].event_id)
                 self.assertEqual(calls[0][1]["sports"], persisted[0].sport)
             finally:

@@ -409,7 +409,7 @@ def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     )
     target["payload"]["effective_sample_size"] = 2
     registry.path.write_text(json.dumps(raw), encoding="utf-8")
-    with pytest.raises(ValueError, match="record digest mismatch"):
+    with pytest.raises(ValueError, match="record (?:digest|identity) mismatch"):
         ScientificRegistry(registry.path)
 
 

@@ -67,6 +67,23 @@ def test_market_event_direct_constructor_rejects_noncanonical_sequence(
         _event(sequence=sequence)
 
 
+@pytest.mark.parametrize("sequence", (-(2**63) - 1, 2**63))
+def test_market_event_rejects_sequence_outside_durable_signed_64_range(
+    sequence: int,
+) -> None:
+    with pytest.raises(ValueError, match="sequence must fit signed 64-bit integer"):
+        _event(sequence=sequence)
+
+
+@pytest.mark.parametrize("sequence", (-(2**63), 2**63 - 1))
+def test_market_event_accepts_durable_signed_64_sequence_boundaries(
+    sequence: int,
+) -> None:
+    event = _event(sequence=sequence)
+    assert event.sequence == sequence
+    assert event.to_dict()["sequence"] == sequence
+
+
 @pytest.mark.parametrize(
     "field_name",
     ("event_id", "market_id", "selection_id", "source_id"),
@@ -150,6 +167,14 @@ def test_market_event_dedupe_key_rejects_post_construction_sequence_subclass_bef
         _ = event.dedupe_key
 
 
+
+def test_market_event_dedupe_key_rejects_post_construction_out_of_range_sequence() -> None:
+    event = _event()
+    object.__setattr__(event, "sequence", 2**63)
+
+    with pytest.raises(ValueError, match="sequence must fit signed 64-bit integer"):
+        _ = event.dedupe_key
+
 def test_valid_delimiter_bearing_domain_identity_is_not_normalized_or_rewritten() -> None:
     event = _event(
         event_id="event|2026",
@@ -167,3 +192,45 @@ def test_valid_delimiter_bearing_domain_identity_is_not_normalized_or_rewritten(
     assert event.market_id == "market|spread"
     assert event.selection_id == "player|a"
     assert event.quote_key == leg.quote_key
+
+@pytest.mark.parametrize(
+    ("field_name", "value"),
+    (
+        ("source_id", "provider-1"),
+        ("event_id", "event-1"),
+        ("market_id", "market-1"),
+        ("selection_id", "selection-1"),
+        ("sport", "football"),
+        ("competition_id", "league:one"),
+        ("market_semantics_id", "market:semantics"),
+        ("provider_source_class", "provider:class"),
+        ("exchange_side", "back"),
+    ),
+)
+def test_market_event_to_dict_rejects_post_construction_identity_subclass_before_dispatch(
+    field_name: str,
+    value: str,
+) -> None:
+    event = _event(
+        sport="football",
+        competition_id="league:one",
+        market_semantics_id="market:semantics",
+        provider_source_class="provider:class",
+        exchange_side="back",
+    )
+    object.__setattr__(event, field_name, _ExplosiveString(value))
+
+    with pytest.raises(ValueError):
+        event.to_dict()
+
+
+@pytest.mark.parametrize("sequence", (True, _ExplosiveInt(1)))
+def test_market_event_to_dict_rejects_post_construction_noncanonical_sequence(
+    sequence: object,
+) -> None:
+    event = _event()
+    object.__setattr__(event, "sequence", sequence)
+
+    with pytest.raises(ValueError, match="sequence must be a non-boolean int"):
+        event.to_dict()
+

@@ -301,6 +301,13 @@ class MarketEvent:
     exchange_side: str | None = None
 
     def __post_init__(self) -> None:
+        for field_name in (
+            "event_id",
+            "market_id",
+            "selection_id",
+            "source_id",
+        ):
+            _canonical_string_value(getattr(self, field_name), field_name)
         _timezone_aware_iso8601_value(self.observed_ts, "observed_ts")
         _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
         if self.source_ts is not None:
@@ -459,6 +466,8 @@ class TicketLeg:
     exchange_side: str | None = None
 
     def __post_init__(self) -> None:
+        for field_name in ("event_id", "market_id", "selection_id"):
+            _canonical_string_value(getattr(self, field_name), field_name)
         if self.sport is not None:
             _canonical_sport_value(self.sport)
         if self.exchange_side is not None:

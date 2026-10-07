@@ -14,6 +14,7 @@ from autosport.outcome_trust import (
     OutcomeLineageBinding,
     OutcomeLineageTrustError,
     TrustedOutcomeRevision,
+    outcome_lineage_binding_from_payload,
 )
 from autosport.run_registry import RunRegistry, UnresolvedExperimentError
 
@@ -89,6 +90,86 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                         record_id="event-results:missing",
                         cutoff="not-a-timestamp",
                     )
+
+    def test_payload_parser_rejects_hostile_top_level_key_before_hash_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class HostileKey(str):
+            armed = False
+
+            def __hash__(self) -> int:
+                if self.armed:
+                    dispatch_calls.append("hash")
+                    raise AssertionError("hostile lineage key hashed before exact admission")
+                return str.__hash__(self)
+
+            def __eq__(self, other: object) -> bool:
+                if self.armed:
+                    dispatch_calls.append("eq")
+                    raise AssertionError("hostile lineage key compared before exact admission")
+                return str.__eq__(self, other)
+
+        binding = self._binding("r1")
+        payload = {
+            "source_identity": binding.source_identity,
+            "record_id": binding.record_id,
+            "root_revision_id": binding.root_revision_id,
+            "root_record_sha256": binding.root_record_sha256,
+            "revisions": [
+                {
+                    "revision": 1,
+                    "revision_id": binding.revisions[0].revision_id,
+                    "record_sha256": binding.revisions[0].record_sha256,
+                    "first_available_at": "2026-01-01T10:00:00Z",
+                }
+            ],
+        }
+        value = payload.pop("source_identity")
+        hostile = HostileKey("source_identity")
+        payload[hostile] = value
+        hostile.armed = True
+
+        with self.assertRaisesRegex(
+            OutcomeLineageTrustError,
+            "keys must be exact strings",
+        ):
+            outcome_lineage_binding_from_payload(payload, context="test lineage")
+
+        self.assertEqual(dispatch_calls, [])
+
+    def test_payload_parser_rejects_mapping_and_revision_list_subclasses(self) -> None:
+        class HostileMapping(dict):
+            def get(self, *args, **kwargs):
+                raise AssertionError("mapping subclass get must not execute")
+
+        class HostileList(list):
+            def __iter__(self):
+                raise AssertionError("list subclass iteration must not execute")
+
+        with self.assertRaisesRegex(OutcomeLineageTrustError, "exact object"):
+            outcome_lineage_binding_from_payload(
+                HostileMapping(),
+                context="test lineage",
+            )
+
+        binding = self._binding("r1")
+        payload = {
+            "source_identity": binding.source_identity,
+            "record_id": binding.record_id,
+            "root_revision_id": binding.root_revision_id,
+            "root_record_sha256": binding.root_record_sha256,
+            "revisions": HostileList(
+                [
+                    {
+                        "revision": 1,
+                        "revision_id": binding.revisions[0].revision_id,
+                        "record_sha256": binding.revisions[0].record_sha256,
+                    }
+                ]
+            ),
+        }
+        with self.assertRaisesRegex(OutcomeLineageTrustError, "non-empty exact list"):
+            outcome_lineage_binding_from_payload(payload, context="test lineage")
 
     def test_two_instances_cannot_publish_from_the_same_stale_snapshot(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:

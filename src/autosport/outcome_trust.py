@@ -253,21 +253,38 @@ def outcome_lineage_binding_from_payload(
     *,
     context: str,
 ) -> OutcomeLineageBinding:
-    if not isinstance(value, dict):
-        raise OutcomeLineageTrustError(f"{context} must be an object")
-    source_identity = _canonical_text(
-        value.get("source_identity"), field=f"{context} source_identity"
+    expected_fields = frozenset(
+        {
+            "source_identity",
+            "record_id",
+            "root_revision_id",
+            "root_record_sha256",
+            "revisions",
+        }
     )
-    record_id = _canonical_text(value.get("record_id"), field=f"{context} record_id")
+    if _exact_dict_fields(value, context=context) != expected_fields:
+        raise OutcomeLineageTrustError(
+            f"{context} must contain exactly the canonical lineage fields"
+        )
+    source_identity = _canonical_text(
+        dict.__getitem__(value, "source_identity"), field=f"{context} source_identity"
+    )
+    record_id = _canonical_text(
+        dict.__getitem__(value, "record_id"), field=f"{context} record_id"
+    )
     root_revision_id = _canonical_text(
-        value.get("root_revision_id"), field=f"{context} root_revision_id"
+        dict.__getitem__(value, "root_revision_id"),
+        field=f"{context} root_revision_id",
     )
     root_record_sha256 = _digest(
-        value.get("root_record_sha256"), field=f"{context} root record SHA-256"
+        dict.__getitem__(value, "root_record_sha256"),
+        field=f"{context} root record SHA-256",
     )
-    raw_revisions = value.get("revisions")
-    if not isinstance(raw_revisions, list) or not raw_revisions:
-        raise OutcomeLineageTrustError(f"{context} revisions must be a non-empty list")
+    raw_revisions = dict.__getitem__(value, "revisions")
+    if type(raw_revisions) is not list or not raw_revisions:
+        raise OutcomeLineageTrustError(
+            f"{context} revisions must be a non-empty exact list"
+        )
 
     revisions: list[TrustedOutcomeRevision] = []
     seen_ids: set[str] = set()
@@ -277,23 +294,28 @@ def outcome_lineage_binding_from_payload(
             "revision_id",
             "record_sha256",
         }
+        raw_fields = _exact_dict_fields(
+            raw,
+            context=f"{context} revision {index}",
+        )
         if (
-            not isinstance(raw, dict)
-            or not allowed_fields.issubset(raw)
-            or not set(raw).issubset(allowed_fields | {"first_available_at"})
+            not allowed_fields.issubset(raw_fields)
+            or not raw_fields.issubset(allowed_fields | {"first_available_at"})
         ):
             raise OutcomeLineageTrustError(
                 f"{context} revision {index} must contain only revision identity/availability fields"
             )
         revision = _positive_int(
-            raw.get("revision"), field=f"{context} revision {index} number"
+            dict.__getitem__(raw, "revision"),
+            field=f"{context} revision {index} number",
         )
         if revision != index:
             raise OutcomeLineageTrustError(
                 f"{context} revisions must be contiguous from revision 1"
             )
         revision_id = _canonical_text(
-            raw.get("revision_id"), field=f"{context} revision {index} revision_id"
+            dict.__getitem__(raw, "revision_id"),
+            field=f"{context} revision {index} revision_id",
         )
         if revision_id in seen_ids:
             raise OutcomeLineageTrustError(f"{context} revisions reuse a revision_id")
@@ -303,15 +325,15 @@ def outcome_lineage_binding_from_payload(
                 revision=revision,
                 revision_id=revision_id,
                 record_sha256=_digest(
-                    raw.get("record_sha256"),
+                    dict.__getitem__(raw, "record_sha256"),
                     field=f"{context} revision {index} record SHA-256",
                 ),
                 first_available_at=(
                     _canonical_timestamp(
-                        raw.get("first_available_at"),
+                        dict.__getitem__(raw, "first_available_at"),
                         field=f"{context} revision {index} first_available_at",
                     )
-                    if "first_available_at" in raw
+                    if "first_available_at" in raw_fields
                     else None
                 ),
             )
@@ -593,6 +615,15 @@ def _strict_json_object(payload: bytes, *, context: str) -> dict[str, Any]:
     if not isinstance(raw, dict):
         raise OutcomeLineageTrustError(f"{context} must be a JSON object")
     return raw
+
+
+def _exact_dict_fields(value: object, *, context: str) -> frozenset[str]:
+    if type(value) is not dict:
+        raise OutcomeLineageTrustError(f"{context} must be an exact object")
+    keys = tuple(dict.keys(value))
+    if any(type(key) is not str for key in keys):
+        raise OutcomeLineageTrustError(f"{context} keys must be exact strings")
+    return frozenset(keys)
 
 
 def _canonical_text(value: object, *, field: str) -> str:

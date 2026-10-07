@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from .domain import PaperTicket, TicketStatus
+from .domain import PaperTicket, TicketStatus, _canonical_string_value
 from .market_outcomes import MarketSettlementOutcomeAuthority
 from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
 

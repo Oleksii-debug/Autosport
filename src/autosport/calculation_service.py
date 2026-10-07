@@ -167,15 +167,18 @@ class CalculationService:
         *,
         causal_cutoff_ts: str,
     ) -> CalculationEvidence:
-        if isinstance(events, (str, bytes)) or not isinstance(events, Sequence):
-            raise ValueError("events must be an ordered sequence of MarketEvent values")
-        if len(events) < 2:
+        if type(events) not in (list, tuple):
+            raise ValueError(
+                "events must be an exact list or tuple of MarketEvent values"
+            )
+        event_snapshot = tuple(events)
+        if len(event_snapshot) < 2:
             raise ValueError("market de-vig requires at least two selected quotes")
 
         cutoff_value, cutoff = _causal_cutoff(causal_cutoff_ts)
         snapshots = tuple(
             _snapshot_quote_at_cutoff(event, cutoff_value=cutoff_value)
-            for event in events
+            for event in event_snapshot
         )
         first = snapshots[0]
         market_identity = (

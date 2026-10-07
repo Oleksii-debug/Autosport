@@ -322,6 +322,50 @@ class CalculationServiceTests(unittest.TestCase):
                 )
 
 
+    def test_market_devig_rejects_sequence_subclass_before_causal_snapshot(self) -> None:
+        class HostileEventList(list):
+            def __len__(self) -> int:
+                raise AssertionError("event collection length dispatch must not execute")
+
+            def __iter__(self):
+                raise AssertionError("event collection iteration dispatch must not execute")
+
+        events = HostileEventList(
+            [
+                self._event(selection_id="driver-a", sequence=1),
+                self._event(
+                    selection_id="driver-b",
+                    decimal_odds="2.05",
+                    sequence=2,
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+            self.service.multiplicative_devig_for_market(
+                events,
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            )
+
+    def test_market_devig_snapshots_exact_list_before_causal_evaluation(self) -> None:
+        first = self._event(selection_id="driver-a", sequence=1)
+        second = self._event(
+            selection_id="driver-b",
+            decimal_odds="2.05",
+            sequence=2,
+        )
+
+        evidence = self.service.multiplicative_devig_for_market(
+            [first, second],
+            causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+        )
+
+        self.assertEqual(
+            [source.selection_id for source in evidence.quote_sources],
+            ["driver-a", "driver-b"],
+        )
+
+
     def test_market_devig_binds_exact_source_quotes_and_is_order_invariant(self) -> None:
         first = self._event(selection_id="driver-a", decimal_odds="2.10", sequence=1)
         second = self._event(

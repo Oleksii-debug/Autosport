@@ -154,3 +154,27 @@ def test_valid_execution_identity_payload_is_unchanged() -> None:
     assert action.to_dict()["quote_id"] == "quote-1"
     assert plan.to_dict()["plan_id"] == "plan-1"
     assert plan.to_dict()["decision_id"] == "decision-1"
+
+
+def test_execution_attempt_constructor_revalidates_identity_fields() -> None:
+    from autosport.real_execution_ledger import ExecutionAttempt
+
+    with pytest.raises(ValueError, match="attempt_id.*exact canonical"):
+        ExecutionAttempt(
+            attempt_id=" attempt-1",
+            plan_id="plan-1",
+            action_id="action-1",
+            effect_fingerprint="a" * 64,
+            reserved_at=T0,
+        )
+
+
+def test_external_receipt_identity_constructor_revalidates_identity_fields() -> None:
+    from autosport.real_execution_ledger import ExternalReceiptIdentity
+
+    with pytest.raises(ValueError, match="account_id.*exact canonical"):
+        ExternalReceiptIdentity(
+            bookmaker_id="book-a",
+            account_id=" acct-a",
+            external_receipt_id="receipt-1",
+        )

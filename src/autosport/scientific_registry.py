@@ -1168,12 +1168,14 @@ class ScientificRegistry:
                     raise ValueError(
                         "DatasetSnapshot payload/envelope availability mismatch"
                     )
-            # causal_cutoff is the dataset's semantic as-of boundary, not a
-            # publication timestamp.  Historical/scientific fixtures may bind a
-            # future evaluation cutoff while the registry envelope records when
-            # the snapshot definition itself became durable.  Keep both instants
-            # well-formed, but do not invent an ordering relation between them.
-            _instant(payload.get("causal_cutoff"), "DatasetSnapshot.causal_cutoff")
+            causal_cutoff = _instant(
+                payload.get("causal_cutoff"),
+                "DatasetSnapshot.causal_cutoff",
+            )
+            if causal_cutoff > payload_available:
+                raise ValueError(
+                    "DatasetSnapshot available_at must not precede causal_cutoff"
+                )
             reveal_after = payload.get("outcome_reveal_after")
             if reveal_after is not None:
                 _instant(reveal_after, "DatasetSnapshot.outcome_reveal_after")

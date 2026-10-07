@@ -391,17 +391,24 @@ class PaperBook:
         _advance_paperbook_causal_history_open(self, ticket.ticket_id)
         return ticket
 
-    @staticmethod
-    def _normalize_resolution_keys(values: object, label: str) -> set[str]:
-        if isinstance(values, str) or values is None:
+    @classmethod
+    def _normalize_resolution_keys(cls, values: object, label: str) -> set[str]:
+        if type(values) is str or values is None:
             raise ValueError(f"PaperBook {label} must be a collection of quote keys")
         try:
-            normalized = set(values)
+            raw_values = tuple(values)
         except TypeError as exc:
             raise ValueError(f"PaperBook {label} must be a collection of quote keys") from exc
-        if any(not isinstance(value, str) or not value for value in normalized):
-            raise ValueError(f"PaperBook {label} must contain non-empty string quote keys")
-        return normalized
+
+        canonical_values: list[str] = []
+        for value in raw_values:
+            canonical_values.append(
+                cls._require_canonical_text(
+                    value,
+                    f"{label} quote_key",
+                )
+            )
+        return set(canonical_values)
 
     @classmethod
     def _settlement_result(
@@ -606,8 +613,8 @@ class PaperBook:
 
     @staticmethod
     def _require_utf8_string(value: object, label: str) -> str:
-        if not isinstance(value, str):
-            raise ValueError(f"PaperBook {label} must be a string")
+        if type(value) is not str:
+            raise ValueError(f"PaperBook {label} must be an exact string")
         try:
             value.encode("utf-8", errors="strict")
         except UnicodeEncodeError as exc:

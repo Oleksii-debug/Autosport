@@ -8,6 +8,17 @@ from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
 
 
+class _ExplosiveString(str):
+    def __hash__(self) -> int:
+        raise AssertionError("hostile string hash dispatched before exact admission")
+
+    def encode(self, *args, **kwargs):
+        raise AssertionError("hostile string encode dispatched before exact admission")
+
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile string strip dispatched before exact admission")
+
+
 class PaperBookCanonicalDurableStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -103,6 +114,30 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         )
         self.assertIs(settled.status, TicketStatus.WON)
         self.assertEqual(restored.balance, Decimal("110"))
+
+
+    def test_open_ticket_rejects_hostile_identity_subclass_before_string_dispatch(self) -> None:
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        object.__setattr__(leg, "event_id", _ExplosiveString("event-1"))
+        book = PaperBook("100")
+
+        with self.assertRaisesRegex(ValueError, "event_id.*exact string"):
+            book.open_ticket([leg], "10")
+
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
+    def test_settlement_rejects_hostile_quote_key_before_hash_dispatch(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+        hostile = _ExplosiveString(leg.quote_key)
+
+        with self.assertRaisesRegex(ValueError, "winning_quote_keys quote_key.*exact string"):
+            book.settle(ticket.ticket_id, [hostile])
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(book.balance, Decimal("90"))
 
 
     def test_open_ticket_rejects_noncanonical_leg_object_before_bankroll_mutation(self) -> None:

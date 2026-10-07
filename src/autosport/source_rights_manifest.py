@@ -600,7 +600,7 @@ def _validated_manifest_snapshot(
     _evidence_classes=_EVIDENCE_CLASSES,
     _runtime_timestamp_impl=_runtime_timestamp,
     _error_type=SourceRightsManifestError,
-) -> tuple[str, tuple[str, ...], str, str, datetime, datetime, str, str, datetime]:
+) -> tuple[str, tuple[str, ...], str, str, str, str, datetime, datetime, str, str, datetime]:
     _bounded_impl(manifest.manifest_bytes)
     digest = _canonical_text_impl(
         manifest.manifest_sha256,

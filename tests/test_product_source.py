@@ -40,6 +40,8 @@ def _write_source_rights_manifest(root: Path, *, privacy: str = "NON_PERSONAL_DA
                 "authorized_scopes": ["provider.market_data.read"],
                 "privacy_classification": privacy,
                 "evidence_class": evidence_class,
+                "terms_reference": "terms:parlayapi:v1",
+                "retention_authority_reference": "retention:parlayapi:v1",
                 "effective_at": "2026-09-01T00:00:00Z",
                 "expires_at": "2026-12-01T00:00:00Z",
                 "human_approved": True,

@@ -11,28 +11,28 @@ Plan 7 is provider-free PAPER/SHADOW whole-product convergence.
 Plan 8 is the final dependency-aware external-bookmaker/real-execution/NVDA/release plan.
 
 ## Plans
-1. Дані, причинність, зберігання, replay та outcomes
+1. Перший план — Дані, причинність, зберігання, replay та outcomes
 https://docs.google.com/document/d/1uNEWkGK3_HNb_u6uZz4vUPap4uJeSxaO_BA0iQrgIuY/edit
 
-2. Фінанси, ризик, PaperBook, портфель і scenario truth
+2. Другий план — Фінанси, ризик, PaperBook, портфель і scenario truth
 https://docs.google.com/document/d/1XQmujyDGfHXe8_ohumnoivS6bSAMNdTKOUOu9wYjKG8/edit
 
-3. Intelligence, research, learning, models та multi-sport
+3. Третій план — Intelligence, research, learning, models та multi-sport
 https://docs.google.com/document/d/1hIu9FQmNLR4KGhVciURT-GH49QDHFnKv_EE9c3xOvtU/edit
 
-4. Bookmakers, provider adapters та execution engineering
+4. Четвертий план — Bookmakers, provider adapters та execution engineering
 https://docs.google.com/document/d/1wEC5a82Vf5c_66t4upGQm4X215IysCNwkwdvfN6ee40/edit
 
-5. Runtime, security, recovery, QA та performance
+5. П’ятий план — Runtime, security, recovery, QA та performance
 https://docs.google.com/document/d/18lEAZZoktPOWjx8SUs6lFc_mY-n8fvYI371PdvZ1Axw/edit
 
-6. Windows, accessibility, packaging та product UI
+6. Шостий план — Windows, accessibility, packaging та product UI
 https://docs.google.com/document/d/1qWTi8eG9SDrNWvtUoYmJyIl92ySviTBRympJ3jvvJVo/edit
 
-7. Provider-free PAPER/SHADOW whole-product convergence
+7. Сьомий план — Provider-free PAPER/SHADOW whole-product convergence
 https://docs.google.com/document/d/19ifIaWknBedZBodtwjs3dG7uqVA_39hduUzox0A6P_Q/edit
 
-8. External bookmaker qualification, real execution, NVDA та final release
+8. Восьмий план — External bookmaker qualification, real execution, NVDA та final release
 https://docs.google.com/document/d/1DmEXcaIF4nff8iNLKFsV6CxexX1v7cEq8E8FCRq5bX8/edit
 
 ## Worker selection
@@ -40,7 +40,7 @@ https://docs.google.com/document/d/1DmEXcaIF4nff8iNLKFsV6CxexX1v7cEq8E8FCRq5bX8/
 - Use MULTI_PLAN_CLOSURE_STATE.md as live status authority; Drive statuses are migration snapshots.
 - Existing PR/branch/source must be REUSE -> REPAIR -> CONVERGE before duplicate scope.
 - Plan 4 is actionable offline without bookmaker credentials/accounts using existing code, public/recorded data and fixtures.
-- Plan 7 waits only for terminal provider-free product inputs from Plans 1,2,3,5,6. Plan 4 is not a hard prerequisite.
+- Plan 7 waits for terminal outputs from all independent engineering Plans 1–6. Plan 4 remains fully parallel/offline-actionable; it becomes a prerequisite only at the final provider-free/PAPER-SHADOW convergence gate.
 - Plan 8 uses per-Section external gates; absence of bookmaker/account evidence never blocks Plans 1–7.
 - Old sequential numbering no longer chooses work.
 

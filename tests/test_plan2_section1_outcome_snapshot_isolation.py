@@ -114,3 +114,56 @@ def test_snapshot_rejects_hostile_mapping_before_custom_copy_dispatch():
     hostile = replace(source, quote_outcomes=HostileMapping(source.quote_outcomes))
     with pytest.raises(ValueError, match="quote_outcomes must be a non-empty exact dict"):
         ContinuousSessionCoordinator._detached_settlement_resolutions((hostile,))
+
+
+def test_alias_mutation_does_not_flip_paper_cash_and_restart_is_idempotent(tmp_path):
+    from decimal import Decimal
+
+    from autosport.domain import TicketLeg, TicketStatus
+    from autosport.paper import PaperBook
+
+    book_path = tmp_path / "paper_book.json"
+    book = PaperBook("100")
+    leg = TicketLeg(
+        event_id="event-1",
+        market_id="winner",
+        selection_id="home",
+        locked_odds=Decimal("2"),
+        sport="table_tennis",
+    )
+    ticket = book.open_ticket(
+        (leg,), Decimal("10"), placed_at="2026-09-19T21:19:30+00:00"
+    )
+    book.save(book_path)
+
+    source = SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="provider-result:section2",
+        quote_outcomes={leg.quote_key: "loss"},
+        evidence_id="evidence-cash-isolation",
+        evidence_sha256="0" * 64,
+        available_at=_CUTOFF,
+    )
+    coordinator = object.__new__(ContinuousSessionCoordinator)
+    coordinator.workspace = tmp_path
+    coordinator.paper_book_path = book_path
+    coordinator.initial_bankroll = "100"
+
+    selected = coordinator._detached_settlement_resolutions((source,))
+    source.quote_outcomes[leg.quote_key] = "win"
+    handoff_copy = coordinator._detached_settlement_resolutions(selected)
+    handoff_copy[0].quote_outcomes[leg.quote_key] = "win"
+
+    settled, ids = coordinator._settle(resolutions=selected)
+    assert settled == (ticket.ticket_id,)
+    assert ids == ("evidence-cash-isolation",)
+    persisted = PaperBook.load(book_path)
+    assert persisted.balance == Decimal("90")
+    assert persisted.tickets[ticket.ticket_id].status is TicketStatus.LOST
+
+    # A durable replay/restart of the same original evidence has no second debit.
+    settled_again, _ = coordinator._settle(resolutions=selected)
+    assert settled_again == ()
+    reopened = PaperBook.load(book_path)
+    assert reopened.balance == Decimal("90")
+    assert reopened.tickets[ticket.ticket_id].status is TicketStatus.LOST

@@ -94,6 +94,10 @@ class ExecutionDisposition(StrEnum):
 def _text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
         raise ModelComputeRouterError(f"{name} must be a non-empty canonical string")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ModelComputeRouterError(
+            f"{name} must not contain control characters"
+        )
     try:
         value.encode("utf-8", errors="strict")
     except UnicodeEncodeError as exc:
@@ -147,6 +151,51 @@ def _sha256(name: str, value: object) -> str:
     if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
         raise ModelComputeRouterError(f"{name} must be SHA-256 hex")
     return text
+
+
+def _snapshot_exact_json_carrier(value: object, *, context: str) -> object:
+    """Detach a JSON payload without invoking caller-defined container/scalar hooks."""
+
+    if value is None or type(value) in {str, int, float, bool}:
+        return value
+    if type(value) is list:
+        return [
+            _snapshot_exact_json_carrier(
+                list.__getitem__(value, index),
+                context=f"{context}[{index}]",
+            )
+            for index in range(list.__len__(value))
+        ]
+    if type(value) is dict:
+        keys = tuple(dict.keys(value))
+        if any(type(key) is not str for key in keys):
+            raise ModelComputeRouterError(
+                f"{context} object keys must be exact strings"
+            )
+        return {
+            key: _snapshot_exact_json_carrier(
+                dict.__getitem__(value, key),
+                context=f"{context}.{key}",
+            )
+            for key in keys
+        }
+    raise ModelComputeRouterError(
+        f"{context} must use exact JSON carrier types"
+    )
+
+
+def _exact_payload_object(
+    raw: object,
+    *,
+    context: str,
+) -> dict[str, Any]:
+    if type(raw) is not dict:
+        raise ModelComputeRouterError(
+            f"{context} must be an exact JSON object"
+        )
+    snapshot = _snapshot_exact_json_carrier(raw, context=context)
+    assert type(snapshot) is dict
+    return snapshot
 
 
 def _canonical_digest(payload: object) -> str:
@@ -221,10 +270,10 @@ class ComputeCandidate:
         _sha256("config_sha256", self.config_sha256)
         if type(self.capabilities) is not tuple or not self.capabilities:
             raise ModelComputeRouterError("capabilities must be a non-empty tuple")
-        if len(set(self.capabilities)) != len(self.capabilities):
-            raise ModelComputeRouterError("capabilities must be unique")
         for capability in self.capabilities:
             _text("capability", capability)
+        if len(set(self.capabilities)) != len(self.capabilities):
+            raise ModelComputeRouterError("capabilities must be unique")
         _nonnegative("estimated_cost", self.estimated_cost)
         _nonnegative("estimated_latency_seconds", self.estimated_latency_seconds)
 
@@ -242,6 +291,7 @@ class ComputeCandidate:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, Any]) -> "ComputeCandidate":
+        raw = _exact_payload_object(raw, context="compute candidate payload")
         try:
             return cls(
                 candidate_id=raw["candidate_id"],
@@ -335,6 +385,7 @@ class ComputeRouteRequest:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, Any]) -> "ComputeRouteRequest":
+        raw = _exact_payload_object(raw, context="route request payload")
         try:
             return cls(
                 request_id=raw["request_id"],
@@ -403,6 +454,7 @@ class ComputeRoutingPolicy:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, Any]) -> "ComputeRoutingPolicy":
+        raw = _exact_payload_object(raw, context="routing policy payload")
         try:
             return cls(
                 policy_id=raw["policy_id"],
@@ -464,9 +516,9 @@ class ValueOfComputationEvidence:
             raise ModelComputeRouterError(
                 "VOC available_at precedes measured_at"
             )
-        if not isinstance(self.provenance, VOCEvidenceProvenance):
+        if type(self.provenance) is not VOCEvidenceProvenance:
             raise ModelComputeRouterError(
-                "provenance must be VOCEvidenceProvenance"
+                "provenance must be an exact VOCEvidenceProvenance"
             )
         _decimal("baseline_utility", self.baseline_utility)
         _decimal("challenger_utility", self.challenger_utility)
@@ -478,11 +530,12 @@ class ValueOfComputationEvidence:
         _nonnegative("measured_compute_cost", self.measured_compute_cost)
         _sha256("evaluation_sha256", self.evaluation_sha256)
         if self.evaluation is not None:
-            if not isinstance(self.evaluation, PairedVOCEvaluation):
+            if type(self.evaluation) is not PairedVOCEvaluation:
                 raise ModelComputeRouterError(
-                    "evaluation must be PairedVOCEvaluation"
+                    "evaluation must be an exact PairedVOCEvaluation"
                 )
             evaluation = self.evaluation
+            PairedVOCEvaluation.__post_init__(evaluation)
             if evaluation.evaluation_id != self.evidence_id:
                 raise ModelComputeRouterError(
                     "VOC evaluation identity does not match evidence_id"
@@ -608,6 +661,7 @@ class ValueOfComputationEvidence:
     def from_payload(
         cls, raw: Mapping[str, Any]
     ) -> "ValueOfComputationEvidence":
+        raw = _exact_payload_object(raw, context="VOC evidence payload")
         try:
             return cls(
                 evidence_id=raw["evidence_id"],
@@ -804,6 +858,7 @@ class ComputeRouteDecision:
     def from_payload(
         cls, raw: Mapping[str, Any]
     ) -> "ComputeRouteDecision":
+        raw = _exact_payload_object(raw, context="route decision payload")
         try:
             return cls(
                 decision_id=raw["decision_id"],
@@ -991,6 +1046,7 @@ class ComputeExecutionEvidence:
     def from_payload(
         cls, raw: Mapping[str, Any]
     ) -> "ComputeExecutionEvidence":
+        raw = _exact_payload_object(raw, context="execution evidence payload")
         try:
             return cls(
                 execution_id=raw["execution_id"],
@@ -1329,9 +1385,9 @@ def _candidate_map(
 ) -> dict[str, ComputeCandidate]:
     result: dict[str, ComputeCandidate] = {}
     for candidate in candidates:
-        if not isinstance(candidate, ComputeCandidate):
+        if type(candidate) is not ComputeCandidate:
             raise TypeError(
-                "candidates must contain ComputeCandidate values"
+                "candidates must contain exact ComputeCandidate values"
             )
         if candidate.candidate_id in result:
             raise ModelComputeRouterError(
@@ -1372,10 +1428,10 @@ def route_compute(
     domain_observation: SportDomainFitnessObservation | None = None,
     domain_route: RouteRecommendation | None = None,
 ) -> ComputeRouteDecision:
-    if not isinstance(request, ComputeRouteRequest):
-        raise TypeError("request must be ComputeRouteRequest")
-    if not isinstance(policy, ComputeRoutingPolicy):
-        raise TypeError("policy must be ComputeRoutingPolicy")
+    if type(request) is not ComputeRouteRequest:
+        raise TypeError("request must be exact ComputeRouteRequest")
+    if type(policy) is not ComputeRoutingPolicy:
+        raise TypeError("policy must be exact ComputeRoutingPolicy")
     now = _instant("as_of", as_of)
     if domain_route is not None and not isinstance(
         domain_route, RouteRecommendation
@@ -2073,7 +2129,7 @@ def _validate_persisted_voc_precompute_admission(
         raise ModelComputeRouterError(
             "persisted VOC precompute admission schema is invalid"
         )
-    if raw.get("schema_version") != 1:
+    if type(raw.get("schema_version")) is not int or raw.get("schema_version") != 1:
         raise ModelComputeRouterError(
             "persisted VOC precompute admission schema version is unsupported"
         )

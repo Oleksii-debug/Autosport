@@ -63,6 +63,62 @@ def _governance(
     )
 
 
+def test_registry_identity_text_fails_before_hostile_dispatch(tmp_path) -> None:
+    class HostileText(str):
+        def strip(self, *args, **kwargs):
+            raise AssertionError("hostile bookmaker identity strip dispatched")
+
+        def __eq__(self, other):
+            raise AssertionError("hostile bookmaker identity equality dispatched")
+
+        def __hash__(self):
+            raise AssertionError("hostile bookmaker identity hash dispatched")
+
+    registry = BookmakerCapabilityRegistry(tmp_path / "bookmaker-capabilities.json")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        registry.profile_history(HostileText("book-a"), "acct-a", "adapter-a")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        registry.governance_history(HostileText("book-a"), "acct-a")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        registry.governance_history("book-a\n", "acct-a")
+
+
+def test_registry_rejects_profile_and_governance_subclasses_before_identity_properties(tmp_path) -> None:
+    class HostileProfile(BookmakerCapabilityProfile):
+        @property
+        def profile_id(self):
+            raise AssertionError("hostile profile_id dispatched before exact-type admission")
+
+    class HostileGovernance(BookmakerGovernanceEvidence):
+        @property
+        def evidence_id(self):
+            raise AssertionError("hostile evidence_id dispatched before exact-type admission")
+
+    # Construct uninitialized subclass sentinels so the registry boundary itself,
+    # rather than the strengthened dataclass constructor, proves exact-type admission
+    # happens before any hostile identity property can dispatch.
+    hostile_profile = object.__new__(HostileProfile)
+    hostile_governance = object.__new__(HostileGovernance)
+
+    registry = BookmakerCapabilityRegistry(tmp_path / "bookmaker-capabilities.json")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="exact BookmakerCapabilityProfile"):
+        registry.register_profile(hostile_profile)
+    with pytest.raises(BookmakerCapabilityRegistryError, match="exact BookmakerGovernanceEvidence"):
+        registry.register_governance(hostile_governance)
+
+
+def test_governance_identity_revalidates_post_init_tamper_before_hash_or_persist(tmp_path) -> None:
+    evidence = _governance()
+    object.__setattr__(evidence, "venue_id", "book-a\n")
+
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        _ = evidence.evidence_id
+
+    registry = BookmakerCapabilityRegistry(tmp_path / "bookmaker-capabilities.json")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="canonical string"):
+        registry.register_governance(evidence)
+
+
 def test_registry_reopens_and_returns_latest_version(tmp_path) -> None:
     path = tmp_path / "bookmaker-capabilities.json"
     registry = BookmakerCapabilityRegistry(path)

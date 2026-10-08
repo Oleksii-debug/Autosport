@@ -37,7 +37,13 @@ _ORIGINAL_SNAPSHOT_VALIDATE_FRAME = authority.CompleteGameBoardSnapshot._validat
 
 
 def _strict_request_from_payload(cls, payload: Mapping[str, object]):
-    if not isinstance(payload, Mapping) or set(payload) != _REQUEST_KEYS:
+    # Reject mapping subclasses before iteration/key dispatch. These envelopes are
+    # Autosport-owned versioned JSON objects, so polymorphic mappings are not data.
+    if type(payload) is not dict:
+        raise authority.ProviderObservationIntegrityError(
+            "complete game-board request payload must be an exact JSON object"
+        )
+    if set(dict.keys(payload)) != _REQUEST_KEYS:
         raise authority.ProviderObservationIntegrityError(
             "complete game-board request payload fields mismatch"
         )
@@ -45,7 +51,13 @@ def _strict_request_from_payload(cls, payload: Mapping[str, object]):
 
 
 def _strict_snapshot_from_payload(cls, payload: Mapping[str, object]):
-    if not isinstance(payload, Mapping) or set(payload) != _SNAPSHOT_KEYS:
+    # Match the canonical loader's exact-object boundary before any mapping
+    # protocol operation can invoke caller-controlled subclass behavior.
+    if type(payload) is not dict:
+        raise authority.ProviderObservationIntegrityError(
+            "complete game-board evidence payload must be an exact JSON object"
+        )
+    if set(dict.keys(payload)) != _SNAPSHOT_KEYS:
         raise authority.ProviderObservationIntegrityError(
             "complete game-board evidence payload fields mismatch"
         )

@@ -11,6 +11,9 @@ BUDGET_SCHEMA_VERSION = 1
 QUALIFICATION_SCHEMA = "autosport.endurance-performance-qualification"
 QUALIFICATION_SCHEMA_VERSION = 1
 _HEX = frozenset("0123456789abcdef")
+_MAX_REPORT_SNAPSHOT_NODES = 10_000
+_MAX_REPORT_SNAPSHOT_DEPTH = 64
+_MAX_REPORT_SNAPSHOT_TEXT_CHARACTERS = 8_000_000
 
 
 class PerformanceQualificationError(ValueError):
@@ -39,19 +42,57 @@ def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]
 
     if not isinstance(report, Mapping):
         raise PerformanceQualificationError("endurance report must be an object")
+    # Never call dict(report): an attacker-owned Mapping can yield an infinite
+    # sequence of keys, lie about its length, or raise secret-bearing errors.
+    # Consume one bounded key/value view, without retrying any read.
+    materialized: dict[str, object] = {}
+    too_many_keys = False
+    invalid_keys = False
     try:
-        materialized = dict(report)
+        for index, key in enumerate(report):
+            if index >= _MAX_REPORT_SNAPSHOT_NODES:
+                too_many_keys = True
+                break
+            if type(key) is not str or key in materialized:
+                invalid_keys = True
+                break
+            materialized[key] = report[key]
     except Exception:
-        # An untrusted Mapping may raise an exception containing private report data.
-        # Preserve the fail-closed type, never its unsafe context or exception text.
         raise PerformanceQualificationError(
             "endurance report could not be snapshotted"
         ) from None
+    if too_many_keys:
+        raise PerformanceQualificationError("endurance report exceeds snapshot node limit")
+    if invalid_keys:
+        raise PerformanceQualificationError("endurance report contains invalid or duplicate keys")
 
     active_containers: set[int] = set()
+    visited_nodes = 0
+    text_characters = 0
 
-    def detach(value: object) -> object:
-        if value is None or type(value) in (str, int, float, bool):
+    def charge_text(text: str) -> None:
+        nonlocal text_characters
+        text_characters += len(text)
+        if text_characters > _MAX_REPORT_SNAPSHOT_TEXT_CHARACTERS:
+            raise PerformanceQualificationError(
+                "endurance report exceeds snapshot text limit"
+            )
+
+    def detach(value: object, depth: int = 0) -> object:
+        nonlocal visited_nodes
+        visited_nodes += 1
+        if visited_nodes > _MAX_REPORT_SNAPSHOT_NODES:
+            raise PerformanceQualificationError(
+                "endurance report exceeds snapshot node limit"
+            )
+        if depth > _MAX_REPORT_SNAPSHOT_DEPTH:
+            raise PerformanceQualificationError(
+                "endurance report exceeds snapshot depth limit"
+            )
+        if type(value) is str:
+            charge_text(value)
+            return value
+        if value is None or type(value) in (int, float, bool):
             return value
 
         if type(value) is dict:
@@ -74,7 +115,8 @@ def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]
                         raise PerformanceQualificationError(
                             "endurance report object keys must be valid UTF-8"
                         ) from exc
-                    detached[key] = detach(item)
+                    charge_text(key)
+                    detached[key] = detach(item, depth + 1)
                 return detached
             finally:
                 active_containers.remove(marker)
@@ -87,7 +129,7 @@ def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]
                 )
             active_containers.add(marker)
             try:
-                return [detach(item) for item in value]
+                return [detach(item, depth + 1) for item in value]
             finally:
                 active_containers.remove(marker)
 

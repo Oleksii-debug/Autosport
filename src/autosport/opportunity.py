@@ -874,6 +874,10 @@ class Opportunity:
             raise OpportunityContractError(
                 "opportunity quote serialization is ambiguous across structured identities"
             )
+        if self.strategy_class is StrategyClass.PARLAY and len(quotes) < 2:
+            raise OpportunityContractError(
+                "PARLAY requires at least two distinct quotes"
+            )
         object.__setattr__(self, "quotes", quotes)
 
         if type(self.forecasts) is not tuple:

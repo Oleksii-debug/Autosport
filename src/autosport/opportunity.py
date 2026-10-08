@@ -5,7 +5,7 @@ import json
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
 from enum import Enum
-from typing import Any, Iterable
+from typing import Any
 
 from .domain import MarketEvent, _quote_identity
 from .forecasting import ForecastRecord, parse_iso_timestamp
@@ -17,6 +17,16 @@ _SHA256_HEX = frozenset("0123456789abcdef")
 
 class OpportunityContractError(ValueError):
     """Raised when an opportunity/plan contract is ambiguous or non-canonical."""
+
+
+def _exact_dict_fields(raw: object) -> frozenset[str] | None:
+    """Return exact built-in string keys without hashing caller-controlled subtypes."""
+    if type(raw) is not dict:
+        return None
+    keys = tuple(raw.keys())
+    if any(type(key) is not str for key in keys):
+        return None
+    return frozenset(keys)
 
 
 class StrategyClass(str, Enum):
@@ -43,6 +53,10 @@ def _canonical_text(value: object, field_name: str) -> str:
         )
     if "\x00" in value:
         raise OpportunityContractError(f"{field_name} must not contain NUL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise OpportunityContractError(
+            f"{field_name} must not contain control characters"
+        )
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
@@ -160,7 +174,7 @@ class EvidenceRef:
 
     @classmethod
     def from_dict(cls, raw: object) -> "EvidenceRef":
-        if type(raw) is not dict or set(raw) != {"authority", "reference"}:
+        if _exact_dict_fields(raw) != frozenset({"authority", "reference"}):
             raise OpportunityContractError(
                 "evidence reference must contain canonical fields"
             )
@@ -171,14 +185,18 @@ class EvidenceRef:
 
 
 def _sorted_unique_evidence(
-    values: Iterable[EvidenceRef],
+    values: tuple[EvidenceRef, ...],
     field_name: str,
 ) -> tuple[EvidenceRef, ...]:
-    refs = tuple(values)
-    if any(not isinstance(item, EvidenceRef) for item in refs):
+    if type(values) is not tuple:
+        raise OpportunityContractError(f"{field_name} must be a tuple")
+    refs = values
+    if any(type(item) is not EvidenceRef for item in refs):
         raise OpportunityContractError(
             f"{field_name} must contain only EvidenceRef values"
         )
+    for item in refs:
+        EvidenceRef.__post_init__(item)
     ordered = tuple(sorted(refs))
     if len(set(ordered)) != len(ordered):
         raise OpportunityContractError(
@@ -255,7 +273,7 @@ class QuoteRef:
         *,
         market_snapshot_hash: str | None = None,
     ) -> "QuoteRef":
-        if not isinstance(event, MarketEvent):
+        if type(event) is not MarketEvent:
             raise OpportunityContractError("quote source must be a MarketEvent")
         try:
             canonical = MarketEvent.from_dict(event.to_dict())
@@ -315,7 +333,8 @@ class QuoteRef:
             "market_event_hash",
             "market_snapshot_hash",
         }
-        if type(raw) is not dict or frozenset(raw) not in {
+        raw_fields = _exact_dict_fields(raw)
+        if raw_fields not in {
             frozenset(expected),
             frozenset(expected | {"sport"}),
         }:
@@ -455,12 +474,13 @@ class PredictiveEligibilityEvidence:
             "as_of",
             "valid_until",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if _exact_dict_fields(raw) != frozenset(expected):
             raise OpportunityContractError(
                 "predictive eligibility evidence must contain canonical fields"
             )
         if (
             raw["schema"] != "autosport.predictive_forecast_eligibility"
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != 1
         ):
             raise OpportunityContractError(
@@ -568,12 +588,11 @@ class ForecastRef:
                     "forecast uncertainty must be between 0 and 1"
                 )
         if self.predictive_eligibility is not None:
-            if not isinstance(
-                self.predictive_eligibility, PredictiveEligibilityEvidence
-            ):
+            if type(self.predictive_eligibility) is not PredictiveEligibilityEvidence:
                 raise OpportunityContractError(
                     "forecast predictive_eligibility must be typed evidence"
                 )
+            PredictiveEligibilityEvidence.__post_init__(self.predictive_eligibility)
             if self.model_id is None:
                 raise OpportunityContractError(
                     "predictive eligibility cannot bind a legacy forecast reference"
@@ -596,11 +615,11 @@ class ForecastRef:
         *,
         predictive_eligibility: PredictiveEligibilityEvidence | None = None,
     ) -> "ForecastRef":
-        if not isinstance(forecast, ForecastRecord):
+        if type(forecast) is not ForecastRecord:
             raise OpportunityContractError(
                 "forecast source must be a ForecastRecord"
             )
-        if not isinstance(quote, QuoteRef):
+        if type(quote) is not QuoteRef:
             raise OpportunityContractError("forecast quote must be a QuoteRef")
         if forecast.quote_key != quote.quote_key:
             raise OpportunityContractError(
@@ -703,7 +722,8 @@ class ForecastRef:
             "market_snapshot_hash",
             "quote_market_event_hash",
         }
-        if type(raw) is dict and set(raw) == legacy:
+        raw_fields = _exact_dict_fields(raw)
+        if raw_fields == frozenset(legacy):
             return cls(
                 forecast_id=_canonical_text(raw["forecast_id"], "forecast_id"),
                 forecast_hash=_canonical_hash(
@@ -735,12 +755,13 @@ class ForecastRef:
             "uncertainty",
             "predictive_eligibility",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if raw_fields != frozenset(expected):
             raise OpportunityContractError(
                 "forecast reference must contain canonical fields"
             )
         if (
             raw["schema"] != "autosport.forecast_ref"
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != 2
         ):
             raise OpportunityContractError(
@@ -800,11 +821,11 @@ class Opportunity:
     evidence_refs: tuple[EvidenceRef, ...] = ()
 
     def __post_init__(self) -> None:
-        if not isinstance(self.strategy_class, StrategyClass):
+        if type(self.strategy_class) is not StrategyClass:
             raise OpportunityContractError(
                 "strategy_class must be a StrategyClass"
             )
-        if not isinstance(self.decision, OpportunityDecision):
+        if type(self.decision) is not OpportunityDecision:
             raise OpportunityContractError(
                 "decision must be an OpportunityDecision"
             )
@@ -827,15 +848,19 @@ class Opportunity:
                 "probability edge is supported only for PREDICTIVE_EDGE or HYBRID"
             )
 
-        quotes = tuple(self.quotes)
+        if type(self.quotes) is not tuple:
+            raise OpportunityContractError("opportunity quotes must be a tuple")
+        quotes = self.quotes
         if not quotes:
             raise OpportunityContractError(
                 "opportunity requires at least one quote"
             )
-        if any(not isinstance(item, QuoteRef) for item in quotes):
+        if any(type(item) is not QuoteRef for item in quotes):
             raise OpportunityContractError(
                 "opportunity quotes must be QuoteRef values"
             )
+        for item in quotes:
+            QuoteRef.__post_init__(item)
         quotes = tuple(sorted(quotes, key=lambda item: item.identity_key))
         identities = [item.identity_key for item in quotes]
         if len(set(identities)) != len(identities):
@@ -849,11 +874,15 @@ class Opportunity:
             )
         object.__setattr__(self, "quotes", quotes)
 
-        forecasts = tuple(self.forecasts)
-        if any(not isinstance(item, ForecastRef) for item in forecasts):
+        if type(self.forecasts) is not tuple:
+            raise OpportunityContractError("opportunity forecasts must be a tuple")
+        forecasts = self.forecasts
+        if any(type(item) is not ForecastRef for item in forecasts):
             raise OpportunityContractError(
                 "opportunity forecasts must be ForecastRef values"
             )
+        for item in forecasts:
+            ForecastRef.__post_init__(item)
         forecasts = tuple(
             sorted(
                 forecasts,
@@ -948,11 +977,21 @@ class Opportunity:
     def conflict_key(self) -> str:
         """Stable identity for one evidence-defined opportunity before decision state."""
 
-        return _canonical_json_hash(self._decision_independent_payload())
+        if type(self) is not Opportunity:
+            raise OpportunityContractError(
+                "opportunity identity requires an exact Opportunity"
+            )
+        return _canonical_json_hash(
+            Opportunity._decision_independent_payload(self)
+        )
 
     @property
     def opportunity_id(self) -> str:
-        return _canonical_json_hash(self._identity_payload())
+        if type(self) is not Opportunity:
+            raise OpportunityContractError(
+                "opportunity identity requires an exact Opportunity"
+            )
+        return _canonical_json_hash(Opportunity._identity_payload(self))
 
     def _identity_payload(self) -> dict[str, Any]:
         return {
@@ -977,13 +1016,17 @@ class Opportunity:
             "forecasts",
             "evidence_refs",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if _exact_dict_fields(raw) != frozenset(expected):
             raise OpportunityContractError(
                 "opportunity must contain canonical fields"
             )
         try:
-            strategy_class = StrategyClass(raw["strategy_class"])
-            decision = OpportunityDecision(raw["decision"])
+            strategy_class = StrategyClass(
+                _canonical_text(raw["strategy_class"], "strategy_class")
+            )
+            decision = OpportunityDecision(
+                _canonical_text(raw["decision"], "decision")
+            )
         except (TypeError, ValueError) as exc:
             raise OpportunityContractError(
                 "opportunity enum value is unsupported"
@@ -1030,15 +1073,28 @@ class OpportunitySet:
     opportunities: tuple[Opportunity, ...]
 
     def __post_init__(self) -> None:
-        values = tuple(self.opportunities)
+        if type(self.opportunities) is not tuple:
+            raise OpportunityContractError("opportunity set members must be a tuple")
+        values = self.opportunities
         if len(values) > _MAX_OPPORTUNITIES:
             raise OpportunityContractError(
                 f"opportunity set exceeds {_MAX_OPPORTUNITIES} members"
             )
-        if any(not isinstance(item, Opportunity) for item in values):
+        if any(type(item) is not Opportunity for item in values):
             raise OpportunityContractError(
                 "opportunity set must contain only Opportunity values"
             )
+        for item in values:
+            try:
+                canonical = Opportunity.from_dict(item.to_dict())
+            except (TypeError, ValueError) as exc:
+                raise OpportunityContractError(
+                    "opportunity set contains a non-canonical Opportunity"
+                ) from exc
+            if canonical != item:
+                raise OpportunityContractError(
+                    "opportunity set member does not match canonical Opportunity state"
+                )
         ordered = tuple(
             sorted(values, key=lambda item: item.opportunity_id)
         )
@@ -1056,6 +1112,10 @@ class OpportunitySet:
 
     @property
     def opportunity_set_id(self) -> str:
+        if type(self) is not OpportunitySet:
+            raise OpportunityContractError(
+                "opportunity set identity requires an exact OpportunitySet"
+            )
         return _canonical_json_hash(
             {
                 "opportunity_ids": [
@@ -1074,9 +1134,8 @@ class OpportunitySet:
 
     @classmethod
     def from_dict(cls, raw: object) -> "OpportunitySet":
-        if (
-            type(raw) is not dict
-            or set(raw) != {"opportunity_set_id", "opportunities"}
+        if _exact_dict_fields(raw) != frozenset(
+            {"opportunity_set_id", "opportunities"}
         ):
             raise OpportunityContractError(
                 "opportunity set must contain canonical fields"
@@ -1125,10 +1184,7 @@ class PlanAllocation:
 
     @classmethod
     def from_dict(cls, raw: object) -> "PlanAllocation":
-        if (
-            type(raw) is not dict
-            or set(raw) != {"opportunity_id", "stake"}
-        ):
+        if _exact_dict_fields(raw) != frozenset({"opportunity_id", "stake"}):
             raise OpportunityContractError(
                 "allocation must contain canonical fields"
             )
@@ -1161,18 +1217,32 @@ class PortfolioPlan:
     )
 
     def __post_init__(self) -> None:
-        if not isinstance(self.opportunity_set, OpportunitySet):
+        if type(self.opportunity_set) is not OpportunitySet:
             raise OpportunityContractError(
                 "opportunity_set must be an OpportunitySet"
             )
+        try:
+            canonical_set = OpportunitySet.from_dict(self.opportunity_set.to_dict())
+        except (TypeError, ValueError) as exc:
+            raise OpportunityContractError(
+                "opportunity_set is not canonical at plan use boundary"
+            ) from exc
+        if canonical_set != self.opportunity_set:
+            raise OpportunityContractError(
+                "opportunity_set does not match canonical state"
+            )
 
-        allocations = tuple(self.allocations)
+        if type(self.allocations) is not tuple:
+            raise OpportunityContractError("allocations must be a tuple")
+        allocations = self.allocations
         if any(
-            not isinstance(item, PlanAllocation) for item in allocations
+            type(item) is not PlanAllocation for item in allocations
         ):
             raise OpportunityContractError(
                 "allocations must contain only PlanAllocation values"
             )
+        for item in allocations:
+            PlanAllocation.__post_init__(item)
         allocations = tuple(
             sorted(allocations, key=lambda item: item.opportunity_id)
         )
@@ -1227,7 +1297,11 @@ class PortfolioPlan:
 
     @property
     def plan_id(self) -> str:
-        return _canonical_json_hash(self._identity_payload())
+        if type(self) is not PortfolioPlan:
+            raise OpportunityContractError(
+                "portfolio plan identity requires an exact PortfolioPlan"
+            )
+        return _canonical_json_hash(PortfolioPlan._identity_payload(self))
 
     def _identity_payload(self) -> dict[str, Any]:
         return {
@@ -1262,7 +1336,7 @@ class PortfolioPlan:
             "risk_evidence_refs",
             "ledger_state_refs",
         }
-        if type(raw) is not dict or set(raw) != expected:
+        if _exact_dict_fields(raw) != frozenset(expected):
             raise OpportunityContractError(
                 "portfolio plan must contain canonical fields"
             )

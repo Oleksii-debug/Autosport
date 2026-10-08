@@ -89,6 +89,22 @@ class MarketMirror:
         return parsed.astimezone(timezone.utc)
 
     @staticmethod
+    def _canonical_lookup_identity(value: object, *, name: str) -> str:
+        """Validate exact canonical identity text before hash/lookup dispatch."""
+        if (
+            type(value) is not str
+            or not value
+            or value.strip() != value
+            or any(ord(character) < 32 or ord(character) == 127 for character in value)
+        ):
+            raise ValueError(f"{name} must be canonical non-empty text")
+        try:
+            value.encode("utf-8")
+        except UnicodeEncodeError as exc:
+            raise ValueError(f"{name} must be valid UTF-8 text") from exc
+        return value
+
+    @staticmethod
     def _selector(
         values: str | Iterable[str] | None,
         *,
@@ -98,15 +114,29 @@ class MarketMirror:
         if values is None:
             return None
         if isinstance(values, str):
-            selected = frozenset({values})
+            if type(values) is not str:
+                raise ValueError(f"{name} entries must be non-empty strings")
+            candidates = (values,)
         else:
             try:
-                selected = frozenset(values)
+                candidates = tuple(values)
             except TypeError as exc:
                 raise TypeError(f"{name} must be a string or iterable of strings") from exc
-        if any(not isinstance(value, str) or not value for value in selected):
+        # Preserve the existing exact-type admission contract before invoking
+        # any string method, then validate the stricter canonical text spelling.
+        if any(type(value) is not str or not value for value in candidates):
             raise ValueError(f"{name} entries must be non-empty strings")
-        return selected
+        # Identity selectors are a trust boundary. Validate exact canonical text
+        # before constructing the hash-based set so malformed text cannot alias a
+        # durable identity.
+        canonical = tuple(
+            MarketMirror._canonical_lookup_identity(
+                value,
+                name=f"{name} entry",
+            )
+            for value in candidates
+        )
+        return frozenset(canonical)
 
     @staticmethod
     def _decision_boundary(*, as_of: datetime, max_age: timedelta) -> tuple[datetime, timedelta]:
@@ -128,8 +158,11 @@ class MarketMirror:
         and fails closed rather than silently replacing canonical evidence. Material
         updates are serialized with readers and advance one mirror-wide revision.
         """
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
+        # Frozen dataclasses can still be tampered with through object.__setattr__.
+        # Reconstruct the canonical value before any identity reaches tuple hashing.
+        event = self._snapshot_event(event)
 
         key = self._key(event)
         with self._lock:
@@ -190,10 +223,10 @@ class MarketMirror:
         but valid provider observations may still be retained in history for audit;
         ``apply`` then keeps the live source-local projection monotonic.
         """
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be a SQLiteMarketStore")
-        if not isinstance(event, MarketEvent):
-            raise TypeError("event must be a MarketEvent")
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
+        if type(event) is not MarketEvent:
+            raise TypeError("event must be an exact MarketEvent")
 
         store.append(event)
         return self.apply(event)
@@ -285,12 +318,16 @@ class MarketMirror:
         quote_key: str,
     ) -> MarketEvent | None:
         """Return one exact source-local quote identity without scanning the mirror."""
-        if type(source_id) is not str or not source_id or source_id.strip() != source_id:
-            raise ValueError("source_id must be a non-empty trimmed string")
-        if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
-            raise ValueError("quote_key must be a non-empty trimmed string")
+        canonical_source_id = self._canonical_lookup_identity(
+            source_id,
+            name="source_id",
+        )
+        canonical_quote_key = self._canonical_lookup_identity(
+            quote_key,
+            name="quote_key",
+        )
         with self._lock:
-            event = self._latest.get((source_id, quote_key))
+            event = self._latest.get((canonical_source_id, canonical_quote_key))
             return None if event is None else self._snapshot_event(event)
 
     def active_view_for_keys(
@@ -319,11 +356,15 @@ class MarketMirror:
             if type(value) is not tuple or len(value) != 2:
                 raise ValueError("mirror key must be a (source_id, quote_key) tuple")
             source_id, quote_key = value
-            if type(source_id) is not str or not source_id or source_id.strip() != source_id:
-                raise ValueError("mirror key source_id must be a non-empty trimmed string")
-            if type(quote_key) is not str or not quote_key or quote_key.strip() != quote_key:
-                raise ValueError("mirror key quote_key must be a non-empty trimmed string")
-            normalized.add((source_id, quote_key))
+            canonical_source_id = self._canonical_lookup_identity(
+                source_id,
+                name="mirror key source_id",
+            )
+            canonical_quote_key = self._canonical_lookup_identity(
+                quote_key,
+                name="mirror key quote_key",
+            )
+            normalized.add((canonical_source_id, canonical_quote_key))
 
         boundary, age_limit = self._decision_boundary(as_of=as_of, max_age=max_age)
         with self._lock:
@@ -358,22 +399,24 @@ class MarketMirror:
         selection_id: str,
         *,
         sport: str | None = None,
+        exchange_side: str | None = None,
     ) -> MarketEvent | None:
-        """Return one exact canonical quote without inferring a missing sport.
+        """Return one exact canonical quote without inferring identity dimensions.
 
-        Omitting sport preserves the deployed legacy sport=None lookup byte-for-byte.
-        Explicit-sport callers must provide the canonical sport dimension so same
-        provider-local IDs across sports cannot alias or be guessed.
+        Omitting sport and exchange_side preserves the deployed legacy lookup byte-for-byte.
+        Explicit callers must provide each canonical identity dimension they intend to
+        address so same provider-local IDs cannot alias or be guessed across sports/sides.
         """
         quote_key = _quote_identity(
             event_id,
             market_id,
             selection_id,
             sport,
+            exchange_side,
         )
-        with self._lock:
-            event = self._latest.get((source_id, quote_key))
-            return None if event is None else self._snapshot_event(event)
+        # Reuse the exact source/quote lookup boundary instead of allowing caller-
+        # controlled str subclasses to reach tuple hashing in _latest directly.
+        return self.event_for_quote_key(source_id, quote_key)
 
     def active_snapshot(
         self,

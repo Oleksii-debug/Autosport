@@ -15,6 +15,7 @@ from autosport.event_lifecycle import (
     ContinuousEventLifecycle,
     EventLifecycleRecord,
     EventPhase,
+    canonical_event_identity_aliases,
 )
 from autosport.domain import MarketEvent
 from autosport.opponent_intelligence import OpponentIntelligenceStore
@@ -257,6 +258,21 @@ def _binding(
     )
 
 
+def _canonical_lifecycle_identity(
+    materializer: SportMemoryResultMaterializer,
+    binding: SportMemoryResultBinding,
+) -> str:
+    matches = tuple(
+        record.identity
+        for record in materializer.runtime.lifecycle.records()
+        if record.source_id == binding.source_id
+        and record.sport == binding.sport_id
+        and binding.event_identity in canonical_event_identity_aliases(record.identity)
+    )
+    assert len(matches) == 1
+    return matches[0]
+
+
 def _settlement(
     materializer: SportMemoryResultMaterializer,
     binding: SportMemoryResultBinding,
@@ -264,14 +280,19 @@ def _settlement(
     *,
     available_at: str = T2,
     evidence_sha256: str = SHA_B,
-    event_identity: str = EVENT_ID,
+    event_identity: str | None = None,
     evidence_id: str = "result-1",
     settlement_ref: str = "settlement-1",
 ) -> SettlementResolution:
     opponent_outcome = "void" if outcome == "void" else ("loss" if outcome == "win" else "win")
     assert binding.opponent_quote_key is not None
+    resolved_event_identity = (
+        _canonical_lifecycle_identity(materializer, binding)
+        if event_identity is None
+        else event_identity
+    )
     canonical = SettlementResolution(
-        event_identity=event_identity,
+        event_identity=resolved_event_identity,
         settlement_ref=settlement_ref,
         quote_outcomes={
             binding.subject_quote_key: outcome,
@@ -657,7 +678,7 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
     assert visible[0].performance_id == first.performance_id
     assert visible[0].score == "1"
 
-    market_store.close()
+    materializer.runtime.close()
     reopened_store = OpponentIntelligenceStore(
         tmp_path / "opponents.json",
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
@@ -678,7 +699,7 @@ def test_result_projection_is_exactly_once_across_restart_and_causally_hidden_be
     replay = reopened.materialize(replay_binding, _settlement(reopened, replay_binding), as_of=T3)
     assert replay == first
     assert len(reopened_store.graph_edges(as_of=T3)) == 1
-    reopened_market.close()
+    reopened_runtime.close()
 
 
 def test_result_projection_requires_explicit_store_correction_lineage(tmp_path):
@@ -974,7 +995,7 @@ def test_event_and_subject_quote_must_match_frozen_binding(tmp_path):
     settlement = _authoritative_assertion(
         materializer,
         SettlementResolution(
-            event_identity=EVENT_ID,
+            event_identity=_canonical_lifecycle_identity(materializer, binding),
             settlement_ref="settlement-1",
             quote_outcomes={"other-quote": "win"},
             evidence_id="result-1",
@@ -1035,7 +1056,7 @@ def test_win_to_void_correction_retires_performance_across_restart_without_fake_
     assert len(store.graph_edges(as_of=T2)) == 1
     assert store.graph_edges(as_of=T3) == ()
 
-    market_store.close()
+    materializer.runtime.close()
     reopened_store = OpponentIntelligenceStore(
         tmp_path / "opponents.json",
         ParticipantIdentityRegistry(tmp_path / "identity.json"),
@@ -1069,7 +1090,7 @@ def test_win_to_void_correction_retires_performance_across_restart_without_fake_
     )
     assert replay == receipt
     assert reopened_store.graph_edges(as_of=T4) == ()
-    reopened_market.close()
+    reopened_runtime.close()
 
     script = f"""
 import sys

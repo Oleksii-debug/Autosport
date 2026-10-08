@@ -79,8 +79,8 @@ def _install_guard() -> None:
             raise ValueError("api_key must be non-empty trimmed text")
         if any(character.isspace() for character in api_key):
             raise ValueError("api_key must not contain whitespace")
-        if not isinstance(request, provider.CompleteGameBoardRequest):
-            raise TypeError("request must be CompleteGameBoardRequest")
+        if type(request) is not provider.CompleteGameBoardRequest:
+            raise TypeError("request must be exact CompleteGameBoardRequest")
         if isinstance(timeout_seconds, bool) or not isinstance(
             timeout_seconds, (int, float)
         ):

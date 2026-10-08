@@ -1,10 +1,13 @@
 from __future__ import annotations
 
+import re
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
+from autosport.domain import TicketLeg
+from autosport.paper import PaperBook
 from autosport.localization import (
     CATALOG_VERSION,
     DEFAULT_LOCALE,
@@ -258,30 +261,33 @@ def test_result_summary_localizes_labels_but_preserves_raw_economic_values() -> 
 
 
 def test_ticket_lines_preserve_canonical_leg_identity_and_decimal_values() -> None:
-    ticket = SimpleNamespace(
-        status=SimpleNamespace(value="won"),
-        stake=Decimal("25.50"),
-        combined_odds=Decimal("2.10"),
-        payout=Decimal("53.55"),
-        legs=(
-            SimpleNamespace(
-                event_id="event:raw-1",
-                market_id="market:raw-2",
-                selection_id="selection:raw-3",
-                locked_odds=Decimal("2.10"),
-            ),
-        ),
+    book = PaperBook("100")
+    leg = TicketLeg(
+        event_id="event:raw-1",
+        market_id="market:raw-2",
+        selection_id="selection:raw-3",
+        locked_odds=Decimal("2.10"),
     )
-    session = SimpleNamespace(book=SimpleNamespace(tickets={"ticket-raw": ticket}))
+    ticket = book.open_ticket(
+        (leg,),
+        Decimal("25.50"),
+        placed_at="2026-09-16T10:00:00+00:00",
+    )
+    book.settle(
+        ticket.ticket_id,
+        {leg.quote_key},
+        settled_at="2026-09-16T10:01:00+00:00",
+    )
+    session = SimpleNamespace(book=book)
 
     rendered = ticket_lines(session)
 
     assert len(rendered) == 1
-    assert rendered[0].startswith("WON | ставка 25.50 | коефіцієнт 2.10 | виплата 53.55 | ")
+    assert rendered[0].startswith("WON | ставка 25.50 | коефіцієнт 2.10 | виплата 53.5500 | ")
     assert "event:raw-1/market:raw-2/selection:raw-3@2.10" in rendered[0]
-    assert ticket_lines(SimpleNamespace(book=SimpleNamespace(tickets={}))) == [
-        "Паперові квитки ще відсутні."
-    ]
+
+    empty_session = SimpleNamespace(book=PaperBook("100"))
+    assert ticket_lines(empty_session) == ["Паперові квитки ще відсутні."]
 
 
 def test_observation_presentation_is_ukrainian_without_mutating_provider_identity() -> None:
@@ -318,3 +324,106 @@ def test_observation_presentation_is_ukrainian_without_mutating_provider_identit
 
     empty_result = SimpleNamespace(current_quotes=())
     assert observation_quote_lines(empty_result) == ["Поточні котирування ще відсутні."]
+
+
+# Test-owned language conformance boundary for issue #1240. This deliberately
+# proves presence of Ukrainian presentation rather than banning Latin/ASCII:
+# canonical provider/protocol tokens remain valid inside Ukrainian context.
+_UKRAINIAN_PRESENTATION_LETTERS = frozenset(
+    "АБВГҐДЕЄЖЗИІЇЙКЛМНОПРСТУФХЦЧШЩЬЮЯ"
+    "абвгґдеєжзиіїйклмнопрстуфхцчшщьюя"
+)
+
+# These controls are intentionally language-neutral numeric mode tokens.
+_CRITICAL_TECHNICAL_ONLY_KEYS = {
+    "ui.speed.realtime",
+    "ui.speed.10x",
+    "ui.speed.100x",
+    "ui.speed.1000x",
+}
+
+# Latin-script tokens are allowed only when their shape or exact identity is
+# technical. Product prose around those tokens must remain Ukrainian-first.
+_LATIN_TOKEN_RE = re.compile(r"[A-Za-z][A-Za-z0-9_.:/\\+\-]*")
+_ALLOWED_TECHNICAL_LATIN_TOKENS = frozenset(
+    {
+        "API",
+        "Autosport",
+        "Betfair",
+        "Control",
+        "ID",
+        "NVDA",
+        "PaperBook",
+        "Provider",
+        "SHA",
+        "Tk",
+        "UIA",
+        "UTC",
+        "Windows",
+    }
+)
+
+
+def _untranslated_latin_product_words(value: str) -> tuple[str, ...]:
+    words: list[str] = []
+    for token in _LATIN_TOKEN_RE.findall(value):
+        if token in _ALLOWED_TECHNICAL_LATIN_TOKENS:
+            continue
+        if any(character.isdigit() for character in token):
+            continue
+        if any(character in "_.:/\\+-" for character in token):
+            continue
+        if token.isupper():
+            continue
+        if any(character.isupper() for character in token[1:]):
+            continue
+        words.append(token)
+    return tuple(words)
+
+
+def _assert_ukrainian_critical_presentation(key: str, value: str) -> None:
+    assert value.strip(), f"{key} resolved to empty/whitespace presentation"
+    assert value != key, f"{key} echoed the localization key instead of presentation"
+    assert any(
+        character in _UKRAINIAN_PRESENTATION_LETTERS for character in value
+    ), f"{key} has no Ukrainian presentation text: {value!r}"
+    untranslated = _untranslated_latin_product_words(value)
+    assert not untranslated, (
+        f"{key} contains untranslated Latin product words: {untranslated!r}; "
+        f"value={value!r}"
+    )
+
+
+def test_critical_visible_and_uia_surfaces_require_ukrainian_presentation() -> None:
+    messages = catalog()
+
+    require_keys(_CRITICAL_UI_KEYS)
+    for key in sorted(_CRITICAL_UI_KEYS - _CRITICAL_TECHNICAL_ONLY_KEYS):
+        _assert_ukrainian_critical_presentation(key, messages[key])
+
+    for key in sorted(_CRITICAL_TECHNICAL_ONLY_KEYS):
+        value = messages[key]
+        assert value.strip(), f"{key} resolved to empty/whitespace technical token"
+        assert value != key, f"{key} echoed the localization key"
+
+
+def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_context() -> None:
+    allowed_samples = (
+        "Betfair API: помилка автентифікації; перевірте ключ.",
+        "Час UTC; SHA-256=abcdef123456.",
+        "Provider-ID=raw-17; стан перевірено українською мовою.",
+    )
+    for index, sample in enumerate(allowed_samples):
+        _assert_ukrainian_critical_presentation(f"sample.{index}", sample)
+
+    with pytest.raises(AssertionError, match="no Ukrainian presentation text"):
+        _assert_ukrainian_critical_presentation(
+            "sample.english_only",
+            "Retry Betfair API request after timeout.",
+        )
+
+    with pytest.raises(AssertionError, match="untranslated Latin product words"):
+        _assert_ukrainian_critical_presentation(
+            "sample.mixed_fallback",
+            "Betfair API: Retry request після помилки.",
+        )

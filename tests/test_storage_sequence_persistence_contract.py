@@ -49,18 +49,21 @@ class StorageSequencePersistenceContractTests(unittest.TestCase):
         for sequence in (_SQLITE_INTEGER_MIN - 1, _SQLITE_INTEGER_MAX + 1):
             with self.subTest(sequence=sequence), tempfile.TemporaryDirectory() as tmp:
                 store = SQLiteMarketStore(Path(tmp) / "market.db")
+                invalid = self._event(0)
+                object.__setattr__(invalid, "sequence", sequence)
                 with self.assertRaisesRegex(
                     ValueError,
                     "must fit signed 64-bit SQLite INTEGER",
                 ):
-                    store.append(self._event(sequence))
+                    store.append(invalid)
                 self.assertEqual(store.events(), [])
                 self.assertEqual(store.current(), {})
                 store.close()
 
     def test_invalid_late_batch_member_rolls_back_valid_prefix(self) -> None:
         valid = self._event(1, selection_id="valid")
-        invalid = self._event(_SQLITE_INTEGER_MAX + 1, selection_id="invalid")
+        invalid = self._event(2, selection_id="invalid")
+        object.__setattr__(invalid, "sequence", _SQLITE_INTEGER_MAX + 1)
 
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")

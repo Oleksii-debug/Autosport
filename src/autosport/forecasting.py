@@ -8,7 +8,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
-from decimal import Decimal
+from decimal import Context, Decimal, DecimalException, ROUND_HALF_EVEN, localcontext
 from pathlib import Path
 from typing import Any, Iterable
 
@@ -48,6 +48,18 @@ def _canonical_sha256(value: object, *, field_name: str) -> str:
     return value
 
 
+def _canonical_identity_text(value: object, *, field_name: str) -> str:
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"{field_name} must be canonical non-empty identity text")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field_name} must not contain control characters")
+    try:
+        value.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field_name} must be valid UTF-8 identity text") from exc
+    return value
+
+
 @dataclass(frozen=True, slots=True)
 class ForecastRecord:
     """Immutable pre-outcome forecast with explicit model/data causal boundaries."""
@@ -71,8 +83,14 @@ class ForecastRecord:
         uncertainty = Decimal(str(self.uncertainty))
         object.__setattr__(self, "probability", probability)
         object.__setattr__(self, "uncertainty", uncertainty)
-        if not self.quote_key or not self.model_id or not self.model_version or not self.strategy_version:
-            raise ValueError("forecast identities must not be empty")
+        for field_name in (
+            "forecast_id",
+            "quote_key",
+            "model_id",
+            "model_version",
+            "strategy_version",
+        ):
+            _canonical_identity_text(getattr(self, field_name), field_name=field_name)
         if not probability.is_finite():
             raise ValueError("probability must be finite")
         if not uncertainty.is_finite():
@@ -94,8 +112,10 @@ class ForecastRecord:
         if contains_forbidden_future_key(provenance):
             raise ValueError("forecast provenance must not contain future-result fields")
         object.__setattr__(self, "provenance", provenance)
-        if not isinstance(self.evidence_hashes, (tuple, list)):
-            raise ValueError("evidence_hashes must be an ordered collection of SHA-256 digests")
+        if type(self.evidence_hashes) not in {tuple, list}:
+            raise ValueError(
+                "evidence_hashes must be an exact list or tuple of SHA-256 digests"
+            )
         evidence_hashes = tuple(
             _canonical_sha256(value, field_name="evidence hash")
             for value in self.evidence_hashes
@@ -116,8 +136,10 @@ class ForecastRecord:
 
     @property
     def canonical_hash(self) -> str:
+        if type(self) is not ForecastRecord:
+            raise ValueError("forecast record must be an exact ForecastRecord")
         canonical = json.dumps(
-            self.to_dict(),
+            ForecastRecord.to_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -126,6 +148,29 @@ class ForecastRecord:
         return hashlib.sha256(canonical.encode("utf-8")).hexdigest()
 
     def to_dict(self) -> dict[str, Any]:
+        for field_name in (
+            "forecast_id",
+            "quote_key",
+            "model_id",
+            "model_version",
+            "strategy_version",
+        ):
+            _canonical_identity_text(getattr(self, field_name), field_name=field_name)
+        if type(self.evidence_hashes) is not tuple:
+            raise ValueError(
+                "evidence_hashes must remain an exact tuple of SHA-256 digests"
+            )
+        evidence_hashes = tuple(
+            _canonical_sha256(value, field_name="evidence hash")
+            for value in self.evidence_hashes
+        )
+        if len(set(evidence_hashes)) != len(evidence_hashes):
+            raise ValueError("duplicate evidence hashes")
+        if self.market_snapshot_hash is not None:
+            _canonical_sha256(
+                self.market_snapshot_hash,
+                field_name="market_snapshot_hash",
+            )
         return {
             "forecast_id": self.forecast_id,
             "quote_key": self.quote_key,
@@ -151,6 +196,8 @@ class JsonlForecastLedger:
         self.path.parent.mkdir(parents=True, exist_ok=True)
 
     def append(self, record: ForecastRecord) -> str:
+        if type(record) is not ForecastRecord:
+            raise ValueError("forecast ledger requires exact ForecastRecord")
         payload = record.to_dict()
         digest = record.canonical_hash
         envelope = json.dumps(
@@ -173,10 +220,9 @@ class ForecastOutcomeFact:
     revealed_at: str
 
     def __post_init__(self) -> None:
-        if not self.forecast_id:
-            raise ValueError("forecast_id required")
-        if self.outcome not in (0, 1):
-            raise ValueError("outcome must be 0 or 1")
+        _canonical_identity_text(self.forecast_id, field_name="forecast_id")
+        if type(self.outcome) is not int or self.outcome not in (0, 1):
+            raise ValueError("outcome must be exact integer 0 or 1")
         parse_iso_timestamp(self.revealed_at)
 
 
@@ -191,10 +237,9 @@ class TemporalEvaluationWindow:
     split: str = "holdout"
 
     def __post_init__(self) -> None:
-        if not self.window_id:
-            raise ValueError("window_id required")
-        if self.split not in _ALLOWED_SPLITS:
-            raise ValueError("split must be validation or holdout")
+        _canonical_identity_text(self.window_id, field_name="window_id")
+        if type(self.split) is not str or self.split not in _ALLOWED_SPLITS:
+            raise ValueError("split must be exact validation or holdout text")
         training_end = parse_iso_timestamp(self.training_end_ts)
         evaluation_start = parse_iso_timestamp(self.evaluation_start_ts)
         evaluation_end = parse_iso_timestamp(self.evaluation_end_ts)
@@ -232,6 +277,106 @@ class ForecastEvaluationSummary:
     strategy_versions: tuple[str, ...]
 
 
+_LOG_LOSS_MIN_DECIMAL_PRECISION = 64
+_LOG_LOSS_MAX_DECIMAL_COEFFICIENT_DIGITS = 4096
+_LOG_LOSS_MAX_DECIMAL_ABS_EFFECTIVE_EXPONENT = 1_000_000
+
+
+def _binary_log_loss(probability: Decimal, outcome: int) -> float:
+    """Return binary log loss without changing the declared Decimal probability.
+
+    Impossible realized endpoint predictions have unbounded log loss. Interior
+    loss is evaluated in a deterministic Decimal context sized to preserve the
+    declared decimal scale; only the final summary scalar is converted to float.
+    """
+
+    if not isinstance(probability, Decimal) or not probability.is_finite():
+        raise ValueError("log-loss probability must be a finite Decimal")
+    if probability < 0 or probability > 1:
+        raise ValueError("log-loss probability must be between 0 and 1")
+    if outcome not in (0, 1):
+        raise ValueError("log-loss outcome must be 0 or 1")
+
+    if probability == 0:
+        if outcome == 0:
+            return 0.0
+        raise ValueError(
+            "log loss is unbounded for probability=0 and realized outcome=1"
+        )
+    if probability == 1:
+        if outcome == 1:
+            return 0.0
+        raise ValueError(
+            "log loss is unbounded for probability=1 and realized outcome=0"
+        )
+
+    decimal_tuple = probability.as_tuple()
+    if len(decimal_tuple.digits) > _LOG_LOSS_MAX_DECIMAL_COEFFICIENT_DIGITS:
+        raise ValueError(
+            "log-loss probability Decimal coefficient exceeds supported resource bound"
+        )
+    raw_exponent = decimal_tuple.exponent
+    if not isinstance(raw_exponent, int):
+        raise ValueError("log-loss probability Decimal exponent must be an integer")
+    significant_digits = len(decimal_tuple.digits)
+    while (
+        significant_digits > 1
+        and decimal_tuple.digits[significant_digits - 1] == 0
+    ):
+        significant_digits -= 1
+    trailing_zeros = len(decimal_tuple.digits) - significant_digits
+    effective_exponent = raw_exponent + trailing_zeros
+    if abs(effective_exponent) > _LOG_LOSS_MAX_DECIMAL_ABS_EFFECTIVE_EXPONENT:
+        raise ValueError(
+            "log-loss probability Decimal exponent exceeds supported resource bound"
+        )
+
+    if outcome == 0 and float(probability) == 0.0:
+        raise ValueError(
+            "positive log loss is not representable as a nonzero binary64 value"
+        )
+
+    decimal_places = -effective_exponent if effective_exponent < 0 else 0
+    precision = max(
+        _LOG_LOSS_MIN_DECIMAL_PRECISION,
+        significant_digits + 2,
+        decimal_places + 2 if outcome == 0 else 0,
+    )
+    context = Context(
+        prec=precision,
+        rounding=ROUND_HALF_EVEN,
+        Emin=-999_999_999,
+        Emax=999_999_999,
+        capitals=1,
+        clamp=0,
+    )
+    try:
+        with localcontext(context):
+            if outcome == 1:
+                decimal_loss = -probability.ln()
+            else:
+                complement = Decimal(1) - probability
+                if complement <= 0:
+                    raise ValueError(
+                        "interior probability complement is not positive"
+                    )
+                decimal_loss = -complement.ln()
+    except DecimalException as exc:
+        raise ValueError(
+            "declared probability cannot be evaluated in the canonical "
+            "Decimal log-loss context"
+        ) from exc
+
+    binary_loss = float(decimal_loss)
+    if not math.isfinite(binary_loss):
+        raise ValueError("log loss is not representable as a finite binary64 value")
+    if decimal_loss != 0 and binary_loss == 0.0:
+        raise ValueError(
+            "positive log loss is not representable as a nonzero binary64 value"
+        )
+    return binary_loss
+
+
 def evaluate_forecast_window(
     records: Iterable[ForecastRecord],
     outcomes: Iterable[ForecastOutcomeFact],
@@ -240,10 +385,16 @@ def evaluate_forecast_window(
 ) -> ForecastEvaluationSummary:
     """Evaluate one temporal fold without allowing model-training leakage across its boundary."""
 
+    if type(window) is not TemporalEvaluationWindow:
+        raise ValueError("evaluation window must be exact TemporalEvaluationWindow")
+    TemporalEvaluationWindow.__post_init__(window)
     if bins <= 0:
         raise ValueError("bins must be positive")
     outcome_by_id: dict[str, ForecastOutcomeFact] = {}
     for fact in outcomes:
+        if type(fact) is not ForecastOutcomeFact:
+            raise ValueError("outcomes must contain exact ForecastOutcomeFact values")
+        ForecastOutcomeFact.__post_init__(fact)
         if fact.forecast_id in outcome_by_id:
             raise ValueError(f"duplicate outcome fact for forecast: {fact.forecast_id}")
         outcome_by_id[fact.forecast_id] = fact
@@ -252,6 +403,9 @@ def evaluate_forecast_window(
     selected: list[tuple[ForecastRecord, ForecastOutcomeFact]] = []
     selected_ids: set[str] = set()
     for record in records:
+        if type(record) is not ForecastRecord:
+            raise ValueError("records must contain exact ForecastRecord values")
+        ForecastRecord.to_dict(record)
         if record.forecast_id in selected_ids:
             raise ValueError(f"duplicate forecast_id: {record.forecast_id}")
         if not window.contains(record.generated_at):
@@ -273,13 +427,10 @@ def evaluate_forecast_window(
     probabilities = [float(record.probability) for record, _fact in selected]
     actuals = [fact.outcome for _record, fact in selected]
     brier = sum((p - y) ** 2 for p, y in zip(probabilities, actuals, strict=True)) / len(selected)
-    epsilon = 1e-15
-    losses = []
-    for probability, outcome in zip(probabilities, actuals, strict=True):
-        clipped = min(1.0 - epsilon, max(epsilon, probability))
-        losses.append(
-            -(outcome * math.log(clipped) + (1 - outcome) * math.log(1 - clipped))
-        )
+    losses = [
+        _binary_log_loss(record.probability, fact.outcome)
+        for record, fact in selected
+    ]
     mean_uncertainty = sum(
         float(record.uncertainty) for record, _fact in selected
     ) / len(selected)
@@ -312,7 +463,16 @@ def evaluate_walk_forward(
     window_values = tuple(windows)
     if not window_values:
         raise ValueError("walk-forward windows required")
-    ordered = sorted(window_values, key=lambda item: parse_iso_timestamp(item.evaluation_start_ts))
+    for window in window_values:
+        if type(window) is not TemporalEvaluationWindow:
+            raise ValueError(
+                "walk-forward windows must contain exact TemporalEvaluationWindow values"
+            )
+        TemporalEvaluationWindow.__post_init__(window)
+    ordered = sorted(
+        window_values,
+        key=lambda item: parse_iso_timestamp(item.evaluation_start_ts),
+    )
     previous_end: datetime | None = None
     for window in ordered:
         start = parse_iso_timestamp(window.evaluation_start_ts)

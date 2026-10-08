@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
@@ -375,36 +376,37 @@ class _ContinuousSessionState:
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
         if type(raw) is not list:
             raise ContinuousSessionError("settlement_evidence must be a list")
+        legacy = {
+            "event_identity", "settlement_ref", "evidence_id",
+            "evidence_sha256", "available_at",
+        }
+        bound = legacy | {"quote_outcomes_binding_version", "quote_outcomes_sha256"}
         values: list[dict[str, str]] = []
+        known: dict[str, dict[str, str]] = {}
         for item in raw:
-            if type(item) is not dict:
-                raise ContinuousSessionError(
-                    "settlement_evidence entries must be objects"
-                )
-            if set(item) != {
-                "event_identity",
-                "settlement_ref",
-                "evidence_id",
-                "evidence_sha256",
-                "available_at",
-            }:
-                raise ContinuousSessionError(
-                    "settlement_evidence entry fields mismatch"
-                )
-            _text(item["event_identity"], "settlement_evidence event_identity")
-            _text(item["settlement_ref"], "settlement_evidence settlement_ref")
-            _text(item["evidence_id"], "settlement_evidence evidence_id")
+            if type(item) is not dict or set(item) not in (legacy, bound):
+                raise ContinuousSessionError("settlement_evidence entry fields mismatch")
+            for field in ("event_identity", "settlement_ref", "evidence_id"):
+                _text(item[field], f"settlement_evidence {field}")
             _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
             _instant(item["available_at"], "settlement_evidence available_at")
-            values.append(
-                {
-                    "event_identity": item["event_identity"],
-                    "settlement_ref": item["settlement_ref"],
-                    "evidence_id": item["evidence_id"],
-                    "evidence_sha256": item["evidence_sha256"],
-                    "available_at": item["available_at"],
-                }
-            )
+            if set(item) == bound:
+                if type(item["quote_outcomes_binding_version"]) is not str or (
+                    item["quote_outcomes_binding_version"] != "canonical-json-sha256-v1"
+                ):
+                    raise ContinuousSessionError(
+                        "settlement_evidence outcome binding version is unsupported"
+                    )
+                _sha256(item["quote_outcomes_sha256"], "settlement_evidence quote_outcomes_sha256")
+            normalized = dict(item)
+            evidence_id = normalized["evidence_id"]
+            previous = known.get(evidence_id)
+            if previous is not None:
+                raise ContinuousSessionError(
+                    "settlement_evidence cannot contain duplicate evidence_id"
+                )
+            known[evidence_id] = normalized
+            values.append(normalized)
         return tuple(values)
 
     def _read(self) -> dict[str, Any]:
@@ -539,19 +541,31 @@ class _ContinuousSessionState:
         evidence: SettlementResolution,
     ) -> dict[str, str]:
         if type(evidence) is not SettlementResolution:
-            raise TypeError(
-                "settlement evidence must be an exact SettlementResolution"
-            )
+            raise TypeError("settlement evidence must be an exact SettlementResolution")
         evidence.validate(as_of=evidence.available_at)
+        # The provider SHA authenticates provider evidence, not necessarily the
+        # resolved payout mapping. Bind that exact validated mapping separately.
+        # Sorted canonical JSON preserves exact quote identity across restart.
+        outcome_bytes = json.dumps(
+            evidence.quote_outcomes,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        outcome_digest = hashlib.sha256(
+            b"autosport.paper.settlement.outcomes.v1\x00" + outcome_bytes
+        ).hexdigest()
         return {
             "event_identity": evidence.event_identity,
             "settlement_ref": evidence.settlement_ref,
             "evidence_id": evidence.evidence_id,
             "evidence_sha256": evidence.evidence_sha256,
             "available_at": _instant(
-                evidence.available_at,
-                "available_at",
+                evidence.available_at, "available_at",
             ).isoformat(),
+            "quote_outcomes_binding_version": "canonical-json-sha256-v1",
+            "quote_outcomes_sha256": outcome_digest,
         }
 
     def validate_settlement_evidence(
@@ -575,6 +589,43 @@ class _ContinuousSessionState:
                     "settlement evidence id conflicts with durable evidence"
                 )
             known[evidence_id] = normalized
+
+    def bind_settlement_evidence(
+        self, *, settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        """Durably bind outcome contents before any PAPER payout or learning hook.
+
+        Legacy metadata-only receipts may be read, but a replay cannot silently
+        upgrade one to verified outcome identity without an independent witness.
+        A distinct evidence ID for a correction is admitted as new evidence;
+        this operation itself never reverses an already committed PAPER payout.
+        """
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
+        normalized = tuple(
+            self._normalized_settlement_evidence(evidence)
+            for evidence in settlement_evidence
+        )
+        if not normalized:
+            return
+
+        def mutate(raw: dict[str, Any]) -> None:
+            known = {
+                item["evidence_id"]: item
+                for item in raw["settlement_evidence"]
+            }
+            for entry in normalized:
+                previous = known.get(entry["evidence_id"])
+                if previous is not None and previous != entry:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts with durable evidence"
+                    )
+                known[entry["evidence_id"]] = entry
+            raw["settlement_evidence"] = list(
+                sorted(known.values(), key=lambda item: item["evidence_id"])
+            )
+
+        self._update(mutate)
 
     def record_source_projection(
         self,
@@ -1173,6 +1224,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
 
             resolutions = self._settlement_resolutions(as_of=now)
             self._state.validate_settlement_evidence(
+                settlement_evidence=resolutions
+            )
+            # Journal the exact outcome fingerprint before any external hook,
+            # paper cash mutation, or crash-sensitive settlement sequence.
+            self._state.bind_settlement_evidence(
                 settlement_evidence=resolutions
             )
             if self.settlement_learning_handoff is not None:

@@ -517,9 +517,10 @@ def test_causal_lookup_rejects_self_consistent_malformed_outcome_reveal_after(
         encoding="utf-8",
     )
 
-    reopened = ScientificRegistry(path)
+    # Persisted records are validated at reopen, before causal lookup.
+    # Early fail-closed rejection is stronger than deferred lookup rejection.
     with pytest.raises(ValueError, match="outcome_reveal_after.*canonical string"):
-        reopened.causal_records("DatasetSnapshot", as_of=T2)
+        ScientificRegistry(path)
 
 
 def test_promotion_fails_closed_then_blocks_reused_confirmation_holdout(tmp_path):

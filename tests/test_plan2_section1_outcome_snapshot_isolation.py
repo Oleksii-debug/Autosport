@@ -101,3 +101,16 @@ def test_snapshot_seam_rejects_resolution_subclasses_before_virtual_dispatch():
     )
     with pytest.raises(TypeError, match="exact SettlementResolution"):
         ContinuousSessionCoordinator._detached_settlement_resolutions((hostile,))
+
+
+def test_snapshot_rejects_hostile_mapping_before_custom_copy_dispatch():
+    class HostileMapping(dict):
+        def copy(self):
+            raise AssertionError("caller-owned mapping copy must not run")
+
+    source = _resolution()
+    from dataclasses import replace
+
+    hostile = replace(source, quote_outcomes=HostileMapping(source.quote_outcomes))
+    with pytest.raises(ValueError, match="quote_outcomes must be a non-empty exact dict"):
+        ContinuousSessionCoordinator._detached_settlement_resolutions((hostile,))

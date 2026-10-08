@@ -140,7 +140,9 @@ def run_hot_path(
     for name, callback in zip(STAGES, callbacks):
         before = read_clock()
         if check_backlog():
-            return stop("BACKLOG", before)
+            # Include time spent in the possibly slow pressure probe. A stale
+            # pre-probe tick would understate the latency of the WAIT report.
+            return stop("BACKLOG", read_clock())
         # A dynamic backlog probe may itself consume the freshness or total
         # budget. Re-sample before EVERY callback (not just decision); a slow
         # sampler must not start a stale intermediate stage.
@@ -165,7 +167,9 @@ def run_hot_path(
         delta = after - before
         samples.append((name, delta))
         if check_backlog():
-            return stop("BACKLOG", after)
+            # Account for the post-stage pressure probe before publishing a
+            # bounded performance report; never backdate an overload.
+            return stop("BACKLOG", read_clock())
         # Post-stage sampling can also consume the deadline, including after
         # the final decision. Never publish OK from the earlier clock tick.
         checked_at = read_clock() if backlog_reader is not None else after

@@ -16,6 +16,10 @@ from typing import Final, TypeVar
 SCHEMA: Final = "autosport.latency_budget"
 SCHEMA_VERSION: Final = 1
 
+# Bound aggregation of untrusted or long-lived latency sample streams.
+# Larger campaigns must aggregate in bounded windows, not exhaust an infinite source.
+MAX_LATENCY_SAMPLES: Final = 100_000
+
 _T = TypeVar("_T")
 
 
@@ -227,6 +231,10 @@ def summarize_latency(samples_ns: Iterable[int], *, budget: LatencyBudget) -> La
 
     validated: list[int] = []
     for index, value in enumerate(samples_ns):
+        if index >= MAX_LATENCY_SAMPLES:
+            raise LatencyBudgetError(
+                f"samples_ns exceeds maximum {MAX_LATENCY_SAMPLES} samples"
+            )
         validated.append(_non_negative_ns(value, field=f"samples_ns[{index}]"))
     if not validated:
         raise LatencyBudgetError("samples_ns must contain at least one sample")

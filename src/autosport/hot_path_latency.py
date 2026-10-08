@@ -1,0 +1,118 @@
+"""Bounded, observer-only five-stage latency and overload gate.
+
+This is a composition helper for fixture experiments, not a second runtime or
+financial authority. `observed_at_ns` uses the same monotonic clock as `clock_ns`.
+No callback output, exception message or secret-bearing input is persisted.
+"""
+from __future__ import annotations
+
+from collections.abc import Callable, Mapping
+from dataclasses import dataclass
+from time import perf_counter_ns
+from typing import Final
+
+STAGES: Final = ("ingest", "mirror", "opportunity", "portfolio", "decision")
+
+
+class HotPathError(ValueError):
+    """Fail-closed configuration, clock, or stage failure without secret echoes."""
+
+
+@dataclass(frozen=True, slots=True)
+class HotPathPolicy:
+    stage_budget_ns: int
+    total_budget_ns: int
+    max_backlog: int
+    max_source_age_ns: int
+
+    def __post_init__(self) -> None:
+        for field in ("stage_budget_ns", "total_budget_ns", "max_source_age_ns"):
+            value = getattr(self, field)
+            if type(value) is not int or value <= 0:
+                raise HotPathError(f"{field} must be a positive integer")
+        if type(self.max_backlog) is not int or self.max_backlog < 0:
+            raise HotPathError("max_backlog must be a nonnegative integer")
+
+
+@dataclass(frozen=True, slots=True)
+class HotPathReport:
+    source_sha: str
+    disposition: str
+    reason: str
+    stage_latencies_ns: tuple[tuple[str, int], ...]
+    total_elapsed_ns: int
+    backlog: int
+    execution_authority: bool = False
+    target_machine_acceptance: bool = False
+
+
+def run_hot_path(
+    *,
+    source_sha: str,
+    policy: HotPathPolicy,
+    observed_at_ns: int,
+    backlog: int,
+    stages: Mapping[str, Callable[[], object]],
+    clock_ns: Callable[[], int] = perf_counter_ns,
+) -> HotPathReport:
+    """Stop before the next stage on stale source, overload or time breach.
+
+    The final `decision` callback is proposal-only: this helper does not authorize
+    order placement or persist any economic effect. Callback side effects before
+    an exception cannot be rolled back; callers own their idempotency contracts.
+    """
+    if type(source_sha) is not str or len(source_sha) != 40 or any(c not in "0123456789abcdef" for c in source_sha):
+        raise HotPathError("source_sha must be a lowercase 40-digit revision")
+    if type(policy) is not HotPathPolicy:
+        raise HotPathError("policy must be exact HotPathPolicy")
+    if type(observed_at_ns) is not int or observed_at_ns < 0:
+        raise HotPathError("observed_at_ns must be monotonic nonnegative integer")
+    if type(backlog) is not int or backlog < 0:
+        raise HotPathError("backlog must be nonnegative integer")
+    if type(stages) is not dict or tuple(stages) != STAGES or not all(callable(stages[k]) for k in STAGES):
+        raise HotPathError("stages must have exactly five ordered callbacks")
+    if not callable(clock_ns):
+        raise HotPathError("clock_ns must be callable")
+    callbacks = tuple(stages[name] for name in STAGES)
+
+    def read_clock() -> int:
+        try:
+            tick = clock_ns()
+        except Exception:
+            raise HotPathError("monotonic clock unavailable") from None
+        if type(tick) is not int or tick < 0:
+            raise HotPathError("monotonic clock returned invalid timestamp")
+        return tick
+
+    started = read_clock()
+    if started < observed_at_ns:
+        raise HotPathError("source timestamp is ahead of monotonic clock")
+    samples: list[tuple[str, int]] = []
+
+    def stop(reason: str, now: int) -> HotPathReport:
+        return HotPathReport(source_sha, "WAIT", reason, tuple(samples), now - started, backlog)
+
+    if backlog > policy.max_backlog:
+        return stop("BACKLOG", started)
+    for name, callback in zip(STAGES, callbacks):
+        before = read_clock()
+        if before < started or before < observed_at_ns:
+            raise HotPathError("monotonic clock moved backwards")
+        if before - observed_at_ns > policy.max_source_age_ns:
+            return stop("STALE_SOURCE", before)
+        if before - started > policy.total_budget_ns:
+            return stop("TOTAL_BUDGET", before)
+        try:
+            callback()
+        except Exception:
+            raise HotPathError("stage failed closed") from None
+        after = read_clock()
+        if after < before:
+            raise HotPathError("monotonic clock moved backwards")
+        delta = after - before
+        samples.append((name, delta))
+        if delta > policy.stage_budget_ns:
+            return stop("STAGE_BUDGET", after)
+        if after - started > policy.total_budget_ns:
+            return stop("TOTAL_BUDGET", after)
+    return HotPathReport(source_sha, "OK", "WITHIN_BUDGET", tuple(samples), samples and after - started or 0, backlog)

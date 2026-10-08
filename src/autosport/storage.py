@@ -2854,9 +2854,14 @@ class SQLiteMarketStore:
         if current_row is not None:
             try:
                 current_event = _event_from_current_row(current_row)
-            except ValueError:
-                # current_quotes is derived and repairable. Malformed projection
-                # bytes cannot override the already-proven append-only history.
+            except ValueError as exc:
+                # A redundant identity mismatch is evidence of a tampered or
+                # inconsistent projection. Do not silently acknowledge an append
+                # by repairing those bytes in the same transaction.
+                if str(exc).startswith("current quote projection row identity mismatch:"):
+                    raise
+                # Malformed derived payloads remain repairable from independently
+                # proven append-only history.
                 current_event = None
             else:
                 if _stream_semantic_identity(current_event) != _stream_semantic_identity(

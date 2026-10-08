@@ -1052,3 +1052,44 @@ def test_verifier_rejects_hash_valid_record_with_unredacted_canonical_alias(
     with pytest.raises(JournalIntegrityError, match="unredacted sensitive"):
         verify_journal(path)
 
+
+
+def test_oversized_journal_is_rejected_before_unbounded_read(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An untrusted large journal may never exhaust verification memory."""
+
+    path = tmp_path / "oversized.jsonl"
+    monkeypatch.setattr(forensic_session_journal, "_MAX_JOURNAL_BYTES", 512)
+    with path.open("wb") as handle:
+        handle.truncate(513)
+
+    with pytest.raises(JournalIntegrityError, match="bounded capacity"):
+        verify_journal(path)
+
+
+def test_journal_capacity_fails_closed_without_appending(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Exhaustion releases the writer lease and restart re-verifies the prefix."""
+
+    journal = new_journal(tmp_path)
+    prefix = journal.path.read_bytes()
+    original_limit = forensic_session_journal._MAX_JOURNAL_BYTES
+    monkeypatch.setattr(forensic_session_journal, "_MAX_JOURNAL_BYTES", len(prefix) + 1)
+
+    with pytest.raises(JournalIntegrityError, match="capacity exhausted"):
+        journal.append_material("product.tick", {"note": "bounded history"})
+    assert journal.path.read_bytes() == prefix
+    assert [record.event_type for record in verify_journal(journal.path)] == [
+        "lifecycle.startup"
+    ]
+
+    monkeypatch.setattr(forensic_session_journal, "_MAX_JOURNAL_BYTES", original_limit)
+    recovered = new_journal(tmp_path)
+    assert [r.event_type for r in recovered.snapshot()] == [
+        "lifecycle.startup",
+        "lifecycle.unclean_restart",
+        "lifecycle.startup",
+    ]
+    recovered.close()

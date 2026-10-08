@@ -2242,17 +2242,18 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
-                event = self.event(
-                    sequence=1,
-                    odds="2.00",
-                    observed_ts="2026-09-16T19:00:00.0000004+00:00",
-                    ingest_ts="2026-09-16T19:00:00.0000004+00:00",
-                )
+                # Noncanonical precision must fail at the earliest domain
+                # boundary, before storage has any side effect.
                 with self.assertRaisesRegex(
                     ValueError,
                     "observed_ts precision finer than microseconds is unsupported",
                 ):
-                    store.append(event)
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00.0000004+00:00",
+                        ingest_ts="2026-09-16T19:00:00.0000004+00:00",
+                    )
 
                 self.assertEqual(store.events(), [])
                 self.assertEqual(
@@ -2268,7 +2269,12 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
-                store.append(
+                # Do not turn an invalid source clock into a replay-visible
+                # row by rounding it to microseconds.
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "source_ts precision finer than microseconds is unsupported",
+                ):
                     self.event(
                         sequence=1,
                         odds="2.00",
@@ -2276,8 +2282,13 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                         ingest_ts="2026-09-16T19:00:00+00:00",
                         source_ts="2026-09-16T19:00:01.0000004+00:00",
                     )
+                self.assertEqual(store.events(), [])
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (0,),
                 )
-
                 snapshot = self.replay(store)
                 self.assertEqual(snapshot.events, ())
             finally:
@@ -4410,15 +4421,21 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     ingest_ts="2026-09-16T18:59:57+00:00",
                     source_ts="2026-09-16T18:59:57+00:00",
                 )
-                impossible = self.event(
-                    sequence=2,
-                    odds="9.99",
-                    observed_ts="2026-09-16T18:59:59+00:00",
-                    ingest_ts="2026-09-16T18:59:58+00:00",
-                    source_ts="2026-09-16T18:59:56+00:00",
-                )
+                # An inverted receipt clock is rejected at domain ingress;
+                # it cannot enter replay/history even as an audit-only row.
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts cannot be before observed_ts",
+                ):
+                    self.event(
+                        sequence=2,
+                        odds="9.99",
+                        observed_ts="2026-09-16T18:59:59+00:00",
+                        ingest_ts="2026-09-16T18:59:58+00:00",
+                        source_ts="2026-09-16T18:59:56+00:00",
+                    )
                 self.assertTrue(store.append(visible))
-                self.assertTrue(store.append(impossible))
+                self.assertEqual(store.events(), [visible])
 
                 snapshot = self.replay(store)
 

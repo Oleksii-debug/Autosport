@@ -43,7 +43,6 @@ class GovernancePermissionState(str, Enum):
 _LOCAL_WRITE_LOCK = RLock()
 
 
-@contextmanager
 def _fdopen_owned_text(fd: int):
     """Transfer a temporary file descriptor to a text handle without leaking it."""
 
@@ -57,6 +56,7 @@ def _fdopen_owned_text(fd: int):
         raise
 
 
+@contextmanager
 def _registry_write_lock(registry_path: Path) -> Iterator[None]:
     """Serialize the complete registry read-modify-publish transaction.
 

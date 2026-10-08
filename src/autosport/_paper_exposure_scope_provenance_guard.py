@@ -1,0 +1,765 @@
+from __future__ import annotations
+
+from hashlib import sha256
+from typing import Any, Callable
+
+from . import _paper_execution_reality_legacy as _ledger_impl
+from . import _paper_value_execution_authority as _paper_value_authority
+from .paper_execution_adoption import (
+    PaperExecutionAdoptionError,
+    PaperExecutionAdoptionRuntime,
+    PreparedPaperExecution,
+)
+from .paper_execution_reality import (
+    PaperExecutionIntegrityError,
+    PaperExecutionLedger,
+)
+
+
+_RESERVED_EVENT_TYPE = "PAPER_EXPOSURE_SCOPE_BOUND"
+_RESERVED_SCHEMA = "autosport.paper_execution.exposure_scope_binding"
+_RESERVED_SCHEMA_VERSION = 1
+_EMPTY_CELL = object()
+
+
+def _snapshot_function_globals(
+    function: Callable[..., object],
+) -> tuple[tuple[tuple[str, object], ...], object]:
+    globals_dict = function.__globals__
+    bindings = tuple(
+        (name, globals_dict[name])
+        for name in function.__code__.co_names
+        if name in globals_dict
+    )
+    return bindings, globals_dict.get("__builtins__")
+
+
+def _function_globals_match(
+    function: Callable[..., object],
+    snapshot: tuple[tuple[tuple[str, object], ...], object],
+) -> bool:
+    bindings, builtins_binding = snapshot
+    globals_dict = function.__globals__
+    if globals_dict.get("__builtins__") is not builtins_binding:
+        return False
+    return all(
+        name in globals_dict and globals_dict[name] is expected
+        for name, expected in bindings
+    )
+
+
+def _snapshot_function_metadata(
+    function: Callable[..., object],
+) -> tuple[object, object, object, object]:
+    defaults = function.__defaults__
+    frozen_defaults = None if defaults is None else tuple(defaults)
+    kwdefaults = function.__kwdefaults__
+    frozen_kwdefaults = (
+        None
+        if kwdefaults is None
+        else tuple(sorted(kwdefaults.items(), key=lambda item: item[0]))
+    )
+    closure = function.__closure__
+    if closure is None:
+        frozen_closure = None
+    else:
+        values: list[object] = []
+        for cell in closure:
+            try:
+                values.append(cell.cell_contents)
+            except ValueError:
+                values.append(_EMPTY_CELL)
+        frozen_closure = tuple(values)
+    return function.__code__, frozen_defaults, frozen_kwdefaults, frozen_closure
+
+
+def _function_metadata_match(
+    function: Callable[..., object],
+    snapshot: tuple[object, object, object, object],
+) -> bool:
+    expected_code, expected_defaults, expected_kwdefaults, expected_closure = snapshot
+    if function.__code__ is not expected_code:
+        return False
+
+    live_defaults = function.__defaults__
+    if expected_defaults is None:
+        if live_defaults is not None:
+            return False
+    elif live_defaults is None or len(live_defaults) != len(expected_defaults):
+        return False
+    elif any(
+        live is not expected
+        for live, expected in zip(live_defaults, expected_defaults, strict=True)
+    ):
+        return False
+
+    live_kwdefaults = function.__kwdefaults__
+    if expected_kwdefaults is None:
+        if live_kwdefaults is not None:
+            return False
+    else:
+        expected_kw_map = dict(expected_kwdefaults)
+        if live_kwdefaults is None or set(live_kwdefaults) != set(expected_kw_map):
+            return False
+        if any(
+            live_kwdefaults[name] is not expected
+            for name, expected in expected_kw_map.items()
+        ):
+            return False
+
+    live_closure = function.__closure__
+    if expected_closure is None:
+        return live_closure is None
+    if live_closure is None or len(live_closure) != len(expected_closure):
+        return False
+    for cell, expected in zip(live_closure, expected_closure, strict=True):
+        try:
+            live = cell.cell_contents
+        except ValueError:
+            live = _EMPTY_CELL
+        if live is not expected:
+            return False
+    return True
+
+
+def bind_canonical_execute(execute_function):
+    """Bind scope publication to exact product-minted scope authority.
+
+    The existing decision-origin execute function remains the execution authority.
+    Exposure publication no longer treats Python frame/code/closure identity as a
+    positive capability.  Instead it consumes a distinct exact-object scope
+    registration issued by canonical preparation/verified PaperValue authorization,
+    re-derives the payload from that PreparedPaperExecution, and writes the reserved
+    event through the existing ledger durability primitives.
+    """
+
+    runtime_type = PaperExecutionAdoptionRuntime
+    ledger_type = PaperExecutionLedger
+    prepared_type = PreparedPaperExecution
+
+    if getattr(execute_function, "_autosport_exposure_scope_execute_guard", False):
+        return execute_function
+
+    installed_execute = runtime_type.execute
+    if (
+        getattr(runtime_type, "_autosport_decision_origin_callsite_guard", False)
+        and installed_execute is not execute_function
+    ):
+        if not getattr(
+            installed_execute,
+            "_autosport_exposure_scope_execute_guard",
+            False,
+        ):
+            raise RuntimeError(
+                "canonical PAPER decision-origin execute binding is unavailable"
+            )
+        return installed_execute
+
+    # Positive scope issuance is owned here, outside caller-writable runtime
+    # dictionaries. Immutable tuple replacement keeps the registry itself free of
+    # mutation methods. Reflected closure-cell/code-object mutation remains outside
+    # this project's TRUSTED_PRODUCT_INTERPRETER boundary.
+    # Runtime origin includes the exact durable ledger location tuple. The ledger
+    # object alone is not sufficient because its path/lock/anchor attributes are
+    # ordinary mutable Python instance state.
+    runtime_origins: tuple[
+        tuple[
+            PaperExecutionAdoptionRuntime,
+            PaperExecutionLedger,
+            object,
+            object,
+            object,
+            object,
+        ],
+        ...,
+    ] = ()
+    scope_authorities: tuple[
+        tuple[
+            PaperExecutionAdoptionRuntime,
+            PreparedPaperExecution,
+            PaperExecutionLedger,
+        ],
+        ...,
+    ] = ()
+
+    base_runtime_init = runtime_type.__init__
+    base_prepare = runtime_type.prepare
+    base_authorize_descriptor = _paper_value_authority._authorize_descriptor
+
+    def construct_with_origin(self, *args, **kwargs):
+        nonlocal runtime_origins
+        base_runtime_init(self, *args, **kwargs)
+        if type(self) is not runtime_type or type(self.ledger) is not ledger_type:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER runtime construction requires exact runtime and ledger"
+            )
+        runtime_origins = (
+            *runtime_origins,
+            (
+                self,
+                self.ledger,
+                self.ledger.path,
+                self.ledger._lock_path,
+                self.ledger._anchor_path,
+                self.ledger._lock,
+            ),
+        )
+
+    def require_runtime_origin(self, *, stage: str):
+        origin = next(
+            (entry for entry in runtime_origins if entry[0] is self),
+            None,
+        )
+        if origin is None:
+            raise PaperExecutionIntegrityError(
+                f"canonical PAPER exposure-scope runtime origin is unavailable {stage}"
+            )
+        _, ledger, path, lock_path, anchor_path, writer_lock = origin
+        if (
+            self.ledger is not ledger
+            or ledger.path is not path
+            or ledger._lock_path is not lock_path
+            or ledger._anchor_path is not anchor_path
+            or ledger._lock is not writer_lock
+        ):
+            raise PaperExecutionIntegrityError(
+                f"canonical PAPER exposure-scope ledger origin changed {stage}"
+            )
+        return ledger
+
+    def prepare_with_scope_authority(self, *args, **kwargs):
+        nonlocal scope_authorities
+        origin_ledger = require_runtime_origin(
+            self,
+            stage="before preparation",
+        )
+        prepared = base_prepare(self, *args, **kwargs)
+        if prepared is not None:
+            if type(prepared) is not prepared_type:
+                raise PaperExecutionIntegrityError(
+                    "canonical PAPER preparation returned non-canonical prepared execution"
+                )
+            scope_authorities = (
+                *scope_authorities,
+                (self, prepared, origin_ledger),
+            )
+        return prepared
+
+    def authorize_descriptor_with_scope_authority(self, *args, **kwargs):
+        nonlocal scope_authorities
+        origin_ledger = require_runtime_origin(
+            self,
+            stage="before authorization",
+        )
+        prepared = base_authorize_descriptor(self, *args, **kwargs)
+        if type(prepared) is not prepared_type:
+            raise PaperExecutionIntegrityError(
+                "canonical PaperValue authorization returned non-canonical prepared execution"
+            )
+        scope_authorities = (
+            *scope_authorities,
+            (self, prepared, origin_ledger),
+        )
+        return prepared
+
+    runtime_type.__init__ = construct_with_origin
+    runtime_type.prepare = prepare_with_scope_authority
+    _paper_value_authority._authorize_descriptor = (
+        authorize_descriptor_with_scope_authority
+    )
+
+    init_guard = construct_with_origin
+    init_guard_code = init_guard.__code__
+    mint_guard = runtime_type._mint_prepared
+    prepare_guard = prepare_with_scope_authority
+    prepare_guard_code = prepare_guard.__code__
+    authorize_guard = authorize_descriptor_with_scope_authority
+    authorize_guard_code = authorize_guard.__code__
+    prepare_paper_value_guard = runtime_type.prepare_paper_value_action
+    require_minted = runtime_type._require_minted
+    require_minted_globals = _snapshot_function_globals(require_minted)
+    require_minted_metadata = _snapshot_function_metadata(require_minted)
+
+    scope_descriptor = runtime_type.__dict__.get("_exposure_scope_payload")
+    if not isinstance(scope_descriptor, classmethod):
+        raise RuntimeError("canonical PAPER exposure-scope payload dispatch is unavailable")
+    scope_function = scope_descriptor.__func__
+    scope_globals = _snapshot_function_globals(scope_function)
+    scope_metadata = _snapshot_function_metadata(scope_function)
+
+    expected_run_id = runtime_type.expected_run_id
+    expected_run_id_globals = _snapshot_function_globals(expected_run_id)
+    expected_run_id_metadata = _snapshot_function_metadata(expected_run_id)
+
+    append_owner = next(
+        (
+            base
+            for base in ledger_type.__mro__[1:]
+            if "_append_event" in base.__dict__
+        ),
+        None,
+    )
+    if append_owner is None:
+        raise RuntimeError("canonical PAPER lower ledger append is unavailable")
+    lower_append = append_owner.__dict__["_append_event"]
+    event_descriptor = append_owner.__dict__.get("_event")
+    if not isinstance(event_descriptor, staticmethod):
+        raise RuntimeError("canonical PAPER event constructor is unavailable")
+    canonical_event = event_descriptor.__func__
+    event_globals = _snapshot_function_globals(canonical_event)
+    event_metadata = _snapshot_function_metadata(canonical_event)
+
+    canonical_json = _ledger_impl._canonical
+    canonical_json_globals = _snapshot_function_globals(canonical_json)
+    canonical_json_metadata = _snapshot_function_metadata(canonical_json)
+    fsync = _ledger_impl.os.fsync
+    os_open = _ledger_impl.os.open
+    os_close = _ledger_impl.os.close
+    os_replace = _ledger_impl.os.replace
+    ledger_digest = _ledger_impl._digest
+    ledger_digest_globals = _snapshot_function_globals(ledger_digest)
+    ledger_digest_metadata = _snapshot_function_metadata(ledger_digest)
+    parse_json_object = _ledger_impl._parse_json_object
+    parse_json_globals = _snapshot_function_globals(parse_json_object)
+    parse_json_metadata = _snapshot_function_metadata(parse_json_object)
+    sha256_digest = sha256
+
+    # The reserved publisher replicates the canonical append algorithm because the
+    # generic ledger seam intentionally rejects this event type.  Seal the concrete
+    # pathlib dispatch it must use; otherwise a late class-level open/exists rebind
+    # can redirect or fabricate the positive durability path while ledger helpers
+    # and fsync remain canonical.
+    ledger_path_type = type(_ledger_impl.Path("."))
+    ledger_path_exists = ledger_path_type.exists
+    ledger_path_exists_globals = _snapshot_function_globals(ledger_path_exists)
+    ledger_path_exists_metadata = _snapshot_function_metadata(ledger_path_exists)
+    ledger_path_open = ledger_path_type.open
+    ledger_path_open_globals = _snapshot_function_globals(ledger_path_open)
+    ledger_path_open_metadata = _snapshot_function_metadata(ledger_path_open)
+    ledger_path_read_text = ledger_path_type.read_text
+    ledger_path_read_text_globals = _snapshot_function_globals(ledger_path_read_text)
+    ledger_path_read_text_metadata = _snapshot_function_metadata(ledger_path_read_text)
+    ledger_path_with_name = ledger_path_type.with_name
+    ledger_path_with_name_globals = _snapshot_function_globals(ledger_path_with_name)
+    ledger_path_with_name_metadata = _snapshot_function_metadata(ledger_path_with_name)
+    ledger_path_unlink = ledger_path_type.unlink
+    ledger_path_unlink_globals = _snapshot_function_globals(ledger_path_unlink)
+    ledger_path_unlink_metadata = _snapshot_function_metadata(ledger_path_unlink)
+
+    ledger_methods = tuple(
+        (
+            name,
+            method,
+            _snapshot_function_globals(method),
+            _snapshot_function_metadata(method),
+        )
+        for name in (
+            "_ensure_existing_path_durable",
+            "_load_unlocked",
+            "_read_anchor_unlocked",
+            "_write_anchor_unlocked",
+            "_sync_parent_directory",
+            "_with_writer_lock",
+        )
+        for method in (getattr(ledger_type, name),)
+    )
+
+    def checked_canonical_json(value: object) -> str:
+        if _ledger_impl._canonical is not canonical_json:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger serializer dispatch was rebound"
+            )
+        if not _function_globals_match(canonical_json, canonical_json_globals):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger serializer globals were rebound"
+            )
+        if not _function_metadata_match(canonical_json, canonical_json_metadata):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger serializer metadata were rebound"
+            )
+        return canonical_json(value)
+
+    def validate_payload(payload: object) -> dict[str, Any]:
+        expected = {
+            "schema",
+            "schema_version",
+            "plan_id",
+            "plan_fingerprint",
+            "intent_evidence_sha256",
+            "bindings",
+            "binding_sha256",
+        }
+        if type(payload) is not dict or set(payload) != expected:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope payload schema is invalid"
+            )
+        if (
+            payload["schema"] != _RESERVED_SCHEMA
+            or payload["schema_version"] != _RESERVED_SCHEMA_VERSION
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope payload version is invalid"
+            )
+        bindings = payload["bindings"]
+        if type(bindings) is not list or not bindings:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope bindings must be non-empty"
+            )
+        expected_binding_keys = {"action_id", "sport", "bankroll_id", "currency"}
+        for binding in bindings:
+            if type(binding) is not dict or set(binding) != expected_binding_keys:
+                raise PaperExecutionIntegrityError(
+                    "canonical PAPER exposure-scope binding schema is invalid"
+                )
+            action_id = binding["action_id"]
+            if (
+                type(action_id) is not str
+                or not action_id
+                or action_id.strip() != action_id
+            ):
+                raise PaperExecutionIntegrityError(
+                    "canonical PAPER exposure-scope action_id is invalid"
+                )
+            for name in ("sport", "bankroll_id", "currency"):
+                value = binding[name]
+                if value is not None and (
+                    type(value) is not str
+                    or not value
+                    or value.strip() != value
+                ):
+                    raise PaperExecutionIntegrityError(
+                        f"canonical PAPER exposure-scope {name} is invalid"
+                    )
+            if (binding["bankroll_id"] is None) != (binding["currency"] is None):
+                raise PaperExecutionIntegrityError(
+                    "canonical PAPER exposure-scope bankroll/currency binding is incomplete"
+                )
+        for name in (
+            "plan_id",
+            "plan_fingerprint",
+            "intent_evidence_sha256",
+            "binding_sha256",
+        ):
+            value = payload[name]
+            if type(value) is not str or not value or value.strip() != value:
+                raise PaperExecutionIntegrityError(
+                    f"canonical PAPER exposure-scope {name} is invalid"
+                )
+        return payload
+
+    canonical_execute = execute_function
+
+    def publish_owned_exposure_scope(
+        self: PaperExecutionAdoptionRuntime,
+        *,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+        run_id: str,
+    ) -> None:
+        if type(self) is not runtime_type or type(self.ledger) is not ledger_type:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure scope requires exact adoption runtime and ledger"
+            )
+        if runtime_type.execute is not canonical_execute:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER execution dispatch was rebound"
+            )
+        if runtime_type._publish_exposure_scope is not publish_owned_exposure_scope:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope publisher dispatch was rebound"
+            )
+        if runtime_type._mint_prepared is not mint_guard:
+            raise PaperExecutionIntegrityError(
+                "canonical prepared-execution mint dispatch was rebound"
+            )
+        if (
+            runtime_type.__init__ is not init_guard
+            or init_guard.__code__ is not init_guard_code
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER runtime-origin authority was rebound"
+            )
+        if (
+            runtime_type.prepare is not prepare_guard
+            or prepare_guard.__code__ is not prepare_guard_code
+            or runtime_type.prepare_paper_value_action is not prepare_paper_value_guard
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER preparation dispatch was rebound"
+            )
+        if (
+            _paper_value_authority._authorize_descriptor is not authorize_guard
+            or authorize_guard.__code__ is not authorize_guard_code
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PaperValue scope-issuance dispatch was rebound"
+            )
+        if runtime_type._require_minted is not require_minted:
+            raise PaperExecutionIntegrityError(
+                "canonical prepared-execution verification was rebound"
+            )
+        if (
+            not _function_globals_match(require_minted, require_minted_globals)
+            or not _function_metadata_match(require_minted, require_minted_metadata)
+        ):
+            raise PaperExecutionAdoptionError(
+                "canonical prepared-execution verification metadata was rebound"
+            )
+        if type(prepared) is not prepared_type:
+            raise TypeError("prepared must be exact PreparedPaperExecution")
+
+        live_scope_descriptor = runtime_type.__dict__.get("_exposure_scope_payload")
+        if (
+            not isinstance(live_scope_descriptor, classmethod)
+            or live_scope_descriptor.__func__ is not scope_function
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope payload authority was rebound"
+            )
+        if (
+            not _function_globals_match(scope_function, scope_globals)
+            or not _function_metadata_match(scope_function, scope_metadata)
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope payload metadata was rebound"
+            )
+
+        if (
+            ledger_type._append_event is not lower_append
+            or append_owner.__dict__.get("_append_event") is not lower_append
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope ledger dispatch was rebound"
+            )
+        if (
+            append_owner.__dict__.get("_event") is not event_descriptor
+            or "_event" in ledger_type.__dict__
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope event constructor dispatch was rebound"
+            )
+        if (
+            not _function_globals_match(canonical_event, event_globals)
+            or not _function_metadata_match(canonical_event, event_metadata)
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER event constructor metadata was rebound"
+            )
+        if (
+            _ledger_impl.os.fsync is not fsync
+            or _ledger_impl.os.open is not os_open
+            or _ledger_impl.os.close is not os_close
+            or _ledger_impl.os.replace is not os_replace
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger durability dispatch was rebound"
+            )
+        if (
+            _ledger_impl._digest is not ledger_digest
+            or not _function_globals_match(ledger_digest, ledger_digest_globals)
+            or not _function_metadata_match(ledger_digest, ledger_digest_metadata)
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger digest authority was rebound"
+            )
+        if (
+            _ledger_impl._parse_json_object is not parse_json_object
+            or not _function_globals_match(parse_json_object, parse_json_globals)
+            or not _function_metadata_match(parse_json_object, parse_json_metadata)
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger parser authority was rebound"
+            )
+        ledger_path = self.ledger.path
+        if (
+            type(ledger_path) is not ledger_path_type
+            or ledger_path_type.exists is not ledger_path_exists
+            or ledger_path_type.open is not ledger_path_open
+            or ledger_path_type.read_text is not ledger_path_read_text
+            or ledger_path_type.with_name is not ledger_path_with_name
+            or ledger_path_type.unlink is not ledger_path_unlink
+            or not _function_globals_match(
+                ledger_path_exists, ledger_path_exists_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_exists, ledger_path_exists_metadata
+            )
+            or not _function_globals_match(
+                ledger_path_open, ledger_path_open_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_open, ledger_path_open_metadata
+            )
+            or not _function_globals_match(
+                ledger_path_read_text, ledger_path_read_text_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_read_text, ledger_path_read_text_metadata
+            )
+            or not _function_globals_match(
+                ledger_path_with_name, ledger_path_with_name_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_with_name, ledger_path_with_name_metadata
+            )
+            or not _function_globals_match(
+                ledger_path_unlink, ledger_path_unlink_globals
+            )
+            or not _function_metadata_match(
+                ledger_path_unlink, ledger_path_unlink_metadata
+            )
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER ledger path dispatch was rebound"
+            )
+        for (
+            name,
+            expected_method,
+            expected_globals,
+            expected_metadata,
+        ) in ledger_methods:
+            if (
+                getattr(ledger_type, name) is not expected_method
+                or name in getattr(self.ledger, "__dict__", {})
+            ):
+                raise PaperExecutionIntegrityError(
+                    f"canonical PAPER ledger {name} dispatch was rebound"
+                )
+            if (
+                not _function_globals_match(expected_method, expected_globals)
+                or not _function_metadata_match(expected_method, expected_metadata)
+            ):
+                raise PaperExecutionIntegrityError(
+                    f"canonical PAPER ledger {name} metadata was rebound"
+                )
+
+        if runtime_type.expected_run_id is not expected_run_id:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER run-id dispatch was rebound"
+            )
+        if (
+            not _function_globals_match(expected_run_id, expected_run_id_globals)
+            or not _function_metadata_match(expected_run_id, expected_run_id_metadata)
+        ):
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER run-id metadata was rebound"
+            )
+
+        require_minted(self, prepared)
+        origin_ledger = require_runtime_origin(
+            self,
+            stage="during publication",
+        )
+        if not any(
+            runtime is self and candidate is prepared and ledger is origin_ledger
+            for runtime, candidate, ledger in scope_authorities
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER exposure-scope publication is reserved for canonical execution authority"
+            )
+
+        if type(trigger_id) is not str or not trigger_id or trigger_id.strip() != trigger_id:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope decision identity is invalid"
+            )
+        expected_run = expected_run_id(self, prepared, trigger_id)
+        if run_id != expected_run:
+            raise PaperExecutionIntegrityError(
+                "canonical PAPER exposure-scope run identity changed"
+            )
+
+        body: dict[str, object] = {
+            "schema": _RESERVED_SCHEMA,
+            "schema_version": _RESERVED_SCHEMA_VERSION,
+            "plan_id": prepared.execution_plan.plan_id,
+            "plan_fingerprint": prepared.execution_plan.fingerprint,
+            "intent_evidence_sha256": sha256_digest(
+                prepared.intent_evidence_json.encode("utf-8")
+            ).hexdigest(),
+            "bindings": [
+                {
+                    "action_id": binding.action_id,
+                    "sport": binding.sport,
+                    "bankroll_id": binding.bankroll_id,
+                    "currency": binding.currency,
+                }
+                for binding in prepared.exposure_bindings
+            ],
+        }
+        payload = validate_payload(
+            {
+                **body,
+                "binding_sha256": sha256_digest(
+                    checked_canonical_json(body).encode("utf-8")
+                ).hexdigest(),
+            }
+        )
+        event_key = f"{run_id}:exposure-scope"
+
+        ensure_existing = ledger_methods[0][1]
+        load_unlocked = ledger_methods[1][1]
+        write_anchor = ledger_methods[3][1]
+        sync_parent = ledger_methods[4][1]
+        with_writer_lock = ledger_methods[5][1]
+
+        def mutate_reserved_scope() -> None:
+            ensure_existing(self.ledger)
+            events = load_unlocked(self.ledger)
+            by_key = {item["event_key"]: item for item in events}
+            prior = by_key.get(event_key)
+            sequence = len(events)
+            previous_sha256 = None if not events else events[-1]["event_sha256"]
+            event = canonical_event(
+                event_type=_RESERVED_EVENT_TYPE,
+                run_id=run_id,
+                key=event_key,
+                payload=payload,
+                sequence=sequence,
+                previous_sha256=previous_sha256,
+            )
+            if prior is not None:
+                comparable = dict(prior)
+                comparable.pop("sequence", None)
+                comparable.pop("previous_sha256", None)
+                comparable.pop("event_sha256", None)
+                proposed = dict(event)
+                proposed.pop("sequence", None)
+                proposed.pop("previous_sha256", None)
+                proposed.pop("event_sha256", None)
+                if comparable != proposed:
+                    raise PaperExecutionIntegrityError(
+                        "event_key already has different payload"
+                    )
+                return
+
+            encoded = checked_canonical_json(event) + "\n"
+            path_existed_before = ledger_path_exists(ledger_path)
+            try:
+                with ledger_path_open(
+                    ledger_path,
+                    "a",
+                    encoding="utf-8",
+                    newline="\n",
+                ) as handle:
+                    handle.write(encoded)
+                    handle.flush()
+                    fsync(handle.fileno())
+                if not path_existed_before or not self.ledger._path_durable:
+                    sync_parent(self.ledger)
+                write_anchor(self.ledger, events + [event])
+            except OSError as exc:
+                self.ledger._path_durable = False
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger durability barrier failed"
+                ) from exc
+            self.ledger._path_durable = True
+
+        with_writer_lock(self.ledger, mutate_reserved_scope)
+
+    canonical_execute._autosport_exposure_scope_execute_guard = True  # type: ignore[attr-defined]
+    publish_owned_exposure_scope._autosport_exposure_scope_provenance_guard = True  # type: ignore[attr-defined]
+    runtime_type._publish_exposure_scope = publish_owned_exposure_scope
+    return canonical_execute
+
+
+__all__ = ["bind_canonical_execute"]

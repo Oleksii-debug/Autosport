@@ -2,8 +2,9 @@ from __future__ import annotations
 
 from datetime import timedelta
 from decimal import Decimal
-from threading import Event, Thread
+from threading import Event, Thread, current_thread
 from time import monotonic, sleep
+from types import MethodType
 
 from autosport.agents import AgentContext
 from autosport.decision_ledger import JsonlDecisionLedger
@@ -114,10 +115,37 @@ def _run_agent(
         done.set()
 
 
+class _PostWitnessBlocker:
+    """Test-only blocker installed on one exact canonical PaperBook instance."""
+
+    def __init__(self, book: PaperBook, *, blocked: Event, release: Event) -> None:
+        self.blocked = blocked
+        self.release = release
+        self.blocking_thread: Thread | None = None
+        original_open_ticket = book.open_ticket
+
+        def blocking_open_ticket(_book: PaperBook, *args, **kwargs):
+            # Install only after canonical runtime construction/durable binding.
+            # Production still receives the exact PaperBook class; this hook only
+            # coordinates the concurrency test at the final materialization seam.
+            if (
+                self.blocking_thread is not None
+                and current_thread() is self.blocking_thread
+            ):
+                self.blocked.set()
+                if not self.release.wait(timeout=5):
+                    raise AssertionError("target execution was not released")
+            return original_open_ticket(*args, **kwargs)
+
+        book.open_ticket = MethodType(blocking_open_ticket, book)
+
+
+
 def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     tmp_path,
-    monkeypatch,
 ) -> None:
+    target_post_witness = Event()
+    release_target = Event()
     book = PaperBook("100.00")
     policy = PaperRiskPolicy(
         max_ticket_fraction=Decimal("0.02"),
@@ -128,6 +156,11 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
     assert policy.evaluate(book, Decimal("1.00")).allowed
 
     runtime = _runtime(tmp_path, book)
+    blocker = _PostWitnessBlocker(
+        book,
+        blocked=target_post_witness,
+        release=release_target,
+    )
     target_event = _event("target")
     competitor_event = _event("competitor")
     target_agent = _agent(target_event, policy)
@@ -157,44 +190,6 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         competitor_context,
         competitor_event,
     )
-    target_post_witness = Event()
-    release_target = Event()
-    original_execute_unlocked = PaperExecutionAdoptionRuntime._execute_unlocked
-
-    def block_after_target_witness(
-        self,
-        *,
-        prepared,
-        trigger_id: str,
-        started_at: str,
-        materialize_exposure: bool,
-        observations=None,
-        evidence_registry=None,
-        suspended_action_ids: frozenset[str] = frozenset(),
-    ):
-        # This boundary is reached only after GENERAL risk admission has committed
-        # and while the runtime-wide execution lock is held. Test synchronization
-        # therefore cannot replace the protected PaperValue authority entry point.
-        if trigger_id == target_decision_id:
-            target_post_witness.set()
-            if not release_target.wait(timeout=5):
-                raise AssertionError("target execution was not released")
-        return original_execute_unlocked(
-            self,
-            prepared=prepared,
-            trigger_id=trigger_id,
-            started_at=started_at,
-            materialize_exposure=materialize_exposure,
-            observations=observations,
-            evidence_registry=evidence_registry,
-            suspended_action_ids=suspended_action_ids,
-        )
-
-    monkeypatch.setattr(
-        PaperExecutionAdoptionRuntime,
-        "_execute_unlocked",
-        block_after_target_witness,
-    )
 
     target_done = Event()
     competitor_done = Event()
@@ -212,6 +207,7 @@ def test_competing_canonical_execution_cannot_enter_after_general_risk_witness(
         kwargs={"done": competitor_done, "errors": competitor_errors},
         daemon=True,
     )
+    blocker.blocking_thread = target_thread
 
     target_thread.start()
     try:

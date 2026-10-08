@@ -1,0 +1,901 @@
+from __future__ import annotations
+
+import hashlib
+import importlib
+import json
+import tempfile
+import unittest
+from datetime import timedelta
+from decimal import Decimal
+from pathlib import Path
+
+import autosport._paper_execution_decision_origin_callsite_guard as decision_callsite
+import autosport._paper_exposure_scope_provenance_guard as scope_guard
+from autosport.agents import AgentContext
+from autosport.decision_ledger import JsonlDecisionLedger
+from autosport.domain import MarketEvent
+from autosport.economic_goal import EconomicGoalContract
+from autosport.paper import PaperBook
+from autosport.paper_execution_adoption import (
+    PaperExecutionAdoptionError,
+    PaperExecutionAdoptionRuntime,
+    PreparedPaperExecution,
+)
+from autosport.paper_execution_reality import (
+    EvidenceGrade,
+    PaperExecutionIntegrityError,
+    PaperExecutionLedger,
+    PaperExecutionModelConfig,
+)
+from autosport.paper_strategy import Forecast, PaperValueAgent
+from autosport.risk import PaperRiskPolicy
+
+
+QUOTE_AT = "2026-09-25T12:00:00+00:00"
+
+
+def _config() -> PaperExecutionModelConfig:
+    return PaperExecutionModelConfig(
+        model_id="exposure-scope-provenance-test",
+        model_version="1",
+        evidence_grade=EvidenceGrade.SYNTHETIC,
+        evidence_source="focused-regression",
+        seed="fixed-seed",
+        max_quote_age_ms=5_000,
+        min_delay_ms=0,
+        max_delay_ms=0,
+        rejected_bps=0,
+        partial_bps=0,
+        unknown_bps=0,
+        partial_fill_bps=5_000,
+        max_slippage_bps=0,
+    )
+
+
+def _event() -> MarketEvent:
+    return MarketEvent(
+        event_id="event-1",
+        market_id="winner",
+        selection_id="home",
+        decimal_odds=Decimal("2.00"),
+        observed_ts=QUOTE_AT,
+        source_id="paper-venue",
+        sequence=1,
+        source_ts="2026-09-25T11:59:59+00:00",
+        ingest_ts=QUOTE_AT,
+        sport="soccer",
+    )
+
+
+def _goal() -> EconomicGoalContract:
+    return EconomicGoalContract(
+        goal_id="scope-product-goal",
+        revision=1,
+        bankroll_id="bankroll-eur",
+        currency="EUR",
+        max_stake_fraction=Decimal("0.10"),
+        max_capital_at_risk_fraction=Decimal("0.50"),
+        max_risk_of_ruin=Decimal("1"),
+        max_concurrent_positions=2,
+        max_quote_age_seconds=Decimal("5"),
+        minimum_data_quality=Decimal("0"),
+    )
+
+
+def _fixture(root: Path):
+    event = _event()
+    book = PaperBook("100.00")
+    execution_ledger = PaperExecutionLedger(root / "paper-execution.jsonl")
+    runtime = PaperExecutionAdoptionRuntime(
+        book=book,
+        ledger=execution_ledger,
+        config=_config(),
+        max_quote_age=timedelta(seconds=5),
+        paper_book_path=root / "paper-book.json",
+    )
+    decision_ledger = JsonlDecisionLedger(root / "decisions.jsonl")
+    context = AgentContext(
+        book,
+        latest_quotes={event.quote_key: event},
+        replay_run_id="scope-product-run",
+        decision_ledger=decision_ledger,
+        paper_execution=runtime,
+        paper_provider_accounts=((event.source_id, "paper-account"),),
+    )
+    agent = PaperValueAgent(
+        {
+            event.quote_key: Forecast(
+                quote_key=event.quote_key,
+                probability=Decimal("0.75"),
+                model_id="scope-product-model",
+                as_of_ts="2026-09-25T11:59:58+00:00",
+            )
+        },
+        stake=Decimal("5.00"),
+        minimum_expected_profit_per_unit=Decimal("0"),
+        risk_policy=PaperRiskPolicy(economic_goal=_goal()),
+    )
+    return event, agent, context, runtime, decision_ledger
+
+
+def _run_product(root: Path):
+    event, agent, context, runtime, decision_ledger = _fixture(root)
+    agent.on_market_event(event, context)
+    return event, agent, context, runtime, decision_ledger
+
+
+def _caller_prepared(runtime: PaperExecutionAdoptionRuntime) -> PreparedPaperExecution:
+    descriptor = runtime.prepare_paper_value_action(
+        event=_event(),
+        stake=Decimal("5.00"),
+        decision_id="caller-authored-scope",
+        account_id="paper-account",
+        bankroll_id="bankroll-eur",
+        currency="EUR",
+    )
+    return PreparedPaperExecution(
+        execution_plan=descriptor.execution_plan,
+        exposure_bindings=descriptor.exposure_bindings,
+        intent_evidence_json=descriptor.intent_evidence_json,
+    )
+
+
+def _seed_scope_authority_for_lower_layer(
+    runtime: PaperExecutionAdoptionRuntime,
+    prepared: PreparedPaperExecution,
+) -> None:
+    """Test-only setup beyond the TRUSTED_PRODUCT_INTERPRETER threat boundary.
+
+    Lower-layer dispatch falsifiers need an already-issued scope capability without
+    recreating the full decision/risk path. Mutating a closure cell is deliberately
+    private interpreter state; production exposes no equivalent grant surface.
+    """
+    publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+    cells = dict(
+        zip(
+            publisher.__code__.co_freevars,
+            publisher.__closure__ or (),
+            strict=True,
+        )
+    )
+    scope_cell = cells["scope_authorities"]
+    current = scope_cell.cell_contents
+    if type(current) is not tuple:
+        raise AssertionError("canonical scope authority registry is not immutable")
+    scope_cell.cell_contents = (*current, (runtime, prepared, runtime.ledger))
+
+
+class PaperExposureScopeProvenanceGuardTests(unittest.TestCase):
+    def _runtime(self, root: Path) -> tuple[PaperExecutionLedger, PaperExecutionAdoptionRuntime]:
+        ledger = PaperExecutionLedger(root / "paper-execution.jsonl")
+        runtime = PaperExecutionAdoptionRuntime(
+            book=PaperBook("100.00"),
+            ledger=ledger,
+            config=_config(),
+            max_quote_age=timedelta(seconds=5),
+            paper_book_path=root / "paper-book.json",
+        )
+        return ledger, runtime
+
+    def test_scope_guard_reuses_existing_execution_and_preparation_authorities(self) -> None:
+        canonical = decision_callsite._execute_with_exact_product_callsite
+        self.assertIs(scope_guard.bind_canonical_execute(canonical), canonical)
+        self.assertFalse(hasattr(canonical, "__wrapped__"))
+        self.assertFalse(
+            hasattr(PaperExecutionAdoptionRuntime, "_autosport_exposure_scope_preparation_guard")
+        )
+        self.assertFalse(hasattr(scope_guard, "_install_preparation_guard"))
+
+    def test_callsite_reload_preserves_installed_exposure_scope_binding(self) -> None:
+        installed_execute = PaperExecutionAdoptionRuntime.execute
+        installed_publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+
+        reloaded = importlib.reload(decision_callsite)
+
+        self.assertIs(PaperExecutionAdoptionRuntime.execute, installed_execute)
+        self.assertIs(reloaded._execute_with_exact_product_callsite, installed_execute)
+        self.assertIs(
+            PaperExecutionAdoptionRuntime._publish_exposure_scope,
+            installed_publisher,
+        )
+
+    def test_guard_does_not_publish_original_bypass_callables(self) -> None:
+        for owner, names in (
+            (PaperExecutionLedger, ("_autosport_exposure_scope_original_append_event",)),
+            (
+                PaperExecutionAdoptionRuntime,
+                (
+                    "_autosport_exposure_scope_original_publish",
+                    "_autosport_exposure_scope_original_mint_prepared",
+                    "_autosport_exposure_scope_original_prepare",
+                    "_autosport_exposure_scope_original_prepare_paper_value_action",
+                ),
+            ),
+        ):
+            for name in names:
+                self.assertFalse(hasattr(owner, name), name)
+        for name in (
+            "_ORIGINAL_LEDGER_APPEND",
+            "_ORIGINAL_RUNTIME_PUBLISH",
+            "_ORIGINAL_RUNTIME_MINT",
+            "_ORIGINAL_RUNTIME_PREPARE",
+            "_ORIGINAL_RUNTIME_PREPARE_PAPER_VALUE",
+            "_MINT_AUTHORITY",
+        ):
+            self.assertFalse(hasattr(scope_guard, name), name)
+
+    def test_direct_mint_does_not_grant_scope_publication_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical execution authority",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
+                    run_id="caller-selected-run",
+                )
+            self.assertEqual(ledger.events(), ())
+
+    def test_reserved_scope_binds_explicit_trigger_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            trigger_id = "distinct-runtime-trigger"
+            run_id = runtime.expected_run_id(prepared, trigger_id)
+
+            runtime._publish_exposure_scope(
+                prepared=prepared,
+                trigger_id=trigger_id,
+                run_id=run_id,
+            )
+
+            events = ledger.events(run_id)
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "PAPER_EXPOSURE_SCOPE_BOUND")
+
+    def test_reserved_scope_rejects_run_id_for_different_trigger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            trigger_id = "distinct-runtime-trigger"
+            wrong_run_id = runtime.expected_run_id(
+                prepared,
+                prepared.execution_plan.decision_id,
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "run identity changed",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    trigger_id=trigger_id,
+                    run_id=wrong_run_id,
+                )
+            self.assertEqual(ledger.events(), ())
+
+    def test_publisher_has_no_positive_frame_or_code_authority_cells(self) -> None:
+        publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+        freevars = set(publisher.__code__.co_freevars)
+        for forbidden in {
+            "getframe",
+            "sys_module",
+            "canonical_execute_code",
+            "baseline_execute",
+            "unlocked_execute",
+            "paper_value_execute",
+        }:
+            self.assertNotIn(forbidden, freevars)
+
+    def test_direct_mint_does_not_create_runtime_scope_authority_surface(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            self.assertIs(runtime._prepared_authorities[id(prepared)], prepared)
+            self.assertFalse(hasattr(runtime, "_exposure_scope_authorities"))
+            with self.assertRaisesRegex(
+                PaperExecutionAdoptionError,
+                "lacks canonical PAPER exposure-scope authority",
+            ):
+                runtime._require_exposure_scope_authority(prepared)
+            self.assertEqual(ledger.events(), ())
+
+    def test_runtime_attribute_registry_injection_cannot_mint_scope_authority(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            runtime._exposure_scope_authorities = {id(prepared): prepared}
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical execution authority",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
+                    run_id=runtime.expected_run_id(
+                        prepared,
+                        prepared.execution_plan.decision_id,
+                    ),
+                )
+            self.assertEqual(ledger.events(), ())
+
+    def test_exact_ledger_swap_cannot_retarget_scope_authorization(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            event, agent, context, runtime, _decision_ledger = _fixture(root)
+            origin_ledger = runtime.ledger
+            replacement = PaperExecutionLedger(root / "swapped-paper-execution.jsonl")
+            runtime.ledger = replacement
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger origin changed",
+            ):
+                agent.on_market_event(event, context)
+            self.assertEqual(origin_ledger.events(), ())
+            self.assertEqual(replacement.events(), ())
+
+    def test_issued_scope_capability_cannot_be_retargeted_to_new_exact_ledger(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            origin_ledger, runtime = self._runtime(root)
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+
+            replacement = PaperExecutionLedger(root / "post-issuance-swap.jsonl")
+            runtime.ledger = replacement
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger origin changed",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
+                    run_id=runtime.expected_run_id(
+                        prepared,
+                        prepared.execution_plan.decision_id,
+                    ),
+                )
+
+            self.assertEqual(origin_ledger.events(), ())
+            self.assertEqual(replacement.events(), ())
+
+    def test_issued_scope_capability_cannot_retarget_origin_ledger_path(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            ledger, runtime = self._runtime(root)
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+
+            origin_path = ledger.path
+            retargeted = root / "same-ledger-retarget.jsonl"
+            ledger.path = retargeted
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger origin changed",
+            ):
+                runtime._publish_exposure_scope(
+                    prepared=prepared,
+                    trigger_id=prepared.execution_plan.decision_id,
+                    run_id=runtime.expected_run_id(
+                        prepared,
+                        prepared.execution_plan.decision_id,
+                    ),
+                )
+
+            self.assertFalse(origin_path.exists())
+            self.assertFalse(retargeted.exists())
+
+    def test_generic_append_cannot_mint_reserved_exposure_scope(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical adoption authority",
+            ):
+                ledger._append_event(
+                    event_type="PAPER_EXPOSURE_SCOPE_BOUND",
+                    run_id="forged-run",
+                    key="forged-run:exposure-scope",
+                    payload={"forged": True},
+                )
+            self.assertEqual(ledger.events(), ())
+
+    def test_inherited_lower_append_cannot_bypass_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            append_owner = next(
+                base
+                for base in PaperExecutionLedger.__mro__[1:]
+                if "_append_event" in base.__dict__
+            )
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "reserved for canonical adoption authority",
+            ):
+                append_owner._append_event(
+                    ledger,
+                    event_type="PAPER_EXPOSURE_SCOPE_BOUND",
+                    run_id="forged-lower-run",
+                    key="forged-lower-run:exposure-scope",
+                    payload={"forged": True},
+                )
+            self.assertEqual(ledger.events(), ())
+
+    def test_reserved_append_has_no_mutable_publisher_code_cell(self) -> None:
+        guarded = PaperExecutionLedger._append_event
+        cells = dict(
+            zip(
+                guarded.__code__.co_freevars,
+                guarded.__closure__ or (),
+                strict=True,
+            )
+        )
+        self.assertNotIn("publisher_code", cells)
+
+    def test_guarded_generic_append_preserves_non_reserved_ledger_semantics(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger._append_event(
+                event_type="FOCUSED_NON_RESERVED_TEST",
+                run_id="generic-run",
+                key="generic-run:event",
+                payload={"value": 1},
+            )
+            ledger._append_event(
+                event_type="FOCUSED_NON_RESERVED_TEST",
+                run_id="generic-run",
+                key="generic-run:event",
+                payload={"value": 1},
+            )
+            events = ledger.events("generic-run")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(events[0]["event_type"], "FOCUSED_NON_RESERVED_TEST")
+            self.assertEqual(events[0]["payload"], {"value": 1})
+
+    def test_product_path_publishes_exact_reserved_scope_before_reservation(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event, agent, context, runtime, decision_ledger = _run_product(Path(tmp))
+            records = decision_ledger.verified_records()
+            self.assertEqual(len(records), 1)
+            run_id = records[0].payload["execution_run_id"]
+            self.assertIsInstance(run_id, str)
+            events = runtime.ledger.events(run_id)
+            event_types = [item["event_type"] for item in events]
+            self.assertEqual(event_types[0], "PAPER_EXPOSURE_SCOPE_BOUND")
+            self.assertIn("RUN_RESERVED", event_types)
+            self.assertIn("ATTEMPT_RECORDED", event_types)
+            self.assertLess(
+                event_types.index("PAPER_EXPOSURE_SCOPE_BOUND"),
+                event_types.index("RUN_RESERVED"),
+            )
+            scope = events[0]
+            payload = scope["payload"]
+            self.assertEqual(
+                payload["schema"],
+                "autosport.paper_execution.exposure_scope_binding",
+            )
+            self.assertEqual(payload["schema_version"], 1)
+            self.assertEqual(payload["bindings"][0]["sport"], "soccer")
+            self.assertEqual(payload["bindings"][0]["bankroll_id"], "bankroll-eur")
+            self.assertEqual(payload["bindings"][0]["currency"], "EUR")
+            body = dict(payload)
+            binding_sha256 = body.pop("binding_sha256")
+            encoded = json.dumps(
+                body,
+                ensure_ascii=False,
+                sort_keys=True,
+                separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+            self.assertEqual(binding_sha256, hashlib.sha256(encoded).hexdigest())
+
+            agent.on_market_event(event, context)
+            scope_events = [
+                item
+                for item in runtime.ledger.events(run_id)
+                if item["event_type"] == "PAPER_EXPOSURE_SCOPE_BOUND"
+            ]
+            self.assertEqual(len(scope_events), 1)
+
+    def test_public_ledger_dispatch_rebind_fails_before_reserved_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event, agent, context, runtime, _decision_ledger = _fixture(Path(tmp))
+            guarded_append = PaperExecutionLedger._append_event
+            forged_calls: list[str] = []
+
+            def forged_append(*args: object, **kwargs: object) -> None:
+                forged_calls.append("append")
+
+            PaperExecutionLedger._append_event = forged_append  # type: ignore[method-assign]
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger dispatch was rebound",
+                ):
+                    agent.on_market_event(event, context)
+            finally:
+                PaperExecutionLedger._append_event = guarded_append  # type: ignore[method-assign]
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(runtime.ledger.events(), ())
+
+    def test_concrete_ledger_path_open_rebind_fails_before_reserved_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            run_id = runtime.expected_run_id(
+                prepared,
+                prepared.execution_plan.decision_id,
+            )
+            path_type = type(ledger.path)
+            had_own_open = "open" in path_type.__dict__
+            original_open = path_type.__dict__.get("open")
+            forged_calls: list[str] = []
+
+            def forged_open(_path: object, *args: object, **kwargs: object):
+                forged_calls.append("open")
+                raise AssertionError("hostile ledger-path open executed")
+
+            setattr(path_type, "open", forged_open)
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger path dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=run_id,
+                    )
+            finally:
+                if had_own_open:
+                    setattr(path_type, "open", original_open)
+                else:
+                    delattr(path_type, "open")
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_concrete_ledger_path_exists_rebind_fails_before_reserved_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            run_id = runtime.expected_run_id(
+                prepared,
+                prepared.execution_plan.decision_id,
+            )
+            path_type = type(ledger.path)
+            had_own_exists = "exists" in path_type.__dict__
+            original_exists = path_type.__dict__.get("exists")
+            forged_calls: list[str] = []
+
+            def forged_exists(_path: object) -> bool:
+                forged_calls.append("exists")
+                return True
+
+            setattr(path_type, "exists", forged_exists)
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger path dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=run_id,
+                    )
+            finally:
+                if had_own_exists:
+                    setattr(path_type, "exists", original_exists)
+                else:
+                    delattr(path_type, "exists")
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_lower_event_constructor_rebind_fails_before_reserved_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event, agent, context, runtime, _decision_ledger = _fixture(Path(tmp))
+            append_owner = next(
+                base
+                for base in PaperExecutionLedger.__mro__[1:]
+                if "_append_event" in base.__dict__
+            )
+            original_descriptor = append_owner.__dict__["_event"]
+            self.assertIsInstance(original_descriptor, staticmethod)
+            forged_calls: list[str] = []
+
+            def forged_event(**kwargs: object) -> dict[str, object]:
+                forged_calls.append("event")
+                changed = dict(kwargs)
+                changed["payload"] = {"forged": True}
+                return original_descriptor.__func__(**changed)
+
+            append_owner._event = staticmethod(forged_event)
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "event constructor dispatch was rebound",
+                ):
+                    agent.on_market_event(event, context)
+            finally:
+                append_owner._event = original_descriptor
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(runtime.ledger.events(), ())
+
+    def test_payload_classmethod_rebind_fails_before_forged_payload(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event, agent, context, runtime, _decision_ledger = _fixture(Path(tmp))
+            original_descriptor = PaperExecutionAdoptionRuntime.__dict__[
+                "_exposure_scope_payload"
+            ]
+            self.assertIsInstance(original_descriptor, classmethod)
+            forged_calls: list[str] = []
+
+            def forged_scope(
+                _cls: type[PaperExecutionAdoptionRuntime],
+                _prepared: PreparedPaperExecution,
+            ) -> dict[str, object]:
+                forged_calls.append("scope")
+                return {"forged": True}
+
+            PaperExecutionAdoptionRuntime._exposure_scope_payload = classmethod(forged_scope)
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "payload authority was rebound",
+                ):
+                    agent.on_market_event(event, context)
+            finally:
+                PaperExecutionAdoptionRuntime._exposure_scope_payload = original_descriptor
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(runtime.ledger.events(), ())
+
+    def test_publisher_ledger_method_witnesses_are_immutable(self) -> None:
+        publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+        cells = dict(
+            zip(
+                publisher.__code__.co_freevars,
+                publisher.__closure__ or (),
+                strict=True,
+            )
+        )
+        witnesses = cells["ledger_methods"].cell_contents
+        self.assertIs(type(witnesses), tuple)
+        self.assertEqual(
+            tuple(entry[0] for entry in witnesses),
+            (
+                "_ensure_existing_path_durable",
+                "_load_unlocked",
+                "_read_anchor_unlocked",
+                "_write_anchor_unlocked",
+                "_sync_parent_directory",
+                "_with_writer_lock",
+            ),
+        )
+        self.assertTrue(
+            all(type(entry) is tuple and len(entry) == 4 for entry in witnesses)
+        )
+        self.assertFalse(
+            any(type(entry) in {dict, list, set} for entry in witnesses)
+        )
+
+    def test_ledger_writer_lock_identity_swap_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            original_lock = ledger._lock
+            ledger._lock = object()
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger origin changed",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                ledger._lock = original_lock
+            self.assertEqual(ledger.events(), ())
+
+    def test_os_open_rebind_fails_before_writer_lock_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            original_open = scope_guard._ledger_impl.os.open
+            forged_calls: list[str] = []
+
+            def forged_open(*args: object, **kwargs: object) -> int:
+                forged_calls.append("open")
+                raise AssertionError("hostile os.open executed")
+
+            scope_guard._ledger_impl.os.open = forged_open
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger durability dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                scope_guard._ledger_impl.os.open = original_open
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_os_replace_rebind_fails_before_anchor_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            original_replace = scope_guard._ledger_impl.os.replace
+            forged_calls: list[str] = []
+
+            def forged_replace(*args: object, **kwargs: object) -> None:
+                forged_calls.append("replace")
+
+            scope_guard._ledger_impl.os.replace = forged_replace
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger durability dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                scope_guard._ledger_impl.os.replace = original_replace
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_read_anchor_dispatch_rebind_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            original = PaperExecutionLedger._read_anchor_unlocked
+            forged_calls: list[str] = []
+
+            def forged_read_anchor(_self):
+                forged_calls.append("read-anchor")
+                return None
+
+            PaperExecutionLedger._read_anchor_unlocked = forged_read_anchor
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger _read_anchor_unlocked dispatch was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                PaperExecutionLedger._read_anchor_unlocked = original
+            self.assertEqual(forged_calls, [])
+            self.assertEqual(ledger.events(), ())
+
+    def test_ledger_digest_code_mutation_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            digest = scope_guard._ledger_impl._digest
+            original_code = digest.__code__
+
+            def forged_digest(_value: object) -> str:
+                return "0" * 64
+
+            digest.__code__ = forged_digest.__code__
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger digest authority was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=runtime.expected_run_id(
+                            prepared,
+                            prepared.execution_plan.decision_id,
+                        ),
+                    )
+            finally:
+                digest.__code__ = original_code
+            self.assertEqual(ledger.events(), ())
+
+    def test_lower_ledger_method_code_mutation_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger, runtime = self._runtime(Path(tmp))
+            prepared = _caller_prepared(runtime)
+            runtime._mint_prepared(prepared)
+            _seed_scope_authority_for_lower_layer(runtime, prepared)
+            run_id = runtime.expected_run_id(
+                prepared,
+                prepared.execution_plan.decision_id,
+            )
+            guarded = PaperExecutionLedger._sync_parent_directory
+            original_code = guarded.__code__
+            # Current canonical ledger hardening may close over captured filesystem
+            # dispatch. Mutate to a distinct but closure-compatible code object so
+            # assignment itself succeeds and the provenance metadata guard is the
+            # component that must reject publication.
+            guarded.__code__ = original_code.replace(
+                co_firstlineno=original_code.co_firstlineno + 1
+            )
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "ledger _sync_parent_directory metadata was rebound",
+                ):
+                    runtime._publish_exposure_scope(
+                        prepared=prepared,
+                        trigger_id=prepared.execution_plan.decision_id,
+                        run_id=run_id,
+                    )
+            finally:
+                guarded.__code__ = original_code
+            self.assertEqual(ledger.events(), ())
+
+    def test_hidden_require_minted_code_rebinding_fails_before_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            event, agent, context, runtime, _decision_ledger = _fixture(Path(tmp))
+            hidden = PaperExecutionAdoptionRuntime._require_minted
+            original_code = hidden.__code__
+
+            def forged_require_minted(_self, _prepared):
+                return None
+
+            hidden.__code__ = forged_require_minted.__code__
+            try:
+                with self.assertRaisesRegex(
+                    Exception,
+                    "prepared-execution verification metadata was rebound",
+                ):
+                    agent.on_market_event(event, context)
+            finally:
+                hidden.__code__ = original_code
+            self.assertEqual(runtime.ledger.events(), ())
+
+
+if __name__ == "__main__":
+    unittest.main()

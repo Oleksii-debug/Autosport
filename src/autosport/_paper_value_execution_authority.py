@@ -439,13 +439,26 @@ def _run_reserved(
             if run_id is not None
             else runtime.ledger.events()
         )
-    except Exception:
-        return False
-    return any(
-        item.get("event_type") == "RUN_RESERVED"
-        and item.get("payload", {}).get("trigger_id") == decision_id
-        for item in events
-    )
+    except Exception as exc:
+        raise PaperExecutionAdoptionError(
+            "paper-value execution reservation history cannot be verified"
+        ) from exc
+
+    for item in events:
+        if type(item) is not dict:
+            raise PaperExecutionAdoptionError(
+                "paper-value execution reservation history is malformed"
+            )
+        if item.get("event_type") != "RUN_RESERVED":
+            continue
+        payload = item.get("payload")
+        if type(payload) is not dict or type(payload.get("trigger_id")) is not str:
+            raise PaperExecutionAdoptionError(
+                "paper-value execution reservation identity is malformed"
+            )
+        if payload["trigger_id"] == decision_id:
+            return True
+    return False
 
 
 def _durable_record_for_call(
@@ -662,12 +675,18 @@ def _first_execution_risk_authority(
         )
     provider_account = authority["provider_account"]
     assert isinstance(provider_account, list)
+    if durable_event.market_semantics_id is not None:
+        raise PaperExecutionAdoptionError(
+            "durable paper-value restart cannot prove market-semantics risk identity "
+            "until canonical TicketLeg binds market_semantics_id"
+        )
     leg = TicketLeg(
         durable_event.event_id,
         durable_event.market_id,
         durable_event.selection_id,
         durable_event.decimal_odds,
         sport=durable_event.sport,
+        exchange_side=durable_event.exchange_side,
     )
     proposal_context = ProposedTicketRiskContext(
         legs=(leg,),
@@ -1001,13 +1020,14 @@ def _authorize_descriptor(
         trigger_id=trigger_id,
         started_at=started_at,
     )
-    return self._mint_prepared(
+    prepared = self._mint_prepared(
         PreparedPaperExecution(
             execution_plan=descriptor.execution_plan,
             exposure_bindings=descriptor.exposure_bindings,
             intent_evidence_json=descriptor.intent_evidence_json,
         )
     )
+    return prepared
 
 
 def _execute(

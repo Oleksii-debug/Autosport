@@ -1,3 +1,9 @@
+## Canonical project-plan naming invariant — owner directive 2026-10-08
+
+In the project Drive root, the canonical planning folder is named exactly `Проєктні плани`.
+Plan filenames are cross-project identifiers only: `1. Перший план`, `2. Другий план`, ... `8. Восьмий план`.
+Do not append subsystem/theme text to Drive filenames. The thematic scope belongs inside each plan document and in PROJECT_PLAN_INDEX.md.
+
 # Multi-Plan Parallel Closure Protocol v4 — owner directive 2026-10-08
 
 This v4 directive overrides conflicting global-sequential / one-mutation-front / earliest-monolithic-Section rules.

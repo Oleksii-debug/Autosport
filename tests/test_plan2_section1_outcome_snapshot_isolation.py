@@ -209,6 +209,12 @@ def test_reused_evidence_id_with_conflicting_payload_fails_before_paper_effect(t
     )
 
     for ordered in ((losing, contradictory), (contradictory, losing)):
+        # Earlier than any optional settlement/learning handoff.
+        with pytest.raises(
+            ContinuousSessionError,
+            match="conflicting settlement payload for reused evidence_id",
+        ):
+            coordinator._detached_settlement_resolutions(ordered)
         with pytest.raises(
             ContinuousSessionError,
             match="conflicting settlement payload for reused evidence_id",

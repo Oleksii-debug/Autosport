@@ -44,9 +44,13 @@ This is the live status authority for the new architecture.
 |10|OPEN|Plan-wide qualification.|
 
 ### Plan 4 — Bookmakers / execution engineering
-Sections 1–7: PARTIAL_EXISTING / ACTIONABLE_OFFLINE from legacy 13,33–37 and current Betfair/BETDAQ/provider/execution/browser code.
-Section 8: OPEN offline qualification.
-Real account/money evidence is NOT required here.
+| Section | State | Evidence / gate |
+|---:|---|---|
+|1|DONE|Terminal 2026-10-08. Reused canonical Booker capability/governance registry #496, lifecycle #1270, strict JSON #2265 and existing integration-boundary code. Exact provider/interface/account/version + separately scoped terms/legal metadata, and environment/application/endpoint-operation/market/sport capability evidence are covered by matrix #1359@d30022a2a7091f6753ce17afede3be3a677bbfac (8 additive paths). Exact-head CI #37769707056 SUCCESS (Ubuntu/Windows Python 3.11/3.12), Windows Candidate #37769706432 SUCCESS; zero unresolved review threads; merged to main c79985faab84290296ed0a0db42bebd3ca3516b0. Scoped multi-provider account/adapter isolation, UNKNOWN/UNSUPPORTED fail-closed, terms separation, duplicate idempotence and Unicode-path restart test #2269@3d7f89de43e4fff7d18685c8d4205db264128330: CI #37775363869 SUCCESS (all four jobs), Windows Candidate #37775363861 SUCCESS, zero unresolved review threads; merged main 789ffb952ce91b7fede25c4fe6c4aa7075ebffad. Post-merge main readback matrix blob 2f82bbe4df8e39dd51149a38b2159456ba223624 and test blob 39506e8867b92ec607e3edab745649bd7b5dbfe9. Offline/fixture evidence only; technical/governance evidence is not provider write or real-money authority. DONE terminal absent demonstrated regression.|
+|2|QUALIFYING_NOT_DONE|Canonical read-only Betfair transport redaction PR #2267@d24eb0c710e56a8e2b3842301a83e8a48da25f3c; exact-head CI #37775505899 and Windows Candidate #37775505789 not yet terminal at Section 1 closure. Merge only after exact-head gates, recheck parsing/pagination/freshness/account-shape/BETDAQ tests, current-main integration and source/test readback. No implicit retry, credentials or external money effects.|
+|3–7|PARTIAL_EXISTING / ACTIONABLE_OFFLINE|Legacy 34–37 and existing provider/execution/browser code; sequential inside Plan 4.|
+|8|OPEN|Offline plan-wide qualification.|
+Real account/money evidence is NOT required for repository-controllable Plan 4 engineering.
 
 ### Plan 5 — Runtime / security / reliability / QA / performance
 | Section | State | Evidence / next gate |

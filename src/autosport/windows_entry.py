@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 from pathlib import Path
+from typing import Any
 
 
 _MACHINE_MODE_ARITY = {
@@ -14,6 +15,8 @@ _MACHINE_MODE_ARITY = {
     "--restart-recovery-recover-child": 3,
     "--research-demo-audit-output": 3,
 }
+_STARTUP_FOCUS_CONTROL = "shell_navigation"
+_STARTUP_FOCUS_WRAPPER_MARKER = "_autosport_startup_focus_v1"
 
 
 def _show_workspace_configuration_error(detail: str) -> None:
@@ -31,6 +34,45 @@ def _show_workspace_configuration_error(detail: str) -> None:
     # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
     # through standard Windows accessibility rather than a custom visual surface.
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
+
+
+def _schedule_startup_focus(app: Any) -> None:
+    """Schedule one non-forced focus transfer after the complete app constructor returns."""
+
+    target = getattr(app, _STARTUP_FOCUS_CONTROL, None)
+    if target is None or not callable(getattr(target, "focus_set", None)):
+        raise RuntimeError(
+            f"canonical Windows startup focus target {_STARTUP_FOCUS_CONTROL!r} is unavailable"
+        )
+    after_idle = getattr(app, "after_idle", None)
+    if not callable(after_idle):
+        raise RuntimeError("Windows app cannot schedule deterministic startup focus")
+    after_idle(target.focus_set)
+
+
+def _install_deterministic_startup_focus(app_class: type[Any] | None = None) -> None:
+    """Make packaged Autosport schedule canonical shell focus exactly once per construction.
+
+    Compact layout installation runs first and guarantees ``shell_navigation`` exists. The
+    callback is queued with ``after_idle`` rather than ``focus_force`` so native Windows focus
+    ownership is respected while the first event-loop turn still has a deterministic target.
+    ``app_class`` is injectable only so the contract can be tested without constructing Tk.
+    """
+
+    if app_class is None:
+        from autosport.gui import AutosportApp
+
+        app_class = AutosportApp
+    current_init = app_class.__init__
+    if getattr(current_init, _STARTUP_FOCUS_WRAPPER_MARKER, False):
+        return
+
+    def init_with_startup_focus(self: Any, *args: Any, **kwargs: Any) -> None:
+        current_init(self, *args, **kwargs)
+        _schedule_startup_focus(self)
+
+    setattr(init_with_startup_focus, _STARTUP_FOCUS_WRAPPER_MARKER, True)
+    setattr(app_class, "__init__", init_with_startup_focus)
 
 
 def _probe_workspace_writable(workspace: Path) -> None:
@@ -164,6 +206,7 @@ def main(argv: list[str] | None = None) -> int:
     from autosport.windows_layout import install_compact_windows_layout
 
     install_compact_windows_layout()
+    _install_deterministic_startup_focus()
     if args and args[0] == "--diagnostic-output":
         from autosport.diagnostic import run_machine_diagnostic
 

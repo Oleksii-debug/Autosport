@@ -15,6 +15,7 @@ from typing import Any, Callable, TypeVar
 
 
 SCHEMA_VERSION = 1
+_MAX_EXECUTION_DECIMAL_TEXT_LENGTH = 8192
 _T = TypeVar("_T")
 
 
@@ -73,12 +74,46 @@ def _now() -> str:
 
 
 def _text(value: str, name: str) -> str:
-    if not isinstance(value, str) or not value.strip():
+    # Authority-bearing durable text must not accept caller-defined str
+    # subclasses whose virtual methods/comparisons can disagree with the
+    # underlying bytes that json.dumps persists.
+    if type(value) is not str or not value.strip():
         raise ValueError(f"{name} must be non-empty text")
     try:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ValueError(f"{name} must be valid UTF-8 text") from exc
+    return value
+
+
+def _identity_text(value: object, name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{name} must be exact canonical identity text")
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be exact canonical UTF-8 identity text") from exc
+    return value
+
+
+def _exact_dict_fields(
+    value: object,
+    expected_fields: set[str],
+    error_message: str,
+) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ExecutionLedgerIntegrityError(error_message)
+    raw_keys = tuple(value.keys())
+    if (
+        any(type(key) is not str for key in raw_keys)
+        or set(raw_keys) != expected_fields
+    ):
+        raise ExecutionLedgerIntegrityError(error_message)
     return value
 
 
@@ -101,17 +136,49 @@ def _timestamp(value: str, name: str) -> datetime:
 
 
 def _decimal(value: Decimal | str | int, name: str) -> Decimal:
-    try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, ValueError) as exc:
-        raise ValueError(f"{name} must be a finite Decimal") from exc
+    if type(value) is Decimal:
+        parsed = value
+    elif type(value) is str:
+        try:
+            parsed = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite Decimal") from exc
+    elif type(value) is int:
+        parsed = Decimal(value)
+    else:
+        raise ValueError(f"{name} must be a finite Decimal")
     if not parsed.is_finite() or parsed <= 0:
         raise ValueError(f"{name} must be finite and > 0")
     return parsed
 
 
+def _validate_decimal_text_resource_bound(value: Decimal) -> None:
+    # Fixed-point formatting can expand exponent-form Decimals by orders of
+    # magnitude. Compute the prospective representation size without
+    # allocating that representation so callers can preflight every economic
+    # field before formatting any sibling field.
+    sign, digits, exponent = value.as_tuple()
+    if not isinstance(exponent, int):
+        raise ValueError("decimal fixed-point representation must be finite")
+    if exponent >= 0:
+        rendered_length = len(digits) + exponent
+    else:
+        point = len(digits) + exponent
+        rendered_length = len(digits) + 1 if point > 0 else 2 - exponent
+    if sign:
+        rendered_length += 1
+    if rendered_length > _MAX_EXECUTION_DECIMAL_TEXT_LENGTH:
+        raise ValueError("decimal fixed-point representation exceeds resource limit")
+
+
 def _decimal_text(value: Decimal) -> str:
-    text = format(value.normalize(), "f")
+    # Decimal.normalize() applies the ambient Decimal Context and can round
+    # exact money/odds before durable persistence. Formatting the original
+    # coefficient/exponent is context-independent.
+    _validate_decimal_text_resource_bound(value)
+    text = format(value, "f")
+    # Trim only representational fractional trailing zeros so numerically
+    # equivalent scales canonicalize.
     return text.rstrip("0").rstrip(".") if "." in text else text
 
 
@@ -197,10 +264,10 @@ class ExecutionAction:
             "event_id",
             "market_id",
             "selection_id",
-            "side",
             "quote_id",
         ):
-            _text(getattr(self, name), name)
+            _identity_text(getattr(self, name), name)
+        _text(self.side, "side")
         observed = _timestamp(self.quote_observed_at, "quote_observed_at")
         expires = _timestamp(self.expires_at, "expires_at")
         if expires <= observed:
@@ -213,6 +280,11 @@ class ExecutionAction:
         )
 
     def to_dict(self) -> dict[str, str]:
+        # Preflight the complete economic tuple before formatting either
+        # member. A hostile exponent in one field must fail before a benign
+        # sibling causes any fixed-point allocation.
+        _validate_decimal_text_resource_bound(self.requested_odds)
+        _validate_decimal_text_resource_bound(self.requested_stake)
         return {
             "action_id": self.action_id,
             "bookmaker_id": self.bookmaker_id,
@@ -246,13 +318,13 @@ class ExecutionPlan:
             "decision_id",
             "approval_id",
         ):
-            _text(getattr(self, name), name)
+            _identity_text(getattr(self, name), name)
         _timestamp(self.created_at, "created_at")
-        if self.schema_version != SCHEMA_VERSION:
+        if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ValueError("unsupported execution plan schema")
         actions = tuple(self.actions)
-        if not actions or not all(isinstance(item, ExecutionAction) for item in actions):
-            raise ValueError("execution plan requires ExecutionAction items")
+        if not actions or not all(type(item) is ExecutionAction for item in actions):
+            raise ValueError("execution plan requires exact ExecutionAction items")
         if len({action.action_id for action in actions}) != len(actions):
             raise ValueError("execution plan needs unique action_id values")
         object.__setattr__(self, "actions", actions)
@@ -270,7 +342,9 @@ class ExecutionPlan:
 
     @property
     def fingerprint(self) -> str:
-        return _digest(self.to_dict())
+        if type(self) is not ExecutionPlan:
+            raise ValueError("execution plan must be an exact ExecutionPlan")
+        return _digest(ExecutionPlan.to_dict(self))
 
 
 @dataclass(frozen=True, slots=True)
@@ -281,12 +355,24 @@ class ExecutionAttempt:
     effect_fingerprint: str
     reserved_at: str
 
+    def __post_init__(self) -> None:
+        _identity_text(self.attempt_id, "attempt_id")
+        _identity_text(self.plan_id, "plan_id")
+        _identity_text(self.action_id, "action_id")
+        _sha256_text(self.effect_fingerprint, "effect_fingerprint")
+        _timestamp(self.reserved_at, "reserved_at")
+
 
 @dataclass(frozen=True, slots=True)
 class ExternalReceiptIdentity:
     bookmaker_id: str
     account_id: str
     external_receipt_id: str
+
+    def __post_init__(self) -> None:
+        _identity_text(self.bookmaker_id, "bookmaker_id")
+        _identity_text(self.account_id, "account_id")
+        _identity_text(self.external_receipt_id, "external_receipt_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -300,13 +386,16 @@ class ExternalAcknowledgement:
     reconciliation_evidence_id: str | None = None
 
     def __post_init__(self) -> None:
-        _text(self.attempt_id, "attempt_id")
-        _text(self.external_receipt_id, "external_receipt_id")
+        _identity_text(self.attempt_id, "attempt_id")
+        _identity_text(self.external_receipt_id, "external_receipt_id")
         _timestamp(self.acknowledged_at, "acknowledged_at")
         if not isinstance(self.status, AcknowledgementStatus):
             raise ValueError("status must be AcknowledgementStatus")
         if self.reconciliation_evidence_id is not None:
-            _text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
+            _identity_text(
+                self.reconciliation_evidence_id,
+                "reconciliation_evidence_id",
+            )
         if self.status in {
             AcknowledgementStatus.ACCEPTED,
             AcknowledgementStatus.PARTIAL,
@@ -327,6 +416,12 @@ class ExternalAcknowledgement:
             )
 
     def to_dict(self) -> dict[str, Any]:
+        # Preflight every accepted economic value before formatting any of
+        # them, matching ExecutionAction's fail-before-allocation boundary.
+        if self.accepted_odds is not None:
+            _validate_decimal_text_resource_bound(self.accepted_odds)
+        if self.accepted_stake is not None:
+            _validate_decimal_text_resource_bound(self.accepted_stake)
         return {
             "attempt_id": self.attempt_id,
             "external_receipt_id": self.external_receipt_id,
@@ -355,13 +450,9 @@ class ExternalEffectReconciliation:
     source: str
 
     def __post_init__(self) -> None:
-        for name in (
-            "attempt_id",
-            "evidence_id",
-            "external_receipt_id",
-            "source",
-        ):
-            _text(getattr(self, name), name)
+        for name in ("attempt_id", "evidence_id", "external_receipt_id"):
+            _identity_text(getattr(self, name), name)
+        _text(self.source, "source")
         _timestamp(self.observed_at, "observed_at")
 
     def to_dict(self) -> dict[str, Any]:
@@ -383,8 +474,9 @@ class ReconciliationSnapshot:
     source: str
 
     def __post_init__(self) -> None:
-        for name in ("attempt_id", "evidence_id", "source"):
-            _text(getattr(self, name), name)
+        for name in ("attempt_id", "evidence_id"):
+            _identity_text(getattr(self, name), name)
+        _text(self.source, "source")
         _timestamp(self.observed_at, "observed_at")
         if type(self.external_effect_found) is not bool:
             raise ValueError("external_effect_found must be bool")
@@ -414,6 +506,55 @@ class VerifiedExecutionLedgerSnapshot:
     payload: bytes
     sha256: str
     event_count: int
+
+
+@dataclass(frozen=True, slots=True)
+class ProviderEvidenceBindingView:
+    """Immutable provider-evidence fact derived from a verified ledger snapshot."""
+
+    evidence_id: str
+    observed_at: str
+    source: str
+    acknowledgement_sha256: str | None = None
+
+    def __post_init__(self) -> None:
+        _sha256_text(self.evidence_id, "evidence_id")
+        _timestamp(self.observed_at, "observed_at")
+        _text(self.source, "source")
+        if self.acknowledgement_sha256 is not None:
+            _sha256_text(
+                self.acknowledgement_sha256,
+                "acknowledgement_sha256",
+            )
+
+
+@dataclass(frozen=True, slots=True)
+class ExecutionAttemptReadView:
+    """Typed immutable view of one attempt from one verified ledger snapshot."""
+
+    attempt: ExecutionAttempt
+    action: ExecutionAction
+    state: AttemptState
+    submitted_at: str | None
+    unknown_reason: str | None
+    unknown_observed_at: str | None
+    provider_order_ref: str | None
+    provider_evidence: ProviderEvidenceBindingView | None
+    acknowledgement: ExternalAcknowledgement | None
+    found_reconciliations: tuple[ExternalEffectReconciliation, ...]
+    not_found_reconciliation: ReconciliationSnapshot | None
+
+
+@dataclass(frozen=True, slots=True)
+class VerifiedExecutionPlanView:
+    """Plan/attempt facts tied to the exact immutable ledger bytes they came from."""
+
+    snapshot_sha256: str
+    event_count: int
+    plan: ExecutionPlan
+    plan_fingerprint: str
+    stale: bool
+    attempts: tuple[ExecutionAttemptReadView, ...]
 
 
 class RealExecutionLedger:
@@ -506,8 +647,13 @@ class RealExecutionLedger:
             )
         if type(event["schema_version"]) is not int or event["schema_version"] != SCHEMA_VERSION:
             raise ExecutionLedgerIntegrityError(f"unsupported event schema{where}")
-        for name in ("event_id", "event_type", "recorded_at", "plan_id"):
-            if not isinstance(event[name], str) or not event[name].strip():
+        for name in ("event_id", "plan_id"):
+            try:
+                _identity_text(event[name], name)
+            except ValueError as exc:
+                raise ExecutionLedgerIntegrityError(f"invalid {name}{where}") from exc
+        for name in ("event_type", "recorded_at"):
+            if type(event[name]) is not str or not event[name].strip():
                 raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
         try:
             _timestamp(event["recorded_at"], "recorded_at")
@@ -519,10 +665,13 @@ class RealExecutionLedger:
             raise ExecutionLedgerIntegrityError(f"unknown event type{where}")
         for name in ("action_id", "attempt_id"):
             value = event[name]
-            if value is not None and (
-                not isinstance(value, str) or not value.strip()
-            ):
-                raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
+            if value is not None:
+                try:
+                    _identity_text(value, name)
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        f"invalid {name}{where}"
+                    ) from exc
         if not isinstance(event["payload"], dict):
             raise ExecutionLedgerIntegrityError(f"invalid payload{where}")
         try:
@@ -641,6 +790,7 @@ class RealExecutionLedger:
     def _plan_event(
         events: list[dict[str, Any]], plan_id: str
     ) -> dict[str, Any] | None:
+        _identity_text(plan_id, "plan_id")
         matches = [
             event
             for event in events
@@ -661,6 +811,7 @@ class RealExecutionLedger:
     def _attempt_events(
         events: list[dict[str, Any]], attempt_id: str
     ) -> list[dict[str, Any]]:
+        _identity_text(attempt_id, "attempt_id")
         return [event for event in events if event["attempt_id"] == attempt_id]
 
     @classmethod
@@ -693,24 +844,29 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "found reconciliation requires UNKNOWN"
                     )
-                evidence_id = event["payload"].get("evidence_id")
-                if not isinstance(evidence_id, str) or not evidence_id.strip():
-                    raise ExecutionLedgerIntegrityError(
-                        "found reconciliation lacks evidence identity"
+                try:
+                    evidence_id = _identity_text(
+                        event["payload"].get("evidence_id"),
+                        "evidence_id",
                     )
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation lacks canonical evidence identity"
+                    ) from exc
                 prior = found_reconciliations.get(evidence_id)
                 if prior is not None and prior != event["payload"]:
                     raise ExecutionLedgerIntegrityError(
                         "conflicting found reconciliation evidence"
                     )
-                external_receipt_id = event["payload"].get("external_receipt_id")
-                if (
-                    not isinstance(external_receipt_id, str)
-                    or not external_receipt_id.strip()
-                ):
-                    raise ExecutionLedgerIntegrityError(
-                        "found reconciliation lacks receipt identity"
+                try:
+                    external_receipt_id = _identity_text(
+                        event["payload"].get("external_receipt_id"),
+                        "external_receipt_id",
                     )
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation lacks canonical receipt identity"
+                    ) from exc
                 if (
                     found_receipt_id is not None
                     and found_receipt_id != external_receipt_id
@@ -785,6 +941,7 @@ class RealExecutionLedger:
         plan_id: str,
         action_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
+        _identity_text(action_id, "action_id")
         plan_event = cls._plan_event(events, plan_id)
         if plan_event is None:
             raise ExecutionStateError(f"plan {plan_id!r} is not reserved")
@@ -855,17 +1012,20 @@ class RealExecutionLedger:
 
     @classmethod
     def _plan_from_dict(cls, value: object) -> ExecutionPlan:
-        if not isinstance(value, dict) or set(value) != {
-            "schema_version",
-            "plan_id",
-            "bookmaker_profile_version",
-            "decision_id",
-            "approval_id",
-            "created_at",
-            "actions",
-        }:
-            raise ExecutionLedgerIntegrityError("stored plan schema is invalid")
-        if not isinstance(value["actions"], list):
+        value = _exact_dict_fields(
+            value,
+            {
+                "schema_version",
+                "plan_id",
+                "bookmaker_profile_version",
+                "decision_id",
+                "approval_id",
+                "created_at",
+                "actions",
+            },
+            "stored plan schema is invalid",
+        )
+        if type(value["actions"]) is not list:
             raise ExecutionLedgerIntegrityError("stored plan actions are invalid")
         actions: list[ExecutionAction] = []
         expected_action_fields = {
@@ -884,10 +1044,11 @@ class RealExecutionLedger:
         }
         try:
             for raw in value["actions"]:
-                if not isinstance(raw, dict) or set(raw) != expected_action_fields:
-                    raise ExecutionLedgerIntegrityError(
-                        "stored action schema is invalid"
-                    )
+                raw = _exact_dict_fields(
+                    raw,
+                    expected_action_fields,
+                    "stored action schema is invalid",
+                )
                 actions.append(ExecutionAction(**raw))
             return ExecutionPlan(
                 plan_id=value["plan_id"],
@@ -914,15 +1075,20 @@ class RealExecutionLedger:
             "accepted_stake",
             "reconciliation_evidence_id",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored acknowledgement schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored acknowledgement schema is invalid",
+        )
         try:
+            status = _identity_text(
+                value["status"],
+                "acknowledgement status",
+            )
             acknowledgement = ExternalAcknowledgement(
                 attempt_id=value["attempt_id"],
                 external_receipt_id=value["external_receipt_id"],
-                status=AcknowledgementStatus(value["status"]),
+                status=AcknowledgementStatus(status),
                 acknowledged_at=value["acknowledged_at"],
                 accepted_odds=value["accepted_odds"],
                 accepted_stake=value["accepted_stake"],
@@ -949,10 +1115,11 @@ class RealExecutionLedger:
             "observed_at",
             "source",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored found reconciliation schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored found reconciliation schema is invalid",
+        )
         try:
             reconciliation = ExternalEffectReconciliation(**value)
         except (TypeError, ValueError) as exc:
@@ -976,10 +1143,11 @@ class RealExecutionLedger:
             "external_effect_found",
             "source",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored not-found reconciliation schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored not-found reconciliation schema is invalid",
+        )
         try:
             snapshot = ReconciliationSnapshot(**value)
         except (TypeError, ValueError) as exc:
@@ -1161,6 +1329,7 @@ class RealExecutionLedger:
                 )
             submitted_time: datetime | None = None
             unknown_time: datetime | None = None
+            provider_evidence_time: datetime | None = None
             provider_order_reference_seen = False
             found_reconciliations: dict[str, ExternalEffectReconciliation] = {}
             found_receipt_id: str | None = None
@@ -1208,6 +1377,13 @@ class RealExecutionLedger:
                             raise ExecutionLedgerIntegrityError(
                                 "UNKNOWN observation precedes attempt submission"
                             )
+                        if (
+                            provider_evidence_time is not None
+                            and unknown_time < provider_evidence_time
+                        ):
+                            raise ExecutionLedgerIntegrityError(
+                                "UNKNOWN observation precedes provider evidence"
+                            )
                     elif (
                         followup["event_type"]
                         == EventType.RECONCILED_FOUND.value
@@ -1229,6 +1405,8 @@ class RealExecutionLedger:
                         causal_boundaries = [reserved_time, unknown_time]
                         if submitted_time is not None:
                             causal_boundaries.append(submitted_time)
+                        if provider_evidence_time is not None:
+                            causal_boundaries.append(provider_evidence_time)
                         if observed_time <= max(causal_boundaries):
                             raise ExecutionLedgerIntegrityError(
                                 "found reconciliation is not newer than "
@@ -1328,6 +1506,10 @@ class RealExecutionLedger:
                             followup["payload"]["evidence_id"], "evidence_id"
                         )
                         _text(followup["payload"]["source"], "source")
+                        if provider_evidence_time is not None:
+                            raise ExecutionLedgerIntegrityError(
+                                "attempt has multiple provider evidence bindings"
+                            )
                         evidence_time = _timestamp(
                             followup["payload"]["observed_at"], "observed_at"
                         )
@@ -1340,6 +1522,7 @@ class RealExecutionLedger:
                             raise ExecutionLedgerIntegrityError(
                                 "provider evidence precedes attempt causal boundary"
                             )
+                        provider_evidence_time = evidence_time
                     elif (
                         followup["event_type"]
                         == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
@@ -1360,6 +1543,8 @@ class RealExecutionLedger:
                             causal_boundaries.append(submitted_time)
                         if unknown_time is not None:
                             causal_boundaries.append(unknown_time)
+                        if provider_evidence_time is not None:
+                            causal_boundaries.append(provider_evidence_time)
                         if acknowledged_time < max(causal_boundaries):
                             raise ExecutionLedgerIntegrityError(
                                 "acknowledgement precedes attempt causal boundary"
@@ -1429,6 +1614,8 @@ class RealExecutionLedger:
                             causal_boundaries.append(submitted_time)
                         if unknown_time is not None:
                             causal_boundaries.append(unknown_time)
+                        if provider_evidence_time is not None:
+                            causal_boundaries.append(provider_evidence_time)
                         if reconciled_time <= max(causal_boundaries):
                             raise ExecutionLedgerIntegrityError(
                                 "not-found reconciliation is not newer than "
@@ -1483,7 +1670,7 @@ class RealExecutionLedger:
         approved_at: str,
         evidence_sha256: str,
     ) -> None:
-        _text(approval_id, "approval_id")
+        _identity_text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
         _timestamp(approved_at, "approved_at")
         _sha256_text(evidence_sha256, "evidence_sha256")
@@ -1534,7 +1721,8 @@ class RealExecutionLedger:
         revoked_at: str,
         revocation_evidence_sha256: str,
     ) -> None:
-        _text(approval_id, "approval_id")
+        _identity_text(plan_id, "plan_id")
+        _identity_text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
         _timestamp(revoked_at, "revoked_at")
         _sha256_text(revocation_evidence_sha256, "revocation_evidence_sha256")
@@ -1601,6 +1789,9 @@ class RealExecutionLedger:
         approval_id: str,
         approval_fingerprint: str,
     ) -> bool:
+        _identity_text(plan_id, "plan_id")
+        _identity_text(approval_id, "approval_id")
+        _sha256_text(approval_fingerprint, "approval_fingerprint")
         events = self._events()
         bindings = [
             event
@@ -1629,8 +1820,8 @@ class RealExecutionLedger:
         provider_id: str,
     ) -> str:
         """Durably bind a provider-safe <=32-char order reference before submission."""
-        _text(attempt_id, "attempt_id")
-        provider = _text(provider_id, "provider_id")
+        _identity_text(attempt_id, "attempt_id")
+        provider = _identity_text(provider_id, "provider_id")
 
         def operation() -> str:
             events = self._events()
@@ -1647,7 +1838,7 @@ class RealExecutionLedger:
                 raise ExecutionIdentityConflict(
                     "provider order reference authority mismatches action bookmaker"
                 )
-            account_id = _text(action["account_id"], "account_id")
+            account_id = _identity_text(action["account_id"], "account_id")
             binding_sha256 = _digest(
                 {
                     "schema": "autosport.provider_order_reference_binding",
@@ -1714,7 +1905,7 @@ class RealExecutionLedger:
         attempt_id: str,
         provider_id: str,
     ) -> str | None:
-        provider = _text(provider_id, "provider_id")
+        provider = _identity_text(provider_id, "provider_id")
         events = self._events()
         matches = [
             event["payload"]
@@ -1744,7 +1935,7 @@ class RealExecutionLedger:
         observed_at: str,
         source: str,
     ) -> None:
-        _text(attempt_id, "attempt_id")
+        _identity_text(attempt_id, "attempt_id")
         _sha256_text(evidence_id, "evidence_id")
         _timestamp(observed_at, "observed_at")
         _text(source, "source")
@@ -1823,6 +2014,9 @@ class RealExecutionLedger:
         return dict(matches[0])
 
     def reserve_plan(self, plan: ExecutionPlan) -> str:
+        if type(plan) is not ExecutionPlan:
+            raise ValueError("plan must be exact ExecutionPlan")
+
         def operation() -> str:
             events = self._events()
             prior = self._plan_event(events, plan.plan_id)
@@ -1857,7 +2051,7 @@ class RealExecutionLedger:
         attempt_id: str,
         reserved_at: str | None = None,
     ) -> ExecutionAttempt:
-        _text(attempt_id, "attempt_id")
+        _identity_text(attempt_id, "attempt_id")
         reserved_at = reserved_at or _now()
         _timestamp(reserved_at, "reserved_at")
 
@@ -1903,15 +2097,14 @@ class RealExecutionLedger:
                     and event["event_type"]
                     == EventType.ATTEMPT_RESERVED.value
                 ):
-                    if (
-                        self._state(
-                            self._attempt_events(events, event["attempt_id"])
-                        )
-                        != AttemptState.RECONCILED_NOT_FOUND
-                    ):
-                        raise ExecutionStateError(
-                            "action already has unresolved/final attempt"
-                        )
+                    # RECONCILED_NOT_FOUND is durable diagnostic truth only.
+                    # No currently integrated product issuer proves that this
+                    # legacy/generic fact authorizes repeating an irreversible
+                    # provider effect.
+                    raise ExecutionStateError(
+                        "action already has prior attempt; retry requires "
+                        "product-issued no-effect authority"
+                    )
             if _timestamp(reserved_at, "reserved_at") >= _timestamp(
                 action["expires_at"], "expires_at"
             ):
@@ -2015,6 +2208,7 @@ class RealExecutionLedger:
                 if event["event_type"]
                 == EventType.ATTEMPT_SUBMITTED.value
             ]
+            causal_boundaries = [reserved_time]
             if submitted_events:
                 submitted_time = _timestamp(
                     submitted_events[-1]["payload"]["submitted_at"],
@@ -2024,6 +2218,20 @@ class RealExecutionLedger:
                     raise ExecutionStateError(
                         "UNKNOWN observed_at cannot precede attempt submission"
                     )
+                causal_boundaries.append(submitted_time)
+            provider_evidence_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
+            ]
+            for event in provider_evidence_events:
+                causal_boundaries.append(
+                    _timestamp(event["payload"]["observed_at"], "observed_at")
+                )
+            if observed_time < max(causal_boundaries):
+                raise ExecutionStateError(
+                    "UNKNOWN observed_at cannot precede attempt causal boundary"
+                )
             self._append(
                 EventType.ATTEMPT_UNKNOWN,
                 first["plan_id"],
@@ -2051,20 +2259,59 @@ class RealExecutionLedger:
                 if event["event_type"]
                 == EventType.ATTEMPT_RESERVED.value
             ]
+            actual_observed_at = _now()
+            observed_time = _timestamp(actual_observed_at, "observed_at")
+            unresolved: list[tuple[dict[str, Any], str]] = []
             for reserved in reserved_events:
                 attempt_id = reserved["attempt_id"]
-                if self._state(
-                    self._attempt_events(events, attempt_id)
-                ) in {AttemptState.RESERVED, AttemptState.SUBMITTED}:
-                    self._append(
-                        EventType.ATTEMPT_UNKNOWN,
-                        reserved["plan_id"],
-                        reserved["action_id"],
-                        attempt_id,
-                        {"reason": reason, "observed_at": _now()},
+                attempt_events = self._attempt_events(events, attempt_id)
+                if self._state(attempt_events) not in {
+                    AttemptState.RESERVED,
+                    AttemptState.SUBMITTED,
+                }:
+                    continue
+                causal_boundaries = [
+                    _timestamp(
+                        reserved["payload"]["reserved_at"], "reserved_at"
                     )
-                    promoted.append(attempt_id)
-                    events = self._events()
+                ]
+                for event in attempt_events:
+                    if (
+                        event["event_type"]
+                        == EventType.ATTEMPT_SUBMITTED.value
+                    ):
+                        causal_boundaries.append(
+                            _timestamp(
+                                event["payload"]["submitted_at"],
+                                "submitted_at",
+                            )
+                        )
+                    elif (
+                        event["event_type"]
+                        == EventType.PROVIDER_EVIDENCE_BOUND.value
+                    ):
+                        causal_boundaries.append(
+                            _timestamp(
+                                event["payload"]["observed_at"],
+                                "observed_at",
+                            )
+                        )
+                if observed_time < max(causal_boundaries):
+                    raise ExecutionStateError(
+                        "recovery clock precedes attempt causal boundary"
+                    )
+                unresolved.append((reserved, attempt_id))
+
+            for reserved, attempt_id in unresolved:
+                self._append(
+                    EventType.ATTEMPT_UNKNOWN,
+                    reserved["plan_id"],
+                    reserved["action_id"],
+                    attempt_id,
+                    {"reason": reason, "observed_at": actual_observed_at},
+                )
+                promoted.append(attempt_id)
+                events = self._events()
             return tuple(promoted)
 
         return self._mutate(operation)
@@ -2072,6 +2319,10 @@ class RealExecutionLedger:
     def acknowledge(
         self, acknowledgement: ExternalAcknowledgement
     ) -> None:
+        if type(acknowledgement) is not ExternalAcknowledgement:
+            raise ValueError(
+                "acknowledgement must be exact ExternalAcknowledgement"
+            )
         payload = acknowledgement.to_dict()
 
         def operation() -> None:
@@ -2101,18 +2352,24 @@ class RealExecutionLedger:
                     "UNKNOWN reconciliation"
                 )
             first = attempt_events[0]
-            causal_boundaries: list[datetime] = [
+            uncertainty_boundaries: list[datetime] = [
                 _timestamp(first["payload"]["reserved_at"], "reserved_at")
             ]
+            provider_evidence_boundaries: list[datetime] = []
             for event in attempt_events:
                 if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value:
-                    causal_boundaries.append(
+                    uncertainty_boundaries.append(
                         _timestamp(event["payload"]["submitted_at"], "submitted_at")
                     )
                 elif event["event_type"] == EventType.ATTEMPT_UNKNOWN.value:
-                    causal_boundaries.append(
+                    uncertainty_boundaries.append(
                         _timestamp(event["payload"]["observed_at"], "observed_at")
                     )
+                elif event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value:
+                    provider_evidence_boundaries.append(
+                        _timestamp(event["payload"]["observed_at"], "observed_at")
+                    )
+            causal_boundaries = uncertainty_boundaries + provider_evidence_boundaries
             acknowledged_time = _timestamp(
                 acknowledgement.acknowledged_at, "acknowledged_at"
             )
@@ -2150,7 +2407,7 @@ class RealExecutionLedger:
                 evidence_time = _timestamp(
                     reconciliation.observed_at, "observed_at"
                 )
-                if evidence_time <= max(causal_boundaries):
+                if evidence_time <= max(uncertainty_boundaries):
                     raise ExecutionStateError(
                         "positive reconciliation evidence must be newer than "
                         "attempt uncertainty boundary"
@@ -2199,6 +2456,10 @@ class RealExecutionLedger:
     def reconcile_found(
         self, reconciliation: ExternalEffectReconciliation
     ) -> None:
+        if type(reconciliation) is not ExternalEffectReconciliation:
+            raise ValueError(
+                "reconciliation must be exact ExternalEffectReconciliation"
+            )
         payload = reconciliation.to_dict()
 
         def operation() -> None:
@@ -2254,6 +2515,12 @@ class RealExecutionLedger:
                             event["payload"]["observed_at"], "observed_at"
                         )
                     )
+                elif event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value:
+                    causal_boundaries.append(
+                        _timestamp(
+                            event["payload"]["observed_at"], "observed_at"
+                        )
+                    )
             if _timestamp(
                 reconciliation.observed_at, "observed_at"
             ) <= max(causal_boundaries):
@@ -2287,6 +2554,8 @@ class RealExecutionLedger:
     def reconcile_not_found(
         self, snapshot: ReconciliationSnapshot
     ) -> None:
+        if type(snapshot) is not ReconciliationSnapshot:
+            raise ValueError("snapshot must be exact ReconciliationSnapshot")
         if snapshot.external_effect_found:
             raise ValueError(
                 "found external effect must be reconciled as acknowledgement"
@@ -2339,6 +2608,12 @@ class RealExecutionLedger:
                             event["payload"]["observed_at"], "observed_at"
                         )
                     )
+                elif event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value:
+                    uncertainty_boundaries.append(
+                        _timestamp(
+                            event["payload"]["observed_at"], "observed_at"
+                        )
+                    )
             if not uncertainty_boundaries:
                 raise ExecutionLedgerIntegrityError(
                     "UNKNOWN attempt is missing an uncertainty boundary"
@@ -2361,10 +2636,184 @@ class RealExecutionLedger:
         self._mutate(operation)
 
     def verified_snapshot(self) -> VerifiedExecutionLedgerSnapshot:
-        raw = self.path.read_bytes() if self.path.exists() else b""
+        if self.path.exists():
+            # A restarted reader must prove the visible ledger file and its
+            # pathname durable before returning facts that callers may bind to
+            # this snapshot identity. Keep the read path aligned with _events().
+            self._ensure_existing_path_durable()
+            raw = self.path.read_bytes()
+        else:
+            raw = b""
         events = self._parse(raw)
         return VerifiedExecutionLedgerSnapshot(
             raw, hashlib.sha256(raw).hexdigest(), len(events)
+        )
+
+    def verified_execution_view(self, plan_id: str) -> VerifiedExecutionPlanView:
+        """Return typed execution facts from one already-verified ledger snapshot.
+
+        The view is a read model only. It does not authorize execution, retry,
+        acknowledgement, reconciliation or risk capacity. Consumers that act
+        on the view must bind subsequent mutation to snapshot_sha256 through
+        the canonical writer/admission authority.
+        """
+
+        _identity_text(plan_id, "plan_id")
+        snapshot = self.verified_snapshot()
+        # Parse the captured bytes, never a second filesystem read, so every
+        # returned fact is mechanically tied to snapshot.sha256/event_count.
+        events = self._parse(snapshot.payload)
+        plan_event = self._plan_event(events, plan_id)
+        if plan_event is None:
+            raise KeyError(plan_id)
+        plan = self._plan_from_dict(plan_event["payload"]["plan"])
+        actions = {action.action_id: action for action in plan.actions}
+
+        attempts: list[ExecutionAttemptReadView] = []
+        for reserved in events:
+            if (
+                reserved["plan_id"] != plan_id
+                or reserved["event_type"] != EventType.ATTEMPT_RESERVED.value
+            ):
+                continue
+            attempt_id = reserved["attempt_id"]
+            action_id = reserved["action_id"]
+            if not isinstance(attempt_id, str) or not isinstance(action_id, str):
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt identity is invalid"
+                )
+            action = actions.get(action_id)
+            if action is None:
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt references missing plan action"
+                )
+            attempt_events = self._attempt_events(events, attempt_id)
+            state = self._state(attempt_events)
+            if state is None:
+                raise ExecutionLedgerIntegrityError(
+                    "reserved attempt has no state"
+                )
+
+            submitted = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.ATTEMPT_SUBMITTED.value
+            ]
+            unknown = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.ATTEMPT_UNKNOWN.value
+            ]
+            provider_refs = [
+                event
+                for event in attempt_events
+                if event["event_type"]
+                == EventType.PROVIDER_ORDER_REFERENCE_BOUND.value
+            ]
+            provider_evidence_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.PROVIDER_EVIDENCE_BOUND.value
+            ]
+            acknowledgements = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.EXTERNAL_ACKNOWLEDGEMENT.value
+            ]
+            found_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.RECONCILED_FOUND.value
+            ]
+            not_found_events = [
+                event
+                for event in attempt_events
+                if event["event_type"] == EventType.RECONCILED_NOT_FOUND.value
+            ]
+            for name, matches in (
+                ("submission", submitted),
+                ("UNKNOWN transition", unknown),
+                ("provider order reference", provider_refs),
+                ("provider evidence", provider_evidence_events),
+                ("external acknowledgement", acknowledgements),
+                ("not-found reconciliation", not_found_events),
+            ):
+                if len(matches) > 1:
+                    raise ExecutionLedgerIntegrityError(
+                        f"attempt has multiple {name} facts"
+                    )
+
+            submitted_at = (
+                submitted[0]["payload"]["submitted_at"] if submitted else None
+            )
+            unknown_reason = unknown[0]["payload"]["reason"] if unknown else None
+            unknown_observed_at = (
+                unknown[0]["payload"]["observed_at"] if unknown else None
+            )
+            provider_order_ref = (
+                provider_refs[0]["payload"]["provider_order_ref"]
+                if provider_refs
+                else None
+            )
+            provider_evidence = None
+            if provider_evidence_events:
+                payload = provider_evidence_events[0]["payload"]
+                provider_evidence = ProviderEvidenceBindingView(
+                    evidence_id=payload["evidence_id"],
+                    observed_at=payload["observed_at"],
+                    source=payload["source"],
+                    acknowledgement_sha256=payload.get(
+                        "acknowledgement_sha256"
+                    ),
+                )
+            acknowledgement = (
+                self._acknowledgement_from_dict(
+                    acknowledgements[0]["payload"]
+                )
+                if acknowledgements
+                else None
+            )
+            found_reconciliations = tuple(
+                self._found_reconciliation_from_dict(event["payload"])
+                for event in found_events
+            )
+            not_found_reconciliation = (
+                self._reconciliation_snapshot_from_dict(
+                    not_found_events[0]["payload"]
+                )
+                if not_found_events
+                else None
+            )
+            attempt = ExecutionAttempt(
+                attempt_id=attempt_id,
+                plan_id=plan_id,
+                action_id=action_id,
+                effect_fingerprint=reserved["payload"]["effect_fingerprint"],
+                reserved_at=reserved["payload"]["reserved_at"],
+            )
+            attempts.append(
+                ExecutionAttemptReadView(
+                    attempt=attempt,
+                    action=action,
+                    state=state,
+                    submitted_at=submitted_at,
+                    unknown_reason=unknown_reason,
+                    unknown_observed_at=unknown_observed_at,
+                    provider_order_ref=provider_order_ref,
+                    provider_evidence=provider_evidence,
+                    acknowledgement=acknowledgement,
+                    found_reconciliations=found_reconciliations,
+                    not_found_reconciliation=not_found_reconciliation,
+                )
+            )
+
+        return VerifiedExecutionPlanView(
+            snapshot_sha256=snapshot.sha256,
+            event_count=snapshot.event_count,
+            plan=plan,
+            plan_fingerprint=plan_event["payload"]["plan_fingerprint"],
+            stale=self._stale(events, plan_id),
+            attempts=tuple(attempts),
         )
 
     def verify_integrity(self) -> int:
@@ -2399,13 +2848,11 @@ class RealExecutionLedger:
             and event["event_type"]
             == EventType.ATTEMPT_RESERVED.value
         ]
-        return (
-            not attempts
-            or self._state(
-                self._attempt_events(events, attempts[-1])
-            )
-            == AttemptState.RECONCILED_NOT_FOUND
-        )
+        # A durable NOT_FOUND fact is not, by itself, proof that a provider
+        # effect cannot appear later.  Until a product-issued no-effect
+        # authority is integrated and re-resolved, any prior attempt keeps
+        # retry fail-closed.
+        return not attempts
 
     def saga(self, plan_id: str) -> ExecutionSaga:
         events = self._events()

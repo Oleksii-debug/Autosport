@@ -44,6 +44,27 @@ def _question() -> ResearchQuestion:
     return ResearchQuestion("question-1", "Does candidate improve holdout ROI?", SHA_A, T0)
 
 
+class _HostileTuple(tuple):
+    def __iter__(self):
+        raise AssertionError("hostile scientific identity tuple iteration must not run")
+
+    def __len__(self):
+        raise AssertionError("hostile scientific identity tuple length must not run")
+
+
+def test_causal_records_rejects_record_type_subclass_before_membership_dispatch(tmp_path):
+    class HostileRecordType(str):
+        def __hash__(self):
+            raise AssertionError("hostile record_type hash dispatched before exact-type admission")
+
+        def __eq__(self, other):
+            raise AssertionError("hostile record_type equality dispatched before exact-type admission")
+
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    with pytest.raises(ValueError, match="record_type must be a non-empty canonical string"):
+        registry.causal_records(HostileRecordType("DatasetSnapshot"), as_of=T1)
+
+
 def _hypothesis() -> Hypothesis:
     return Hypothesis(
         "hypothesis-1",
@@ -55,6 +76,20 @@ def _hypothesis() -> Hypothesis:
         ("max_drawdown",),
         T0,
     )
+
+
+def test_hypothesis_rejects_tuple_subclass_before_identity_iteration():
+    with pytest.raises(ValueError, match="exact tuple"):
+        Hypothesis(
+            "hypothesis-hostile",
+            "question-1",
+            "Candidate improves the frozen primary metric.",
+            "holdout ROI > champion ROI",
+            "holdout ROI <= champion ROI or any guardrail regresses",
+            "roi",
+            _HostileTuple(("max_drawdown",)),
+            T0,
+        )
 
 
 def _payload_sha(record) -> str:
@@ -681,6 +716,23 @@ def test_direct_promotion_append_cannot_bypass_evidence_validation(tmp_path):
         registry.append(decision)
 
 
+def test_private_promotion_append_cannot_bypass_evidence_validation(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
+    decision = PromotionDecision(
+        "promotion-private-bypass",
+        PromotionAction.PROMOTE,
+        "strategy-missing",
+        "protocol-missing",
+        SHA_A,
+        "eval-missing",
+        SHA_B,
+        T3,
+    )
+
+    with pytest.raises(PromotionEvidenceError, match="record_promotion"):
+        registry._append(decision)
+
+
 def test_champion_history_orders_mixed_timezone_offsets_by_instant(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     foundation = _foundation(registry)
@@ -1032,3 +1084,83 @@ def test_promotion_rejects_preconsumed_confirmation_holdout(tmp_path):
     )
     with pytest.raises(PromotionEvidenceError, match="unconsumed confirmation holdout"):
         registry.record_promotion(decision)
+
+
+def test_public_append_does_not_dispatch_through_private_compatibility_hook(
+    tmp_path,
+    monkeypatch,
+):
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    called = False
+
+    def forged_private_append(self, record, *, allow_repeat_experiment=False):
+        del self, record, allow_repeat_experiment
+        nonlocal called
+        called = True
+        raise AssertionError("public append must not dispatch through _append")
+
+    monkeypatch.setattr(ScientificRegistry, "_append", forged_private_append)
+
+    digest = registry.append(_question())
+
+    assert len(digest) == 64
+    assert registry.get("ResearchQuestion", "question-1") is not None
+    assert called is False
+
+
+def test_promotion_evidence_constructor_rejects_subclass_before_payload_dispatch():
+    exact = _promotion_evidence(
+        experiment_id="experiment-identity-subclass",
+        strategy_id="strategy-1",
+        model_id="model-1",
+        bundle_id="eval-1",
+        dataset_id="dataset-1",
+        protocol_id="protocol-1",
+        bundle_sha=SHA_D,
+        evidence_id="promotion-identity-subclass",
+    )
+
+    class HostilePromotionEvidence(PromotionEvidence):
+        __slots__ = ()
+
+        def to_payload(self, *, include_id: bool = True):
+            raise AssertionError("PromotionEvidence subclass payload must not execute")
+
+    fields = {
+        field: getattr(exact, field)
+        for field in PromotionEvidence.__dataclass_fields__
+    }
+    with pytest.raises(ValueError, match="exact PromotionEvidence"):
+        HostilePromotionEvidence(**fields)
+
+
+def test_research_protocol_rejects_binding_subclass_before_identity_dispatch():
+    exact = _binding()
+
+    class HostileBinding(ScientificProtocolBinding):
+        __slots__ = ("_armed",)
+
+        def __getattribute__(self, name):
+            if name in {"_armed", "__class__", "__dict__"}:
+                return object.__getattribute__(self, name)
+            try:
+                armed = object.__getattribute__(self, "_armed")
+            except AttributeError:
+                armed = False
+            if armed and name == "research_protocol_id":
+                raise AssertionError(
+                    "ScientificProtocolBinding subclass identity dispatch must not execute"
+                )
+            return object.__getattribute__(self, name)
+
+    fields = {
+        field: getattr(exact, field)
+        for field in ScientificProtocolBinding.__dataclass_fields__
+    }
+    hostile = HostileBinding(**fields)
+    object.__setattr__(hostile, "_armed", True)
+
+    with pytest.raises(ValueError, match="exact ScientificProtocolBinding"):
+        ResearchProtocol(hostile, SHA_C, SHA_D, SHA_A, T0)

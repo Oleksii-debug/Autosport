@@ -97,7 +97,7 @@ def test_deserialization_rejects_missing_source_identity() -> None:
     payload = _event_payload()
     del payload["source_id"]
 
-    with pytest.raises(ValueError, match="source_id must be a non-empty trimmed string"):
+    with pytest.raises(ValueError, match="serialized market event fields mismatch"):
         MarketEvent.from_dict(payload)
 
 
@@ -155,7 +155,7 @@ def test_deserialization_rejects_missing_decimal_odds() -> None:
     payload = _event_payload()
     del payload["decimal_odds"]
 
-    with pytest.raises(ValueError, match="decimal_odds must be a finite decimal greater than 1"):
+    with pytest.raises(ValueError, match="serialized market event fields mismatch"):
         MarketEvent.from_dict(payload)
 
 
@@ -426,7 +426,7 @@ def test_deserialization_rejects_lone_surrogate_metadata_value() -> None:
     payload = _event_payload()
     payload["metadata"] = {"label": surrogate}
 
-    with pytest.raises(ValueError, match="UTF-8 encodable"):
+    with pytest.raises(ValueError, match="valid UTF-8 text"):
         MarketEvent.from_dict(payload)
 
 
@@ -435,7 +435,7 @@ def test_deserialization_rejects_lone_surrogate_metadata_key() -> None:
     payload = _event_payload()
     payload["metadata"] = metadata
 
-    with pytest.raises(ValueError, match="UTF-8 encodable"):
+    with pytest.raises(ValueError, match="valid UTF-8 text"):
         MarketEvent.from_dict(payload)
 
 
@@ -444,7 +444,7 @@ def test_deserialization_rejects_lone_surrogate_canonical_string_field() -> None
     payload = _event_payload()
     payload["event_id"] = surrogate
 
-    with pytest.raises(ValueError, match="event_id must be UTF-8 encodable"):
+    with pytest.raises(ValueError, match="event_id must be valid UTF-8 text"):
         MarketEvent.from_dict(payload)
 
 

@@ -272,15 +272,17 @@ def test_dataset_snapshot_itself_must_be_available_by_decision(tmp_path) -> None
 
 
 def test_dataset_causal_cutoff_after_decision_fails_closed(tmp_path) -> None:
-    snapshot, feature_set, provenance, _, lineage = _canonical_feature_context(
-        tmp_path, causal_cutoff="2026-09-20T10:02:01Z"
-    )
-    with pytest.raises(FutureEvidenceError, match="causal cutoff"):
-        PointInTimeFeatureAuthority.bind(
-            dataset_snapshot=snapshot, feature_set=feature_set,
-            feature_provenance=provenance, lineage_authority=lineage,
-            decision_cutoff_utc="2026-09-20T10:02:00Z",
+    # A snapshot physically available by the decision cannot contain a
+    # later causal cutoff. The canonical snapshot constructor must reject
+    # that impossible chronology before registry/lineage publication.
+    with pytest.raises(
+        ValueError, match="available_at must not precede causal_cutoff"
+    ):
+        _canonical_feature_context(
+            tmp_path, causal_cutoff="2026-09-20T10:02:01Z"
         )
+    assert not (tmp_path / "scientific-registry.json").exists()
+    assert not (tmp_path / "dataset-snapshot-lineage.json").exists()
 
 
 def test_renamed_snapshot_cannot_mint_fresh_holdout_after_restart(tmp_path) -> None:

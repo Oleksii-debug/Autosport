@@ -8,6 +8,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from autosport.domain import MarketEvent, MarketType
+from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
 from autosport.storage import SQLiteMarketStore
 
 
@@ -190,10 +191,13 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
                     (baseline.source_id, baseline.quote_key),
                 )
                 store.connection.commit()
-                self.assertNotIn(
-                    (baseline.source_id, baseline.quote_key),
-                    store.current_by_source(),
-                )
+                # Trusted reads reject missing derived rows rather than returning
+                # an incomplete projection that could conceal historical semantics.
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current quote projection diverges from canonical market history",
+                ):
+                    store.current_by_source()
 
                 with self.assertRaisesRegex(
                     ValueError,
@@ -292,7 +296,7 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     ValueError,
-                    "current market quote projection conflicts with authoritative history",
+                    "market quote stream semantic identity changed",
                 ):
                     store.append(continuation)
 
@@ -333,9 +337,11 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             finally:
                 connection.close()
 
+            # The signed append-chain proof fails before per-stream validation.
+            # Neither boundary may re-accept the rewritten durable history.
             with self.assertRaisesRegex(
-                ValueError,
-                "market quote stream semantic identity changed",
+                MonotonicAuthorityRollbackError,
+                "positive market append authority semantic binding is invalid",
             ):
                 SQLiteMarketStore(db_path)
 

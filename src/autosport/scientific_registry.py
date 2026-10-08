@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import math
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -63,6 +64,12 @@ def _sha256(value: object, name: str) -> str:
 
 def _iso(value: object, name: str) -> str:
     text = _text(value, name)
+    for match in re.finditer(r"[.,]([0-9]+)", text):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(f"{name} precision finer than microseconds is unsupported")
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -74,6 +81,16 @@ def _iso(value: object, name: str) -> str:
 
 def _instant(value: object, name: str) -> datetime:
     return datetime.fromisoformat(_iso(value, name).replace("Z", "+00:00")).astimezone(timezone.utc)
+
+
+def _optional_outcome_reveal_instant(
+    payload: Mapping[str, Any],
+    name: str,
+) -> datetime | None:
+    value = payload.get("outcome_reveal_after")
+    if value is None:
+        return None
+    return _instant(value, name)
 
 
 def _text_tuple(value: object, name: str, *, allow_empty: bool = False) -> tuple[str, ...]:
@@ -910,7 +927,9 @@ class RegistryEntry:
     @property
     def reveal_after(self) -> str | None:
         value = self.payload.get("outcome_reveal_after")
-        return value if isinstance(value, str) else None
+        if value is None:
+            return None
+        return _iso(value, "outcome_reveal_after")
 
 
 _LOCAL_SCIENTIFIC_RECORD_TYPES = {
@@ -1095,7 +1114,6 @@ class ScientificRegistry:
             payload_record_id = None
         if payload_record_id is not None and payload_record_id != raw_entry["record_id"]:
             raise ValueError("scientific registry record identity mismatch")
-
         # Revalidate every persisted identity/version/hash-shaped member before
         # accepting a self-consistent envelope digest.  The writer validates the
         # canonical DTO before persistence, but restart must not let JSON type drift
@@ -1141,6 +1159,45 @@ class ScientificRegistry:
                     validate_identity_shape(member, f"{path}[{index}]")
 
         validate_identity_shape(payload, f"{record_type}.payload")
+        if record_type == "DatasetSnapshot":
+            # Durable pre-availability-schema snapshots may omit the duplicate
+            # payload-level available_at field.  The immutable registry envelope
+            # already binds available_at into record_sha256, so absence can migrate
+            # conservatively to that exact envelope instant.  A present payload
+            # value remains strict and must equal the envelope; it may never
+            # backdate or rewrite product availability.
+            envelope_available = _instant(
+                raw_entry["available_at"],
+                "DatasetSnapshot.envelope_available_at",
+            )
+            payload_available_raw = payload.get("available_at")
+            if payload_available_raw is None:
+                payload_available = envelope_available
+            else:
+                payload_available = _instant(
+                    payload_available_raw,
+                    "DatasetSnapshot.available_at",
+                )
+                if payload_available != envelope_available:
+                    raise ValueError(
+                        "DatasetSnapshot payload/envelope availability mismatch"
+                    )
+            # The causal cutoff is part of this immutable snapshot's data
+            # identity. A snapshot may not claim observations from a time
+            # later than its own product-available timestamp, even when its
+            # payload and envelope hashes have been recomputed consistently.
+            # Apply this on read as well as append for legacy payloads.
+            causal_cutoff = _instant(
+                payload.get("causal_cutoff"),
+                "DatasetSnapshot.causal_cutoff",
+            )
+            if causal_cutoff > payload_available:
+                raise ValueError(
+                    "DatasetSnapshot available_at must not precede causal_cutoff"
+                )
+            reveal_after = payload.get("outcome_reveal_after")
+            if reveal_after is not None:
+                _instant(reveal_after, "DatasetSnapshot.outcome_reveal_after")
         expected = _digest({"record_type": raw_entry["record_type"],
                             "record_id": raw_entry["record_id"],
                             "available_at": raw_entry["available_at"],
@@ -1371,10 +1428,13 @@ class ScientificRegistry:
                 except PromotionEvidenceError:
                     continue
             available = _instant(raw["available_at"], "available_at")
-            reveal = raw["payload"].get("outcome_reveal_after")
+            reveal = _optional_outcome_reveal_instant(
+                raw["payload"],
+                "outcome_reveal_after",
+            )
             if available > cutoff:
                 continue
-            if isinstance(reveal, str) and _instant(reveal, "outcome_reveal_after") > cutoff:
+            if reveal is not None and reveal > cutoff:
                 continue
             values.append(RegistryEntry(**raw))
         values.sort(key=lambda item: (_instant(item.available_at, "available_at"), item.record_id))
@@ -1471,8 +1531,11 @@ class ScientificRegistry:
                     raise PromotionEvidenceError(f"promotion evidence missing {kind}:{identity}")
                 if _instant(value["available_at"], f"{kind}.available_at") > decision_at:
                     raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not available at decision time")
-                reveal = value["payload"].get("outcome_reveal_after")
-                if isinstance(reveal, str) and _instant(reveal, f"{kind}.outcome_reveal_after") > decision_at:
+                reveal = _optional_outcome_reveal_instant(
+                    value["payload"],
+                    f"{kind}.outcome_reveal_after",
+                )
+                if reveal is not None and reveal > decision_at:
                     raise PromotionEvidenceError(f"promotion evidence {kind}:{identity} was not causally revealed at decision time")
                 return value
 

@@ -5,6 +5,8 @@ import unittest
 from decimal import Decimal
 from unittest.mock import patch
 
+import autosport.calculation_service as calculation_service_module
+
 from autosport.calculation import CalculationEngine
 from autosport.calculation_service import CalculationService
 from autosport.domain import MarketEvent, MarketType
@@ -23,6 +25,7 @@ class CalculationServiceTests(unittest.TestCase):
         sequence: int = 1,
         observed_ts: str = "2026-09-14T12:00:00+00:00",
         source_ts: str | None = "2026-09-14T11:59:59+00:00",
+        ingest_ts: str | None = None,
         metadata: dict[str, object] | None = None,
     ) -> MarketEvent:
         return MarketEvent(
@@ -35,7 +38,7 @@ class CalculationServiceTests(unittest.TestCase):
             sequence=sequence,
             market_type=MarketType.WINNER,
             source_ts=source_ts,
-            ingest_ts="2026-09-14T12:05:00+00:00",
+            ingest_ts=observed_ts if ingest_ts is None else ingest_ts,
             metadata={} if metadata is None else metadata,
         )
 
@@ -184,6 +187,20 @@ class CalculationServiceTests(unittest.TestCase):
         self.assertNotEqual(first.result.result_hash, second.result.result_hash)
         self.assertNotEqual(first.evidence_sha256, second.evidence_sha256)
 
+    def test_causal_cutoff_rejects_str_subclass_before_virtual_methods(self) -> None:
+        class _ExplosiveCutoff(str):
+            def strip(self, *args: object, **kwargs: object) -> str:
+                raise AssertionError("causal cutoff validation must reject str subclasses before strip")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal_cutoff_ts must be a non-empty trimmed timezone-aware ISO timestamp",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(),
+                causal_cutoff_ts=_ExplosiveCutoff("2026-09-14T12:00:00Z"),  # type: ignore[arg-type]
+            )
+
     def test_future_quote_is_rejected_instead_of_substituted(self) -> None:
         cutoff = "2026-09-14T12:00:30+00:00"
         accepted = self.service.implied_probability_for_event(
@@ -200,6 +217,82 @@ class CalculationServiceTests(unittest.TestCase):
                     observed_ts="2026-09-14T12:01:00+00:00",
                 ),
                 causal_cutoff_ts=cutoff,
+            )
+
+    def test_causal_cutoff_rejects_nonzero_submicrosecond_precision(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "causal_cutoff_ts precision finer than microseconds",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(),
+                causal_cutoff_ts="2026-09-14T12:00:00.0000001+00:00",
+            )
+
+    def test_quote_timestamp_rejects_nonzero_submicrosecond_precision(self) -> None:
+        event = self._event()
+        object.__setattr__(event, "ingest_ts", "2026-09-14T12:00:00.0000001+00:00")
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts precision finer than microseconds",
+        ):
+            self.service.implied_probability_for_event(
+                event,
+                causal_cutoff_ts="2026-09-14T12:00:01+00:00",
+            )
+
+    def test_ingest_timestamp_before_observation_is_rejected_as_invalid_chronology(self) -> None:
+        # Construction now rejects impossible chronology. Simulate a mutated
+        # valid quote to prove the calculation-time use boundary also fails closed.
+        invalid = self._event(
+            observed_ts="2026-09-14T12:00:00+00:00",
+            ingest_ts="2026-09-14T12:00:00+00:00",
+        )
+        object.__setattr__(invalid, "ingest_ts", "2026-09-14T11:59:59+00:00")
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts is before observed_ts",
+        ):
+            self.service.implied_probability_for_event(
+                invalid,
+                causal_cutoff_ts="2026-09-14T12:01:00+00:00",
+            )
+
+    def test_future_source_timestamp_is_rejected_as_causally_unavailable(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_ts is after the calculation causal cutoff",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(source_ts="2026-09-14T12:00:01+00:00"),
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            )
+
+    def test_future_ingest_timestamp_is_rejected_as_causally_unavailable(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts is after the calculation causal cutoff",
+        ):
+            self.service.implied_probability_for_event(
+                self._event(ingest_ts="2026-09-14T12:00:01+00:00"),
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            )
+
+    def test_market_devig_rejects_any_quote_not_fully_available_at_cutoff(self) -> None:
+        first = self._event(selection_id="driver-a", sequence=1)
+        future = self._event(
+            selection_id="driver-b",
+            decimal_odds="2.05",
+            sequence=2,
+            ingest_ts="2026-09-14T12:00:01+00:00",
+        )
+        with self.assertRaisesRegex(
+            ValueError,
+            "ingest_ts is after the calculation causal cutoff",
+        ):
+            self.service.multiplicative_devig_for_market(
+                (first, future),
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
             )
 
     def test_mutable_metadata_and_future_outcome_fields_are_not_part_of_evidence(self) -> None:
@@ -222,6 +315,82 @@ class CalculationServiceTests(unittest.TestCase):
         self.assertNotIn("metadata", contaminated.quote_sources[0].as_dict())
         self.assertNotIn("status", contaminated.quote_sources[0].as_dict())
         self.assertNotIn("score_state", contaminated.quote_sources[0].as_dict())
+
+    def test_quote_snapshot_fails_closed_on_exact_event_toctou_mutation(self) -> None:
+        event = self._event(
+            observed_ts="2026-09-14T11:59:59+00:00",
+            ingest_ts="2026-09-14T11:59:59+00:00",
+        )
+        original_timestamp = calculation_service_module._timestamp
+
+        def mutating_timestamp(value: object, *, field: str):
+            parsed = original_timestamp(value, field=field)
+            if field == "observed_ts":
+                object.__setattr__(
+                    event,
+                    "observed_ts",
+                    "2026-09-14T12:30:00+00:00",
+                )
+            return parsed
+
+        with patch.object(
+            calculation_service_module,
+            "_timestamp",
+            side_effect=mutating_timestamp,
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "changed during calculation snapshot",
+            ):
+                self.service.implied_probability_for_event(
+                    event,
+                    causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+                )
+
+
+    def test_market_devig_rejects_sequence_subclass_before_causal_snapshot(self) -> None:
+        class HostileEventList(list):
+            def __len__(self) -> int:
+                raise AssertionError("event collection length dispatch must not execute")
+
+            def __iter__(self):
+                raise AssertionError("event collection iteration dispatch must not execute")
+
+        events = HostileEventList(
+            [
+                self._event(selection_id="driver-a", sequence=1),
+                self._event(
+                    selection_id="driver-b",
+                    decimal_odds="2.05",
+                    sequence=2,
+                ),
+            ]
+        )
+
+        with self.assertRaisesRegex(ValueError, "exact list or tuple"):
+            self.service.multiplicative_devig_for_market(
+                events,
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            )
+
+    def test_market_devig_snapshots_exact_list_before_causal_evaluation(self) -> None:
+        first = self._event(selection_id="driver-a", sequence=1)
+        second = self._event(
+            selection_id="driver-b",
+            decimal_odds="2.05",
+            sequence=2,
+        )
+
+        evidence = self.service.multiplicative_devig_for_market(
+            [first, second],
+            causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+        )
+
+        self.assertEqual(
+            [source.selection_id for source in evidence.quote_sources],
+            ["driver-a", "driver-b"],
+        )
+
 
     def test_market_devig_binds_exact_source_quotes_and_is_order_invariant(self) -> None:
         first = self._event(selection_id="driver-a", decimal_odds="2.10", sequence=1)
@@ -330,7 +499,12 @@ class CalculationServiceTests(unittest.TestCase):
                 self.assertIsNotNone(value)
                 object.__setattr__(invalid, field, TrapStr(value))
 
-                with self.assertRaisesRegex(ValueError, "quote fields are not canonical"):
+                # Exact timestamp validation precedes serialization and must
+                # reject str subclasses without dispatching TrapStr.strip().
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{field} must be a non-empty trimmed timezone-aware ISO timestamp",
+                ):
                     self.service.implied_probability_for_event(
                         invalid,
                         causal_cutoff_ts="2026-09-14T12:00:00+00:00",
@@ -350,6 +524,31 @@ class CalculationServiceTests(unittest.TestCase):
                         invalid,
                         causal_cutoff_ts="2026-09-14T12:00:00+00:00",
                     )
+
+
+    def test_market_event_subclass_is_rejected_before_hostile_attribute_dispatch(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"observed_ts", "ingest_ts", "source_ts", "event_id"}:
+                    raise AssertionError(
+                        "noncanonical MarketEvent attribute dispatch must never execute"
+                    )
+                return super().__getattribute__(name)
+
+        canonical = self._event()
+        hostile = object.__new__(HostileMarketEvent)
+        for field_name in canonical.__dataclass_fields__:
+            object.__setattr__(
+                hostile,
+                field_name,
+                object.__getattribute__(canonical, field_name),
+            )
+
+        with self.assertRaisesRegex(ValueError, "event must be an exact MarketEvent"):
+            self.service.implied_probability_for_event(
+                hostile,
+                causal_cutoff_ts="2026-09-14T12:00:00+00:00",
+            )
 
 
 if __name__ == "__main__":

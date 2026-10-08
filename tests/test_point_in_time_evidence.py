@@ -590,6 +590,7 @@ def test_feature_authority_rejects_lineage_authority_subclass_before_virtual_dis
             decision_cutoff_utc="2099-01-01T00:00:00Z",
         )
 
+
 def test_feature_provenance_rejects_boolean_schema_version_alias() -> None:
     snapshot = _snapshot()
     feature_set = _feature_set()
@@ -666,3 +667,11 @@ def test_holdout_ledger_rejects_boolean_schema_version_without_rewrite(tmp_path)
 
     assert path.read_bytes() == forged
 
+
+
+def test_point_in_time_parser_rejects_nonzero_submicrosecond_timestamp_precision() -> None:
+    with pytest.raises(PointInTimeEvidenceError, match="precision finer than microseconds"):
+        point_in_time_module._instant(
+            "2026-09-20T10:00:00.1234561Z",
+            "test causal timestamp",
+        )

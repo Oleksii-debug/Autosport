@@ -4,16 +4,18 @@ import hashlib
 import json
 import math
 import os
+import re
 import stat
 import uuid
 from collections.abc import Mapping
+from datetime import datetime
 from dataclasses import dataclass, field
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any
 
 from .causal_integrity import contains_forbidden_future_key
-from .domain import utc_now_iso
+from .domain import _timezone_aware_iso8601_value, utc_now_iso
 from .economic_goal import EconomicGoalContract
 from .integrity import durable_path_lock
 from .economic_goal_provenance import (
@@ -130,6 +132,21 @@ def _canonical_decision_text(value: object, field_name: str) -> str:
     return value
 
 
+def _decision_instant(value: object, field_name: str) -> datetime:
+    """Parse one exact causal ledger timestamp using the product timestamp contract."""
+
+    canonical = _timezone_aware_iso8601_value(value, field_name)
+    for match in re.finditer(r"[.,]([0-9]+)", canonical):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{field_name} precision finer than microseconds is unsupported"
+            )
+    return datetime.fromisoformat(canonical.replace("Z", "+00:00"))
+
+
 def _require_canonical_decision_id(
     value: object,
     *,
@@ -195,6 +212,10 @@ class DecisionRecord:
         ):
             _canonical_decision_text(getattr(self, field_name), field_name)
         _require_canonical_decision_id(self.decision_id)
+        observed = _decision_instant(self.observed_ts, "observed_ts")
+        recorded = _decision_instant(self.recorded_at, "recorded_at")
+        if observed > recorded:
+            raise ValueError("observed_ts cannot be after recorded_at")
         payload = _freeze_decision_payload(self.payload)
         if contains_forbidden_future_key(payload):
             raise ValueError("decision payload must not contain future-result fields")
@@ -600,6 +621,17 @@ class JsonlDecisionLedger:
                 raise DecisionLedgerIntegrityError(
                     f"Decision Ledger decision_kind is invalid{location}: {exc}"
                 ) from exc
+        try:
+            observed = _decision_instant(record["observed_ts"], "observed_ts")
+            recorded = _decision_instant(record["recorded_at"], "recorded_at")
+        except ValueError as exc:
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger chronology is invalid{location}"
+            ) from exc
+        if observed > recorded:
+            raise DecisionLedgerIntegrityError(
+                f"Decision Ledger observed_ts is after recorded_at{location}"
+            )
         try:
             cls._validate_json_value(record, path="record")
         except RecursionError as exc:

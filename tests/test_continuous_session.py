@@ -3,9 +3,12 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
+
+import autosport.continuous_session as continuous_session_module
 
 from autosport.causal_collector import (
     CollectorDelta,
@@ -69,6 +72,14 @@ class _HostileTuple(tuple):
 
     def __len__(self):
         raise AssertionError("hostile tuple length must not run")
+
+
+class _HostileRequiredHistory(timedelta):
+    def __lt__(self, _other):
+        raise AssertionError("hostile timedelta comparison must not run")
+
+    def total_seconds(self):
+        raise AssertionError("hostile timedelta conversion must not run")
 
 
 class _HostileSettlementResolution(SettlementResolution):
@@ -247,6 +258,38 @@ class _OutcomeAuthority:
         return self.resolution
 
 
+class _MutatingSettlementHandoff:
+    def __init__(self, quote_key: str) -> None:
+        self.quote_key = quote_key
+        self.prepare_calls = 0
+        self.reconcile_calls = 0
+
+    def prepare_settlement(self, *, paper_book_path, resolutions, at):
+        self.prepare_calls += 1
+        object.__setattr__(
+            resolutions[0],
+            "quote_outcomes",
+            {self.quote_key: "loss"},
+        )
+        object.__setattr__(
+            resolutions[0],
+            "available_at",
+            "2099-01-01T00:00:00+00:00",
+        )
+        return ()
+
+    def reconcile_after_settlement(
+        self,
+        *,
+        paper_book_path,
+        resolutions,
+        settled_ticket_ids,
+        at,
+    ):
+        self.reconcile_calls += 1
+        object.__setattr__(resolutions[0], "evidence_sha256", "f" * 64)
+
+
 class _MappedOutcomeAuthority:
     def __init__(self, resolutions: dict[str, SettlementResolution]) -> None:
         self.resolutions = dict(resolutions)
@@ -335,6 +378,7 @@ def _build_coordinator(
     *,
     outcome_authority=None,
     settlement_learning_handoff=None,
+    required_history: timedelta = timedelta(0),
 ):
     market_store = SQLiteMarketStore(root / "market.db")
     lifecycle = ContinuousEventLifecycle(root / "catalog.json")
@@ -376,6 +420,7 @@ def _build_coordinator(
         session_id="session-1",
         clock=clock,
         initial_bankroll="100",
+        required_history=required_history,
     )
     return coordinator, market_store, lifecycle, mirror, invalidations, dependencies
 
@@ -445,10 +490,34 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_constructor_rejects_required_history_subclass_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            with self.assertRaisesRegex(TypeError, "exact timedelta"):
+                _build_coordinator(
+                    root,
+                    source,
+                    clock,
+                    required_history=_HostileRequiredHistory(seconds=1),
+                )
+
     def test_tick_registers_new_event_and_persists_checkpoint_across_restart(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             page = CatalogPage(
                 source_id="provider-a",
                 stream_epoch="epoch-1",
@@ -484,6 +553,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             source = _Source(
                 CatalogPage(
                     source_id="provider-a",
@@ -670,6 +741,75 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
                     self.assertEqual(authority.calls, 2)
                 finally:
                     restarted_store.close()
+            finally:
+                store.close()
+
+    def test_learning_handoff_cannot_mutate_admitted_settlement_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            event = _event(
+                phase=EventPhase.COMPLETED,
+                settlement_ref="provider-result:isolated",
+            )
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-isolated",
+                    position=1,
+                    events=(event,),
+                )
+            )
+
+            book = PaperBook("100")
+            leg = TicketLeg(
+                event_id="event-1",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            ticket = book.open_ticket(
+                (leg,),
+                Decimal("10"),
+                placed_at="2026-09-19T21:19:30+00:00",
+            )
+            book.save(root / "paper_book.json")
+
+            resolution = SettlementResolution(
+                event_identity=event.identity,
+                settlement_ref="provider-result:isolated",
+                quote_outcomes={leg.quote_key: "win"},
+                evidence_id="outcome-isolated",
+                evidence_sha256="a" * 64,
+                available_at="2026-09-19T21:19:30+00:00",
+            )
+            handoff = _MutatingSettlementHandoff(leg.quote_key)
+            coordinator, store, *_ = _build_coordinator(
+                root,
+                source,
+                clock,
+                outcome_authority=_OutcomeAuthority(resolution),
+                settlement_learning_handoff=handoff,
+            )
+            try:
+                result = coordinator.tick()
+
+                self.assertEqual(result.settled_ticket_ids, (ticket.ticket_id,))
+                self.assertEqual(
+                    PaperBook.load(root / "paper_book.json").balance,
+                    Decimal("110"),
+                )
+                self.assertEqual(handoff.prepare_calls, 1)
+                self.assertEqual(handoff.reconcile_calls, 1)
+                evidence = coordinator.status().settlement_evidence
+                self.assertEqual(len(evidence), 1)
+                self.assertEqual(evidence[0]["evidence_sha256"], "a" * 64)
+                self.assertEqual(
+                    evidence[0]["available_at"],
+                    "2026-09-19T21:19:30+00:00",
+                )
             finally:
                 store.close()
 
@@ -1087,6 +1227,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             detected = _collector_delta(
                 delta_id="gap-detected",
                 gap_state=GapState.DETECTED,
@@ -1209,3 +1351,11 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_continuous_session_rejects_nonzero_submicrosecond_causal_timestamp() -> None:
+    with unittest.TestCase().assertRaisesRegex(ValueError, "precision finer than microseconds"):
+        continuous_session_module._instant(
+            "2026-09-19T21:20:00.1234561Z",
+            "available_at",
+        )

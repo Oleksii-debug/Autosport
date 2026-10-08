@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import uuid
 from dataclasses import dataclass
 from datetime import datetime, timezone
@@ -46,6 +47,12 @@ def _sha256(value: object, name: str) -> str:
 
 def _instant(value: object, name: str) -> datetime:
     text = _text(value, name)
+    for match in re.finditer(r"[.,]([0-9]+)", text):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(f"{name} precision finer than microseconds is unsupported")
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -139,8 +146,12 @@ class DatasetSnapshotLineageRecord:
         _sha256(self.manifest_sha256, "manifest_sha256")
         _text(self.source_identity, "source_identity")
         _text(self.license_identity, "license_identity")
-        _instant(self.causal_cutoff, "causal_cutoff")
+        cutoff = _instant(self.causal_cutoff, "causal_cutoff")
         available = _instant(self.available_at, "available_at")
+        if cutoff > available:
+            raise ValueError(
+                "dataset snapshot lineage availability predates causal cutoff"
+            )
         if self.proof_registered_at is not None:
             registered = _instant(self.proof_registered_at, "proof_registered_at")
             if registered < available:

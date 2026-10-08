@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror, MirrorUpdate
@@ -10,6 +11,18 @@ from autosport.storage import SQLiteMarketStore
 
 
 class MarketMirrorTests(unittest.TestCase):
+    def _recorded_product_clock(self, initial: str) -> list[str]:
+        # Test-only physical availability: never backdate a later append to
+        # a decision cutoff merely because the provider observation is old.
+        clock = [initial]
+        product_patch = patch(
+            "autosport.storage._market_product_utc_now",
+            side_effect=lambda: clock[0],
+        )
+        product_patch.start()
+        self.addCleanup(product_patch.stop)
+        return clock
+
     @staticmethod
     def event(
         *,
@@ -123,7 +136,27 @@ class MarketMirrorTests(unittest.TestCase):
             Decimal("1.80"),
         )
 
+    def test_restore_and_replay_reject_store_subclass_before_dispatch(self) -> None:
+        class HostileStore(SQLiteMarketStore):
+            def events(self):
+                raise AssertionError("store subclass history dispatch must not execute")
+
+            def replay_events_at_frozen_cutoff(self, *, as_of: str):
+                raise AssertionError("store subclass replay dispatch must not execute")
+
+        hostile = object.__new__(HostileStore)
+
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            MarketMirror.from_store(hostile)
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            MarketMirror.replay_view_from_store(
+                hostile,
+                as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+                max_age=timedelta(minutes=5),
+            )
+
     def test_sport_aware_lookup_survives_store_restore_and_replay(self) -> None:
+        product_clock = self._recorded_product_clock("2026-09-16T18:59:02+00:00")
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
@@ -169,6 +202,7 @@ class MarketMirrorTests(unittest.TestCase):
                     "soccer",
                 )
 
+                product_clock[0] = "2026-09-16T19:00:00+00:00"
                 replay = MarketMirror.replay_view_from_store(
                     store,
                     as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
@@ -387,6 +421,26 @@ class MarketMirrorTests(unittest.TestCase):
         )
         self.assertEqual(len(mirror.snapshot()), 4)
 
+    def test_active_snapshot_rejects_ingest_before_observation(self) -> None:
+        mirror = MarketMirror()
+        impossible = self.event(
+            selection="invalid-local-chronology",
+            observed_ts="2026-09-16T18:59:59+00:00",
+            ingest_ts="2026-09-16T18:59:59+00:00",
+            source_ts="2026-09-16T18:59:57+00:00",
+        )
+        # Revalidate a corrupted frozen value at admission, not just at read.
+        object.__setattr__(impossible, "ingest_ts", "2026-09-16T18:59:58+00:00")
+        with self.assertRaisesRegex(ValueError, "ingest_ts cannot be before observed_ts"):
+            mirror.apply(impossible)
+
+        active = mirror.active_snapshot(
+            as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
+            max_age=timedelta(minutes=5),
+        )
+        self.assertEqual(active, ())
+        self.assertEqual(mirror.snapshot(), ())
+
     def test_active_snapshot_prefers_source_time_over_observation_time(self) -> None:
         mirror = MarketMirror()
         mirror.apply(
@@ -534,6 +588,7 @@ class MarketMirrorTests(unittest.TestCase):
                 reopened_store.close()
 
     def test_replay_view_reconstructs_pre_update_state_without_future_leakage(self) -> None:
+        product_clock = self._recorded_product_clock("2026-09-16T18:59:01+00:00")
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
@@ -546,6 +601,11 @@ class MarketMirrorTests(unittest.TestCase):
                             source_ts="2026-09-16T18:58:55+00:00",
                             ingest_ts="2026-09-16T18:59:01+00:00",
                         ),
+                    ]
+                )
+                product_clock[0] = "2026-09-16T19:01:01+00:00"
+                store.append_many(
+                    [
                         self.event(
                             sequence=2,
                             odds="9.99",
@@ -555,7 +615,6 @@ class MarketMirrorTests(unittest.TestCase):
                         ),
                     ]
                 )
-
                 replay = MarketMirror.replay_view_from_store(
                     store,
                     as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
@@ -570,6 +629,7 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
     def test_replay_view_excludes_late_ingestion_even_when_provider_evidence_is_earlier(self) -> None:
+        product_clock = self._recorded_product_clock("2026-09-16T18:58:40+00:00")
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
@@ -582,6 +642,11 @@ class MarketMirrorTests(unittest.TestCase):
                             source_ts="2026-09-16T18:58:20+00:00",
                             ingest_ts="2026-09-16T18:58:40+00:00",
                         ),
+                    ]
+                )
+                product_clock[0] = "2026-09-16T19:01:00+00:00"
+                store.append_many(
+                    [
                         self.event(
                             sequence=2,
                             odds="9.99",
@@ -591,7 +656,6 @@ class MarketMirrorTests(unittest.TestCase):
                         ),
                     ]
                 )
-
                 replay = MarketMirror.replay_view_from_store(
                     store,
                     as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
@@ -606,6 +670,7 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
     def test_replay_view_applies_live_freshness_and_focused_selectors_at_one_revision(self) -> None:
+        product_clock = self._recorded_product_clock("2026-09-16T18:59:40+00:00")
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
@@ -626,6 +691,11 @@ class MarketMirrorTests(unittest.TestCase):
                             selection="other",
                             observed_ts="2026-09-16T18:59:40+00:00",
                         ),
+                    ]
+                )
+                product_clock[0] = "2026-09-16T19:00:01+00:00"
+                store.append_many(
+                    [
                         self.event(
                             source="provider-a",
                             selection="future",
@@ -633,7 +703,6 @@ class MarketMirrorTests(unittest.TestCase):
                         ),
                     ]
                 )
-
                 replay = MarketMirror.replay_view_from_store(
                     store,
                     as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
@@ -669,51 +738,6 @@ class MarketMirrorTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             mirror.apply(event)
         self.assertEqual(hash_calls, [])
-        self.assertEqual(len(mirror), 0)
-
-    def test_apply_rejects_market_event_subclass_before_live_dispatch(self) -> None:
-        class HostileMarketEvent(MarketEvent):
-            def __getattribute__(self, name: str):
-                if name in {"source_id", "quote_key", "sequence", "to_dict"}:
-                    raise AssertionError("MarketEvent subtype dispatch must not execute")
-                return super().__getattribute__(name)
-
-        hostile = object.__new__(HostileMarketEvent)
-
-        mirror = MarketMirror()
-        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
-            mirror.apply(hostile)
-        self.assertEqual(len(mirror), 0)
-
-    def test_persist_and_apply_rejects_market_event_subclass_before_store_use(self) -> None:
-        class HostileMarketEvent(MarketEvent):
-            def __getattribute__(self, name: str):
-                if name in {"source_id", "quote_key", "sequence", "to_dict"}:
-                    raise AssertionError("MarketEvent subtype dispatch must not execute")
-                return super().__getattribute__(name)
-
-        hostile = object.__new__(HostileMarketEvent)
-
-        with tempfile.TemporaryDirectory() as directory:
-            store = SQLiteMarketStore(Path(directory) / "market.db")
-            mirror = MarketMirror()
-            try:
-                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
-                    mirror.persist_and_apply(store, hostile)
-                self.assertEqual(store.events(), [])
-                self.assertEqual(len(mirror), 0)
-            finally:
-                store.close()
-
-    def test_persist_and_apply_rejects_store_subclass_before_append_dispatch(self) -> None:
-        class HostileStore(SQLiteMarketStore):
-            def append(self, event: MarketEvent) -> bool:
-                raise AssertionError("store subclass append dispatch must not execute")
-
-        hostile = object.__new__(HostileStore)
-        mirror = MarketMirror()
-        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
-            mirror.persist_and_apply(hostile, self.event(sequence=93))
         self.assertEqual(len(mirror), 0)
 
     def test_get_rejects_identity_subclasses_before_lookup_dispatch(self) -> None:
@@ -754,6 +778,52 @@ class MarketMirrorTests(unittest.TestCase):
                 with self.assertRaises(ValueError):
                     mirror.get(**values)
                 self.assertEqual(dispatch_calls, [])
+
+    def test_persist_and_apply_rejects_store_subclass_before_append_dispatch(self) -> None:
+        class HostileStore(SQLiteMarketStore):
+            def append(self, event: MarketEvent) -> bool:
+                raise AssertionError("store subclass append dispatch must not execute")
+
+        hostile = object.__new__(HostileStore)
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "exact SQLiteMarketStore"):
+            mirror.persist_and_apply(hostile, self.event(sequence=93))
+        self.assertEqual(len(mirror), 0)
+
+    def test_apply_rejects_market_event_subclass_before_live_dispatch(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"source_id", "quote_key", "sequence", "to_dict"}:
+                    raise AssertionError("MarketEvent subtype dispatch must not execute")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileMarketEvent)
+
+        mirror = MarketMirror()
+        with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+            mirror.apply(hostile)
+        self.assertEqual(len(mirror), 0)
+
+    def test_persist_and_apply_rejects_market_event_subclass_before_store_use(self) -> None:
+        class HostileMarketEvent(MarketEvent):
+            def __getattribute__(self, name: str):
+                if name in {"source_id", "quote_key", "sequence", "to_dict"}:
+                    raise AssertionError("MarketEvent subtype dispatch must not execute")
+                return super().__getattribute__(name)
+
+        hostile = object.__new__(HostileMarketEvent)
+
+        with tempfile.TemporaryDirectory() as directory:
+            store = SQLiteMarketStore(Path(directory) / "market.db")
+            mirror = MarketMirror()
+            try:
+                with self.assertRaisesRegex(TypeError, "exact MarketEvent"):
+                    mirror.persist_and_apply(store, hostile)
+                self.assertEqual(store.events(), [])
+                self.assertEqual(len(mirror), 0)
+            finally:
+                store.close()
+
 
     def test_view_rejects_str_subclass_selector_before_hash_dispatch(self) -> None:
         hash_calls: list[str] = []

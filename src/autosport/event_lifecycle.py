@@ -4,6 +4,7 @@ import base64
 import binascii
 import hashlib
 import json
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime, timedelta, timezone
 from enum import StrEnum
@@ -58,6 +59,12 @@ def _text(value: object, name: str) -> str:
 
 def _instant(value: object, name: str) -> datetime:
     raw = _text(value, name)
+    for match in re.finditer(r"[.,]([0-9]+)", raw):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(f"{name} precision finer than microseconds is unsupported")
     try:
         parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -835,9 +842,11 @@ class ContinuousEventLifecycle:
         as_of: str,
         required_history: timedelta,
     ) -> EventEvidenceAssessment:
-        if not isinstance(store, SQLiteMarketStore):
-            raise TypeError("store must be SQLiteMarketStore")
-        if not isinstance(required_history, timedelta) or required_history < timedelta(0):
+        if type(store) is not SQLiteMarketStore:
+            raise TypeError("store must be an exact SQLiteMarketStore")
+        if type(required_history) is not timedelta:
+            raise TypeError("required_history must be an exact timedelta")
+        if required_history < timedelta(0):
             raise ValueError("required_history must be a non-negative timedelta")
         record = self.get(identity)
         if record is None:
@@ -905,16 +914,36 @@ class ContinuousEventLifecycle:
 
         availability: list[datetime] = []
         canonical_event_id = _scoped_identity(record.source_id, record.event_id)
-        for event in store.events(canonical_event_id):
-            if event.source_id != record.source_id or event.sport != record.sport:
+        replay_events = store.replay_events_at_frozen_cutoff(
+            as_of=cutoff.isoformat()
+        )
+        for event in replay_events:
+            if (
+                event.event_id != canonical_event_id
+                or event.source_id != record.source_id
+                or event.sport != record.sport
+            ):
                 continue
             try:
+                source = _instant(
+                    event.source_ts or event.observed_ts,
+                    "source_ts",
+                )
                 observed = _instant(event.observed_ts, "observed_ts")
                 ingested = _instant(event.ingest_ts, "ingest_ts")
             except ValueError:
                 continue
-            if observed <= cutoff and ingested <= cutoff:
-                availability.append(ingested)
+            if (
+                source <= cutoff
+                and observed <= cutoff
+                and observed <= ingested <= cutoff
+            ):
+                product_available = _instant(
+                    store.event_product_available_at(event),
+                    "product_available_at",
+                )
+                if product_available <= cutoff:
+                    availability.append(max(ingested, product_available))
         first = min(availability) if availability else None
         threshold = cutoff - required_history
         if first is None or first > threshold:

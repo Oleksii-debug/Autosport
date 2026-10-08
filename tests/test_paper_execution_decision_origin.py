@@ -68,7 +68,7 @@ def _record(decision_id: str = DECISION_ID, *, payload_value: str = "alpha") -> 
         payload={"value": payload_value},
         context_hash="context-origin-test",
         decision_id=decision_id,
-        recorded_at="2026-09-20T12:00:00.500000+00:00",
+        recorded_at="2026-09-20T12:00:01.500000+00:00",
     )
 
 

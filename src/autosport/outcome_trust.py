@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
+from datetime import datetime, timezone
 from typing import Any, TYPE_CHECKING
 
 if TYPE_CHECKING:
@@ -18,6 +20,7 @@ class TrustedOutcomeRevision:
     revision: int
     revision_id: str
     record_sha256: str
+    first_available_at: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -227,15 +230,22 @@ def outcome_lineage_payload(binding: OutcomeLineageBinding) -> dict[str, Any]:
         "record_id": binding.record_id,
         "root_revision_id": binding.root_revision_id,
         "root_record_sha256": binding.root_record_sha256,
-        "revisions": [
-            {
-                "revision": revision.revision,
-                "revision_id": revision.revision_id,
-                "record_sha256": revision.record_sha256,
-            }
-            for revision in binding.revisions
-        ],
+        "revisions": [_revision_payload(revision) for revision in binding.revisions],
     }
+
+
+def _revision_payload(revision: TrustedOutcomeRevision) -> dict[str, Any]:
+    payload: dict[str, Any] = {
+        "revision": revision.revision,
+        "revision_id": revision.revision_id,
+        "record_sha256": revision.record_sha256,
+    }
+    if revision.first_available_at is not None:
+        payload["first_available_at"] = _canonical_timestamp(
+            revision.first_available_at,
+            field=f"outcome revision {revision.revision} first_available_at",
+        )
+    return payload
 
 
 def outcome_lineage_binding_from_payload(
@@ -243,42 +253,69 @@ def outcome_lineage_binding_from_payload(
     *,
     context: str,
 ) -> OutcomeLineageBinding:
-    if not isinstance(value, dict):
-        raise OutcomeLineageTrustError(f"{context} must be an object")
-    source_identity = _canonical_text(
-        value.get("source_identity"), field=f"{context} source_identity"
+    expected_fields = frozenset(
+        {
+            "source_identity",
+            "record_id",
+            "root_revision_id",
+            "root_record_sha256",
+            "revisions",
+        }
     )
-    record_id = _canonical_text(value.get("record_id"), field=f"{context} record_id")
+    if _exact_dict_fields(value, context=context) != expected_fields:
+        raise OutcomeLineageTrustError(
+            f"{context} must contain exactly the canonical lineage fields"
+        )
+    source_identity = _canonical_text(
+        dict.__getitem__(value, "source_identity"), field=f"{context} source_identity"
+    )
+    record_id = _canonical_text(
+        dict.__getitem__(value, "record_id"), field=f"{context} record_id"
+    )
     root_revision_id = _canonical_text(
-        value.get("root_revision_id"), field=f"{context} root_revision_id"
+        dict.__getitem__(value, "root_revision_id"),
+        field=f"{context} root_revision_id",
     )
     root_record_sha256 = _digest(
-        value.get("root_record_sha256"), field=f"{context} root record SHA-256"
+        dict.__getitem__(value, "root_record_sha256"),
+        field=f"{context} root record SHA-256",
     )
-    raw_revisions = value.get("revisions")
-    if not isinstance(raw_revisions, list) or not raw_revisions:
-        raise OutcomeLineageTrustError(f"{context} revisions must be a non-empty list")
+    raw_revisions = dict.__getitem__(value, "revisions")
+    if type(raw_revisions) is not list or not raw_revisions:
+        raise OutcomeLineageTrustError(
+            f"{context} revisions must be a non-empty exact list"
+        )
 
     revisions: list[TrustedOutcomeRevision] = []
     seen_ids: set[str] = set()
     for index, raw in enumerate(raw_revisions, start=1):
-        if not isinstance(raw, dict) or set(raw) != {
+        allowed_fields = {
             "revision",
             "revision_id",
             "record_sha256",
-        }:
+        }
+        raw_fields = _exact_dict_fields(
+            raw,
+            context=f"{context} revision {index}",
+        )
+        if (
+            not allowed_fields.issubset(raw_fields)
+            or not raw_fields.issubset(allowed_fields | {"first_available_at"})
+        ):
             raise OutcomeLineageTrustError(
-                f"{context} revision {index} must contain only revision identity fields"
+                f"{context} revision {index} must contain only revision identity/availability fields"
             )
         revision = _positive_int(
-            raw.get("revision"), field=f"{context} revision {index} number"
+            dict.__getitem__(raw, "revision"),
+            field=f"{context} revision {index} number",
         )
         if revision != index:
             raise OutcomeLineageTrustError(
                 f"{context} revisions must be contiguous from revision 1"
             )
         revision_id = _canonical_text(
-            raw.get("revision_id"), field=f"{context} revision {index} revision_id"
+            dict.__getitem__(raw, "revision_id"),
+            field=f"{context} revision {index} revision_id",
         )
         if revision_id in seen_ids:
             raise OutcomeLineageTrustError(f"{context} revisions reuse a revision_id")
@@ -288,12 +325,27 @@ def outcome_lineage_binding_from_payload(
                 revision=revision,
                 revision_id=revision_id,
                 record_sha256=_digest(
-                    raw.get("record_sha256"),
+                    dict.__getitem__(raw, "record_sha256"),
                     field=f"{context} revision {index} record SHA-256",
+                ),
+                first_available_at=(
+                    _canonical_timestamp(
+                        dict.__getitem__(raw, "first_available_at"),
+                        field=f"{context} revision {index} first_available_at",
+                    )
+                    if "first_available_at" in raw_fields
+                    else None
                 ),
             )
         )
 
+    availability_flags = [
+        revision.first_available_at is not None for revision in revisions
+    ]
+    if any(availability_flags) and not all(availability_flags):
+        raise OutcomeLineageTrustError(
+            f"{context} must bind first availability for either every revision or none"
+        )
     if (
         revisions[0].revision_id != root_revision_id
         or revisions[0].record_sha256 != root_record_sha256
@@ -325,11 +377,211 @@ def assert_compatible_outcome_lineages(
         )
     overlap = min(len(trusted.revisions), len(incoming.revisions))
     for index in range(overlap):
-        if trusted.revisions[index] != incoming.revisions[index]:
+        accepted = trusted.revisions[index]
+        candidate = incoming.revisions[index]
+        if (
+            accepted.revision != candidate.revision
+            or accepted.revision_id != candidate.revision_id
+            or accepted.record_sha256 != candidate.record_sha256
+        ):
             raise OutcomeLineageTrustError(
                 "outcome lineage trust conflict: accepted source/record identity diverged at "
                 f"revision {index + 1}"
             )
+        if (
+            accepted.first_available_at is not None
+            and candidate.first_available_at is not None
+            and _canonical_timestamp(
+                accepted.first_available_at,
+                field="trusted outcome first_available_at",
+            )
+            != _canonical_timestamp(
+                candidate.first_available_at,
+                field="incoming outcome first_available_at",
+            )
+        ):
+            raise OutcomeLineageTrustError(
+                "outcome lineage trust conflict: accepted product first availability was rewritten at "
+                f"revision {index + 1}"
+            )
+
+
+def assert_outcome_availability_not_downgraded(
+    authority: OutcomeLineageBinding,
+    evidence: OutcomeLineageBinding,
+) -> None:
+    """Reject deletion of product availability still preserved by durable evidence."""
+
+    if (
+        authority.source_identity != evidence.source_identity
+        or authority.record_id != evidence.record_id
+    ):
+        return
+    assert_compatible_outcome_lineages(authority, evidence)
+    overlap = min(len(authority.revisions), len(evidence.revisions))
+    for index in range(overlap):
+        authoritative = authority.revisions[index]
+        preserved = evidence.revisions[index]
+        if (
+            preserved.first_available_at is not None
+            and authoritative.first_available_at is None
+        ):
+            raise OutcomeLineageTrustError(
+                "outcome lineage trust lost product first availability preserved by "
+                f"durable evidence at revision {index + 1}"
+            )
+
+
+def bind_outcome_lineage_availability(
+    incoming: OutcomeLineageBinding,
+    *,
+    accepted_at: str,
+    trusted: OutcomeLineageBinding | None = None,
+) -> OutcomeLineageBinding:
+    """Bind source lineage to the product time at which it actually became trusted."""
+
+    product_available_at = _canonical_timestamp(
+        accepted_at,
+        field="outcome lineage product acceptance time",
+    )
+    accepted_dt = _parse_timestamp(product_available_at)
+    if trusted is not None:
+        if (
+            trusted.source_identity != incoming.source_identity
+            or trusted.record_id != incoming.record_id
+        ):
+            raise OutcomeLineageTrustError(
+                "cannot extend outcome availability from another source/record identity"
+            )
+        assert_compatible_outcome_lineages(trusted, incoming)
+        if len(incoming.revisions) < len(trusted.revisions):
+            raise OutcomeLineageTrustError(
+                "cannot bind product availability from a stale outcome lineage prefix"
+            )
+        trusted_times = [
+            revision.first_available_at for revision in trusted.revisions
+        ]
+        if any(value is not None for value in trusted_times) and not all(
+            value is not None for value in trusted_times
+        ):
+            raise OutcomeLineageTrustError(
+                "trusted outcome lineage has incomplete product availability evidence"
+            )
+        if (
+            len(incoming.revisions) > len(trusted.revisions)
+            and trusted_times
+            and trusted_times[-1] is not None
+        ):
+            assert trusted_times[-1] is not None
+            if accepted_dt < _parse_timestamp(trusted_times[-1]):
+                raise OutcomeLineageTrustError(
+                    "product acceptance time predates already trusted outcome availability"
+                )
+
+    revisions: list[TrustedOutcomeRevision] = []
+    for index, revision in enumerate(incoming.revisions):
+        established = (
+            trusted.revisions[index].first_available_at
+            if trusted is not None
+            and index < len(trusted.revisions)
+            and trusted.revisions[index].first_available_at is not None
+            else product_available_at
+        )
+        revisions.append(
+            TrustedOutcomeRevision(
+                revision=revision.revision,
+                revision_id=revision.revision_id,
+                record_sha256=revision.record_sha256,
+                first_available_at=established,
+            )
+        )
+    return OutcomeLineageBinding(
+        source_identity=incoming.source_identity,
+        record_id=incoming.record_id,
+        root_revision_id=incoming.root_revision_id,
+        root_record_sha256=incoming.root_record_sha256,
+        revisions=tuple(revisions),
+    )
+
+
+def resolve_outcome_revision_as_of(
+    binding: OutcomeLineageBinding,
+    cutoff: str,
+) -> TrustedOutcomeRevision | None:
+    """Return the latest product-trusted revision genuinely available by cutoff."""
+
+    if type(binding) is not OutcomeLineageBinding:
+        raise OutcomeLineageTrustError(
+            "outcome causal lineage must be an exact OutcomeLineageBinding"
+        )
+    revisions = binding.revisions
+    if (
+        type(revisions) is not tuple
+        or not revisions
+        or any(type(revision) is not TrustedOutcomeRevision for revision in revisions)
+    ):
+        raise OutcomeLineageTrustError(
+            "outcome causal lineage revisions must be an exact tuple of TrustedOutcomeRevision"
+        )
+
+    # Frozen DTOs can still be changed through object.__setattr__. Rebuild the
+    # causal-use snapshot through the strict wire parser before any timestamp
+    # dispatch so post-construction aliases cannot move outcome availability.
+    binding = outcome_lineage_binding_from_payload(
+        outcome_lineage_payload(binding),
+        context="outcome causal lineage",
+    )
+    revisions = binding.revisions
+
+    cutoff_dt = _parse_timestamp(
+        _canonical_timestamp(cutoff, field="outcome as-of cutoff")
+    )
+    resolved: TrustedOutcomeRevision | None = None
+    previous_available: datetime | None = None
+    for revision in revisions:
+        if revision.first_available_at is None:
+            if any(item.first_available_at is not None for item in revisions):
+                raise OutcomeLineageTrustError(
+                    "outcome lineage has incomplete product availability evidence"
+                )
+            return None
+        available_dt = _parse_timestamp(revision.first_available_at)
+        if previous_available is not None and available_dt < previous_available:
+            raise OutcomeLineageTrustError(
+                "outcome lineage product availability moves backwards"
+            )
+        previous_available = available_dt
+        if available_dt <= cutoff_dt:
+            resolved = revision
+    return resolved
+
+
+def _parse_timestamp(value: str) -> datetime:
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise OutcomeLineageTrustError(
+                "outcome timestamp precision finer than microseconds is unsupported"
+            )
+    try:
+        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise OutcomeLineageTrustError("outcome timestamp must be ISO-8601") from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise OutcomeLineageTrustError("outcome timestamp must include an explicit timezone")
+    return parsed
+
+
+def _canonical_timestamp(value: object, *, field: str) -> str:
+    text = _canonical_text(value, field=field)
+    parsed = _parse_timestamp(text)
+    return (
+        parsed.astimezone(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
 
 
 def _strict_json_object(payload: bytes, *, context: str) -> dict[str, Any]:
@@ -365,8 +617,20 @@ def _strict_json_object(payload: bytes, *, context: str) -> dict[str, Any]:
     return raw
 
 
+def _exact_dict_fields(value: object, *, context: str) -> frozenset[str]:
+    if type(value) is not dict:
+        raise OutcomeLineageTrustError(f"{context} must be an exact object")
+    keys = tuple(dict.keys(value))
+    if any(type(key) is not str for key in keys):
+        raise OutcomeLineageTrustError(f"{context} keys must be exact strings")
+    return frozenset(keys)
+
+
 def _canonical_text(value: object, *, field: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    # Authority-bearing text must not retain caller-defined str dispatch.
+    # Exact JSON/product strings are ordinary built-ins; accepting a subclass
+    # lets strip/replace/hash/equality change meaning after validation.
+    if type(value) is not str or not value or value != value.strip():
         raise OutcomeLineageTrustError(
             f"{field} must be a non-empty canonical string without surrounding whitespace"
         )

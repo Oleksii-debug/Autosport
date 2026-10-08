@@ -74,7 +74,17 @@ class StoragePhysicalTimeTests(unittest.TestCase):
                 ),
             )
             store.connection.commit()
-            self.assertEqual(store.current()[earlier.quote_key].decimal_odds, Decimal("2.0"))
+            # A corrupt derived projection must not be consumed as current truth.
+            # The canonical append-only history remains unchanged and can repair
+            # the projection on restart only after independent history validation.
+            with self.assertRaisesRegex(
+                ValueError, "current quote projection diverges from canonical market history"
+            ):
+                store.current()
+            self.assertEqual(
+                [event.decimal_odds for event in store.events()],
+                [Decimal("1.8"), Decimal("2.0")],
+            )
             store.close()
 
             reopened = SQLiteMarketStore(path)

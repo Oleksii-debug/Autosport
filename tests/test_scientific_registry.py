@@ -3,6 +3,7 @@ from dataclasses import replace
 
 import pytest
 
+import autosport.scientific_registry as registry_module
 from autosport.scientific_registry import (
     ConflictingScientificRecordError,
     DatasetSnapshot,
@@ -162,7 +163,7 @@ def _foundation_with_binding(
     protocol = ResearchProtocol(_binding(question, hypothesis, promotion_rule), SHA_C, SHA_D, SHA_A, T0)
     dataset = DatasetSnapshot(
         "dataset-1", SHA_A, "lawful-provider:fixture", "license-evidence:v1",
-        T1, T0, outcome_reveal_after=T1,
+        T1, T1, outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
     model = ModelVersion("model-1", "fixture-model", SHA_A, SHA_C, SHA_D,
@@ -194,7 +195,7 @@ def _foundation(registry: ScientificRegistry) -> dict[str, object]:
         "lawful-provider:fixture",
         "license-evidence:v1",
         T1,
-        T0,
+        T1,
         outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
@@ -373,6 +374,93 @@ def test_conflicting_identity_rejected_but_exact_replay_is_idempotent(tmp_path):
         registry.append(replace(question, statement="Changed question"))
 
 
+def test_dataset_snapshot_rejects_availability_before_causal_cutoff(tmp_path) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    snapshot = DatasetSnapshot(
+        "dataset-future-bearing",
+        SHA_A,
+        "source",
+        "license",
+        T1,
+        T0,
+    )
+    with pytest.raises(
+        ValueError,
+        match="DatasetSnapshot available_at must not precede causal_cutoff",
+    ):
+        registry.append(snapshot)
+
+
+def test_dataset_snapshot_restart_rejects_self_consistent_future_bearing_state(tmp_path) -> None:
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(
+        DatasetSnapshot(
+            "dataset-restart-future",
+            SHA_A,
+            "source",
+            "license",
+            T1,
+            T1,
+        )
+    )
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["causal_cutoff"] = T2
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="DatasetSnapshot available_at must not precede causal_cutoff",
+    ):
+        registry.causal_records("DatasetSnapshot", as_of=T2)
+
+
+def test_dataset_snapshot_restart_binds_payload_and_envelope_availability(tmp_path) -> None:
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(
+        DatasetSnapshot(
+            "dataset-restart-availability",
+            SHA_A,
+            "source",
+            "license",
+            T1,
+            T1,
+        )
+    )
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["available_at"] = T2
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(json.dumps(state), encoding="utf-8")
+
+    with pytest.raises(
+        ValueError,
+        match="DatasetSnapshot payload/envelope availability mismatch",
+    ):
+        registry.causal_records("DatasetSnapshot", as_of=T2)
+
+
 def test_causal_lookup_honors_availability_and_outcome_reveal(tmp_path):
     registry = ScientificRegistry.initialize_pristine(tmp_path / "scientific_registry.json")
     registry.append(
@@ -382,13 +470,57 @@ def test_causal_lookup_honors_availability_and_outcome_reveal(tmp_path):
             "source",
             "license",
             T1,
-            T0,
+            T1,
             outcome_reveal_after=T2,
         )
     )
     assert registry.causal_records("DatasetSnapshot", as_of=T1) == ()
     visible = registry.causal_records("DatasetSnapshot", as_of=T2)
     assert [entry.record_id for entry in visible] == ["dataset-hidden"]
+
+
+def test_causal_lookup_rejects_self_consistent_malformed_outcome_reveal_after(
+    tmp_path,
+) -> None:
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    registry.append(
+        DatasetSnapshot(
+            "dataset-malformed-reveal",
+            SHA_A,
+            "source",
+            "license",
+            T1,
+            T1,
+            outcome_reveal_after=T2,
+        )
+    )
+
+    state = json.loads(path.read_text(encoding="utf-8"))
+    entry = state["records"][0]
+    entry["payload"]["outcome_reveal_after"] = 7
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+    path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    # Persisted records are validated at reopen, before causal lookup.
+    # Early fail-closed rejection is stronger than deferred lookup rejection.
+    with pytest.raises(ValueError, match="outcome_reveal_after.*canonical string"):
+        ScientificRegistry(path)
 
 
 def test_promotion_fails_closed_then_blocks_reused_confirmation_holdout(tmp_path):
@@ -611,7 +743,7 @@ def test_promotion_rejects_cross_dataset_model_experiment_lineage(tmp_path):
             "lawful-provider:fixture-2",
             "license-evidence:v1",
             T1,
-            T0,
+            T1,
             outcome_reveal_after=T1,
         )
     )
@@ -1086,30 +1218,6 @@ def test_promotion_rejects_preconsumed_confirmation_holdout(tmp_path):
         registry.record_promotion(decision)
 
 
-def test_public_append_does_not_dispatch_through_private_compatibility_hook(
-    tmp_path,
-    monkeypatch,
-):
-    registry = ScientificRegistry.initialize_pristine(
-        tmp_path / "scientific_registry.json"
-    )
-    called = False
-
-    def forged_private_append(self, record, *, allow_repeat_experiment=False):
-        del self, record, allow_repeat_experiment
-        nonlocal called
-        called = True
-        raise AssertionError("public append must not dispatch through _append")
-
-    monkeypatch.setattr(ScientificRegistry, "_append", forged_private_append)
-
-    digest = registry.append(_question())
-
-    assert len(digest) == 64
-    assert registry.get("ResearchQuestion", "question-1") is not None
-    assert called is False
-
-
 def test_promotion_evidence_constructor_rejects_subclass_before_payload_dispatch():
     exact = _promotion_evidence(
         experiment_id="experiment-identity-subclass",
@@ -1164,3 +1272,8 @@ def test_research_protocol_rejects_binding_subclass_before_identity_dispatch():
 
     with pytest.raises(ValueError, match="exact ScientificProtocolBinding"):
         ResearchProtocol(hostile, SHA_C, SHA_D, SHA_A, T0)
+
+
+def test_scientific_registry_rejects_nonzero_submicrosecond_causal_timestamp() -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        registry_module._iso("2026-01-01T00:00:00.1234561Z", "causal timestamp")

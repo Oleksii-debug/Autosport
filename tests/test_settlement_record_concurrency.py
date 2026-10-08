@@ -56,7 +56,10 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
                 ContinuousSessionError,
                 "settlement engine constructor origin changed",
             ):
-                coordinator._settle(resolutions=(object(),))
+                coordinator._settle(
+                    resolutions=(object(),),
+                    as_of="2026-09-23T12:00:00+00:00",
+                )
 
         replay_session = object.__new__(AutosportSession)
         with patch.object(
@@ -86,6 +89,7 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
         ):
             coordinator._settle(
                 resolutions=(),
+                as_of="2026-09-23T12:00:00+00:00",
                 _settlement_engine_type=object,
             )
 
@@ -171,7 +175,13 @@ class SettlementRecordConcurrencyTests(unittest.TestCase):
 
             self.assertIs(getattr(owner, name), canonical)
 
-        self.assertEqual(coordinator._settle(resolutions=()), ((), ()))
+        self.assertEqual(
+            coordinator._settle(
+                resolutions=(),
+                as_of="2026-09-23T12:00:00+00:00",
+            ),
+            ((), ()),
+        )
         self.assertEqual(entered, [])
 
     def test_module_lock_rebind_cannot_split_record_from_settlement_commit(

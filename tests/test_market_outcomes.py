@@ -3,6 +3,7 @@ import unittest
 from datetime import datetime, timezone
 from decimal import Decimal
 
+import autosport.market_outcomes as market_outcomes_module
 from autosport.domain import MarketType, TicketLeg
 from autosport.market_outcomes import (
     MarketOutcomeIdentity,
@@ -509,6 +510,28 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
                 datetime(2026, 9, 18, 15, 0, 0, tzinfo=timezone.utc)
             )
 
+    def test_authority_rejects_datetime_subclass_before_virtual_dispatch(self):
+        authority = self._authority()
+        dispatch_calls = []
+
+        class HostileDatetime(datetime):
+            def utcoffset(self):
+                dispatch_calls.append("utcoffset")
+                raise AssertionError("datetime subclass dispatch must not execute")
+
+            def astimezone(self, *args, **kwargs):
+                dispatch_calls.append("astimezone")
+                raise AssertionError("datetime subclass dispatch must not execute")
+
+        hostile = HostileDatetime(
+            2026, 9, 18, 15, 0, 2, tzinfo=timezone.utc
+        )
+
+        with self.assertRaisesRegex(TypeError, "decision_as_of must be an exact datetime"):
+            authority.assert_available_as_of(hostile)
+
+        self.assertEqual(dispatch_calls, [])
+
     def test_authoritative_scenario_search_covers_unticketed_real_third_outcome(self):
         authority = self._authority()
         book = PaperBook("100")
@@ -934,3 +957,11 @@ class MarketOutcomeAuthorityTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_market_outcome_authority_rejects_nonzero_submicrosecond_timestamp() -> None:
+    with unittest.TestCase().assertRaisesRegex(ValueError, "precision finer than microseconds"):
+        market_outcomes_module._canonical_timestamp(
+            "observed_at",
+            "2026-09-18T15:00:01.1234561Z",
+        )

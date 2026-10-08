@@ -5,6 +5,8 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.real_execution_ledger as execution_ledger_module
+
 from autosport.real_execution_ledger import (
     AcknowledgementStatus,
     AttemptState,
@@ -1925,3 +1927,11 @@ class RealExecutionLedgerTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_execution_ledger_rejects_nonzero_submicrosecond_timestamp() -> None:
+    with unittest.TestCase().assertRaisesRegex(ValueError, "precision finer than microseconds"):
+        execution_ledger_module._timestamp(
+            "2026-09-17T19:28:00.1234561Z",
+            "recorded_at",
+        )

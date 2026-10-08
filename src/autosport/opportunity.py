@@ -37,6 +37,7 @@ class StrategyClass(str, Enum):
     ARBITRAGE = "arbitrage"
     DUTCHING = "dutching"
     HEDGE_REBALANCE = "hedge_rebalance"
+    PARLAY = "parlay"
     HYBRID = "hybrid"
 
 
@@ -842,10 +843,11 @@ class Opportunity:
             )
         if self.claims_probability_edge and self.strategy_class not in {
             StrategyClass.PREDICTIVE_EDGE,
+            StrategyClass.PARLAY,
             StrategyClass.HYBRID,
         }:
             raise OpportunityContractError(
-                "probability edge is supported only for PREDICTIVE_EDGE or HYBRID"
+                "probability edge is supported only for PREDICTIVE_EDGE, PARLAY or HYBRID"
             )
 
         if type(self.quotes) is not tuple:

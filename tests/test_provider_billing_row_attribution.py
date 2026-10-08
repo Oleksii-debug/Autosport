@@ -150,6 +150,8 @@ def test_binds_exact_authenticated_row_but_keeps_allocation_unproven() -> None:
     assert evidence.row_amount == Decimal("-499")
     assert evidence.row_amount_sign == "NEGATIVE"
     assert evidence.row_item_class == "UNKNOWN"
+    assert evidence.row_provider_charge_class is None
+    assert evidence.row_provider_transaction_id is None
     assert evidence.attribution_state == "UNPROVEN"
     assert evidence.missing_authorities == (
         "AUTOSPORT_ACTIVITY_NUMERATOR",

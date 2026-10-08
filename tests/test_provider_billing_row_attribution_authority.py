@@ -149,7 +149,7 @@ def _source():
 def _combined_source_digest(entitlement: object, statement: object, observed_at: str) -> str:
     payload = {
         "schema": "autosport.betfair_provider_billing_inputs",
-        "schema_version": 5,
+        "schema_version": 6,
         "venue_id": entitlement.venue_id,
         "observed_at": observed_at,
         "entitlement": {
@@ -193,6 +193,8 @@ def _combined_source_digest(entitlement: object, statement: object, observed_at:
                 "balance": str(item.balance),
                 "item_class": item.item_class,
                 "item_class_data_sha256": item.item_class_data_sha256,
+                "provider_charge_class": item.provider_charge_class,
+                "provider_transaction_id": item.provider_transaction_id,
             }
             for item in statement.items
         ],
@@ -237,6 +239,8 @@ def _caller_built_source(issued: object):
         balance=original_item.balance,
         item_class=original_item.item_class,
         item_class_data_sha256=original_item.item_class_data_sha256,
+        provider_charge_class=original_item.provider_charge_class,
+        provider_transaction_id=original_item.provider_transaction_id,
     )
     statement = statement_cls(
         venue_id=issued.statement.venue_id,
@@ -266,7 +270,7 @@ def _caller_modified_evidence(
     provider_owner = "caller-selected-owner"
     payload = {
         "schema": "autosport.provider_billing_row_attribution",
-        "schema_version": 1,
+        "schema_version": 2,
         "venue_id": evidence.venue_id,
         "provider_owner": provider_owner,
         "app_id": evidence.app_id,
@@ -284,6 +288,8 @@ def _caller_modified_evidence(
             "amount_sign": evidence.row_amount_sign,
             "item_class": evidence.row_item_class,
             "item_class_data_sha256": evidence.row_item_class_data_sha256,
+            "provider_charge_class": evidence.row_provider_charge_class,
+            "provider_transaction_id": evidence.row_provider_transaction_id,
         },
         "attribution_state": "UNPROVEN",
         "missing_authorities": list(evidence.missing_authorities),
@@ -314,6 +320,8 @@ def _caller_modified_evidence(
         row_amount_sign=evidence.row_amount_sign,
         row_item_class=evidence.row_item_class,
         row_item_class_data_sha256=evidence.row_item_class_data_sha256,
+        row_provider_charge_class=evidence.row_provider_charge_class,
+        row_provider_transaction_id=evidence.row_provider_transaction_id,
         attribution_state="UNPROVEN",
         missing_authorities=evidence.missing_authorities,
         evidence_sha256=digest,
@@ -536,6 +544,28 @@ def test_caller_modified_exact_type_cannot_pass_product_verifier() -> None:
         match="does not match canonical source re-resolution",
     ):
         verify_provider_billing_row_attribution(source, modified, "billing-ref-1")
+
+
+def test_charge_identity_post_construction_tamper_cannot_pass_product_verifier() -> None:
+    source = _source()
+    evidence = resolve_provider_billing_row_attribution(source, "billing-ref-1")
+
+    object.__setattr__(
+        evidence,
+        "row_provider_charge_class",
+        "BETFAIR_TRANSACTION_CHARGE",
+    )
+    object.__setattr__(evidence, "row_provider_transaction_id", 123)
+
+    with pytest.raises(
+        ProviderBillingRowAuthorityError,
+        match="does not match canonical source re-resolution",
+    ):
+        verify_provider_billing_row_attribution(
+            source,
+            evidence,
+            "billing-ref-1",
+        )
 
 
 def test_rebound_evidence_equality_cannot_bypass_field_verification(

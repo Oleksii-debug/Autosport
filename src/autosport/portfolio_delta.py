@@ -14,7 +14,7 @@ from decimal import Decimal
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
-from .portfolio_plan import PortfolioPlan
+from .portfolio_plan import PortfolioDependencyGraph, PortfolioPlan
 from .risk import PaperRiskPolicy
 
 
@@ -23,6 +23,25 @@ def _canonical_hash(payload: dict[str, object]) -> str:
         json.dumps(payload, sort_keys=True, separators=(",", ":"), ensure_ascii=False,
                    allow_nan=False).encode("utf-8")
     ).hexdigest()
+
+
+def _same_canonical_wire(received: object, expected: object) -> bool:
+    """Compare JSON payload types and values without Python bool/int coercion."""
+    if type(received) is not type(expected):
+        return False
+    if type(expected) is dict:
+        if any(type(key) is not str for key in received):
+            return False
+        return received.keys() == expected.keys() and all(
+            _same_canonical_wire(received[key], value)
+            for key, value in expected.items()
+        )
+    if type(expected) is list:
+        return len(received) == len(expected) and all(
+            _same_canonical_wire(left, right)
+            for left, right in zip(received, expected, strict=True)
+        )
+    return received == expected
 
 
 @dataclass(frozen=True, slots=True)
@@ -64,6 +83,16 @@ class PortfolioDelta:
             raise TypeError("delta requires exact canonical PortfolioPlan")
         if type(risk_policy) is not PaperRiskPolicy:
             raise TypeError("delta requires exact canonical PaperRiskPolicy")
+        # A frozen dataclass is not a use-boundary trust boundary: callers can
+        # change it (or its graph) with object.__setattr__ after construction.
+        # Validate exact monetary values before invoking class-owned validators.
+        if type(plan.stakes) is not tuple or any(type(stake) is not Decimal for stake in plan.stakes):
+            raise ValueError("proposal stakes must be exact canonical Decimals")
+        if plan.dependency_graph is not None:
+            if type(plan.dependency_graph) is not PortfolioDependencyGraph:
+                raise ValueError("proposal dependency graph must be exact canonical type")
+            PortfolioDependencyGraph.__post_init__(plan.dependency_graph)
+        PortfolioPlan.__post_init__(plan)
         goal = risk_policy.economic_goal
         if type(goal) is not EconomicGoalContract:
             raise ValueError("delta requires an exact owner EconomicGoal")
@@ -145,6 +174,6 @@ class PortfolioDelta:
     ) -> "PortfolioDelta":
         """Re-derive from current canonical authorities; never trust a serialized delta."""
         expected = cls.derive(book, plan, risk_policy)
-        if type(raw) is not dict or raw != expected.to_dict():
+        if not _same_canonical_wire(raw, expected.to_dict()):
             raise ValueError("delta payload is stale, tampered or noncanonical")
         return expected

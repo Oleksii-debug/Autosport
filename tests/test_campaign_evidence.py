@@ -106,7 +106,7 @@ class PaperCampaignTests(unittest.TestCase):
                 manifest_sha256="33" * 32,
                 source_identity="fixture-source",
                 license_identity="fixture-license",
-                causal_cutoff="2026-09-03T23:59:59Z",
+                causal_cutoff="2026-08-03T00:00:00Z",
                 available_at_utc="2026-08-03T00:00:00Z",
                 outcome_reveal_after="2026-09-04T00:00:00Z",
             ),

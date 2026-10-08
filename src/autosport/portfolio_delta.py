@@ -14,7 +14,7 @@ from decimal import Decimal
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .paper import PaperBook
-from .portfolio_plan import PortfolioDependencyGraph, PortfolioPlan
+from .portfolio_plan import PortfolioDependencyEvidence, PortfolioDependencyGraph, PortfolioPlan
 from .risk import PaperRiskPolicy
 
 
@@ -92,6 +92,27 @@ class PortfolioDelta:
             if type(plan.dependency_graph) is not PortfolioDependencyGraph:
                 raise ValueError("proposal dependency graph must be exact canonical type")
             PortfolioDependencyGraph.__post_init__(plan.dependency_graph)
+        # DependencyEvidence is frozen, but object.__setattr__ can still mutate
+        # nested risk/correlation inputs after PortfolioPlan construction.
+        # Reject noncanonical numeric subclasses before the validators touch them.
+        if plan.dependency_evidence is not None:
+            evidence = plan.dependency_evidence
+            if type(evidence) is not PortfolioDependencyEvidence:
+                raise ValueError("proposal dependency evidence must be exact canonical type")
+            fractions = (
+                evidence.uncertainty_fraction,
+                evidence.fee_fraction,
+                evidence.partial_fill_stress_fraction,
+            )
+            if any(type(value) is not Decimal for value in fractions):
+                raise ValueError("proposal dependency fractions must be exact Decimals")
+            pairs = evidence.pairwise_dependency_upper_bounds
+            if type(pairs) is not tuple or any(
+                type(pair) is not tuple or len(pair) != 3 or type(pair[2]) is not Decimal
+                for pair in pairs
+            ):
+                raise ValueError("proposal dependency pair bounds must be exact Decimals")
+            PortfolioDependencyEvidence.__post_init__(evidence)
         PortfolioPlan.__post_init__(plan)
         goal = risk_policy.economic_goal
         if type(goal) is not EconomicGoalContract:

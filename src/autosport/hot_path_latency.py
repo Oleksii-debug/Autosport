@@ -54,6 +54,7 @@ def run_hot_path(
     backlog: int,
     stages: Mapping[str, Callable[[], object]],
     clock_ns: Callable[[], int] = perf_counter_ns,
+    backlog_reader: Callable[[], int] | None = None,
 ) -> HotPathReport:
     """Stop before the next stage on stale source, overload or time breach.
 
@@ -73,6 +74,8 @@ def run_hot_path(
         raise HotPathError("stages must have exactly five ordered callbacks")
     if not callable(clock_ns):
         raise HotPathError("clock_ns must be callable")
+    if backlog_reader is not None and not callable(backlog_reader):
+        raise HotPathError("backlog_reader must be callable")
     callbacks = tuple(stages[name] for name in STAGES)
 
     def read_clock() -> int:
@@ -88,14 +91,31 @@ def run_hot_path(
     if started < observed_at_ns:
         raise HotPathError("source timestamp is ahead of monotonic clock")
     samples: list[tuple[str, int]] = []
+    # Highest observed pressure wins within this bounded window. A later decrease
+    # cannot erase an overload already witnessed before a downstream proposal.
+    observed_backlog = backlog
+
+    def check_backlog() -> bool:
+        nonlocal observed_backlog
+        if backlog_reader is not None:
+            try:
+                latest = backlog_reader()
+            except Exception:
+                raise HotPathError("backlog sampling unavailable") from None
+            if type(latest) is not int or latest < 0:
+                raise HotPathError("backlog sample must be nonnegative integer")
+            observed_backlog = max(observed_backlog, latest)
+        return observed_backlog > policy.max_backlog
 
     def stop(reason: str, now: int) -> HotPathReport:
-        return HotPathReport(source_sha, "WAIT", reason, tuple(samples), now - started, backlog)
+        return HotPathReport(source_sha, "WAIT", reason, tuple(samples), now - started, observed_backlog)
 
     if backlog > policy.max_backlog:
         return stop("BACKLOG", started)
     for name, callback in zip(STAGES, callbacks):
         before = read_clock()
+        if check_backlog():
+            return stop("BACKLOG", before)
         if before < started or before < observed_at_ns:
             raise HotPathError("monotonic clock moved backwards")
         if before - observed_at_ns > policy.max_source_age_ns:
@@ -111,6 +131,8 @@ def run_hot_path(
             raise HotPathError("monotonic clock moved backwards")
         delta = after - before
         samples.append((name, delta))
+        if check_backlog():
+            return stop("BACKLOG", after)
         if delta > policy.stage_budget_ns:
             return stop("STAGE_BUDGET", after)
         if after - started > policy.total_budget_ns:
@@ -118,4 +140,4 @@ def run_hot_path(
         # An observation that expires during the final stage cannot return OK.
         if after - observed_at_ns > policy.max_source_age_ns:
             return stop("STALE_SOURCE", after)
-    return HotPathReport(source_sha, "OK", "WITHIN_BUDGET", tuple(samples), samples and after - started or 0, backlog)
+    return HotPathReport(source_sha, "OK", "WITHIN_BUDGET", tuple(samples), samples and after - started or 0, observed_backlog)

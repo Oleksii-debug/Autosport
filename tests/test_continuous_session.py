@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -450,6 +451,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             page = CatalogPage(
                 source_id="provider-a",
                 stream_epoch="epoch-1",
@@ -485,6 +488,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             source = _Source(
                 CatalogPage(
                     source_id="provider-a",
@@ -1157,6 +1162,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             detected = _collector_delta(
                 delta_id="gap-detected",
                 gap_state=GapState.DETECTED,

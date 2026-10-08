@@ -286,6 +286,50 @@ def test_self_consistent_caller_scope_cannot_replace_canonical_scope(tmp_path) -
         )
 
 
+def test_cross_sport_activation_fails_even_when_other_semantics_match(tmp_path) -> None:
+    training = _identity("training-dataset", T1)
+    deployment = _identity("deployment-dataset", T2)
+    training_scope = _scope()
+    second_sport_scope = replace(
+        training_scope,
+        sport_domain="test-only-second-sport",
+    )
+
+    # Sport is an authority-bearing compatibility dimension, not presentation
+    # metadata. Keep every other semantic dimension byte-for-byte identical.
+    assert training_scope.scope_id != second_sport_scope.scope_id
+    assert (
+        replace(second_sport_scope, sport_domain=training_scope.sport_domain)
+        == training_scope
+    )
+
+    training_authority = _authority(
+        training,
+        dataset_sha="1" * 64,
+        runtime_id=TRAINING_RUNTIME_ID,
+        marker="1",
+    )
+    deployment_authority = replace(
+        _authority(
+            deployment,
+            dataset_sha="2" * 64,
+            runtime_id=DEPLOYMENT_RUNTIME_ID,
+            marker="2",
+        ),
+        scope=second_sport_scope,
+    )
+
+    with pytest.raises(
+        PolicyDeploymentSemanticBridgeError,
+        match="canonical semantic scopes are incompatible",
+    ):
+        _validate(
+            tmp_path,
+            resolver_side_effect=(training_authority, deployment_authority),
+            require_existing=False,
+        )
+
+
 def test_missing_semantic_binding_fails_closed_on_resume(tmp_path) -> None:
     training = _identity("training-dataset", T1)
     deployment = _identity("deployment-dataset", T2)

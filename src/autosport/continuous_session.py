@@ -980,6 +980,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         if type(resolutions) is not tuple:
             raise TypeError("settlement resolutions must be an exact tuple")
         detached: list[SettlementResolution] = []
+        seen: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
             if type(resolution) is not SettlementResolution:
                 raise TypeError("settlement resolutions must be exact SettlementResolution values")
@@ -990,6 +991,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ValueError("quote_outcomes must be a non-empty exact dict")
             snapshot = replace(resolution, quote_outcomes=resolution.quote_outcomes.copy())
             snapshot.validate(as_of=snapshot.available_at)
+            previous = seen.get(snapshot.evidence_id)
+            # Reject inconsistent duplicate receipts before exposing settlement
+            # evidence to any learning or reconciliation preparation hook.
+            if previous is not None and previous != snapshot:
+                raise ContinuousSessionError(
+                    "conflicting settlement payload for reused evidence_id"
+                )
+            seen.setdefault(snapshot.evidence_id, snapshot)
             detached.append(snapshot)
         return tuple(detached)
 

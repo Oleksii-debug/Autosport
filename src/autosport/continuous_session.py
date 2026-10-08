@@ -4,6 +4,7 @@ import json
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -741,7 +742,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         max_invalidation_batches_per_tick: int = 4,
         max_invalidation_items_per_batch: int = 250,
         causal_view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
-        initial_bankroll: str = "10000",
+        initial_bankroll: str | Decimal = "10000",
     ) -> None:
         if not isinstance(workspace, (str, Path)):
             raise TypeError("workspace must be a path-like value")
@@ -813,12 +814,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             self.causal_view = CausalView(causal_view)
         except ValueError as exc:
             raise ValueError("unsupported causal_view") from exc
+        # Do not launder binary floats or caller-owned __str__ into PAPER money.
+        # This boundary is typed as text for persisted session compatibility;
+        # exact built-in Decimal is also accepted without lossy conversion.
+        if type(initial_bankroll) not in (str, Decimal):
+            raise ValueError(
+                "initial_bankroll must be an exact Decimal or decimal string"
+            )
         try:
-            initial_bankroll = str(initial_bankroll)
             PaperBook(initial_bankroll)
         except Exception as exc:
             raise ValueError("initial_bankroll must construct a valid PaperBook") from exc
-        self.initial_bankroll = initial_bankroll
+        self.initial_bankroll = (
+            initial_bankroll
+            if type(initial_bankroll) is str
+            else str(initial_bankroll)
+        )
         self._state = _ContinuousSessionState(
             self.workspace / "continuous_session.json",
             session_id=session_id,

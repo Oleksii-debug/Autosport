@@ -16,8 +16,8 @@ This is the live status authority for the new architecture.
 | Section | State | Note |
 |---:|---|---|
 |1|DONE|legacy Section 2; accepted main evidence|
-|2|QUALIFYING|legacy Section 3; canonical PR #2238, frozen candidate per legacy live registry|
-|3|PARTIAL_EXISTING|legacy Section 4; PR #2261 prequalification lineage|
+|2|QUALIFYING|legacy Section 3; canonical PR #2238 current head `a1bf6ca00dfcc67eb171defedb056cabd3d9a3ed` (negative chronology test repair in two files, production unchanged); prior exact-head CI 37699969910 FAILED (101 failed), Windows 37699969821 CANCELLED, Endurance 37699969904 CANCELLED; new exact-head CI 37728854272, Windows 37728854321, Endurance 37728854316 QUEUED (NOT PASS). Still no DONE: repair remaining causal/replay/projection regressions, qualify all gates, integrate and read back.|
+|3|PARTIAL_EXISTING|legacy Section 4; canonical stacked PR #2261@`8a814cf0c1b80df0d0bf28deae4562222762111d`, based on older Section-2 candidate; exact-head CI 37658703334 FAILED (346 failed), Windows 37658703336 CANCELLED; no DONE. After Section 2 terminal integration, reconverge same lineage, qualify source rights/provenance/coverage/corrections/retention/restart and read back.|
 |4|PARTIAL_EXISTING|legacy Section 6 storage/history/checkpoint implementation|
 |5|PARTIAL_EXISTING|legacy Section 14 collector/sync implementation|
 |6|PARTIAL_EXISTING|legacy Section 15 lifecycle/memory implementation|
@@ -27,12 +27,20 @@ This is the live status authority for the new architecture.
 |10|OPEN|plan qualification|
 
 ### Plan 2 — Financial / risk / paper / portfolio
-Sections 1–7: PARTIAL_EXISTING from legacy 5,9,10,18–21 and current financial/PaperBook/portfolio code.
-Section 8: OPEN plan qualification.
+| Section | State | Note |
+|---:|---|---|
+|1|QUALIFYING|Parent PR #2262 merged to `main` at `f034c670195b587ba560e5d59c58ea1559d27244` after exact-head CI 37738857766, Windows 37738857748 and Endurance 37738857644 SUCCESS; Decimal/PaperBook ingress post-merge blobs read back. Remaining Section-1 settlement/correction fail-closed repair reuses PR #2266 (`plan2/section1-resolution-snapshot-isolation-20261008`) at exact head `ab79c4ec73aa0bbc4ab56253eadbd1ccca8e8c3c`: detached provider/learning outcome maps, versioned durable payload SHA-256 independent of provider evidence hash, pre-effect binding, strict legacy/no blind promotion, cross-restart/correction/crash tests. Exact-head CI 37749881926 and Windows 37749881794 QUEUED (NOT PASS); exact-head Endurance and integration pending. No local full-repo tests (github.com DNS inaccessible). NO TERMINAL DONE; Section 2 remains next only after Section 1 closure. See PR #2266 comment 6055916228.|
+|2|PARTIAL_EXISTING|Next actionable only after Section 1 terminal DONE; reuse EconomicGoal/Risk authority, owner controls, restart and portfolio-risk tests. No independent Section-2 closure claimed.|
+|3–7|PARTIAL_EXISTING|Legacy 10,18–21 and current PaperBook/portfolio/scenario/financial-reconciliation code; each requires its own qualification and terminal readback.|
+|8|OPEN|Plan-wide financial/PAPER qualification.|
 
 ### Plan 3 — Intelligence / research / learning / multi-sport
-Sections 1–9: PARTIAL_EXISTING from legacy 11,23–29,31 and current research/agent/model/memory code.
-Section 10: OPEN plan qualification.
+| Section | State | Evidence / next gate |
+|---:|---|---|
+|1|QUALIFYING_NOT_DONE|Frozen promotion protocol repairs merged via #2264 at `179dddba10503d3a8a34de79157766045d0afd8a`; exact-head CI `37737367000` SUCCESS (Ubuntu/Windows) and Windows candidate `37737366994` SUCCESS; post-merge scientific registry blob `5fcfcf96b4240c0111ee33d8710017e3eaa0941d`. Multiplicity family-close #1888 merged at `f04ed3512f163d0e83d84750ea4d699c4cbf349d`, CI `37726876194` SUCCESS and Windows `37726875859` SUCCESS at its PR SHA, post-merge family-close blob `afa592a6bb03ea1f38544881520a850844edf8a2`. **NOT DONE:** holdout physical-content #819 exact-head CI `37726628662` FAILED; disclosure/export #925 exact-head CI `37726795061` FAILED (including monotonic workspace root conflicts). Repair/requalify those existing lineages, verify integrated holdout consumption and negative-result preservation, run combined exact-main scientific/restart/causal regression, then terminal readback before DONE. Source/PAPER/real authority remains separate; research/model cannot extend Risk/owner authority.|
+|2|PARTIAL_EXISTING / NEXT_AFTER_SECTION1|Universal Opportunity Engine: existing `opportunity.py` and opportunity contract/authority/revalidation tests must be audited and qualified only after Section 1 reaches terminal DONE; do not claim opportunity or financial execution authority from fixture outputs.|
+|3–9|PARTIAL_EXISTING|Legacy Sections 23–29,31 and current research/agent/model/memory code; sequential closure within Plan 3 only.|
+|10|OPEN|Plan-wide qualification.|
 
 ### Plan 4 — Bookmakers / execution engineering
 Sections 1–7: PARTIAL_EXISTING / ACTIONABLE_OFFLINE from legacy 13,33–37 and current Betfair/BETDAQ/provider/execution/browser code.
@@ -40,7 +48,12 @@ Section 8: OPEN offline qualification.
 Real account/money evidence is NOT required here.
 
 ### Plan 5 — Runtime / security / reliability / QA / performance
-Sections 1–8: PARTIAL_EXISTING from legacy 8,22,32,39–42 plus Windows-lab/control-plane architecture.
+| Section | State | Evidence / next gate |
+|---:|---|---|
+|1|DONE|Canonical runtime START/STOP/recovery and one-active-lease authority reused; secret-bearing secondary exception notes repaired in PR #2263 (`a909c552d3766657ab8b310c1cb00e99be886388`). Exact-head CI 37726753316 SUCCESS (Ubuntu/Windows Python 3.11/3.12; Windows 3.12 7828 passed, 14 skipped), Windows candidate 37726753340 SUCCESS; no review threads; merged `bb581b82b48ff23a7930e57733c1fbc641245231`. Post-merge product-runtime/test blobs `803c9ec1cb1324ae8b99e19e01e63ffa8092889f` / `be19b16b889de22767715ca080afee94dee15f36` verified. No real bookmaker/financial authority or physical NVDA claimed.|
+|2|QUALIFYING|Canonical security scanner PR #1694 (`gpt56sol/1575-secret-canary-scan-2305`); current live SHA is the PR head, not this snapshot. Same three scanner/test paths; repaired quadratic folded-Base64 regex and added 64k adversarial bounded-time regression. Focused isolated probes passed; full exact-head CI and Windows candidate still pending execution, not PASS. Require executable gate success, safe expected-head merge and main source readback before DONE. No external bookmaker/financial authority.|
+|3|PARTIAL_EXISTING|Canonical forensic journal PR #1198 (`sol/forensic-lock-continuity-v6`); current live SHA is the PR head, not this snapshot. Same five journal/entrypoint/test paths; added fail-closed 64 MiB verified-history capacity cap and oversized-file/crash-restart falsifiers. Full exact-head CI and Windows candidate pending execution, not PASS. May close only after Section 2 terminal DONE, successful tests, merge and readback. Observational evidence only.|
+|4–8|PARTIAL_EXISTING|Legacy 39–42 and current QA/verification/reliability/performance/Windows-lab architecture; each separately qualifies.|
 Section 9: OPEN plan qualification.
 
 ### Plan 6 — Windows / accessibility / packaging / UI

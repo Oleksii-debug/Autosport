@@ -43,6 +43,19 @@ class GovernancePermissionState(str, Enum):
 _LOCAL_WRITE_LOCK = RLock()
 
 
+def _fdopen_owned_text(fd: int):
+    """Transfer a temporary file descriptor to a text handle without leaking it."""
+
+    try:
+        return os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 @contextmanager
 def _registry_write_lock(registry_path: Path) -> Iterator[None]:
     """Serialize the complete registry read-modify-publish transaction.
@@ -540,7 +553,7 @@ class BookmakerCapabilityRegistry:
         )
         temp_path = Path(temp_name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            with _fdopen_owned_text(fd) as handle:
                 json.dump(
                     document,
                     handle,

@@ -1825,6 +1825,8 @@ class PortfolioPlan:
         if raw.get("schema") != "autosport.portfolio_plan":
             raise ValueError("unsupported portfolio plan schema")
         schema_version = raw.get("schema_version")
+        if type(schema_version) is not int:
+            raise ValueError("unsupported portfolio plan schema_version")
         if schema_version == 4:
             expected = legacy_expected
         elif schema_version == 5:

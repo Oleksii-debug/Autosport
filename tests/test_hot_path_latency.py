@@ -160,3 +160,74 @@ def test_last_stage_source_age_boundary_is_inclusive():
     assert result.disposition == "OK"
     assert result.total_elapsed_ns == 20
     assert calls == list(STAGES)
+
+
+def test_mutable_caller_policy_cannot_expand_stage_budget_midflight():
+    """object.__setattr__ can bypass frozen, but must not change active gates."""
+    calls = []
+    policy = HotPathPolicy(10, 100, 0, 100)
+    stages = make_callbacks(calls)
+
+    def ingest():
+        calls.append("ingest")
+        object.__setattr__(policy, "stage_budget_ns", 999_999)
+
+    stages["ingest"] = ingest
+    result = run_hot_path(
+        source_sha=SHA,
+        policy=policy,
+        observed_at_ns=100,
+        backlog=0,
+        stages=stages,
+        clock_ns=clock(100, 100, 111),
+    )
+    assert result.disposition == "WAIT"
+    assert result.reason == "STAGE_BUDGET"
+    assert calls == ["ingest"]
+    assert policy.stage_budget_ns == 999_999
+    assert not result.execution_authority
+
+
+def test_mutable_caller_policy_cannot_expand_backlog_threshold_midflight():
+    calls = []
+    pressure = [0]
+    policy = HotPathPolicy(10, 100, 2, 100)
+    stages = make_callbacks(calls)
+
+    def ingest():
+        calls.append("ingest")
+        pressure[0] = 50
+        object.__setattr__(policy, "max_backlog", 100_000)
+
+    stages["ingest"] = ingest
+    result = run_hot_path(
+        source_sha=SHA,
+        policy=policy,
+        observed_at_ns=100,
+        backlog=0,
+        stages=stages,
+        clock_ns=clock(100, 100, 101),
+        backlog_reader=lambda: pressure[0],
+    )
+    assert result.disposition == "WAIT"
+    assert result.reason == "BACKLOG"
+    assert result.backlog == 50
+    assert calls == ["ingest"]
+    assert policy.max_backlog == 100_000
+    assert not result.execution_authority
+
+
+def test_pre_mutated_policy_is_revalidated_before_any_stage():
+    calls = []
+    policy = HotPathPolicy(10, 100, 2, 100)
+    object.__setattr__(policy, "max_backlog", True)
+    with pytest.raises(HotPathError, match="max_backlog"):
+        run_hot_path(
+            source_sha=SHA,
+            policy=policy,
+            observed_at_ns=100,
+            backlog=0,
+            stages=make_callbacks(calls),
+            clock_ns=clock(100),
+        )
+    assert calls == []

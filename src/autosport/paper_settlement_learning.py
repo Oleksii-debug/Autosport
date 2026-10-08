@@ -23,6 +23,7 @@ from .decision_ledger import DecisionRecord, JsonlDecisionLedger
 from .domain import PaperTicket, TicketStatus
 from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
+from .event_lifecycle import canonical_event_identity_aliases
 from .learning_environment import (
     Action,
     CausalLearningEnvironment,
@@ -89,20 +90,19 @@ class PaperSettlementLearningWitness:
         _text(self.ticket_id, "ticket_id")
         _sha(self.binding_id, "binding_id")
         _sha(self.settlement_bundle_sha256, "settlement_bundle_sha256")
-        if not isinstance(self.observation, Observation):
-            raise TypeError("observation must be Observation")
-        if not isinstance(self.action, Action):
-            raise TypeError("action must be Action")
-        if not isinstance(self.outcome, Outcome):
-            raise TypeError("outcome must be Outcome")
-        if not isinstance(self.reward, RewardEvidence):
-            raise TypeError("reward must be RewardEvidence")
-        if not isinstance(self.transition, Transition):
-            raise TypeError("transition must be Transition")
-        if not isinstance(self.baseline_checkpoint, EnvironmentCheckpoint):
-            raise TypeError("baseline_checkpoint must be EnvironmentCheckpoint")
-        if not isinstance(self.next_checkpoint, EnvironmentCheckpoint):
-            raise TypeError("next_checkpoint must be EnvironmentCheckpoint")
+        typed_evidence = (
+            ("observation", self.observation, Observation),
+            ("action", self.action, Action),
+            ("outcome", self.outcome, Outcome),
+            ("reward", self.reward, RewardEvidence),
+            ("transition", self.transition, Transition),
+            ("baseline_checkpoint", self.baseline_checkpoint, EnvironmentCheckpoint),
+            ("next_checkpoint", self.next_checkpoint, EnvironmentCheckpoint),
+        )
+        for field_name, value, expected_type in typed_evidence:
+            if type(value) is not expected_type:
+                raise TypeError(f"{field_name} must use the exact canonical record type")
+            expected_type.__post_init__(value)
         if (
             self.observation.environment_id != self.action.environment_id
             or self.action.environment_id != self.outcome.environment_id
@@ -409,7 +409,11 @@ class PaperSettlementLearningBridge:
             "state_sha256",
         }:
             raise PaperSettlementLearningBridgeError("bridge state schema mismatch")
-        if state["schema"] != SCHEMA or state["schema_version"] != SCHEMA_VERSION:
+        if (
+            state["schema"] != SCHEMA
+            or type(state["schema_version"]) is not int
+            or state["schema_version"] != SCHEMA_VERSION
+        ):
             raise PaperSettlementLearningBridgeError("unsupported bridge schema")
         if type(state["bindings"]) is not dict:
             raise PaperSettlementLearningBridgeError("bridge bindings must be an object")
@@ -523,8 +527,9 @@ class PaperSettlementLearningBridge:
         record: DecisionRecord,
         observation: Observation,
     ) -> None:
-        if not isinstance(observation, Observation):
-            raise TypeError("observation must be Observation")
+        if type(observation) is not Observation:
+            raise TypeError("observation must use the exact canonical Observation type")
+        Observation.__post_init__(observation)
         if record.context_hash != observation.observation_id:
             raise PaperSettlementLearningBridgeError(
                 "economic decision context_hash does not bind exact learning Observation"
@@ -545,8 +550,9 @@ class PaperSettlementLearningBridge:
         """Verify immutable economic-decision context before AgentLoop mutation."""
 
         canonical_decision_id = _text(decision_id, "decision_id")
-        if not isinstance(observation, Observation):
-            raise TypeError("observation must be Observation")
+        if type(observation) is not Observation:
+            raise TypeError("observation must use the exact canonical Observation type")
+        Observation.__post_init__(observation)
         decision = self.decision_ledger.verified_economic_decision(
             canonical_decision_id,
             self.economic_goal,
@@ -625,14 +631,17 @@ class PaperSettlementLearningBridge:
 
         _text(ticket_id, "ticket_id")
         _text(decision_id, "decision_id")
-        if not isinstance(environment, CausalLearningEnvironment):
-            raise TypeError("environment must be CausalLearningEnvironment")
-        if not isinstance(observation, Observation):
-            raise TypeError("observation must be Observation")
-        if not isinstance(action, Action):
-            raise TypeError("action must be Action")
-        if not isinstance(baseline_checkpoint, EnvironmentCheckpoint):
-            raise TypeError("baseline_checkpoint must be EnvironmentCheckpoint")
+        if type(environment) is not CausalLearningEnvironment:
+            raise TypeError("environment must use the exact canonical CausalLearningEnvironment type")
+        if type(observation) is not Observation:
+            raise TypeError("observation must use the exact canonical Observation type")
+        if type(action) is not Action:
+            raise TypeError("action must use the exact canonical Action type")
+        if type(baseline_checkpoint) is not EnvironmentCheckpoint:
+            raise TypeError("baseline_checkpoint must use the exact canonical EnvironmentCheckpoint type")
+        Observation.__post_init__(observation)
+        Action.__post_init__(action)
+        EnvironmentCheckpoint.__post_init__(baseline_checkpoint)
         if (
             environment.environment_id != action.environment_id
             or observation.environment_id != action.environment_id
@@ -853,12 +862,12 @@ class PaperSettlementLearningBridge:
         used: dict[str, dict[str, object]] = {}
         leg_by_key = {leg.quote_key: leg for leg in ticket.legs}
         for resolution in resolutions:
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not SettlementResolution:
                 raise PaperSettlementLearningBridgeError(
                     "handoff contains non-canonical settlement evidence"
                 )
             try:
-                resolution.validate(as_of=at)
+                SettlementResolution.validate(resolution, as_of=at)
             except (TypeError, ValueError) as exc:
                 raise PaperSettlementLearningBridgeError(
                     "settlement evidence failed causal validation"
@@ -870,9 +879,14 @@ class PaperSettlementLearningBridge:
             }
             if not scoped:
                 continue
-            identity_parts = {resolution.event_identity}
-            if ":" in resolution.event_identity:
-                identity_parts.add(resolution.event_identity.split(":", 1)[1])
+            try:
+                identity_parts = set(
+                    canonical_event_identity_aliases(resolution.event_identity)
+                )
+            except ValueError as exc:
+                raise PaperSettlementLearningBridgeError(
+                    "settlement evidence event identity is not canonical"
+                ) from exc
             for key in scoped:
                 if leg_by_key[key].event_id not in identity_parts:
                     raise PaperSettlementLearningBridgeError(

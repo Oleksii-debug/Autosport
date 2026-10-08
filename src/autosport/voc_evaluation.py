@@ -48,7 +48,12 @@ class VOCEvaluationProvenance(StrEnum):
 
 
 def _text(name: str, value: object) -> str:
-    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise VOCEvaluationError(f"{name} must be a non-empty canonical string")
     try:
         value.encode("utf-8", errors="strict")
@@ -445,6 +450,48 @@ class PairedVOCEvaluation:
 
     @classmethod
     def from_payload(cls, raw: Mapping[str, Any]) -> "PairedVOCEvaluation":
+        if cls is not PairedVOCEvaluation:
+            raise VOCEvaluationError(
+                "paired VOC evaluation parser authority cannot be subclassed"
+            )
+        if type(raw) is not dict:
+            raise VOCEvaluationError(
+                "paired VOC evaluation payload must be an exact object"
+            )
+        for key in raw:
+            if type(key) is not str:
+                raise VOCEvaluationError(
+                    "paired VOC evaluation payload keys must be exact strings"
+                )
+
+        # The serialized schema is part of the Section-2 identity authority.
+        # Reject coercive wire aliases before Decimal/Enum construction can
+        # normalize a different runtime type into the same canonical payload.
+        for field in (
+            "baseline_utility",
+            "challenger_utility",
+            "compute_cost_penalty",
+            "latency_opportunity_cost_penalty",
+            "measured_compute_cost",
+            "support_fraction",
+            "incremental_value_interval_low",
+            "incremental_value_interval_high",
+            "provenance",
+        ):
+            if type(raw.get(field)) is not str:
+                raise VOCEvaluationError(
+                    f"paired VOC evaluation payload field {field} must be an exact string"
+                )
+        for field in ("baseline_abstained", "challenger_abstained"):
+            if type(raw.get(field)) is not bool:
+                raise VOCEvaluationError(
+                    f"paired VOC evaluation payload field {field} must be an exact bool"
+                )
+        for field in ("paired_sample_count", "effective_sample_size"):
+            if type(raw.get(field)) is not int:
+                raise VOCEvaluationError(
+                    f"paired VOC evaluation payload field {field} must be an exact int"
+                )
         try:
             expected_sha256 = raw["evaluation_sha256"]
             value = cls(
@@ -502,9 +549,168 @@ class PairedVOCEvaluation:
                 raise
             raise VOCEvaluationError("invalid paired VOC evaluation payload") from exc
         _sha256("evaluation_sha256", expected_sha256)
+        if set(raw) != set(value.payload()):
+            raise VOCEvaluationError(
+                "paired VOC evaluation payload schema fields mismatch"
+            )
         if value.evaluation_sha256 != expected_sha256:
             raise VOCEvaluationError("paired VOC evaluation SHA-256 mismatch")
         return value
+
+
+@dataclass(frozen=True, slots=True)
+class VOCCohort:
+    """Typed immutable write authority for one frozen VOC evaluation cohort.
+
+    The cohort payload is derived from exact PairedVOCEvaluation members rather
+    than caller-authored identity dictionaries. This keeps ScientificRegistry
+    writes fail-closed while preserving the deployed VOCCohort payload schema.
+    """
+
+    cohort_id: str
+    members: tuple[PairedVOCEvaluation, ...]
+    decision_recorded_from: str
+    decision_recorded_through: str
+
+    def __post_init__(self) -> None:
+        if type(self) is not VOCCohort:
+            raise VOCEvaluationError("VOC cohort must be an exact VOCCohort")
+        _text("cohort_id", self.cohort_id)
+        if type(self.members) is not tuple or not self.members:
+            raise VOCEvaluationError("VOC cohort members must be a non-empty tuple")
+        for member in self.members:
+            if type(member) is not PairedVOCEvaluation:
+                raise VOCEvaluationError(
+                    "VOC cohort members must be exact PairedVOCEvaluation values"
+                )
+            PairedVOCEvaluation.__post_init__(member)
+
+        member_ids = [member.evaluation_id for member in self.members]
+        if len(member_ids) != len(set(member_ids)):
+            raise VOCEvaluationError("VOC cohort reuses evaluation identity")
+        if member_ids != sorted(member_ids):
+            raise VOCEvaluationError(
+                "VOC cohort members must use deterministic identity order"
+            )
+
+        recorded_from = _instant(
+            "decision_recorded_from", self.decision_recorded_from
+        )
+        recorded_through = _instant(
+            "decision_recorded_through", self.decision_recorded_through
+        )
+        if recorded_through < recorded_from:
+            raise VOCEvaluationError("VOC cohort eligibility window is reversed")
+        available = max(
+            _instant("member evaluated_at", member.evaluated_at)
+            for member in self.members
+        )
+        if available < recorded_through:
+            raise VOCEvaluationError(
+                "VOC cohort cannot freeze before its eligibility window closes"
+            )
+
+        first = self.members[0]
+        identity_fields = (
+            "research_protocol_id",
+            "research_protocol_sha256",
+            "scoring_rule_sha256",
+            "holdout_access_id",
+            "multiple_comparison_control_sha256",
+            "task_class",
+            "sport_id",
+            "league_id",
+            "regime_id",
+            "urgency_id",
+            "contradiction_state",
+            "baseline_candidate_id",
+            "baseline_backend_id",
+            "baseline_model_id",
+            "baseline_config_sha256",
+            "challenger_candidate_id",
+            "challenger_backend_id",
+            "challenger_model_id",
+            "challenger_config_sha256",
+        )
+        for member in self.members[1:]:
+            for field in identity_fields:
+                if getattr(member, field) != getattr(first, field):
+                    raise VOCEvaluationError(
+                        f"VOC cohort mixes incompatible {field} identities"
+                    )
+            if member.provenance is not first.provenance:
+                raise VOCEvaluationError(
+                    "VOC cohort mixes incompatible evidence provenance"
+                )
+
+    @property
+    def record_type(self) -> str:
+        return "VOCCohort"
+
+    @property
+    def record_id(self) -> str:
+        return self.cohort_id
+
+    @property
+    def available_at(self) -> str:
+        latest = max(
+            self.members,
+            key=lambda member: _instant("member evaluated_at", member.evaluated_at),
+        )
+        return _time("cohort available_at", latest.evaluated_at)
+
+    def to_payload(self) -> dict[str, Any]:
+        self.__post_init__()
+        first = self.members[0]
+        return {
+            "cohort_id": self.cohort_id,
+            "denominator": len(self.members),
+            "research_protocol_id": first.research_protocol_id,
+            "research_protocol_sha256": first.research_protocol_sha256,
+            "scoring_rule_sha256": first.scoring_rule_sha256,
+            "holdout_access_id": first.holdout_access_id,
+            "multiple_comparison_control_sha256": (
+                first.multiple_comparison_control_sha256
+            ),
+            "task_class": first.task_class,
+            "scope": {
+                "sport_id": first.sport_id,
+                "league_id": first.league_id,
+                "regime_id": first.regime_id,
+                "urgency_id": first.urgency_id,
+                "contradiction_state": first.contradiction_state,
+            },
+            "baseline_compute_identity": {
+                "candidate_id": first.baseline_candidate_id,
+                "backend_id": first.baseline_backend_id,
+                "model_id": first.baseline_model_id,
+                "config_sha256": first.baseline_config_sha256,
+            },
+            "challenger_compute_identity": {
+                "candidate_id": first.challenger_candidate_id,
+                "backend_id": first.challenger_backend_id,
+                "model_id": first.challenger_model_id,
+                "config_sha256": first.challenger_config_sha256,
+            },
+            "eligibility": {
+                "kind": "decision-ledger-window-v1",
+                "decision_recorded_from": _time(
+                    "decision_recorded_from", self.decision_recorded_from
+                ),
+                "decision_recorded_through": _time(
+                    "decision_recorded_through", self.decision_recorded_through
+                ),
+            },
+            "members": [
+                {
+                    "evaluation_id": member.evaluation_id,
+                    "evaluation_sha256": member.evaluation_sha256,
+                    "decision_context_sha256": member.decision_context_sha256,
+                    "decision_evidence_sha256": member.decision_evidence_sha256,
+                }
+                for member in self.members
+            ],
+        }
 
 
 @dataclass(frozen=True, slots=True)
@@ -925,14 +1131,22 @@ class CanonicalVOCAuthorityResolver:
         if protocol_entry is None:
             raise VOCEvaluationError("canonical ResearchProtocol is missing for outcome binding")
         binding = protocol_entry.payload.get("binding")
-        design_text = None if not isinstance(binding, dict) else binding.get("evaluation_design")
-        if not isinstance(design_text, str):
+        design_text = (
+            None
+            if type(binding) is not dict
+            else binding.get("evaluation_design")
+        )
+        if type(design_text) is not str:
             raise VOCEvaluationError("canonical VOC outcome identity binding is missing")
         try:
             design = json.loads(design_text)
         except json.JSONDecodeError as exc:
             raise VOCEvaluationError("canonical VOC evaluation design is not valid JSON") from exc
-        outcome_identity = design.get("outcome_identity") if isinstance(design, dict) else None
+        outcome_identity = (
+            design.get("outcome_identity")
+            if type(design) is dict
+            else None
+        )
         if type(outcome_identity) is not dict:
             raise VOCEvaluationError("canonical VOC outcome identity binding is missing")
         expected_identity = {
@@ -964,10 +1178,11 @@ class CanonicalVOCAuthorityResolver:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score is missing"
             )
-        if not isinstance(score, OutcomeDerivedVOCScore):
+        if type(score) is not OutcomeDerivedVOCScore:
             raise VOCEvaluationError(
                 "canonical outcome-derived VOC score is invalid"
             )
+        OutcomeDerivedVOCScore.__post_init__(score)
         available_at = _instant("score.available_at", score.available_at)
         if available_at < _instant(
             "outcome_revealed_at",
@@ -1315,8 +1530,9 @@ class CanonicalVOCAuthorityResolver:
         *,
         as_of: str,
     ) -> OutcomeDerivedVOCScore | None:
-        if not isinstance(evaluation, PairedVOCEvaluation):
-            raise TypeError("evaluation must be PairedVOCEvaluation")
+        if type(evaluation) is not PairedVOCEvaluation:
+            raise TypeError("evaluation must be an exact PairedVOCEvaluation")
+        PairedVOCEvaluation.__post_init__(evaluation)
         _instant("as_of", as_of)
         canonical = self._require_registry_result(evaluation, as_of=as_of)
         self._require_decision(canonical)
@@ -1402,8 +1618,9 @@ class VOCEvaluationStore:
 
     def record(self, evaluation: PairedVOCEvaluation) -> str:
         """Persist immutable evidence; persistence alone grants no CLOUD authority."""
-        if not isinstance(evaluation, PairedVOCEvaluation):
-            raise TypeError("evaluation must be PairedVOCEvaluation")
+        if type(evaluation) is not PairedVOCEvaluation:
+            raise TypeError("evaluation must be an exact PairedVOCEvaluation")
+        PairedVOCEvaluation.__post_init__(evaluation)
         with WorkspaceEconomicLock(self.path.parent):
             loaded = self._load()
             existing = loaded.get(evaluation.evaluation_id)
@@ -1440,7 +1657,7 @@ class VOCEvaluationStore:
         resolved = resolver.resolve_decision_context(expected, as_of=as_of)
         if resolved is None:
             raise VOCEvaluationError("canonical current VOC decision context is missing")
-        if not isinstance(resolved, Mapping) or set(resolved) != _VOC_CURRENT_CONTEXT_FIELDS:
+        if type(resolved) is not dict or set(resolved) != _VOC_CURRENT_CONTEXT_FIELDS:
             raise VOCEvaluationError("canonical current VOC decision context schema is invalid")
         return {
             field: _text(f"canonical current VOC context {field}", resolved.get(field))
@@ -1468,8 +1685,9 @@ class VOCEvaluationStore:
         resolved = resolver.resolve(value, as_of=as_of)
         if resolved is None:
             raise VOCEvaluationError("canonical VOC authority could not resolve evaluation")
-        if not isinstance(resolved, PairedVOCEvaluation):
+        if type(resolved) is not PairedVOCEvaluation:
             raise VOCEvaluationError("canonical VOC authority returned invalid evaluation")
+        PairedVOCEvaluation.__post_init__(resolved)
         if resolved.payload() != value.payload():
             raise VOCEvaluationError("canonical VOC authority differs from routed evaluation")
         return resolved
@@ -1490,8 +1708,9 @@ class VOCEvaluationStore:
         if resolver is None:
             raise VOCEvaluationError("missing canonical VOC authority resolver")
         score = resolver.resolve_score(value, as_of=as_of)
-        if score is None or not isinstance(score, OutcomeDerivedVOCScore):
+        if score is None or type(score) is not OutcomeDerivedVOCScore:
             raise VOCEvaluationError("canonical outcome-derived VOC score is missing")
+        OutcomeDerivedVOCScore.__post_init__(score)
         return score
 
     def values(self) -> tuple[PairedVOCEvaluation, ...]:

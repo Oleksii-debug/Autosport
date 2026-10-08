@@ -130,7 +130,7 @@ class ParlayApiProviderTests(unittest.TestCase):
 
         with self.assertRaisesRegex(
             ProviderPayloadError,
-            "sport_key does not match configured provider sport",
+            "event sport_key conflicts with provider sport",
         ):
             provider.read_batch()
 

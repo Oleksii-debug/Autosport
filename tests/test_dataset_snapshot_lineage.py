@@ -23,6 +23,86 @@ def _members(*values: str) -> tuple[str, ...]:
     return tuple(_sha(value) for value in values)
 
 
+def test_membership_manifest_rejects_uppercase_sha_identity_alias() -> None:
+    with pytest.raises(ValueError, match="canonical lowercase SHA-256"):
+        membership_manifest_sha256(("A" * 64,))
+
+
+def test_restart_record_parser_rejects_uppercase_sha_identity_alias() -> None:
+    raw = {
+        "kind": "autosport-dataset-snapshot-lineage-proof-v1",
+        "schema_version": 1,
+        "snapshot_id": "snapshot-a",
+        "dataset_record_sha256": "A" * 64,
+        "manifest_sha256": "b" * 64,
+        "source_identity": "provider:source-a",
+        "license_identity": "license:v1",
+        "causal_cutoff": "2026-09-01T00:00:00Z",
+        "available_at": "2026-09-01T00:01:00Z",
+        "member_sha256": ["c" * 64],
+        "parent_snapshot_id": None,
+        "parent_dataset_record_sha256": None,
+        "parent_proof_sha256": None,
+        "proof_sha256": "d" * 64,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="dataset_record_sha256 must be a canonical lowercase SHA-256",
+    ):
+        DatasetSnapshotLineageAuthority._record_from_raw(raw)
+
+
+
+
+
+@pytest.mark.parametrize("schema_version", (True, 1.0, 2.0))
+def test_restart_record_parser_rejects_non_exact_int_schema_version(
+    schema_version: object,
+) -> None:
+    raw = {
+        "kind": "autosport-dataset-snapshot-lineage-proof-v1",
+        "schema_version": schema_version,
+        "snapshot_id": "snapshot-schema-version",
+        "dataset_record_sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "source_identity": "provider:source-a",
+        "license_identity": "license:v1",
+        "causal_cutoff": "2026-09-01T00:00:00Z",
+        "available_at": "2026-09-01T00:01:00Z",
+        "member_sha256": ["c" * 64],
+        "parent_snapshot_id": None,
+        "parent_dataset_record_sha256": None,
+        "parent_proof_sha256": None,
+        "proof_sha256": "d" * 64,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="dataset snapshot lineage proof schema mismatch",
+    ):
+        DatasetSnapshotLineageAuthority._record_from_raw(raw)
+
+
+def test_authority_restart_rejects_boolean_root_schema_version_without_rewrite(
+    tmp_path: Path,
+) -> None:
+    registry = _registry(tmp_path)
+    authority = _authority(tmp_path, registry)
+    raw = json.loads(authority.path.read_text(encoding="utf-8"))
+    raw["schema_version"] = True
+    authority.path.write_text(
+        json.dumps(raw, ensure_ascii=False, sort_keys=True),
+        encoding="utf-8",
+    )
+    forged = authority.path.read_bytes()
+
+    with pytest.raises(ValueError, match="authority schema_version mismatch"):
+        _restart(authority, registry)
+
+    assert authority.path.read_bytes() == forged
+
+
 def _registry(tmp_path: Path) -> ScientificRegistry:
     return ScientificRegistry.initialize_pristine(tmp_path / "scientific-registry.json")
 

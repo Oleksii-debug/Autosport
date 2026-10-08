@@ -2303,20 +2303,20 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     odds="2.00",
                     observed_ts="2026-09-16T19:00:00+00:00",
                 )
-                tampered = self.event(
-                    sequence=1,
-                    odds="2.00",
-                    observed_ts="2026-09-16T19:00:00.0000004+00:00",
-                    ingest_ts="2026-09-16T19:00:00.0000004+00:00",
-                )
+                # A typed MarketEvent correctly rejects submicrosecond clocks
+                # at construction. Inject the legacy bytes directly into the
+                # stored row to exercise the replay corruption guard instead.
+                tampered = original.to_dict()
+                tampered["observed_ts"] = "2026-09-16T19:00:00.0000004+00:00"
+                tampered["ingest_ts"] = "2026-09-16T19:00:00.0000004+00:00"
                 store.append(original)
                 store.connection.execute(
                     """UPDATE market_events
                        SET observed_ts=?, payload_json=?
                        WHERE dedupe_key=?""",
                     (
-                        tampered.observed_ts,
-                        storage_module._canonical_payload(tampered),
+                        tampered["observed_ts"],
+                        storage_module._canonical_json(tampered),
                         original.dedupe_key,
                     ),
                 )

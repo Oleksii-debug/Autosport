@@ -2409,6 +2409,11 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     )
                 )
                 source_ids = (source_id for source_id in ("provider-a",))
+                # The one-shot selector is the target of this test. Issue the
+                # replay at a real product decision time; the causal cutoff
+                # must not be newer than the product-owned clock.
+                with self._clock_lock:
+                    self._product_now = self.CUTOFF
 
                 snapshot = MarketMirror.replay_view_from_store(
                     store,

@@ -1,6 +1,7 @@
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -97,6 +98,42 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
             ],
         }
 
+    def test_structured_legacy_quote_alias_normalizes_across_instruction_graph(self):
+        raw = self._plan_dict()
+        decision = raw["decisions"][0]
+        legacy_quote = "event|2026|market|spread|player|a"
+        candidate_leg = decision["candidate"]["legs"][0]
+        candidate_leg.update(
+            {
+                "quote_key": legacy_quote,
+                "event_id": "event|2026",
+                "market_id": "market|spread",
+                "selection_id": "player|a",
+            }
+        )
+        decision["trigger_quote_key"] = legacy_quote
+        decision["scenario_groups"][0]["outcomes"][1]["quote_key"] = legacy_quote
+        decision["forecasts"][0]["quote_key"] = legacy_quote
+        decision["evidence"][0]["quote_key"] = legacy_quote
+
+        plan = ResearchStrategyPlan.from_dict(raw)
+        instruction = plan.instructions[0]
+        canonical_quote = instruction.candidate.legs[0].quote_key
+
+        self.assertTrue(canonical_quote.startswith("component-boundary-v1-"))
+        self.assertEqual(instruction.trigger_quote_key, canonical_quote)
+        self.assertIn(
+            canonical_quote,
+            {
+                outcome.quote_key
+                for group in instruction.groups
+                for outcome in group.outcomes
+            },
+        )
+        self.assertEqual(instruction.forecasts[0].quote_key, canonical_quote)
+        self.assertEqual(instruction.evidence[0].quote_key, canonical_quote)
+
+
     def test_research_strategy_runs_full_typed_pipeline_in_dataset_session(self):
         dataset = load_dataset(Path("examples/tt_demo"))
         plan = ResearchStrategyPlan.from_dict(self._plan_dict())
@@ -146,6 +183,58 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "quality_flags must be a JSON array"):
             ResearchStrategyPlan.from_dict(raw)
 
+    def test_plan_rejects_identity_string_type_laundering(self):
+        mutations = (
+            ("decision_id", lambda raw: raw["decisions"][0].__setitem__("decision_id", 7)),
+            (
+                "scenario group_id",
+                lambda raw: raw["decisions"][0]["scenario_groups"][0].__setitem__(
+                    "group_id", 7
+                ),
+            ),
+            (
+                "forecast model_id",
+                lambda raw: raw["decisions"][0]["forecasts"][0].__setitem__(
+                    "model_id", 7
+                ),
+            ),
+            (
+                "forecast forecast_id",
+                lambda raw: raw["decisions"][0]["forecasts"][0].__setitem__(
+                    "forecast_id", 7
+                ),
+            ),
+            (
+                "evidence source_id",
+                lambda raw: raw["decisions"][0]["evidence"][0].__setitem__(
+                    "source_id", 7
+                ),
+            ),
+            (
+                "evidence content_sha256",
+                lambda raw: raw["decisions"][0]["evidence"][0].__setitem__(
+                    "content_sha256", 7
+                ),
+            ),
+        )
+        for label, mutate in mutations:
+            with self.subTest(label=label):
+                raw = self._plan_dict()
+                mutate(raw)
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "must be exact non-empty canonical text",
+                ):
+                    ResearchStrategyPlan.from_dict(raw)
+
+    def test_direct_instruction_rejects_non_string_identity(self):
+        instruction = ResearchStrategyPlan.from_dict(self._plan_dict()).instructions[0]
+        with self.assertRaisesRegex(
+            ValueError,
+            "decision_id must be exact non-empty canonical text",
+        ):
+            replace(instruction, decision_id=7)
+
     def test_stale_candidate_odds_fail_before_registry_or_book_mutation(self):
         dataset = load_dataset(Path("examples/tt_demo"))
         plan = ResearchStrategyPlan.from_dict(self._plan_dict(odds="1.80"))
@@ -163,6 +252,33 @@ class ResearchStrategyRuntimeTests(unittest.TestCase):
                 self.assertFalse((Path(tmp) / "paper_book.json").exists())
             finally:
                 session.close()
+
+    def test_plan_source_sha256_identity_rejects_aliases_before_normalization(self):
+        raw = self._plan_dict()
+        canonical = ResearchStrategyPlan.from_dict(raw).source_sha256
+
+        with self.assertRaisesRegex(ValueError, "canonical lowercase SHA-256"):
+            ResearchStrategyPlan.from_dict(
+                raw,
+                source_sha256=canonical.upper(),
+            )
+
+        class HostileDigest(str):
+            def lower(self):
+                raise AssertionError("digest subclass normalization must not dispatch")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_sha256 must be exact non-empty canonical text",
+        ):
+            ResearchStrategyPlan.from_dict(
+                raw,
+                source_sha256=HostileDigest(canonical),
+            )
+
+        plan = ResearchStrategyPlan.from_dict(raw)
+        with self.assertRaisesRegex(ValueError, "canonical lowercase SHA-256"):
+            replace(plan, source_sha256=canonical.upper())
 
     def test_plan_hash_is_part_of_research_experiment_identity(self):
         first = ResearchStrategyPlan.from_dict(self._plan_dict(probability="0.60"))

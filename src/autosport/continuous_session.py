@@ -16,7 +16,12 @@ from .causal_collector import (
     SyncState,
 )
 from .collector_service import HeadlessCollectorService
-from .event_lifecycle import ContinuousEventLifecycle, EventLifecycleRecord, EventPhase
+from .event_lifecycle import (
+    ContinuousEventLifecycle,
+    EventLifecycleRecord,
+    EventPhase,
+    canonical_event_identity_aliases,
+)
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .market_mirror_runtime import (
@@ -256,8 +261,13 @@ class ContinuousSessionStatus:
 
 
 def _text(value: object, field: str) -> str:
-    if type(value) is not str or not value or value.strip() != value:
-        raise ValueError(f"{field} must be a non-empty trimmed string")
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{field} must be a non-empty canonical string")
     return value
 
 
@@ -407,6 +417,7 @@ class _ContinuousSessionState:
             type(raw) is not dict
             or set(raw) != self._FIELDS
             or raw["schema"] != self._SCHEMA
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != self._VERSION
             or raw["source_id"] != self.source_id
         ):
@@ -526,6 +537,11 @@ class _ContinuousSessionState:
     def _normalized_settlement_evidence(
         evidence: SettlementResolution,
     ) -> dict[str, str]:
+        if type(evidence) is not SettlementResolution:
+            raise TypeError(
+                "settlement evidence must be an exact SettlementResolution"
+            )
+        evidence.validate(as_of=evidence.available_at)
         return {
             "event_identity": evidence.event_identity,
             "settlement_ref": evidence.settlement_ref,
@@ -542,6 +558,8 @@ class _ContinuousSessionState:
         *,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
         raw = self._read()
         known = {
             item["evidence_id"]: item
@@ -549,12 +567,13 @@ class _ContinuousSessionState:
         }
         for evidence in settlement_evidence:
             normalized = self._normalized_settlement_evidence(evidence)
-            existing = known.get(evidence.evidence_id)
+            evidence_id = normalized["evidence_id"]
+            existing = known.get(evidence_id)
             if existing is not None and existing != normalized:
                 raise ContinuousSessionError(
                     "settlement evidence id conflicts with durable evidence"
                 )
-            known[evidence.evidence_id] = normalized
+            known[evidence_id] = normalized
 
     def record_source_projection(
         self,
@@ -562,11 +581,52 @@ class _ContinuousSessionState:
         deltas: tuple[CollectorDelta, ...],
         backlog: bool,
     ) -> None:
+        if type(deltas) is not tuple:
+            raise TypeError("deltas must be an exact tuple")
         if type(backlog) is not bool:
             raise TypeError("backlog must be boolean")
         for delta in deltas:
-            if not isinstance(delta, CollectorDelta):
-                raise TypeError("deltas must contain CollectorDelta values")
+            if type(delta) is not CollectorDelta:
+                raise TypeError("deltas must contain exact CollectorDelta values")
+            if type(delta.schema_version) is not int or delta.schema_version != 1:
+                raise TypeError("collector delta schema_version must be exact version 1")
+            for field_name in (
+                "delta_id",
+                "source_id",
+                "lawful_terms_ref",
+                "retention_ref",
+                "stream_epoch",
+                "source_cursor",
+                "event_dedupe_key",
+                "event_id",
+                "source_payload_digest",
+                "canonical_event_digest",
+            ):
+                if type(getattr(delta, field_name)) is not str:
+                    raise TypeError(
+                        f"collector delta {field_name} must be exact identity text"
+                    )
+            for field_name in ("cursor_position", "revision_number"):
+                if type(getattr(delta, field_name)) is not int:
+                    raise TypeError(
+                        f"collector delta {field_name} must be an exact integer"
+                    )
+            for field_name in ("revision_of", "gap_from_cursor", "gap_to_cursor"):
+                value = getattr(delta, field_name)
+                if value is not None and type(value) is not str:
+                    raise TypeError(
+                        f"collector delta {field_name} must be exact identity text or None"
+                    )
+            if type(delta.quality_flags) is not tuple or any(
+                type(flag) is not str for flag in delta.quality_flags
+            ):
+                raise TypeError(
+                    "collector delta quality_flags must be an exact tuple of exact strings"
+                )
+            if type(delta.gap_state) is not GapState:
+                raise TypeError("collector delta gap_state must be exact GapState")
+            if type(delta.sync_state) is not SyncState:
+                raise TypeError("collector delta sync_state must be exact SyncState")
             delta.validate()
             if delta.source_id != self.source_id:
                 raise ContinuousSessionError(
@@ -612,6 +672,12 @@ class _ContinuousSessionState:
         full_refresh: bool,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
+        normalized_evidence = tuple(
+            self._normalized_settlement_evidence(evidence)
+            for evidence in settlement_evidence
+        )
         timestamp = _instant(at, "at")
 
         def mutate(raw: dict[str, Any]) -> None:
@@ -625,16 +691,16 @@ class _ContinuousSessionState:
                 item["evidence_id"]: item
                 for item in raw["settlement_evidence"]
             }
-            for evidence in settlement_evidence:
-                existing = known.get(evidence.evidence_id)
-                normalized = self._normalized_settlement_evidence(evidence)
+            for normalized in normalized_evidence:
+                evidence_id = normalized["evidence_id"]
+                existing = known.get(evidence_id)
                 if existing is not None:
                     if existing != normalized:
                         raise ContinuousSessionError(
                             "settlement evidence id conflicts with durable evidence"
                         )
                     continue
-                known[evidence.evidence_id] = normalized
+                known[evidence_id] = normalized
             raw["settlement_evidence"] = list(
                 sorted(known.values(), key=lambda item: item["evidence_id"])
             )
@@ -874,10 +940,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             resolution = self.outcome_authority.resolve(record, as_of=as_of)
             if resolution is None:
                 continue
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not SettlementResolution:
                 raise ContinuousSessionError(
-                    "outcome authority must return SettlementResolution or None"
+                    "outcome authority must return exact SettlementResolution or None"
                 )
+            # Validate the exact DTO before any identity/reference comparison.
+            # Construction is intentionally permissive enough for deserialization, so
+            # hostile scalar subclasses must fail closed before __eq__/__ne__ dispatch.
+            resolution.validate(as_of=as_of)
             if resolution.event_identity != record.identity:
                 raise ContinuousSessionError(
                     "settlement evidence event identity does not match lifecycle identity"
@@ -886,7 +956,6 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )
-            resolution.validate(as_of=as_of)
             resolutions.append(resolution)
         return tuple(resolutions)
 
@@ -903,12 +972,20 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         resolutions: tuple[SettlementResolution, ...],
         _settlement_engine_type: type[SettlementEngine],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        if not resolutions:
-            return (), ()
+        if type(resolutions) is not tuple:
+            raise TypeError("resolutions must be an exact tuple")
         if SettlementEngine is not _settlement_engine_type:
             raise ContinuousSessionError(
                 "settlement engine constructor origin changed"
             )
+        for resolution in resolutions:
+            if type(resolution) is not SettlementResolution:
+                raise TypeError(
+                    "resolutions must contain exact SettlementResolution values"
+                )
+            resolution.validate(as_of=resolution.available_at)
+        if not resolutions:
+            return (), ()
         unique: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
             unique.setdefault(resolution.evidence_id, resolution)
@@ -940,9 +1017,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         book: PaperBook,
         event_identity: str,
     ) -> set[str]:
-        parts = {event_identity}
-        if ":" in event_identity:
-            parts.add(event_identity.split(":", 1)[1])
+        if type(book) is not PaperBook:
+            raise TypeError("book must be an exact PaperBook")
+        _text(event_identity, "event_identity")
+        try:
+            parts = set(canonical_event_identity_aliases(event_identity))
+        except ValueError as exc:
+            raise ContinuousSessionError(
+                "settlement evidence event identity is not canonical"
+            ) from exc
         return {
             leg.quote_key
             for ticket in book.tickets.values()

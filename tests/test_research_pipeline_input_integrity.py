@@ -8,6 +8,7 @@ from autosport.decision_ledger import JsonlDecisionLedger
 from autosport.forecasting import ForecastRecord
 from autosport.paper import PaperBook
 from autosport.research_pipeline import (
+    DeterministicResearchCritic,
     ResearchDecisionPipeline,
     ResearchDecisionPolicy,
     ResearchEvidence,
@@ -106,6 +107,101 @@ class ResearchPipelineInputIntegrityTests(unittest.TestCase):
         kwargs["quality_flags"] = ("\ud800",)
         with self.assertRaisesRegex(ValueError, "valid UTF-8"):
             ResearchEvidence(**kwargs)
+
+    def test_research_evidence_rejects_noncanonical_sha_identity_aliases(self):
+        for field in ("content_sha256", "market_snapshot_hash"):
+            with self.subTest(field=field):
+                kwargs = self._evidence_kwargs()
+                kwargs[field] = "B" * 64
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "canonical lowercase SHA-256",
+                ):
+                    ResearchEvidence(**kwargs)
+
+        class HostileDigest(str):
+            lower_calls = 0
+            hash_calls = 0
+
+            def lower(self):
+                type(self).lower_calls += 1
+                return "b" * 64
+
+            def __hash__(self):
+                type(self).hash_calls += 1
+                return super().__hash__()
+
+        kwargs = self._evidence_kwargs()
+        kwargs["content_sha256"] = HostileDigest("b" * 64)
+        with self.assertRaisesRegex(ValueError, "canonical lowercase SHA-256"):
+            ResearchEvidence(**kwargs)
+
+        self.assertEqual(HostileDigest.lower_calls, 0)
+        self.assertEqual(HostileDigest.hash_calls, 0)
+
+    def test_critic_revalidates_mutated_hash_identity_before_membership_dispatch(self):
+        class HostileDigest(str):
+            lower_calls = 0
+            hash_calls = 0
+
+            def lower(self):
+                type(self).lower_calls += 1
+                return "b" * 64
+
+            def __hash__(self):
+                type(self).hash_calls += 1
+                return super().__hash__()
+
+        candidate, _groups, forecasts, evidence = self._approved_inputs()
+        item = evidence[0]
+        object.__setattr__(
+            item,
+            "content_sha256",
+            HostileDigest("B" * 64),
+        )
+
+        with self.assertRaisesRegex(ValueError, "content_sha256"):
+            DeterministicResearchCritic().review(
+                candidate,
+                forecasts,
+                evidence,
+                decision_ts="2026-09-14T10:00:03+00:00",
+            )
+
+        self.assertEqual(HostileDigest.lower_calls, 0)
+        self.assertEqual(HostileDigest.hash_calls, 0)
+
+    def test_critic_revalidates_mutated_forecast_hash_identity_without_lowercasing(self):
+        class HostileDigest(str):
+            lower_calls = 0
+            hash_calls = 0
+
+            def lower(self):
+                type(self).lower_calls += 1
+                return "b" * 64
+
+            def __hash__(self):
+                type(self).hash_calls += 1
+                return super().__hash__()
+
+        candidate, _groups, forecasts, evidence = self._approved_inputs()
+        forecast = forecasts[B]
+        object.__setattr__(
+            forecast,
+            "evidence_hashes",
+            (HostileDigest("B" * 64),),
+        )
+
+        with self.assertRaisesRegex(ValueError, "evidence hash"):
+            DeterministicResearchCritic().review(
+                candidate,
+                forecasts,
+                evidence,
+                decision_ts="2026-09-14T10:00:03+00:00",
+            )
+
+        self.assertEqual(HostileDigest.lower_calls, 0)
+        self.assertEqual(HostileDigest.hash_calls, 0)
 
     def test_research_evidence_accepts_valid_non_ascii_utf8_identity(self):
         kwargs = self._evidence_kwargs()

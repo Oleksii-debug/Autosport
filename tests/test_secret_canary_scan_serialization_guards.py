@@ -127,6 +127,36 @@ def test_line_wrapped_base64_cannot_hide_canary_across_chunks(
     assert canary not in repr(report)
 
 
+@pytest.mark.parametrize("line_ending", [b"\\n", b"\\r\\n"])
+def test_folded_base64_real_newlines_not_mistaken_for_literal_slashes(
+    tmp_path: Path,
+    line_ending: bytes,
+) -> None:
+    canary = "folded-only-canary-CRLF-0123456789"
+    raw = canary.encode("utf-8")
+    encoded = base64.b64encode(b"prefix:" + raw + b":suffix")
+    folded = line_ending.join(
+        encoded[index : index + 12]
+        for index in range(0, len(encoded), 12)
+    )
+    assert raw not in folded
+    assert base64.b64encode(raw) not in folded
+    assert line_ending in folded
+    (tmp_path / "folded-credential.log").write_bytes(folded)
+
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path,
+        canary,
+        chunk_size=7,
+    )
+
+    assert report.status == "LEAK"
+    assert report.exit_code == 2
+    assert len(report.findings) == 1
+    assert "base64-semantic" in report.findings[0].encodings
+    assert canary not in repr(report)
+
+
 @pytest.mark.parametrize("ensure_ascii", [False, True])
 def test_json_string_serialization_cannot_hide_canary(
     tmp_path: Path,

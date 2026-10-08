@@ -1,3 +1,17 @@
+# LEGACY MONOLITHIC CLOSURE REGISTRY — SUPERSEDED FOR WORK SELECTION
+
+Do not use this file to choose the next work front.
+Use PROJECT_PLAN_INDEX.md + MULTI_PLAN_PARALLELISM_CONTRACT.md + MULTI_PLAN_CLOSURE_STATE.md.
+
+Historical migration:
+- former 0–1: accepted product/control baseline, retained as audit authority;
+- former 2 -> Plan 1 / Section 1 DONE;
+- former 3 -> Plan 1 / Section 2 QUALIFYING, canonical PR #2238;
+- former 4 -> Plan 1 / Section 3 PARTIAL_EXISTING, PR #2261;
+- later Sections map via LEGACY_46_TO_MULTIPLAN_COVERAGE.md.
+
+---
+
 # Sequential Closure State
 
 This file is the durable GitHub mirror for ordered Section/Subsection closure.

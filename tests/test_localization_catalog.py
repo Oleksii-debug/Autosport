@@ -82,6 +82,12 @@ _CRITICAL_UI_KEYS = {
 }
 
 _RUNTIME_RECOVERY_KEYS = {
+    # Native pre-GUI errors are keyboard/NVDA-critical recovery copy too.
+    "ui.windows.workspace_configuration.title",
+    "ui.windows.workspace_configuration.message",
+    "ui.windows.workspace_access.title",
+    "ui.windows.workspace_access.unknown_error",
+    "ui.windows.workspace_access.message",
     "ui.status.bank.pending",
     "ui.status.bank.current",
     "ui.status.windows.economic_unavailable",
@@ -198,6 +204,15 @@ def test_critical_catalog_is_fail_closed_against_blank_key_echo_and_english_fall
     messages = catalog()
     guarded_keys = _CRITICAL_UI_KEYS | _RUNTIME_RECOVERY_KEYS
     require_keys(guarded_keys)
+
+    native_workspace_error_keys = {
+        "ui.windows.workspace_configuration.title",
+        "ui.windows.workspace_configuration.message",
+        "ui.windows.workspace_access.title",
+        "ui.windows.workspace_access.unknown_error",
+        "ui.windows.workspace_access.message",
+    }
+    assert native_workspace_error_keys <= guarded_keys
 
     # The bounded manifests deliberately include visible controls, UIA/NVDA
     # presentation resources, and startup/recovery status/error text, so all of

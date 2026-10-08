@@ -196,3 +196,7 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Positive Historical Data provenance must use a closure-hidden canonical urllib
+# dispatch snapshot; structural/synthetic transports remain explicitly non-authority.
+from . import _betfair_historical_entitlement_io_snapshot_guard as _betfair_historical_entitlement_io_snapshot_guard  # noqa: F401,E402

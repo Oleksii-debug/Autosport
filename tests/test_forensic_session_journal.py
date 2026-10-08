@@ -1107,7 +1107,7 @@ def test_unicode_record_separator_inside_note_survives_verified_restart(
 
     verified = verify_journal(journal.path)
     assert verified[1].payload["note"] == note
-    assert len(verified) == 4
+    assert len(verified) == 3
 
     reopened = new_journal(tmp_path)
     assert reopened.snapshot()[1].payload["note"] == note

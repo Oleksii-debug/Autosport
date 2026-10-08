@@ -141,8 +141,9 @@ _ENGLISH_UI_DIRECTIVE = re.compile(
 # Catch sentence-case/low-case dangerous untranslated operator commands.
 # Uppercase prose is handled separately; do not reject legitimate STOP/UIA tokens.
 _ENGLISH_CRITICAL_ACTION_PHRASE = re.compile(
-    r"\b(?:[Ss]tart|[Aa]pprove|[Dd]elete|[Ee]xport)\s+"
-    r"(?i:real\s+bet|all\s+data|private\s+data)\b"
+    r"\b(?:start|approve|delete|export)\s+"
+    r"(?:real\s+bet|all\s+data|private\s+data)\b",
+    re.IGNORECASE,
 )
 
 
@@ -264,6 +265,11 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
         "Approve Real Bet і",
         "Delete ALL DATA і",
         "Export PRIVATE DATA і",
+        "START Real Bet і",
+        "APPROVE Real Bet і",
+        "DELETE All Data і",
+        "EXPORT Private Data і",
+        "sTaRt Real Bet і",
     ):
         with pytest.raises(AssertionError, match="untranslated English critical action"):
             _assert_critical_ukrainian_template(
@@ -622,6 +628,11 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         "Approve Real Bet і",
         "Delete ALL DATA і",
         "Export PRIVATE DATA і",
+        "START Real Bet і",
+        "APPROVE Real Bet і",
+        "DELETE All Data і",
+        "EXPORT Private Data і",
+        "sTaRt Real Bet і",
     ):
         with pytest.raises(AssertionError, match="untranslated English critical action"):
             _assert_ukrainian_critical_presentation(

@@ -237,3 +237,166 @@ def test_reused_evidence_id_with_conflicting_payload_fails_before_paper_effect(t
     assert replayed == ()
     assert ids_again == ids
     assert PaperBook.load(path).balance == Decimal("90")
+
+
+def test_durable_outcome_binding_rejects_same_id_changed_payout_after_restart(tmp_path):
+    from dataclasses import replace
+
+    from autosport.continuous_session import (
+        ContinuousSessionError,
+        _ContinuousSessionState,
+    )
+
+    path = tmp_path / "continuous_session.json"
+    new_state = lambda: _ContinuousSessionState(
+        path,
+        session_id="session-1",
+        source_id="provider-a",
+        clock=lambda: _CUTOFF,
+    )
+    source = _resolution()
+    state = new_state()
+    state.validate_settlement_evidence(settlement_evidence=(source,))
+    state.bind_settlement_evidence(settlement_evidence=(source,))
+    entry = state.snapshot().settlement_evidence[0]
+    assert entry["quote_outcomes_binding_version"] == "canonical-json-sha256-v1"
+    assert len(entry["quote_outcomes_sha256"]) == 64
+    assert entry["evidence_sha256"] == "0" * 64
+    assert entry["quote_outcomes_sha256"] != entry["evidence_sha256"]
+
+    state.record_success(
+        at=_CUTOFF, full_refresh=False, settlement_evidence=(source,),
+    )
+    restored = new_state()
+    restored.validate_settlement_evidence(settlement_evidence=(source,))
+    restored.bind_settlement_evidence(settlement_evidence=(source,))
+    before = path.read_bytes()
+    conflicting = replace(source, quote_outcomes={_OUTCOME_KEY: "win"})
+    for action in (
+        restored.validate_settlement_evidence,
+        restored.bind_settlement_evidence,
+    ):
+        with pytest.raises(
+            ContinuousSessionError,
+            match="settlement evidence id conflicts with durable evidence",
+        ):
+            action(settlement_evidence=(conflicting,))
+    assert path.read_bytes() == before
+
+    # A correction has distinct version/evidence identity, never a rewritten
+    # old payout. It is recorded without any implied second PAPER fill.
+    successor = replace(
+        conflicting,
+        evidence_id="evidence-section2-revision-2",
+        evidence_sha256="1" * 64,
+        settlement_ref="provider-result:section2:correction2",
+    )
+    restored.bind_settlement_evidence(settlement_evidence=(successor,))
+    next_state = new_state()
+    assert len(next_state.snapshot().settlement_evidence) == 2
+    assert next_state.snapshot().cycles_completed == 1
+
+
+def test_legacy_metadata_only_receipt_is_readable_but_not_verified_as_payload(tmp_path):
+    import json
+    from autosport.continuous_session import (
+        ContinuousSessionError,
+        _ContinuousSessionState,
+    )
+
+    path = tmp_path / "continuous_session.json"
+    state = _ContinuousSessionState(
+        path, session_id="session-1", source_id="provider-a",
+        clock=lambda: _CUTOFF,
+    )
+    original = _resolution()
+    state.bind_settlement_evidence(settlement_evidence=(original,))
+    payload = json.loads(path.read_text(encoding="utf-8"))
+    old_record = payload["settlement_evidence"][0]
+    del old_record["quote_outcomes_binding_version"]
+    del old_record["quote_outcomes_sha256"]
+    path.write_text(json.dumps(payload), encoding="utf-8")
+    restarted = _ContinuousSessionState(
+        path, session_id="session-1", source_id="provider-a",
+        clock=lambda: _CUTOFF,
+    )
+    assert len(restarted.snapshot().settlement_evidence) == 1
+    legacy_bytes = path.read_bytes()
+    with pytest.raises(ContinuousSessionError, match="conflicts with durable evidence"):
+        restarted.bind_settlement_evidence(settlement_evidence=(original,))
+    assert path.read_bytes() == legacy_bytes
+
+    malformed = json.loads(path.read_text(encoding="utf-8"))
+    malformed["settlement_evidence"][0]["quote_outcomes_sha256"] = "a" * 64
+    path.write_text(json.dumps(malformed), encoding="utf-8")
+    with pytest.raises(ContinuousSessionError, match="entry fields mismatch"):
+        _ContinuousSessionState(
+            path, session_id="session-1", source_id="provider-a",
+            clock=lambda: _CUTOFF,
+        )
+
+
+def test_crash_after_outcome_prebind_preserves_cash_and_denies_alias_replay(tmp_path):
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from autosport.continuous_session import (
+        ContinuousSessionError,
+        _ContinuousSessionState,
+    )
+    from autosport.domain import TicketLeg, TicketStatus
+    from autosport.paper import PaperBook
+
+    path = tmp_path / "continuous_session.json"
+    book_path = tmp_path / "paper.json"
+    leg = TicketLeg(
+        event_id="event-1", market_id="winner", selection_id="home",
+        locked_odds=Decimal("2"), sport="table_tennis",
+    )
+    book = PaperBook("100")
+    ticket = book.open_ticket(
+        (leg,), Decimal("10"), placed_at="2026-10-08T05:00:00+00:00",
+    )
+    book.save(book_path)
+    source = SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="provider-result:crash",
+        quote_outcomes={leg.quote_key: "loss"},
+        evidence_id="evidence-crash",
+        evidence_sha256="2" * 64,
+        available_at=_CUTOFF,
+    )
+
+    def reopen():
+        return _ContinuousSessionState(
+            path, session_id="session-crash",
+            source_id="provider-a", clock=lambda: _CUTOFF,
+        )
+
+    # Simulate a hard crash precisely after the journal prebind but before
+    # the PAPER economic commit: only the initial stake has been debited.
+    reopen().bind_settlement_evidence(settlement_evidence=(source,))
+    assert PaperBook.load(book_path).balance == Decimal("90")
+    after_crash = reopen()
+    with pytest.raises(ContinuousSessionError, match="conflicts with durable evidence"):
+        after_crash.validate_settlement_evidence(
+            settlement_evidence=(
+                replace(source, quote_outcomes={leg.quote_key: "win"}),
+            ),
+        )
+    coordinator = object.__new__(ContinuousSessionCoordinator)
+    coordinator.workspace = tmp_path
+    coordinator.paper_book_path = book_path
+    coordinator.initial_bankroll = "100"
+    after_crash.validate_settlement_evidence(settlement_evidence=(source,))
+    settled, ids = coordinator._settle(resolutions=(source,))
+    assert settled == (ticket.ticket_id,)
+    assert ids == ("evidence-crash",)
+    after_crash.record_success(
+        at=_CUTOFF, full_refresh=False, settlement_evidence=(source,),
+    )
+    assert PaperBook.load(book_path).tickets[ticket.ticket_id].status is TicketStatus.LOST
+    replayed, _ = coordinator._settle(resolutions=(source,))
+    assert replayed == ()
+    assert PaperBook.load(book_path).balance == Decimal("90")
+    assert reopen().snapshot().settlement_evidence[0]["quote_outcomes_sha256"]

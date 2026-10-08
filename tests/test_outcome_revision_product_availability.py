@@ -4,7 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import patch
 
@@ -321,8 +321,16 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
             )
 
             forged = ForgedCutoff(self.t0)
-            with self.assertRaisesRegex(ValueError, "cutoff.*exact"):
-                self._resolve(registry, forged)
+            # Bypass the test-only logical-time adapter so the hostile subclass
+            # reaches the real API boundary without normalization in the fixture.
+            with self.assertRaisesRegex(
+                OutcomeLineageTrustError, "outcome as-of cutoff.*canonical string"
+            ):
+                registry.outcome_revision_as_of(
+                    source_identity=self.source_identity,
+                    record_id=self.record_id,
+                    cutoff=forged,
+                )
             self.assertEqual(ForgedCutoff.replace_calls, 0)
 
     def test_as_of_identity_rejects_string_subclass_before_hash_lookup(self) -> None:
@@ -364,8 +372,14 @@ class OutcomeRevisionProductAvailabilityTests(unittest.TestCase):
                 accepted_at=self.t1,
             )
 
-            utc = self._resolve(registry, "2026-01-01T10:00:00Z")
-            offset = self._resolve(registry, "2026-01-01T12:00:00+02:00")
+            # Compare the same product-owned availability instant expressed
+            # in two zones; logical fixture time is not the durable receipt time.
+            actual_cutoff = self._product_cutoff(self.t1)
+            utc = self._resolve(registry, actual_cutoff)
+            equivalent = self._instant(actual_cutoff).astimezone(
+                timezone(timedelta(hours=2))
+            ).isoformat()
+            offset = self._resolve(registry, equivalent)
             self.assertEqual(utc, offset)
             with self.assertRaisesRegex(
                 OutcomeLineageTrustError,

@@ -156,8 +156,8 @@ class MarketMirrorTests(unittest.TestCase):
             )
 
     def test_sport_aware_lookup_survives_store_restore_and_replay(self) -> None:
-         product_clock = self._recorded_product_clock("2026-09-16T18:59:02+00:00")
-       with tempfile.TemporaryDirectory() as directory:
+        product_clock = self._recorded_product_clock("2026-09-16T18:59:02+00:00")
+        with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
             try:
@@ -588,8 +588,8 @@ class MarketMirrorTests(unittest.TestCase):
                 reopened_store.close()
 
     def test_replay_view_reconstructs_pre_update_state_without_future_leakage(self) -> None:
-         product_clock = self._recorded_product_clock("2026-09-16T18:59:01+00:00")
-       with tempfile.TemporaryDirectory() as directory:
+        product_clock = self._recorded_product_clock("2026-09-16T18:59:01+00:00")
+        with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
                 store.append_many(
@@ -629,8 +629,8 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
     def test_replay_view_excludes_late_ingestion_even_when_provider_evidence_is_earlier(self) -> None:
-         product_clock = self._recorded_product_clock("2026-09-16T18:58:40+00:00")
-       with tempfile.TemporaryDirectory() as directory:
+        product_clock = self._recorded_product_clock("2026-09-16T18:58:40+00:00")
+        with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
                 store.append_many(
@@ -670,8 +670,8 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
     def test_replay_view_applies_live_freshness_and_focused_selectors_at_one_revision(self) -> None:
-         product_clock = self._recorded_product_clock("2026-09-16T18:59:40+00:00")
-       with tempfile.TemporaryDirectory() as directory:
+        product_clock = self._recorded_product_clock("2026-09-16T18:59:40+00:00")
+        with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
                 store.append_many(

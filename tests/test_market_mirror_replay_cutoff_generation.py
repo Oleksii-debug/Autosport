@@ -4436,7 +4436,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             sequence=2,
             odds="2.10",
             observed_ts="2026-09-16T19:00:02+00:00",
-            ingest_ts="2026-09-16T19:00:01+00:00",
+            ingest_ts="2026-09-16T19:00:03+00:00",
             source_ts="2026-09-16T18:59:59+00:00",
         )
         mirror.apply(late_ingest)
@@ -4544,8 +4544,9 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             def traced_lock(_authority):
                 return TracingLock()
 
-            def require_locked_baseline(_store):
+            def require_locked_baseline(_store, authority):
                 self.assertTrue(state["held"])
+                self.assertIsInstance(authority, MonotonicWorkspaceAuthority)
                 state["baseline"] = True
 
             def require_locked_rebuild(_store, *, append_authority):

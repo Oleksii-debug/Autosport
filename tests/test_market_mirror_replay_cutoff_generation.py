@@ -1496,9 +1496,14 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 original_decoder = storage_module._event_from_history_row
 
                 def blocking_decoder(row):
-                    decode_entered.set()
-                    if not release_decode.wait(timeout=10):
-                        raise RuntimeError("test decoder release timeout")
+                    # Patch targets the replay worker only. The independent
+                    # writer can also decode history while proving append
+                    # authority; blocking it would make this test mistake its
+                    # own global monkeypatch for an SQLite writer transaction.
+                    if threading.current_thread() is replay_thread:
+                        decode_entered.set()
+                        if not release_decode.wait(timeout=10):
+                            raise RuntimeError("test decoder release timeout")
                     return original_decoder(row)
 
                 def resolve_existing_cutoff() -> None:

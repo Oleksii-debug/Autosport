@@ -480,7 +480,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     SQLiteMarketStore(path)
             self.assertTrue(tampered)
@@ -2485,7 +2485,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "market append authority baseline semantic binding is invalid",
                 ):
                     self.replay(store)
 
@@ -2522,7 +2522,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority does not cover durable entries",
                 ):
                     self.replay(store)
 
@@ -2541,7 +2541,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 MonotonicAuthorityRollbackError,
-                "positive market append chronology is missing, forged, or unproven",
+                "positive market append authority does not cover durable entries",
             ):
                 SQLiteMarketStore(path)
 
@@ -2569,7 +2569,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority does not cover durable entries",
                 ):
                     self.replay(store)
 
@@ -2611,7 +2611,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     self.replay(store)
 
@@ -3520,7 +3520,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     store.events()
             finally:
@@ -3623,7 +3623,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     store.events()
             finally:
@@ -3658,7 +3658,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     MarketMirror.from_store(store)
             finally:
@@ -3744,7 +3744,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "market append authority baseline semantic binding is invalid",
                 ):
                     store.events()
             finally:
@@ -4003,7 +4003,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 before = store._market_append_authority().read_history()
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     store.append(forged)
                 after = store._market_append_authority().read_history()
@@ -4047,7 +4047,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     store.append(
                         self.event(

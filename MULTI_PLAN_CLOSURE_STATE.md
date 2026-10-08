@@ -27,8 +27,12 @@ This is the live status authority for the new architecture.
 |10|OPEN|plan qualification|
 
 ### Plan 2 — Financial / risk / paper / portfolio
-Sections 1–7: PARTIAL_EXISTING from legacy 5,9,10,18–21 and current financial/PaperBook/portfolio code.
-Section 8: OPEN plan qualification.
+| Section | State | Note |
+|---:|---|---|
+|1|QUALIFYING|Canonical existing PR #2262 @ `eb670396bc8573da721aadb83948250a73b39cae`: strict exact Decimal odds/probability/PaperBook bankroll and stake ingress; targeted adversarial and save/restart/dedup tests added. CI #37729887384, Windows candidate #37729887411, Endurance #37729887366 are QUEUED (NOT PASS). PR remains open; exact-head qualification, full Section-1 settlement/correction acceptance audit, integration and post-merge readback pending. No terminal DONE.|
+|2|PARTIAL_EXISTING|Next actionable only after Section 1 terminal DONE; reuse EconomicGoal/Risk authority, owner controls, restart and portfolio-risk tests. No independent Section-2 closure claimed.|
+|3–7|PARTIAL_EXISTING|Legacy 10,18–21 and current PaperBook/portfolio/scenario/financial-reconciliation code; each requires its own qualification and terminal readback.|
+|8|OPEN|Plan-wide financial/PAPER qualification.|
 
 ### Plan 3 — Intelligence / research / learning / multi-sport
 Sections 1–9: PARTIAL_EXISTING from legacy 11,23–29,31 and current research/agent/model/memory code.

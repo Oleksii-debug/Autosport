@@ -8,6 +8,17 @@ from autosport.domain import TicketLeg, TicketStatus
 from autosport.paper import PaperBook
 
 
+class _ExplosiveString(str):
+    def __hash__(self) -> int:
+        raise AssertionError("hostile string hash dispatched before exact admission")
+
+    def encode(self, *args, **kwargs):
+        raise AssertionError("hostile string encode dispatched before exact admission")
+
+    def strip(self, *args, **kwargs):
+        raise AssertionError("hostile string strip dispatched before exact admission")
+
+
 class PaperBookCanonicalDurableStateTests(unittest.TestCase):
     def setUp(self) -> None:
         self._tmp = tempfile.TemporaryDirectory()
@@ -58,22 +69,89 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         self.path.write_text(json.dumps(payload), encoding="utf-8")
 
     def test_open_ticket_rejects_noncanonical_leg_identity_before_bankroll_mutation(self) -> None:
-        invalid_legs = (
-            TicketLeg("", "winner", "alice", Decimal("2")),
-            TicketLeg(" event-1", "winner", "alice", Decimal("2")),
-            TicketLeg("event-1", "winner ", "alice", Decimal("2")),
-            TicketLeg("event-1", "winner", " alice", Decimal("2")),
-            TicketLeg("event|1", "winner", "alice", Decimal("2")),
-            TicketLeg("event-1", "win|ner", "alice", Decimal("2")),
-            TicketLeg("event-1", "winner", "ali|ce", Decimal("2")),
+        cases = (
+            ("event_id", ""),
+            ("event_id", " event-1"),
+            ("market_id", "winner "),
+            ("selection_id", " alice"),
         )
-        for leg in invalid_legs:
-            with self.subTest(leg=leg):
+        for field, value in cases:
+            with self.subTest(field=field, value=value):
+                leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+                object.__setattr__(leg, field, value)
                 book = PaperBook("100")
                 with self.assertRaises(ValueError):
                     book.open_ticket([leg], "10")
                 self.assertEqual(book.balance, Decimal("100"))
                 self.assertEqual(book.tickets, {})
+
+    def test_delimiter_bearing_leg_survives_open_save_load_and_settlement(self) -> None:
+        leg = TicketLeg(
+            "event|2026",
+            "market|spread",
+            "player|a",
+            Decimal("2"),
+        )
+        self.assertTrue(leg.quote_key.startswith("component-boundary-v1-"))
+
+        book = PaperBook("100")
+        ticket = book.open_ticket(
+            [leg],
+            "10",
+            placed_at="2026-09-14T09:00:00+00:00",
+        )
+        book.save(self.path)
+
+        restored = PaperBook.load(self.path)
+        restored_ticket = restored.tickets[ticket.ticket_id]
+        self.assertEqual(restored_ticket.legs[0].event_id, leg.event_id)
+        self.assertEqual(restored_ticket.legs[0].market_id, leg.market_id)
+        self.assertEqual(restored_ticket.legs[0].selection_id, leg.selection_id)
+        self.assertEqual(restored_ticket.legs[0].quote_key, leg.quote_key)
+
+        settled = restored.settle(
+            ticket.ticket_id,
+            {leg.quote_key},
+            settled_at="2026-09-14T09:01:00+00:00",
+        )
+        self.assertIs(settled.status, TicketStatus.WON)
+        self.assertEqual(restored.balance, Decimal("110"))
+
+
+    def test_open_ticket_rejects_hostile_identity_subclass_before_string_dispatch(self) -> None:
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        object.__setattr__(leg, "event_id", _ExplosiveString("event-1"))
+        book = PaperBook("100")
+
+        with self.assertRaisesRegex(ValueError, "event_id.*exact string"):
+            book.open_ticket([leg], "10")
+
+        self.assertEqual(book.balance, Decimal("100"))
+        self.assertEqual(book.tickets, {})
+
+    def test_settlement_rejects_hostile_quote_key_before_hash_dispatch(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+        hostile = _ExplosiveString(leg.quote_key)
+
+        with self.assertRaisesRegex(ValueError, "winning_quote_keys quote_key.*exact string"):
+            book.settle(ticket.ticket_id, [hostile])
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(book.balance, Decimal("90"))
+
+
+    def test_settlement_rejects_hostile_ticket_id_before_hash_dispatch(self) -> None:
+        book = PaperBook("100")
+        leg = TicketLeg("event-1", "winner", "alice", Decimal("2"))
+        ticket = book.open_ticket([leg], "10")
+
+        with self.assertRaisesRegex(ValueError, "ticket_id.*exact string"):
+            book.settle(_ExplosiveString(ticket.ticket_id), {leg.quote_key})
+
+        self.assertIs(ticket.status, TicketStatus.OPEN)
+        self.assertEqual(book.balance, Decimal("90"))
 
     def test_open_ticket_rejects_noncanonical_leg_object_before_bankroll_mutation(self) -> None:
         book = PaperBook("100")
@@ -126,7 +204,7 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
                 )
 
                 with self.assertRaisesRegex(ValueError, "snapshot placed_at"):
-                    PaperBook.load(self.path)
+                    PaperBook.load_bytes(self.path.read_bytes())
 
     def test_save_rejects_mutated_invalid_timestamp_without_replacing_snapshot(self) -> None:
         book = PaperBook("100")
@@ -139,7 +217,10 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         last_good = self.path.read_bytes()
         ticket.placed_at = ""
 
-        with self.assertRaisesRegex(ValueError, "snapshot placed_at"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket opening economic identity changed after admission",
+        ):
             book.save(self.path)
 
         self.assertEqual(self.path.read_bytes(), last_good)
@@ -150,9 +231,6 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
             ("", "winner", "alice", "non-empty trimmed string"),
             ("event-1", " winner", "alice", "non-empty trimmed string"),
             ("event-1", "winner", "alice ", "non-empty trimmed string"),
-            ("event|1", "winner", "alice", "quote-key delimiter"),
-            ("event-1", "win|ner", "alice", "quote-key delimiter"),
-            ("event-1", "winner", "ali|ce", "quote-key delimiter"),
         )
         for event_id, market_id, selection_id, message in cases:
             with self.subTest(
@@ -166,7 +244,7 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
                     selection_id=selection_id,
                 )
                 with self.assertRaisesRegex(ValueError, message):
-                    PaperBook.load(self.path)
+                    PaperBook.load_bytes(self.path.read_bytes())
 
     def test_settlement_arithmetic_failure_does_not_partially_mutate_ticket_or_balance(self) -> None:
         book = PaperBook("9E+999999")
@@ -203,7 +281,10 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
 
         ticket.legs = (TicketLeg("event|alias", "winner", "alice", Decimal("2")),)
 
-        with self.assertRaisesRegex(ValueError, "quote-key delimiter"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket opening economic identity changed after admission",
+        ):
             book.save(self.path)
 
         self.assertEqual(self.path.read_bytes(), last_good)
@@ -217,9 +298,130 @@ class PaperBookCanonicalDurableStateTests(unittest.TestCase):
         last_good = self.path.read_bytes()
         book.tickets["alias-ticket-id"] = book.tickets.pop(ticket.ticket_id)
 
-        with self.assertRaisesRegex(ValueError, "mapping key must match ticket_id"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket set changed outside product-issued opening authority",
+        ):
             book.save(self.path)
 
+        self.assertEqual(self.path.read_bytes(), last_good)
+
+    def test_save_rejects_hostile_ticket_mapping_key_before_hash_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class ArmedTicketId(str):
+            armed = False
+
+            def __hash__(self) -> int:
+                if self.armed:
+                    dispatch_calls.append("hash")
+                    raise AssertionError("hostile ticket id hashed before exact admission")
+                return str.__hash__(self)
+
+            def __eq__(self, other: object) -> bool:
+                if self.armed:
+                    dispatch_calls.append("eq")
+                    raise AssertionError("hostile ticket id compared before exact admission")
+                return str.__eq__(self, other)
+
+        book, ticket = self._valid_book()
+        book.save(self.path)
+        last_good = self.path.read_bytes()
+
+        original = book.tickets.pop(ticket.ticket_id)
+        hostile = ArmedTicketId(ticket.ticket_id)
+        book.tickets[hostile] = original
+        hostile.armed = True
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "ticket identity keys must be exact strings",
+        ):
+            book.save(self.path)
+
+        self.assertEqual(dispatch_calls, [])
+        self.assertEqual(self.path.read_bytes(), last_good)
+
+    def test_save_rejects_hostile_lifecycle_ticket_id_before_comparison_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class ArmedTicketId(str):
+            armed = False
+
+            def __eq__(self, other: object) -> bool:
+                if self.armed:
+                    dispatch_calls.append("eq")
+                    raise AssertionError("hostile lifecycle ticket id compared before exact admission")
+                return str.__eq__(self, other)
+
+        book, _ = self._valid_book()
+        book.save(self.path)
+        last_good = self.path.read_bytes()
+
+        action, ticket_id, winners, voids = book._lifecycle[0]
+        hostile = ArmedTicketId(ticket_id)
+        hostile.armed = True
+        book._lifecycle[0] = (action, hostile, winners, voids)
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "lifecycle action/ticket identities must be exact strings",
+        ):
+            book.save(self.path)
+
+        self.assertEqual(dispatch_calls, [])
+        self.assertEqual(self.path.read_bytes(), last_good)
+
+    def test_save_rejects_hostile_settlement_history_key_before_sort_dispatch(self) -> None:
+        dispatch_calls: list[str] = []
+
+        class ArmedTicketId(str):
+            armed = False
+
+            def __hash__(self) -> int:
+                if self.armed:
+                    dispatch_calls.append("hash")
+                    raise AssertionError("hostile settlement ticket id hashed before exact admission")
+                return str.__hash__(self)
+
+            def __eq__(self, other: object) -> bool:
+                if self.armed:
+                    dispatch_calls.append("eq")
+                    raise AssertionError("hostile settlement ticket id compared before exact admission")
+                return str.__eq__(self, other)
+
+            def __lt__(self, other: object) -> bool:
+                if self.armed:
+                    dispatch_calls.append("lt")
+                    raise AssertionError("hostile settlement ticket id sorted before exact admission")
+                return str.__lt__(self, other)
+
+        book = PaperBook("100")
+        first = book.open_ticket(
+            [TicketLeg("event-1", "winner", "alice", Decimal("2"))],
+            "10",
+        )
+        second = book.open_ticket(
+            [TicketLeg("event-2", "winner", "bob", Decimal("2"))],
+            "10",
+        )
+        book.settle(first.ticket_id, {first.legs[0].quote_key})
+        book.settle(second.ticket_id, {second.legs[0].quote_key})
+        book.save(self.path)
+        last_good = self.path.read_bytes()
+
+        settled_at = book._settlement_times.pop(first.ticket_id)
+        hostile = ArmedTicketId(first.ticket_id)
+        book._settlement_times[hostile] = settled_at
+        hostile.armed = True
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "settlement history ticket identity keys must be exact strings",
+        ):
+            book.save(self.path)
+
+        self.assertEqual(dispatch_calls, [])
         self.assertEqual(self.path.read_bytes(), last_good)
 
     def test_save_rejects_mutated_economic_state_without_replacing_snapshot(self) -> None:

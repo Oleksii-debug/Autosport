@@ -74,8 +74,10 @@ def validate_outcome_source_lineage(
         expected_source_identity,
         field="sealed results outcome_provenance.source_identity",
     )
-    if not isinstance(source_record, dict):
-        raise ValueError("sealed outcome source record must be a JSON object")
+    _exact_dict_keys(
+        source_record,
+        field="sealed outcome source record",
+    )
 
     source_root_resolved = source_root.resolve()
     current_resolved = (source_root / current_file).resolve()
@@ -286,6 +288,7 @@ def validate_outcome_source_lineage(
 
 
 def _record_fields(raw: dict[str, Any]) -> dict[str, Any]:
+    _exact_dict_keys(raw, field="sealed outcome source record")
     schema_version = raw.get("schema_version")
     if type(schema_version) is not int or schema_version != 2:
         raise ValueError("sealed outcome source record.schema_version must be exact integer 2")
@@ -387,14 +390,28 @@ def _json_object_bytes(
 
 def _canonical_text(value: object, *, field: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or not value
         or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
     ):
         raise ValueError(
-            f"{field} must be a non-empty canonical string without surrounding whitespace"
+            f"{field} must be a non-empty canonical string without surrounding whitespace or control characters"
         )
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8 text") from exc
     return value
+
+
+def _exact_dict_keys(value: object, *, field: str) -> tuple[str, ...]:
+    if type(value) is not dict:
+        raise ValueError(f"{field} must be an exact JSON object")
+    keys = tuple(dict.keys(value))
+    if any(type(key) is not str for key in keys):
+        raise ValueError(f"{field} keys must be exact strings")
+    return keys
 
 
 def _positive_int(value: object, *, field: str) -> int:
@@ -435,15 +452,20 @@ def _timestamp(value: object, *, field: str) -> datetime:
 
 def _quote_outcomes(raw: dict[str, Any]) -> dict[str, str]:
     value = raw.get("quote_outcomes")
-    if not isinstance(value, dict):
-        raise ValueError("sealed outcome source record quote_outcomes must be an object")
+    keys = _exact_dict_keys(
+        value,
+        field="sealed outcome source record quote_outcomes",
+    )
     normalized: dict[str, str] = {}
-    for quote_key, outcome in value.items():
-        if not isinstance(quote_key, str) or not quote_key:
-            raise ValueError("sealed outcome source record quote keys must be non-empty strings")
-        if not isinstance(outcome, str) or outcome not in _ALLOWED_OUTCOMES:
+    for quote_key in keys:
+        canonical_key = _canonical_text(
+            quote_key,
+            field="sealed outcome source record quote key",
+        )
+        outcome = dict.__getitem__(value, quote_key)
+        if type(outcome) is not str or outcome not in _ALLOWED_OUTCOMES:
             raise ValueError(
                 "sealed outcome source record contains unsupported outcome; allowed values are win, loss, void"
             )
-        normalized[quote_key] = outcome
+        normalized[canonical_key] = outcome
     return normalized

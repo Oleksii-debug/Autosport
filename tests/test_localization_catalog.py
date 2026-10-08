@@ -138,6 +138,14 @@ _ENGLISH_UI_DIRECTIVE = re.compile(
 )
 
 
+# Catch sentence-case/low-case dangerous untranslated operator commands.
+# Uppercase prose is handled separately; do not reject legitimate STOP/UIA tokens.
+_ENGLISH_CRITICAL_ACTION_PHRASE = re.compile(
+    r"\b(?:[Ss]tart|[Aa]pprove|[Dd]elete|[Ee]xport)\s+"
+    r"(?:real\s+bet|all\s+data|private\s+data)\b"
+)
+
+
 _UPPERCASE_PROSE_SPAN = re.compile(r"\b[A-Z]{2,}(?:\s+[A-Z]{2,})+\b")
 _ALLOWED_UPPERCASE_TECHNICAL_WORDS = frozenset(
     {"API", "UIA", "NVDA", "UTC", "SHA", "ID", "STOP", "PAPER", "SHADOW", "LIVE"}
@@ -179,6 +187,9 @@ def _assert_critical_ukrainian_template(key: str, value: str) -> None:
     )
     assert not _has_untranslated_uppercase_prose(language_text), (
         f"{key} contains untranslated uppercase operator prose: {value!r}"
+    )
+    assert not _ENGLISH_CRITICAL_ACTION_PHRASE.search(language_text), (
+        f"{key} contains untranslated English critical action: {value!r}"
     )
 
 
@@ -238,6 +249,16 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
         ):
             _assert_critical_ukrainian_template(
                 "ui.example.unsafe_uppercase_prose", untranslated_uppercase
+            )
+    for sentence_case_english in (
+        "Start real bet і",
+        "Approve real bet і",
+        "Delete all data і",
+        "Export private data і",
+    ):
+        with pytest.raises(AssertionError, match="untranslated English critical action"):
+            _assert_critical_ukrainian_template(
+                "ui.example.sentence_case_english", sentence_case_english
             )
     with pytest.raises(AssertionError, match="empty/whitespace"):
         _assert_critical_ukrainian_template("ui.example.blank", "   ")
@@ -515,6 +536,9 @@ def _assert_ukrainian_critical_presentation(key: str, value: str) -> None:
     assert not _has_untranslated_uppercase_prose(value), (
         f"{key} contains untranslated uppercase operator prose: {value!r}"
     )
+    assert not _ENGLISH_CRITICAL_ACTION_PHRASE.search(value), (
+        f"{key} contains untranslated English critical action: {value!r}"
+    )
     untranslated = _untranslated_latin_product_words(value)
     assert not untranslated, (
         f"{key} contains untranslated Latin product words: {untranslated!r}; "
@@ -574,6 +598,17 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         ):
             _assert_ukrainian_critical_presentation(
                 "sample.unsafe_uppercase_prose", untranslated_uppercase
+            )
+
+    for sentence_case_english in (
+        "Start real bet і",
+        "Approve real bet і",
+        "Delete all data і",
+        "Export private data і",
+    ):
+        with pytest.raises(AssertionError, match="untranslated English critical action"):
+            _assert_ukrainian_critical_presentation(
+                "sample.sentence_case_english", sentence_case_english
             )
 
     with pytest.raises(AssertionError, match="English-only critical UI directive"):

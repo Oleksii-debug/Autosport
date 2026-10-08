@@ -1,3 +1,19 @@
+# Multi-Plan Parallel Closure Protocol v4 — owner directive 2026-10-08
+
+This v4 directive overrides conflicting global-sequential / one-mutation-front / earliest-monolithic-Section rules.
+
+Before mutation read PROJECT_PLAN_INDEX.md, MULTI_PLAN_PARALLELISM_CONTRACT.md, MULTI_PLAN_CLOSURE_STATE.md, the assigned Drive plan and live GitHub.
+
+- Plans 1–6 are independent; no priority order.
+- Inside one assigned plan, skip terminal DONE and take the first ACTIONABLE unfinished Section from MULTI_PLAN_CLOSURE_STATE.md.
+- Drive status lines are migration snapshots only.
+- Existing PR/branch/source: REUSE -> REPAIR -> CONVERGE.
+- Plan 4 provider/bookmaker engineering is ACTIONABLE_OFFLINE using existing code, public/recorded sources and fixtures; do not request real credentials to close engineering.
+- Plan 7 is provider-free PAPER/SHADOW convergence and waits on Plans 1,2,3,5,6; Plan 4 is not a hard prerequisite.
+- Plan 8 uses per-Section external gates. Real money / account / NVDA evidence never blocks Plans 1–7.
+- Fixture/source/PAPER/real/physical evidence classes are never interchangeable.
+- DONE remains terminal under Simplified Section Closure Protocol v3.
+
 # AGENTS.md
 
 ## Simplified Section Closure Protocol v3 — owner directive 2026-10-07

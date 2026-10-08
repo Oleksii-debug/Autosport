@@ -423,8 +423,8 @@ def test_source_or_license_identity_cannot_cross_lineages(tmp_path: Path) -> Non
             "cutoff moved backwards",
         ),
         (
-            "2026-09-02T00:00:00Z",
-            "2026-08-31T23:59:59Z",
+            "2026-09-01T00:00:00Z",
+            "2026-09-01T00:00:30Z",
             "availability moved backwards",
         ),
     ],

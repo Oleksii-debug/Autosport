@@ -6,6 +6,7 @@ from unittest.mock import patch
 
 from autosport.domain import TicketStatus, TicketLeg
 from autosport.paper import PaperBook
+import autosport.portfolio as portfolio_module
 from autosport.portfolio import PortfolioEngine
 
 
@@ -80,19 +81,17 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
             "10",
             placed_at="2026-09-21T08:00:00+00:00",
         )
-        canonical_ticket_type = type(first)
         copies = 0
+        canonical_fingerprint = portfolio_module._analysis_ticket_fingerprint
 
-        def copy_then_settle(*args, **kwargs):
+        def fingerprint_then_settle(ticket):
             nonlocal copies
-            snapshot = canonical_ticket_type(*args, **kwargs)
+            snapshot = canonical_fingerprint(ticket)
             copies += 1
             if copies == 1:
                 # The unsafe interleaving is deterministic:
-                # first was copied OPEN, then first and second settle before
-                # the second source ticket is inspected.  A naive one-pass
-                # copy would publish {first OPEN, second absent}, a state that
-                # never existed at one instant.
+                # first was observed OPEN, then both source tickets settle
+                # before the second source ticket is inspected.
                 book.settle(
                     first.ticket_id,
                     {first_leg.quote_key},
@@ -105,9 +104,10 @@ class PortfolioScenarioSnapshotIntegrityTests(unittest.TestCase):
                 )
             return snapshot
 
-        with patch(
-            "autosport.portfolio.PaperTicket",
-            side_effect=copy_then_settle,
+        with patch.object(
+            portfolio_module,
+            "_analysis_ticket_fingerprint",
+            side_effect=fingerprint_then_settle,
         ):
             with self.assertRaisesRegex(
                 ValueError,

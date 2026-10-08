@@ -22,13 +22,14 @@ def _candidate(leg: CandidateLeg) -> ParlayCandidate:
 @pytest.mark.parametrize("event_id", ("", " event", "event "))
 def test_ticket_identity_rejects_noncanonical_event_id(event_id: str) -> None:
     leg = CandidateLeg(
-        f"{event_id}|market|selection",
-        event_id,
+        "event|market|selection",
+        "event",
         Decimal("2"),
         Decimal("0.5"),
         "market",
         "selection",
     )
+    object.__setattr__(leg, "event_id", event_id)
 
     with pytest.raises(
         ValueError,
@@ -43,13 +44,14 @@ def test_direct_optimizer_rejects_empty_event_before_candidate_scenario_risk(
     """Direct evaluate_candidates callers must not depend on Beam input validation."""
 
     leg = CandidateLeg(
-        "|market|selection",
-        "",
+        "event|market|selection",
+        "event",
         Decimal("2"),
         Decimal("0.5"),
         "market",
         "selection",
     )
+    object.__setattr__(leg, "event_id", "")
     groups = [
         ScenarioGroup(
             "candidate",

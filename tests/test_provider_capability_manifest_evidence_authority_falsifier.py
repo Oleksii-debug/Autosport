@@ -996,11 +996,27 @@ def test_profile_validator_and_type_substitution_cannot_replace_canonical_profil
     forged_profile.source_ref = "forged-profile"
     forged_profile.source_payload_sha256 = _HASH_A
 
+    # Construct the spoofed identity from an actual canonical profile first.
+    # The FakeProfile deliberately borrows the canonical property descriptor,
+    # which now rejects a wrong concrete type before the manifest verifier runs.
+    # The legitimate twin supplies an exact matching digest so this falsifier
+    # reaches the intended anti-substitution boundary.
+    canonical_twin = BookmakerCapabilityProfile(
+        venue_id=forged_profile.venue_id,
+        account_id=forged_profile.account_id,
+        adapter_id=forged_profile.adapter_id,
+        adapter_version=forged_profile.adapter_version,
+        profile_version=forged_profile.profile_version,
+        facts=forged_profile.facts,
+        observed_at=forged_profile.observed_at,
+        source_ref=forged_profile.source_ref,
+        source_payload_sha256=forged_profile.source_payload_sha256,
+    )
     integration = BookmakerIntegrationEvidence(
         venue_id=forged_profile.venue_id,
         adapter_id=forged_profile.adapter_id,
         adapter_version=forged_profile.adapter_version,
-        profile_id=forged_profile.profile_id,
+        profile_id=canonical_twin.profile_id,
         integration_kind=BookmakerIntegrationKind.OFFICIAL_API,
         observed_at=_T1,
         source_ref="integration-manifest",

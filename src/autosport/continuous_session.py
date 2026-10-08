@@ -983,8 +983,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         for resolution in resolutions:
             if type(resolution) is not SettlementResolution:
                 raise TypeError("settlement resolutions must be exact SettlementResolution values")
-            resolution.validate(as_of=resolution.available_at)
-            detached.append(replace(resolution, quote_outcomes=resolution.quote_outcomes.copy()))
+            # Copy first, then validate that exact detached payload. Never
+            # validate one mutable mapping and consume a later revision of it.
+            # Reject dict subclasses before dispatching their copy() methods.
+            if type(resolution.quote_outcomes) is not dict:
+                raise ValueError("quote_outcomes must be a non-empty exact dict")
+            snapshot = replace(resolution, quote_outcomes=resolution.quote_outcomes.copy())
+            snapshot.validate(as_of=snapshot.available_at)
+            detached.append(snapshot)
         return tuple(detached)
 
     def _load_book(self) -> PaperBook:

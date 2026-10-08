@@ -465,3 +465,45 @@ def test_script_returns_zero_for_pass_and_five_for_budget_failure(tmp_path: Path
     )
     assert failed.returncode == 5
     assert "performance_qualification=FAIL" in failed.stdout
+
+
+@pytest.mark.parametrize("phase", ["keys", "lookup"])
+@pytest.mark.parametrize("exception_type", [OSError, KeyError, RuntimeError])
+def test_hostile_report_mapping_error_is_redacted(
+    phase: str, exception_type: type[Exception]
+) -> None:
+    """Untrusted report Mapping exceptions must never enter diagnostic traceback."""
+    import traceback
+
+    secret = "CANARY_PRIVATE_REPORT_TOKEN_DO_NOT_EMIT"
+
+    class HostileReport(Mapping[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            if phase == "keys":
+                raise exception_type(secret)
+            return iter(("status",))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            raise exception_type(secret)
+
+    with pytest.raises(
+        PerformanceQualificationError, match="could not be snapshotted"
+    ) as caught:
+        qualify_endurance_report(
+            HostileReport(),
+            _budget(),
+            source_sha=SOURCE_SHA,
+            machine_profile="untrusted-mapping-negative-fixture",
+        )
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(caught.value), caught.value, caught.value.__traceback__
+        )
+    )
+    assert secret not in rendered
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True

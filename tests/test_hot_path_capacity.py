@@ -67,3 +67,24 @@ def test_wait_congestion_counts_in_total_percentile():
     assert v.p95_elapsed_ns == 1_000_000
     assert v.stage_p95_ns == tuple((s,1) for s in STAGES)
     assert v.wait_count == 10
+
+
+def test_degraded_partial_ingest_latency_is_included_in_stage_p95():
+    # A high-latency WAIT at ingest must not vanish from stage telemetry.
+    slow_wait = HotPathReport(SHA, 'WAIT', 'STAGE_BUDGET', (('ingest', 1_000_000),), 1_000_001, 0)
+    reports = tuple(ok(1) for _ in range(10)) + tuple(slow_wait for _ in range(10))
+    v = summarize_hot_path_windows(reports, expected_source_sha=SHA)
+    assert v.window_count == 20 and v.wait_count == 10
+    assert v.stage_p95_ns[0] == ('ingest', 1_000_000)
+    assert v.stage_p95_ns[1:] == tuple((s, 1) for s in STAGES[1:])
+    assert v.p95_elapsed_ns == 1_000_001
+    assert v.execution_authority is False and v.target_machine_acceptance is False
+
+
+def test_all_wait_partial_stages_preserve_bounded_prefix_percentiles():
+    slow_wait = HotPathReport(SHA, 'WAIT', 'TOTAL_BUDGET', (('ingest', 10_000),), 10_001, 0)
+    v = summarize_hot_path_windows((slow_wait, slow_wait), expected_source_sha=SHA)
+    assert v.complete_count == 0 and v.wait_count == 2
+    assert v.stage_p95_ns == (('ingest', 10_000),)
+    assert v.p95_elapsed_ns == 10_001
+    assert v.execution_authority is False

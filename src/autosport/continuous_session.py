@@ -1022,6 +1022,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             return (), ()
         unique: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
+            previous = unique.get(resolution.evidence_id)
+            # Idempotency applies only to identical evidence payloads. A reused
+            # receipt/evidence ID with different quote outcomes cannot silently
+            # discard the second result and choose a financial outcome by order.
+            if previous is not None and previous != resolution:
+                raise ContinuousSessionError(
+                    "conflicting settlement payload for reused evidence_id"
+                )
             unique.setdefault(resolution.evidence_id, resolution)
 
         with WorkspaceEconomicLock(self.workspace):

@@ -139,7 +139,7 @@ _PERCENT_HEX = re.compile(r"%[0-9A-F]{2}")
 _PERCENT_HEX_BYTES = re.compile(rb"%[0-9A-Fa-f]{2}")
 _BASE64_RUN_BYTES = re.compile(rb"[A-Za-z0-9+/_-]{4,}={0,2}")
 _BASE64_FOLDED_RUN_BYTES = re.compile(
-    rb"(?:[A-Za-z0-9+/_-]{4,}\\r?\\n)+[A-Za-z0-9+/_-]{2,}={0,2}"
+    rb"(?:[A-Za-z0-9+/_-]{4,}\r?\n)+[A-Za-z0-9+/_-]{2,}={0,2}"
 )
 _HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 

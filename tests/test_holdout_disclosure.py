@@ -27,9 +27,11 @@ def _member(value: str) -> str:
 
 
 _MEMBERS_A = (_member("a"), _member("b"))
-_MEMBERS_B = (*_MEMBERS_A, _member("c"))
+_MEMBERS_B = (*_MEMBERS_A, _member("c"))  # Different manifest, overlapping evidence
+_MEMBERS_C = (_member("x"), _member("y"))  # Independently observed population
 _MANIFEST_A = membership_manifest_sha256(_MEMBERS_A)
 _MANIFEST_B = membership_manifest_sha256(_MEMBERS_B)
+_MANIFEST_C = membership_manifest_sha256(_MEMBERS_C)
 _DISCLOSED_AT = "2026-09-21T12:00:00Z"
 
 
@@ -82,6 +84,15 @@ def _ledger(tmp_path) -> HoldoutConsumptionLedger:
             _snapshot(snapshot_id="confirmation-b", manifest_sha256=_MANIFEST_B),
             _MEMBERS_B,
             "renamed-snapshot",
+        ),
+        (
+            _snapshot(
+                snapshot_id="confirmation-c",
+                manifest_sha256=_MANIFEST_C,
+                source_identity="provider:independent-confirmation-feed",
+            ),
+            _MEMBERS_C,
+            None,
         ),
     )
     for snapshot, _, _ in snapshots:
@@ -283,16 +294,16 @@ def test_family_relabel_cannot_reset_consumed_physical_holdout(
         )
 
 
-def test_disjoint_manifest_retains_independent_confirmation_capacity(tmp_path) -> None:
+def test_different_manifest_with_overlapping_membership_is_consumed(tmp_path) -> None:
     first = _snapshot(manifest_sha256=_MANIFEST_A)
-    second = _snapshot(
+    overlapping = _snapshot(
         snapshot_id="confirmation-b",
         manifest_sha256=_MANIFEST_B,
     )
     ledger = _ledger(tmp_path)
     gate = HoldoutDisclosureGate(ledger)
 
-    gate.record(
+    first_decision = gate.record(
         dataset_snapshot=first,
         research_protocol_id="protocol-v1",
         confirmation_trial_family_id="family-v1",
@@ -302,11 +313,112 @@ def test_disjoint_manifest_retains_independent_confirmation_capacity(tmp_path) -
         disclosed_at_utc=_DISCLOSED_AT,
     )
 
+    # B contains both members of A. Different manifests do not prove fresh
+    # confirmation observations, for assert_unused OR the durable consume path.
+    with pytest.raises(HoldoutAlreadyConsumedError, match="overlap"):
+        ledger.assert_unused(
+            dataset_snapshot=overlapping,
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+        )
+    with pytest.raises(HoldoutAlreadyConsumedError, match="overlap"):
+        gate.record(
+            dataset_snapshot=overlapping,
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+            channel=DisclosureChannel.API,
+            kind=DisclosureKind.EVENT_OUTCOME,
+            accessible_to_adaptive_actor=True,
+            disclosed_at_utc=_DISCLOSED_AT,
+        )
+    assert ledger.records() == (first_decision.consumption,)
+
+
+def test_canonical_proven_disjoint_membership_preserves_capacity(tmp_path) -> None:
+    first = _snapshot()
+    disjoint = _snapshot(
+        snapshot_id="confirmation-c",
+        manifest_sha256=_MANIFEST_C,
+        source_identity="provider:independent-confirmation-feed",
+    )
+    ledger = _ledger(tmp_path)
+    gate = HoldoutDisclosureGate(ledger)
+    gate.record(
+        dataset_snapshot=first,
+        research_protocol_id="protocol-v1",
+        confirmation_trial_family_id="family-v1",
+        channel=DisclosureChannel.UI,
+        kind=DisclosureKind.PASS_FAIL,
+        accessible_to_adaptive_actor=True,
+        disclosed_at_utc=_DISCLOSED_AT,
+    )
     ledger.assert_unused(
-        dataset_snapshot=second,
+        dataset_snapshot=disjoint,
         research_protocol_id="protocol-v1",
         confirmation_trial_family_id="family-v1",
     )
+    other = gate.record(
+        dataset_snapshot=disjoint,
+        research_protocol_id="protocol-v1",
+        confirmation_trial_family_id="family-v1",
+        channel=DisclosureChannel.API,
+        kind=DisclosureKind.EVENT_OUTCOME,
+        accessible_to_adaptive_actor=True,
+        disclosed_at_utc=_DISCLOSED_AT,
+    )
+    assert other.consumed
+    assert len(ledger.records()) == 2
+
+
+def test_overlap_remains_consumed_after_ledger_restart(tmp_path) -> None:
+    first = _snapshot()
+    overlapping = _snapshot(
+        snapshot_id="confirmation-b",
+        manifest_sha256=_MANIFEST_B,
+    )
+    ledger = _ledger(tmp_path)
+    first_record = HoldoutDisclosureGate(ledger).record(
+        dataset_snapshot=first,
+        research_protocol_id="protocol-v1",
+        confirmation_trial_family_id="family-v1",
+        channel=DisclosureChannel.EXPORT,
+        kind=DisclosureKind.EVENT_OUTCOME,
+        accessible_to_adaptive_actor=True,
+        disclosed_at_utc=_DISCLOSED_AT,
+    ).consumption
+
+    restarted = HoldoutConsumptionLedger(
+        ledger._path,
+        lineage_authority=ledger._dataset_lineage_authority,
+    )
+    with pytest.raises(HoldoutAlreadyConsumedError, match="overlap"):
+        restarted.assert_unused(
+            dataset_snapshot=overlapping,
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+        )
+    with pytest.raises(HoldoutAlreadyConsumedError, match="overlap"):
+        HoldoutDisclosureGate(restarted).record(
+            dataset_snapshot=overlapping,
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-v1",
+            channel=DisclosureChannel.UI,
+            kind=DisclosureKind.PASS_FAIL,
+            accessible_to_adaptive_actor=True,
+            disclosed_at_utc=_DISCLOSED_AT,
+        )
+    # The original frozen-attempt retry must remain idempotent after restart.
+    resumed = HoldoutDisclosureGate(restarted).record(
+        dataset_snapshot=first,
+        research_protocol_id="protocol-v1",
+        confirmation_trial_family_id="family-v1",
+        channel=DisclosureChannel.API,
+        kind=DisclosureKind.PASS_FAIL,
+        accessible_to_adaptive_actor=False,
+        disclosed_at_utc="2026-09-21T12:05:00Z",
+    )
+    assert resumed.consumption == first_record
+    assert len(restarted.records()) == 1
 
 
 def test_gate_rejects_instance_shadowed_ledger_consume(tmp_path) -> None:

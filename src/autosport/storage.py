@@ -1017,6 +1017,9 @@ class SQLiteMarketStore:
         # same durable database.
         self.path = Path(path).resolve(strict=False)
         self._connection_lock = RLock()
+        # Serialize threads of one store before attempting its nonblocking
+        # cross-process append lease; never substitute this for the OS lock.
+        self._append_thread_lock = RLock()
 
         # Ensure even a brand-new database has an inode that can be witnessed both
         # before and after sqlite3.connect(). Without this pre/post witness, a
@@ -3008,7 +3011,11 @@ class SQLiteMarketStore:
         # append issuance first, then this instance's SQLite connection lock.
         # Reversing these two locks creates an AB-BA deadlock when one thread is
         # appending while another calls events()/current_by_source().
-        with self._market_append_issuance_lock(authority):
+        # One store's provider drains may run in different threads. Acquire a
+        # store-local lock before the external issuance lease so an ordinary
+        # same-process race cannot masquerade as another economic writer.
+        # Keep the cross-process lease -> SQLite connection lock order intact.
+        with self._append_thread_lock, self._market_append_issuance_lock(authority):
             with self._connection_lock:
                 self.connection.execute("BEGIN IMMEDIATE")
                 prepared: tuple[str, str] | None = None

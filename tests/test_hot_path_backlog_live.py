@@ -69,7 +69,7 @@ def test_backlog_sampler_exception_is_redacted_and_does_not_retry():
         )
     assert "CANARY" not in str(captured.value)
     assert captured.value.__cause__ is None
-    assert captured.value.__suppress_context__
+    assert captured.value.__context__ is None
     assert reads == [1] and calls == []
 
 

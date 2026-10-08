@@ -40,7 +40,7 @@ https://docs.google.com/document/d/1DmEXcaIF4nff8iNLKFsV6CxexX1v7cEq8E8FCRq5bX8/
 - Use MULTI_PLAN_CLOSURE_STATE.md as live status authority; Drive statuses are migration snapshots.
 - Existing PR/branch/source must be REUSE -> REPAIR -> CONVERGE before duplicate scope.
 - Plan 4 is actionable offline without bookmaker credentials/accounts using existing code, public/recorded data and fixtures.
-- Plan 7 waits for terminal outputs from all independent engineering Plans 1–6. Plan 4 remains fully parallel/offline-actionable; it becomes a prerequisite only at the final provider-free/PAPER-SHADOW convergence gate.
+- Plan 7 waits for terminal Plans 1,2,3,5,6 plus the provider-free qualification slice of Plan 4: Sections 1,2,7 (or a later equivalent with the same acceptance boundary). The rest of Plan 4—supervised/real execution machinery—does not block M1 and continues in parallel toward Plan 8.
 - Plan 8 uses per-Section external gates; absence of bookmaker/account evidence never blocks Plans 1–7.
 - Old sequential numbering no longer chooses work.
 

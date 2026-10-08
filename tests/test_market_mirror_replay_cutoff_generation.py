@@ -4397,7 +4397,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     odds="9.99",
                     observed_ts="2026-09-16T18:59:59+00:00",
                     ingest_ts="2026-09-16T18:59:59+00:00",
-                    source_ts="2026-09-16T19:00:01+00:00",
+                    source_ts="2026-09-16T19:00:01.000001+00:00",
                 )
                 self.assertTrue(store.append(visible))
                 self.assertTrue(store.append(future_source))

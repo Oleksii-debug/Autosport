@@ -66,6 +66,15 @@ def run_hot_path(
         raise HotPathError("source_sha must be a lowercase 40-digit revision")
     if type(policy) is not HotPathPolicy:
         raise HotPathError("policy must be exact HotPathPolicy")
+    # Frozen dataclasses can still be changed with object.__setattr__ by a
+    # callback holding the caller's policy. Re-validate then detach all scalar
+    # thresholds before executing any stage; never reread mutable caller state.
+    policy = HotPathPolicy(
+        stage_budget_ns=policy.stage_budget_ns,
+        total_budget_ns=policy.total_budget_ns,
+        max_backlog=policy.max_backlog,
+        max_source_age_ns=policy.max_source_age_ns,
+    )
     if type(observed_at_ns) is not int or observed_at_ns < 0:
         raise HotPathError("observed_at_ns must be monotonic nonnegative integer")
     if type(backlog) is not int or backlog < 0:

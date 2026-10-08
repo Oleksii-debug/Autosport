@@ -142,7 +142,7 @@ _ENGLISH_UI_DIRECTIVE = re.compile(
 # Uppercase prose is handled separately; do not reject legitimate STOP/UIA tokens.
 _ENGLISH_CRITICAL_ACTION_PHRASE = re.compile(
     r"\b(?:[Ss]tart|[Aa]pprove|[Dd]elete|[Ee]xport)\s+"
-    r"(?:real\s+bet|all\s+data|private\s+data)\b"
+    r"(?i:real\s+bet|all\s+data|private\s+data)\b"
 )
 
 
@@ -255,6 +255,10 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
         "Approve real bet і",
         "Delete all data і",
         "Export private data і",
+        "Start REAL BET і",
+        "Approve Real Bet і",
+        "Delete ALL DATA і",
+        "Export PRIVATE DATA і",
     ):
         with pytest.raises(AssertionError, match="untranslated English critical action"):
             _assert_critical_ukrainian_template(
@@ -605,6 +609,10 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         "Approve real bet і",
         "Delete all data і",
         "Export private data і",
+        "Start REAL BET і",
+        "Approve Real Bet і",
+        "Delete ALL DATA і",
+        "Export PRIVATE DATA і",
     ):
         with pytest.raises(AssertionError, match="untranslated English critical action"):
             _assert_ukrainian_critical_presentation(

@@ -106,6 +106,67 @@ def _show_startup_error(message: str) -> None:
         pass
 
 
+
+def _offer_native_emergency_stop(workspace: Path, failure_message: str) -> None:
+    """Keep an explicit, keyboard-accessible STOP choice after WebView2 startup fails.
+
+    This is not an automatic execution STOP. The native Windows dialog defaults to
+    No, and a Yes response attempts only the canonical durable admission STOP.
+    A failed or uncertain journal write must never be announced as confirmed.
+    """
+
+    try:
+        import ctypes
+
+        message_box = ctypes.windll.user32.MessageBoxW
+        choice = message_box(
+            None,
+            failure_message
+            + "\n\nWebView2 недоступний. Чи активувати аварійний STOP через "
+            "стійкий журнал заборони нових виконань?\n"
+            "Це не доводить завершення вже запущених процесів. "
+            "Кнопка «Ні» вибрана за замовчуванням.",
+            "Автоспорт — резервне аварійне керування",
+            0x00000004 | 0x00000030 | 0x00000100,  # YESNO, warning, default NO
+        )
+    except Exception:
+        _show_startup_error(failure_message)
+        return
+
+    if choice != 6:  # IDYES; No, Escape, close and unexpected results are inert.
+        return
+
+    try:
+        from autosport.windows_emergency_stop import WindowsEmergencyStopBridge
+
+        result = WindowsEmergencyStopBridge.for_workspace(workspace).activate()
+        confirmed = result.stopped is True
+        message = (
+            result.message_uk
+            if confirmed
+            else "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
+            "Нові виконання мають залишатися заблокованими; "
+            "перевірте стійкий журнал STOP."
+        )
+    except Exception:
+        confirmed = False
+        message = (
+            "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
+            "Доступ до стійкого журналу не підтверджено. "
+            "Не вважайте нові виконання заблокованими без перевірки."
+        )
+
+    try:
+        message_box(
+            None,
+            message,
+            "Автоспорт — результат аварійного STOP",
+            0x00000040 if confirmed else 0x00000010,  # information / error
+        )
+    except Exception:
+        pass
+
+
 def _run_owned_interactive_gui(workspace: Path, webview_storage: Path) -> int:
     """Run the interactive WebView stack while caller holds both storage ownership locks."""
 
@@ -114,7 +175,7 @@ def _run_owned_interactive_gui(workspace: Path, webview_storage: Path) -> int:
     )
 
     if active_webview2_environment_overrides():
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        _offer_native_emergency_stop(workspace, _WEBVIEW2_STARTUP_ERROR)
         return 3
 
     try:
@@ -122,11 +183,11 @@ def _run_owned_interactive_gui(workspace: Path, webview_storage: Path) -> int:
 
         runtime_preflight = ensure_webview2_runtime()
     except Exception:
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        _offer_native_emergency_stop(workspace, _WEBVIEW2_STARTUP_ERROR)
         return 3
 
     if runtime_preflight.available is not True:
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        _offer_native_emergency_stop(workspace, _WEBVIEW2_STARTUP_ERROR)
         return 3
 
     from autosport.windows_webview_emergency_stop import EmergencyStopWebController
@@ -144,9 +205,9 @@ def _run_owned_interactive_gui(workspace: Path, webview_storage: Path) -> int:
         )
     except WindowsWebViewUnavailable as exc:
         if getattr(exc, "reason", None) == "storage":
-            _show_startup_error(_WEBVIEW2_STORAGE_ERROR)
+            _offer_native_emergency_stop(workspace, _WEBVIEW2_STORAGE_ERROR)
             return 2
-        _show_startup_error(_WEBVIEW2_STARTUP_ERROR)
+        _offer_native_emergency_stop(workspace, _WEBVIEW2_STARTUP_ERROR)
         return 3
 
 

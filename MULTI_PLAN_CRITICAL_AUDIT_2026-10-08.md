@@ -11,7 +11,7 @@
 ## Dependency model
 Plans 1–6 are independent engineering plans and may finish in any order.
 Plan 4 bookmaker/provider/execution engineering is offline/fixture-capable and requires no real bookmaker credentials for component DONE.
-Plan 7 is provider-free PAPER/SHADOW convergence and waits on terminal Plans 1–6. Plan 4 remains parallel/offline-actionable, but its provider/public-browser qualification is required for the final end-to-end convergence.
+Plan 7 is provider-free PAPER/SHADOW convergence and waits on terminal Plans 1,2,3,5,6 plus Plan 4 Sections 1,2,7. This is the minimal correct provider-free dependency: the remaining supervised/real-execution Plan-4 Sections continue independently toward Plan 8.
 Plan 8 is dependency-aware external/real-execution/NVDA/final release.
 
 ## Migrated truth

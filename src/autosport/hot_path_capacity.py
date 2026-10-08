@@ -29,7 +29,7 @@ class HotPathCapacityEvidence:
     wait_count: int
     max_backlog: int
     max_elapsed_ns: int
-    p95_elapsed_ns: int | None
+    p95_elapsed_ns: int
     stage_p95_ns: tuple[tuple[str, int], ...]
     wait_reasons: tuple[tuple[str, int], ...]
     windows_sha256: str
@@ -53,9 +53,9 @@ class HotPathCapacityEvidence:
                 raise HotPathError("invalid capacity count or latency")
         if not (0 < self.window_count <= MAX_CAPACITY_WINDOWS and self.window_count == self.complete_count + self.wait_count):
             raise HotPathError("inconsistent capacity window counts")
-        if (self.p95_elapsed_ns is None) != (self.complete_count == 0):
-            raise HotPathError("inconsistent complete-window latency")
-        if self.p95_elapsed_ns is not None and (type(self.p95_elapsed_ns) is not int or not 0 <= self.p95_elapsed_ns <= self.max_elapsed_ns):
+        # WAIT windows are part of observed load. Omitting them from total p95
+        # would understate congestion while claiming a source-bound metric.
+        if type(self.p95_elapsed_ns) is not int or not 0 <= self.p95_elapsed_ns <= self.max_elapsed_ns:
             raise HotPathError("invalid capacity percentile")
         if type(self.stage_p95_ns) is not tuple or len(self.stage_p95_ns) != (len(STAGES) if self.complete_count else 0):
             raise HotPathError("incomplete capacity stage percentiles")
@@ -125,7 +125,7 @@ def summarize_hot_path_windows(
         wait_count=len(reports) - len(completed),
         max_backlog=max_backlog,
         max_elapsed_ns=max_elapsed,
-        p95_elapsed_ns=_p95([r.total_elapsed_ns for r in completed]) if completed else None,
+        p95_elapsed_ns=_p95([r.total_elapsed_ns for r in reports]),
         stage_p95_ns=tuple(
             (stage, _p95([r.stage_latencies_ns[index][1] for r in completed]))
             for index, stage in enumerate(STAGES)

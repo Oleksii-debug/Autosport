@@ -91,10 +91,15 @@ def run_hot_path(
 
     def read_clock() -> int:
         nonlocal previous_tick
+        clock_failed = False
         try:
             tick = clock_ns()
         except Exception:
-            raise HotPathError("monotonic clock unavailable") from None
+            clock_failed = True
+        # Raise after leaving the handler: exception chaining retains sensitive
+        # callback payload in __context__ even with "from None".
+        if clock_failed:
+            raise HotPathError("monotonic clock unavailable")
         if type(tick) is not int or tick < 0:
             raise HotPathError("monotonic clock returned invalid timestamp")
         # Every sample must be >= the prior sample, including across stages.
@@ -115,10 +120,13 @@ def run_hot_path(
     def check_backlog() -> bool:
         nonlocal observed_backlog
         if backlog_reader is not None:
+            sampler_failed = False
             try:
                 latest = backlog_reader()
             except Exception:
-                raise HotPathError("backlog sampling unavailable") from None
+                sampler_failed = True
+            if sampler_failed:
+                raise HotPathError("backlog sampling unavailable")
             if type(latest) is not int or latest < 0:
                 raise HotPathError("backlog sample must be nonnegative integer")
             observed_backlog = max(observed_backlog, latest)
@@ -139,10 +147,13 @@ def run_hot_path(
             return stop("STALE_SOURCE", before)
         if before - started > policy.total_budget_ns:
             return stop("TOTAL_BUDGET", before)
+        stage_failed = False
         try:
             callback()
         except Exception:
-            raise HotPathError("stage failed closed") from None
+            stage_failed = True
+        if stage_failed:
+            raise HotPathError("stage failed closed")
         after = read_clock()
         if after < before:
             raise HotPathError("monotonic clock moved backwards")

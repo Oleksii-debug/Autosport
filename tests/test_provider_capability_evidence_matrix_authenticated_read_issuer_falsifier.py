@@ -477,7 +477,13 @@ def test_restart_journal_can_requalify_only_with_fresh_product_issued_successor(
         journal=restored,
     )
     assert fact.evidence_sha256 == successor.evidence.evidence_id
-    assert restored.to_json() == restored_before
+    # A legitimate fresh successor is published to the caller journal on
+    # successful issuance. The pre-issuance snapshot must remain only a prefix,
+    # not be mistaken for the post-commit durable state.
+    committed = restored.to_json()
+    assert committed != restored_before
+    assert restored.latest_evidence_id_for(successor.evidence) == successor.evidence.evidence_id
+    assert CapabilityEvidenceJournal.from_json(committed).to_json() == committed
 
     matrix = build_provider_capability_evidence_matrix(
         successor.profile,

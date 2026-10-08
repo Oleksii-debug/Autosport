@@ -6,6 +6,8 @@ from types import SimpleNamespace
 
 import pytest
 
+from autosport.domain import TicketLeg
+from autosport.paper import PaperBook
 from autosport.localization import (
     CATALOG_VERSION,
     DEFAULT_LOCALE,
@@ -259,30 +261,33 @@ def test_result_summary_localizes_labels_but_preserves_raw_economic_values() -> 
 
 
 def test_ticket_lines_preserve_canonical_leg_identity_and_decimal_values() -> None:
-    ticket = SimpleNamespace(
-        status=SimpleNamespace(value="won"),
-        stake=Decimal("25.50"),
-        combined_odds=Decimal("2.10"),
-        payout=Decimal("53.55"),
-        legs=(
-            SimpleNamespace(
-                event_id="event:raw-1",
-                market_id="market:raw-2",
-                selection_id="selection:raw-3",
-                locked_odds=Decimal("2.10"),
-            ),
-        ),
+    book = PaperBook("100")
+    leg = TicketLeg(
+        event_id="event:raw-1",
+        market_id="market:raw-2",
+        selection_id="selection:raw-3",
+        locked_odds=Decimal("2.10"),
     )
-    session = SimpleNamespace(book=SimpleNamespace(tickets={"ticket-raw": ticket}))
+    ticket = book.open_ticket(
+        (leg,),
+        Decimal("25.50"),
+        placed_at="2026-09-16T10:00:00+00:00",
+    )
+    book.settle(
+        ticket.ticket_id,
+        {leg.quote_key},
+        settled_at="2026-09-16T10:01:00+00:00",
+    )
+    session = SimpleNamespace(book=book)
 
     rendered = ticket_lines(session)
 
     assert len(rendered) == 1
-    assert rendered[0].startswith("WON | ставка 25.50 | коефіцієнт 2.10 | виплата 53.55 | ")
+    assert rendered[0].startswith("WON | ставка 25.50 | коефіцієнт 2.10 | виплата 53.5500 | ")
     assert "event:raw-1/market:raw-2/selection:raw-3@2.10" in rendered[0]
-    assert ticket_lines(SimpleNamespace(book=SimpleNamespace(tickets={}))) == [
-        "Паперові квитки ще відсутні."
-    ]
+
+    empty_session = SimpleNamespace(book=PaperBook("100"))
+    assert ticket_lines(empty_session) == ["Паперові квитки ще відсутні."]
 
 
 def test_observation_presentation_is_ukrainian_without_mutating_provider_identity() -> None:

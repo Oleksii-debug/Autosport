@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -26,6 +27,7 @@ from autosport.paper import PaperBook
 from autosport.paper_settlement_learning import (
     PaperSettlementLearningBridge,
     PaperSettlementLearningBridgeError,
+    PaperSettlementLearningWitness,
 )
 from autosport.risk import PaperRiskPolicy
 from autosport.settlement import SettlementEngine
@@ -204,6 +206,129 @@ def _settle(
 
 
 class PaperSettlementLearningBridgeTests(unittest.TestCase):
+
+
+    def test_bridge_reread_rejects_boolean_schema_version_with_valid_digest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-schema-version",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                _ticket,
+                _decision,
+                _environment,
+                _baseline,
+                _runtime,
+                _observation,
+                _action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            path = root / "paper_learning_bridge.json"
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["schema_version"] = True
+            bare = {
+                "schema": raw["schema"],
+                "schema_version": raw["schema_version"],
+                "bindings": raw["bindings"],
+            }
+            raw["state_sha256"] = hashlib.sha256(
+                json.dumps(
+                    bare,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                    allow_nan=False,
+                ).encode("utf-8")
+            ).hexdigest()
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            forged = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                PaperSettlementLearningBridgeError,
+                "unsupported bridge schema",
+            ):
+                bridge._read()
+
+            self.assertEqual(path.read_bytes(), forged)
+
+    def test_resolution_witness_rejects_observation_subclass_before_dispatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            leg = TicketLeg(
+                event_id="event-identity-guard",
+                market_id="winner",
+                selection_id="home",
+                locked_odds=Decimal("2.00"),
+                sport="table_tennis",
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(root, legs=(leg,))
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(
+                root,
+                outcomes={leg.quote_key: "win"},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+            witness = bridge.resolution_witness(ticket.ticket_id)
+
+            class ObservationAlias(Observation):
+                pass
+
+            alias = ObservationAlias(
+                environment_id=witness.observation.environment_id,
+                observed_at=witness.observation.observed_at,
+                available_at=witness.observation.available_at,
+                evidence=witness.observation.evidence,
+            )
+            with self.assertRaisesRegex(
+                TypeError,
+                "observation must use the exact canonical record type",
+            ):
+                PaperSettlementLearningWitness(
+                    ticket_id=witness.ticket_id,
+                    binding_id=witness.binding_id,
+                    settlement_bundle_sha256=witness.settlement_bundle_sha256,
+                    observation=alias,
+                    action=witness.action,
+                    outcome=witness.outcome,
+                    reward=witness.reward,
+                    transition=witness.transition,
+                    baseline_checkpoint=witness.baseline_checkpoint,
+                    next_checkpoint=witness.next_checkpoint,
+                )
+
     def test_outbox_survives_failure_before_agent_loop_ack(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)

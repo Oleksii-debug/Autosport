@@ -43,6 +43,19 @@ class GovernancePermissionState(str, Enum):
 _LOCAL_WRITE_LOCK = RLock()
 
 
+def _fdopen_owned_text(fd: int):
+    """Transfer a temporary file descriptor to a text handle without leaking it."""
+
+    try:
+        return os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 @contextmanager
 def _registry_write_lock(registry_path: Path) -> Iterator[None]:
     """Serialize the complete registry read-modify-publish transaction.
@@ -89,9 +102,14 @@ def _registry_write_lock(registry_path: Path) -> Iterator[None]:
 
 
 def _text(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise BookmakerCapabilityRegistryError(
-            f"{field} must be a non-empty trimmed string"
+            f"{field} must be a non-empty canonical string"
         )
     return value
 
@@ -157,6 +175,11 @@ class BookmakerGovernanceEvidence:
         return sha256(encoded).hexdigest()
 
     def to_canonical_dict(self) -> dict[str, object]:
+        if type(self) is not BookmakerGovernanceEvidence:
+            raise BookmakerCapabilityRegistryError(
+                "evidence must be an exact BookmakerGovernanceEvidence"
+            )
+        BookmakerGovernanceEvidence.__post_init__(self)
         return {
             "account_id": self.account_id,
             "automation_permission": self.automation_permission.value,
@@ -178,9 +201,9 @@ class BookmakerCapabilityRegistry:
         self.path = Path(path)
 
     def register_profile(self, profile: BookmakerCapabilityProfile) -> bool:
-        if not isinstance(profile, BookmakerCapabilityProfile):
+        if type(profile) is not BookmakerCapabilityProfile:
             raise BookmakerCapabilityRegistryError(
-                "profile must be a BookmakerCapabilityProfile"
+                "profile must be an exact BookmakerCapabilityProfile"
             )
         with _registry_write_lock(self.path):
             document = self._load_document()
@@ -247,9 +270,9 @@ class BookmakerCapabilityRegistry:
         self,
         evidence: BookmakerGovernanceEvidence,
     ) -> bool:
-        if not isinstance(evidence, BookmakerGovernanceEvidence):
+        if type(evidence) is not BookmakerGovernanceEvidence:
             raise BookmakerCapabilityRegistryError(
-                "evidence must be BookmakerGovernanceEvidence"
+                "evidence must be exact BookmakerGovernanceEvidence"
             )
         with _registry_write_lock(self.path):
             document = self._load_document()
@@ -530,7 +553,7 @@ class BookmakerCapabilityRegistry:
         )
         temp_path = Path(temp_name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            with _fdopen_owned_text(fd) as handle:
                 json.dump(
                     document,
                     handle,

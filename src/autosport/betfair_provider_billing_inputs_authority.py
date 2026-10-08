@@ -29,8 +29,13 @@ store, economic classifier, allocation authority, or durable cost record.
 """
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import datetime, timezone
+from hashlib import sha256
+import hmac
+from secrets import token_bytes
 import urllib.request as _urllib_request
+from weakref import ReferenceType, ref
 
 from . import betfair_account_readonly as _readonly
 from . import betfair_provider_billing_inputs as _inputs
@@ -140,10 +145,46 @@ def _build_observation_authority():
     error_cls = BetfairProviderBillingInputsAuthorityError
     get_attr = object.__getattribute__
     object_new = object.__new__
+    hmac_new = hmac.new
+    compare_digest = hmac.compare_digest
+    hash_ctor = sha256
+    session_binding_key = token_bytes(32)
 
-    # Strongly retaining the issued object prevents id reuse while its issuance is
-    # authoritative. The stored projection detects object.__setattr__ tampering.
-    issued: dict[int, tuple[object, tuple[object, ...]]] = {}
+    @dataclass(frozen=True, slots=True, weakref_slot=True)
+    class TraversalCapability:
+        """Private possession capability for one exact product-owned page sweep."""
+
+        pages: tuple[object, ...]
+
+        def __post_init__(self) -> None:
+            if type(self.pages) is not tuple or not self.pages:
+                raise error_cls("provider billing traversal pages must be non-empty")
+
+        def __len__(self) -> int:
+            return len(self.pages)
+
+        def __iter__(self):
+            return iter(self.pages)
+
+        def __getitem__(self, index):
+            return self.pages[index]
+
+    # Issuance must not become a process-lifetime owner. Weak references preserve
+    # exact-object authority while callers hold the capability and remove stale
+    # registry entries when the corresponding observation/traversal is released.
+    # Opaque session bindings never enter durable/public evidence.
+    issued: dict[
+        int,
+        tuple[ReferenceType[object], tuple[object, ...], bytes],
+    ] = {}
+    traversals: dict[
+        int,
+        tuple[
+            ReferenceType[TraversalCapability],
+            tuple[int, ...],
+            bytes,
+        ],
+    ] = {}
 
     def assert_executable_authority() -> None:
         """Fail fast on known executable drift inside the trusted-process boundary."""
@@ -224,15 +265,51 @@ def _build_observation_authority():
                 "provider billing observation failed canonical validation"
             ) from exc
 
-    def register(source: object):
+    def session_binding(credentials: BetfairSessionCredentials) -> bytes:
+        if type(credentials) is not credentials_cls:
+            raise error_cls(
+                "provider billing session capability must be exact canonical credentials"
+            )
+        application_key = credentials.application_key.encode("utf-8")
+        session_token = credentials.session_token.encode("utf-8")
+        payload = (
+            b"autosport.betfair.provider-billing-session-v1\x00"
+            + len(application_key).to_bytes(8, "big")
+            + application_key
+            + len(session_token).to_bytes(8, "big")
+            + session_token
+        )
+        return hmac_new(session_binding_key, payload, hash_ctor).digest()
+
+    def register(source: object, binding: bytes):
         if type(source) is not source_cls:
             raise error_cls(
                 "canonical provider billing read returned unexpected observation type"
             )
+        if type(binding) is not bytes or len(binding) != hash_ctor().digest_size:
+            raise error_cls("provider billing session binding is invalid")
         # Re-run the closure-backed canonical structural/digest validator before the
-        # observation enters the private issuance relation.
+        # observation enters the private issuance relation.  Only an authority-keyed
+        # opaque session binding is retained; raw credentials/session tokens are not
+        # stored in the registry and the binding never enters durable evidence.
         validate_structure(source)
-        issued[id(source)] = (source, projection(source))
+        source_id = id(source)
+
+        def discard_source(
+            dead_ref: ReferenceType[object],
+            *,
+            registered_id: int = source_id,
+        ) -> None:
+            current = issued.get(registered_id)
+            if current is not None and current[0] is dead_ref:
+                issued.pop(registered_id, None)
+
+        source_ref = ref(source, discard_source)
+        issued[source_id] = (
+            source_ref,
+            projection(source),
+            binding,
+        )
         return source
 
     def read(
@@ -301,7 +378,7 @@ def _build_observation_authority():
         # A persistent executable/global-opener rebind that occurs during provider
         # I/O cannot be legitimized merely because the returned JSON is valid.
         assert_executable_authority()
-        return register(source)
+        return register(source, session_binding(credentials))
 
     def validate(source: object):
         """Return only an exact, untampered observation issued by ``read`` above."""
@@ -316,7 +393,7 @@ def _build_observation_authority():
         # tampering from replacing the exact issued identity.
         validate_structure(source)
         registered = issued.get(id(source))
-        if registered is None or registered[0] is not source:
+        if registered is None or registered[0]() is not source:
             raise error_cls(
                 "provider billing observation must be issued by canonical provider read"
             )
@@ -326,10 +403,120 @@ def _build_observation_authority():
             )
         return source
 
-    return read, validate
+    def read_traversal(
+        credentials: BetfairSessionCredentials,
+        *,
+        record_count: int = 100,
+        statement_from: str | None = None,
+        statement_to: str | None = None,
+        max_pages: int = 1000,
+    ):
+        """Acquire one bounded product-owned account-statement pagination sweep."""
+
+        if type(credentials) is not credentials_cls:
+            raise TypeError("credentials must be exact BetfairSessionCredentials")
+        if (
+            isinstance(max_pages, bool)
+            or not isinstance(max_pages, int)
+            or max_pages <= 0
+            or max_pages > 1000
+        ):
+            raise ValueError("max_pages must be an integer from 1 through 1000")
+
+        binding = session_binding(credentials)
+        pages: list[object] = []
+        from_record = 0
+        for _page_index in range(max_pages):
+            source = read(
+                credentials,
+                from_record=from_record,
+                record_count=record_count,
+                statement_from=statement_from,
+                statement_to=statement_to,
+            )
+            registered = issued[id(source)]
+            if not compare_digest(registered[2], binding):
+                raise error_cls(
+                    "provider billing authenticated session changed during traversal"
+                )
+            pages.append(source)
+            statement = get_attr(source, "statement")
+            more_available = get_attr(statement, "more_available")
+            items = get_attr(statement, "items")
+            if not more_available:
+                capability = TraversalCapability(tuple(pages))
+                traversal_id = id(capability)
+
+                def discard_traversal(
+                    dead_ref: ReferenceType[TraversalCapability],
+                    *,
+                    registered_id: int = traversal_id,
+                ) -> None:
+                    current = traversals.get(registered_id)
+                    if current is not None and current[0] is dead_ref:
+                        traversals.pop(registered_id, None)
+
+                capability_ref = ref(capability, discard_traversal)
+                traversals[traversal_id] = (
+                    capability_ref,
+                    tuple(id(page) for page in capability.pages),
+                    binding,
+                )
+                return capability
+            item_count = len(items)
+            if item_count <= 0:
+                raise error_cls(
+                    "provider billing traversal cannot progress from an empty "
+                    "non-terminal page"
+                )
+            from_record += item_count
+
+        raise error_cls(
+            "provider billing traversal did not reach a terminal page "
+            "within max_pages"
+        )
+
+    def validate_traversal(capability: object):
+        """Validate one exact product-owned authenticated pagination sweep.
+
+        The private capability object itself must have been issued by the canonical
+        traversal reader. A consumer therefore cannot mint positive traversal
+        evidence by reconstructing or splicing the underlying page tuple, even when
+        the pages used the same authenticated session. Registry ownership is weak:
+        releasing the capability also releases its traversal-authority entry.
+        """
+
+        if type(capability) is not TraversalCapability:
+            raise TypeError("traversal must be exact canonical capability")
+        traversal = traversals.get(id(capability))
+        if traversal is None or traversal[0]() is not capability:
+            raise error_cls(
+                "provider billing traversal must be issued by canonical "
+                "pagination acquisition"
+            )
+        pages = capability.pages
+        if tuple(id(source) for source in pages) != traversal[1]:
+            raise error_cls(
+                "provider billing traversal changed after canonical acquisition"
+            )
+
+        traversal_binding = traversal[2]
+        for source in pages:
+            current = validate(source)
+            registered = issued[id(current)]
+            if not compare_digest(registered[2], traversal_binding):
+                raise error_cls(
+                    "provider billing traversal pages must share one "
+                    "authenticated session capability"
+                )
+        return pages
+
+    return read, validate, read_traversal, validate_traversal
 
 
 (
     read_verified_betfair_provider_billing_inputs,
     validate_betfair_provider_billing_inputs_observation,
+    read_verified_betfair_provider_billing_inputs_traversal,
+    validate_betfair_provider_billing_inputs_traversal,
 ) = _build_observation_authority()

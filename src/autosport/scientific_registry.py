@@ -157,7 +157,17 @@ def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     minimum_effective_sample_size = payload.get("minimum_effective_sample_size")
     if type(primary_metric) is not str or not primary_metric:
         raise PromotionEvidenceError("frozen promotion rule lacks primary metric")
-    if isinstance(minimum_improvement, bool) or not isinstance(minimum_improvement, (int, float)) or not math.isfinite(minimum_improvement):
+    if type(minimum_improvement) not in (int, float):
+        raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
+    try:
+        finite_improvement = math.isfinite(minimum_improvement)
+    except OverflowError as exc:
+        # JSON may contain a finite integer too large to convert to float.
+        # Untrusted frozen evidence must fail closed rather than crash promotion.
+        raise PromotionEvidenceError(
+            "frozen promotion rule minimum improvement is invalid"
+        ) from exc
+    if not finite_improvement:
         raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
     if isinstance(minimum_effective_sample_size, bool) or not isinstance(minimum_effective_sample_size, int) or minimum_effective_sample_size <= 0:
         raise PromotionEvidenceError("frozen promotion rule minimum effective sample size is invalid")

@@ -384,7 +384,7 @@ def test_postconstruction_profile_mutation_invalidates_manifest_read() -> None:
         manifest.state_of(ProviderManifestCapability.LIVE_QUOTES)
 
 
-def test_supports_rejects_state_reader_rebinding(monkeypatch) -> None:
+def test_supports_rejects_state_reader_rebinding() -> None:
     profile = _profile()
     integration = bind_bookmaker_integration(
         profile,
@@ -403,8 +403,10 @@ def test_supports_rejects_state_reader_rebinding(monkeypatch) -> None:
         source_payload_sha256=_HASH_C,
     )
 
+    # The metaclass rejects replacement before any method can be changed.
+    # Using monkeypatch.setattr here would schedule an invalid teardown restore.
     with pytest.raises(TypeError, match="sealed provider-manifest authority"):
-        monkeypatch.setattr(
+        setattr(
             type(manifest),
             "state_of",
             lambda self, capability: ProviderManifestState.PROVEN,
@@ -743,9 +745,7 @@ def test_manifest_identity_rejects_coordinated_dependency_rebinding() -> None:
     ):
         _ = manifest.manifest_id
 
-def test_manifest_identity_rejects_internal_validation_dispatch_bypass(
-    monkeypatch,
-) -> None:
+def test_manifest_identity_rejects_internal_validation_dispatch_bypass() -> None:
     profile = _profile()
     integration = bind_bookmaker_integration(
         profile,
@@ -770,13 +770,12 @@ def test_manifest_identity_rejects_internal_validation_dispatch_bypass(
     )
     object.__setattr__(stream, "state", ProviderManifestState.PROVEN)
 
-    monkeypatch.setattr(type(manifest), "_validate_facts", lambda *args, **kwargs: None)
-    monkeypatch.setattr(
-        type(manifest),
-        "_validate_dependencies",
-        lambda *args, **kwargs: None,
-    )
+    for method_name in ("_validate_facts", "_validate_dependencies"):
+        with pytest.raises(TypeError, match="sealed provider-manifest authority"):
+            setattr(type(manifest), method_name, lambda *args, **kwargs: None)
 
+    # Class-level dispatch cannot be bypassed; post-construction evidence
+    # tampering must still be rejected by the original validators.
     with pytest.raises(
         ProviderCapabilityManifestError,
         match="stream extension truth changed after validation",
@@ -784,7 +783,7 @@ def test_manifest_identity_rejects_internal_validation_dispatch_bypass(
         _ = manifest.manifest_id
 
 
-def test_manifest_identity_rejects_state_reader_rebinding(monkeypatch) -> None:
+def test_manifest_identity_rejects_state_reader_rebinding() -> None:
     profile = _profile()
     integration = bind_bookmaker_integration(
         profile,
@@ -803,16 +802,15 @@ def test_manifest_identity_rejects_state_reader_rebinding(monkeypatch) -> None:
         source_payload_sha256=_HASH_C,
     )
 
-    monkeypatch.setattr(
-        type(manifest),
-        "state_of",
-        lambda self, capability: ProviderManifestState.PROVEN,
-    )
-    with pytest.raises(
-        ProviderCapabilityManifestError,
-        match="canonical manifest validator changed",
-    ):
-        _ = manifest.manifest_id
+    original_id = manifest.manifest_id
+    with pytest.raises(TypeError, match="sealed provider-manifest authority"):
+        setattr(
+            type(manifest),
+            "state_of",
+            lambda self, capability: ProviderManifestState.PROVEN,
+        )
+    assert manifest.manifest_id == original_id
+    assert manifest.supports(ProviderManifestCapability.STREAM) is False
 
 def test_bound_identity_fields_cannot_be_rewritten_with_coordinated_truth_mutation() -> None:
     profile = _profile()

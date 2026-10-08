@@ -167,3 +167,67 @@ def test_alias_mutation_does_not_flip_paper_cash_and_restart_is_idempotent(tmp_p
     reopened = PaperBook.load(book_path)
     assert reopened.balance == Decimal("90")
     assert reopened.tickets[ticket.ticket_id].status is TicketStatus.LOST
+
+
+def test_reused_evidence_id_with_conflicting_payload_fails_before_paper_effect(tmp_path):
+    """An identical evidence ID is not permission to replace a quote outcome."""
+    from dataclasses import replace
+    from decimal import Decimal
+
+    from autosport.continuous_session import ContinuousSessionError
+    from autosport.domain import TicketLeg, TicketStatus
+    from autosport.paper import PaperBook
+
+    path = tmp_path / "paper.json"
+    book = PaperBook("100")
+    leg = TicketLeg(
+        event_id="event-1",
+        market_id="winner",
+        selection_id="home",
+        locked_odds=Decimal("2"),
+        sport="table_tennis",
+    )
+    ticket = book.open_ticket(
+        (leg,), Decimal("10"), placed_at="2026-10-08T05:00:00+00:00"
+    )
+    book.save(path)
+    before = path.read_bytes()
+    coordinator = object.__new__(ContinuousSessionCoordinator)
+    coordinator.workspace = tmp_path
+    coordinator.paper_book_path = path
+    coordinator.initial_bankroll = "100"
+    losing = SettlementResolution(
+        event_identity="provider-a:event-1",
+        settlement_ref="result:1",
+        quote_outcomes={leg.quote_key: "loss"},
+        evidence_id="same-evidence-id",
+        evidence_sha256="0" * 64,
+        available_at=_CUTOFF,
+    )
+    contradictory = replace(
+        losing, quote_outcomes={leg.quote_key: "win"}
+    )
+
+    for ordered in ((losing, contradictory), (contradictory, losing)):
+        with pytest.raises(
+            ContinuousSessionError,
+            match="conflicting settlement payload for reused evidence_id",
+        ):
+            coordinator._settle(resolutions=ordered)
+        assert path.read_bytes() == before
+        original = PaperBook.load(path)
+        assert original.balance == Decimal("90")
+        assert original.tickets[ticket.ticket_id].status is TicketStatus.OPEN
+
+    # Identical duplicate delivery is idempotent, not a second settlement.
+    settled, ids = coordinator._settle(resolutions=(losing, losing))
+    assert settled == (ticket.ticket_id,)
+    assert ids == ("same-evidence-id",)
+    reloaded = PaperBook.load(path)
+    assert reloaded.balance == Decimal("90")
+    assert reloaded.tickets[ticket.ticket_id].status is TicketStatus.LOST
+
+    replayed, ids_again = coordinator._settle(resolutions=(losing, losing))
+    assert replayed == ()
+    assert ids_again == ids
+    assert PaperBook.load(path).balance == Decimal("90")

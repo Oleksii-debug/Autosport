@@ -19,6 +19,9 @@ POLICY_ARTIFACT_KIND: Final = "transparent-bandit-policy"
 POLICY_ARTIFACT_SCHEMA: Final = "autosport.transparent_bandit_policy_artifact"
 POLICY_ARTIFACT_SCHEMA_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
+_CANONICAL_REGISTRY_TYPE = ScientificRegistry
+_CANONICAL_ARTIFACT_STORE_TYPE = FactoryArtifactStore
+_CANONICAL_POLICY_TYPE = BanditPolicyState
 
 
 class ChampionPolicyError(RuntimeError):
@@ -54,10 +57,15 @@ def persist_policy_state(
 ) -> str:
     """Persist immutable policy evidence; this grants no activation authority."""
 
-    if not isinstance(artifact_store, FactoryArtifactStore):
-        raise TypeError("artifact_store must be FactoryArtifactStore")
-    if not isinstance(policy, BanditPolicyState):
-        raise TypeError("policy must be BanditPolicyState")
+    if (
+        FactoryArtifactStore is not _CANONICAL_ARTIFACT_STORE_TYPE
+        or BanditPolicyState is not _CANONICAL_POLICY_TYPE
+    ):
+        raise ChampionPolicyError("champion policy durable type authority changed")
+    if type(artifact_store) is not _CANONICAL_ARTIFACT_STORE_TYPE:
+        raise TypeError("artifact_store must be exact FactoryArtifactStore")
+    if type(policy) is not _CANONICAL_POLICY_TYPE:
+        raise TypeError("policy must be exact BanditPolicyState")
     return artifact_store.write(POLICY_ARTIFACT_KIND, policy.policy_id, _artifact(policy))
 
 
@@ -152,10 +160,16 @@ def load_champion_policy(
 ) -> BanditPolicyState:
     """Load the exact promoted policy for one compatible next episode."""
 
-    if not isinstance(registry, ScientificRegistry):
-        raise TypeError("registry must be ScientificRegistry")
-    if not isinstance(artifact_store, FactoryArtifactStore):
-        raise TypeError("artifact_store must be FactoryArtifactStore")
+    if (
+        ScientificRegistry is not _CANONICAL_REGISTRY_TYPE
+        or FactoryArtifactStore is not _CANONICAL_ARTIFACT_STORE_TYPE
+        or BanditPolicyState is not _CANONICAL_POLICY_TYPE
+    ):
+        raise ChampionPolicyError("champion policy durable type authority changed")
+    if type(registry) is not _CANONICAL_REGISTRY_TYPE:
+        raise TypeError("registry must be exact ScientificRegistry")
+    if type(artifact_store) is not _CANONICAL_ARTIFACT_STORE_TYPE:
+        raise TypeError("artifact_store must be exact FactoryArtifactStore")
     strategy_key = _text(canonical_strategy_id, "canonical_strategy_id")
     expected_environment = _sha256(environment_id, "environment_id")
     expected_protocol = _text(protocol_id, "protocol_id")
@@ -279,7 +293,10 @@ def load_champion_policy(
     ):
         raise ChampionPolicyError("champion policy artifact identity mismatch")
     try:
-        policy = BanditPolicyState.from_payload(artifact["policy"])
+        policy = BanditPolicyState.from_payload(
+            artifact["policy"],
+            expected_policy_id=champion_id,
+        )
     except (TypeError, ValueError) as exc:
         raise ChampionPolicyError("champion policy payload is invalid") from exc
     if policy.policy_id != champion_id:
@@ -298,6 +315,80 @@ def load_champion_policy(
             "next-episode actions widen the champion policy universe"
         )
     return policy
+
+
+def _bind_durable_seam_type_authority(
+    persist_impl,
+    load_impl,
+):
+    """Bind exact durable-seam type authority outside mutable module aliases."""
+
+    registry_type = ScientificRegistry
+    artifact_store_type = FactoryArtifactStore
+    policy_type = BanditPolicyState
+
+    def guarded_persist_policy_state(
+        artifact_store: FactoryArtifactStore,
+        policy: BanditPolicyState,
+    ) -> str:
+        if (
+            ScientificRegistry is not registry_type
+            or FactoryArtifactStore is not artifact_store_type
+            or BanditPolicyState is not policy_type
+        ):
+            raise ChampionPolicyError(
+                "champion policy durable type authority changed"
+            )
+        if type(artifact_store) is not artifact_store_type:
+            raise TypeError("artifact_store must be exact FactoryArtifactStore")
+        if type(policy) is not policy_type:
+            raise TypeError("policy must be exact BanditPolicyState")
+        return persist_impl(artifact_store, policy)
+
+    def guarded_load_champion_policy(
+        registry: ScientificRegistry,
+        artifact_store: FactoryArtifactStore,
+        *,
+        as_of: str,
+        canonical_strategy_id: str,
+        environment_id: str,
+        protocol_id: str,
+        config_sha256: str,
+        admissible_actions: frozenset[str],
+        eligibility_decision: ChampionEligibilityDecision | None = None,
+    ) -> BanditPolicyState:
+        if (
+            ScientificRegistry is not registry_type
+            or FactoryArtifactStore is not artifact_store_type
+            or BanditPolicyState is not policy_type
+        ):
+            raise ChampionPolicyError(
+                "champion policy durable type authority changed"
+            )
+        if type(registry) is not registry_type:
+            raise TypeError("registry must be exact ScientificRegistry")
+        if type(artifact_store) is not artifact_store_type:
+            raise TypeError("artifact_store must be exact FactoryArtifactStore")
+        return load_impl(
+            registry,
+            artifact_store,
+            as_of=as_of,
+            canonical_strategy_id=canonical_strategy_id,
+            environment_id=environment_id,
+            protocol_id=protocol_id,
+            config_sha256=config_sha256,
+            admissible_actions=admissible_actions,
+            eligibility_decision=eligibility_decision,
+        )
+
+    return guarded_persist_policy_state, guarded_load_champion_policy
+
+
+persist_policy_state, load_champion_policy = _bind_durable_seam_type_authority(
+    persist_policy_state,
+    load_champion_policy,
+)
+del _bind_durable_seam_type_authority
 
 
 __all__ = [

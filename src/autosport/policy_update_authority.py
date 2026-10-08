@@ -173,3 +173,56 @@ def attempt_utility_bound_update(
         reason_codes=tuple(sorted(reasons)),
     )
     return policy, evidence
+
+
+def _bind_utility_update_type_authority(update_impl):
+    """Bind exact update input types outside mutable imported roots."""
+
+    policy_type = BanditPolicyState
+    action_type = Action
+    reward_type = RewardEvidence
+    transition_type = Transition
+    utility_type = PolicyUtilityEvidence
+
+    def guarded_attempt_utility_bound_update(
+        *,
+        policy: BanditPolicyState,
+        action: Action,
+        reward: RewardEvidence,
+        transition: Transition,
+        utility: PolicyUtilityEvidence,
+    ) -> tuple[BanditPolicyState, UtilityBoundUpdateEvidence]:
+        if (
+            BanditPolicyState is not policy_type
+            or Action is not action_type
+            or RewardEvidence is not reward_type
+            or Transition is not transition_type
+            or PolicyUtilityEvidence is not utility_type
+        ):
+            raise LearningEnvironmentError(
+                "utility-bound update input type authority changed"
+            )
+        for value, expected, label in (
+            (policy, policy_type, "policy"),
+            (action, action_type, "action"),
+            (reward, reward_type, "reward"),
+            (transition, transition_type, "transition"),
+            (utility, utility_type, "utility"),
+        ):
+            if type(value) is not expected:
+                raise TypeError(f"{label} must use exact canonical type")
+        return update_impl(
+            policy=policy,
+            action=action,
+            reward=reward,
+            transition=transition,
+            utility=utility,
+        )
+
+    return guarded_attempt_utility_bound_update
+
+
+attempt_utility_bound_update = _bind_utility_update_type_authority(
+    attempt_utility_bound_update
+)
+del _bind_utility_update_type_authority

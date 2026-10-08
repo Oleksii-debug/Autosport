@@ -18,6 +18,13 @@ CATALOG_VERSION = 8
 # UI text authorities.
 _WINDOWS_SHELL_UK_UA = MappingProxyType(
     {
+        "ui.windows.workspace_configuration.title": "Автоспорт — помилка налаштування робочої теки",
+        "ui.windows.workspace_configuration.message": (
+            "Автоспорт не відкрив робочу теку через недійсні налаштування.\n\n"
+            "{detail}\n\n"
+            "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
+            "потім перезапустіть Автоспорт. Економічний стан і стан спостереження не змінено."
+        ),
         "ui.windows.workspace_access.title": "Автоспорт — робоча тека недоступна для запису",
         "ui.windows.workspace_access.unknown_error": "невідома помилка файлової системи",
         "ui.windows.workspace_access.message": (

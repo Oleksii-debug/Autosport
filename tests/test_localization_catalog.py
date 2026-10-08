@@ -134,7 +134,7 @@ _LANGUAGE_NEUTRAL_CRITICAL_VALUES = {
 _FORMAT_FIELD = re.compile(r"\{[^{}]*\}")
 _CYRILLIC_LETTER = re.compile(r"[\u0400-\u04FF]")
 _ENGLISH_UI_DIRECTIVE = re.compile(
-    r"\b(?:press|click|retry|reopen|settings|please|confirm|submit|try\s+again|failed\s+to|unable\s+to)\b",
+    r"\b(?:press|click|retry|reopen|settings|please|confirm|submit|place|cancel|try\s+again|failed\s+to|unable\s+to)\b",
     re.IGNORECASE,
 )
 
@@ -199,6 +199,8 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
         "Please click тут",
         "CONFIRM REAL BET і",
         "SUBMIT REAL BET і",
+        "PLACE REAL BET і",
+        "CANCEL REAL BET і",
     ):
         with pytest.raises(AssertionError, match="English-only critical UI directive"):
             _assert_critical_ukrainian_template(
@@ -517,6 +519,8 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
     for english_uppercase_command in (
         "CONFIRM REAL BET і",
         "SUBMIT REAL BET і",
+        "PLACE REAL BET і",
+        "CANCEL REAL BET і",
     ):
         with pytest.raises(AssertionError, match="English-only critical UI directive"):
             _assert_ukrainian_critical_presentation(

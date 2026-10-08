@@ -1093,3 +1093,23 @@ def test_journal_capacity_fails_closed_without_appending(
         "lifecycle.startup",
     ]
     recovered.close()
+
+@pytest.mark.parametrize("separator", ("\u0085", "\u2028", "\u2029"))
+def test_unicode_record_separator_inside_note_survives_verified_restart(
+    tmp_path: Path, separator: str
+) -> None:
+    """A legal UTF-8 JSON string is not a physical JSONL record boundary."""
+
+    journal = new_journal(tmp_path)
+    note = "перед" + separator + "після"
+    journal.append_material("product.note", {"note": note})
+    journal.close()
+
+    verified = verify_journal(journal.path)
+    assert verified[1].payload["note"] == note
+    assert len(verified) == 4
+
+    reopened = new_journal(tmp_path)
+    assert reopened.snapshot()[1].payload["note"] == note
+    assert reopened.snapshot()[-1].event_type == "lifecycle.startup"
+    reopened.close()

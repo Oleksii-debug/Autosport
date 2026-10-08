@@ -518,7 +518,10 @@ def _parse_verified_record_bytes(raw: bytes) -> tuple[JournalRecord, ...]:
 
     records: list[JournalRecord] = []
     expected_prev = GENESIS_SHA256
-    for expected_seq, line in enumerate(text.splitlines(), start=1):
+    # JSONL records are delimited only by LF.  str.splitlines() also splits
+    # legitimate Unicode string values (U+0085/U+2028/U+2029), breaking
+    # byte-identical restart verification of otherwise canonical JSON.
+    for expected_seq, line in enumerate(text[:-1].split("\n"), start=1):
         if not line:
             raise JournalIntegrityError("journal contains an empty record")
         record = _parse_line(line, expected_seq=expected_seq, expected_prev=expected_prev)
@@ -764,6 +767,53 @@ class ForensicSessionJournal:
     def _try_publish_locked_sidecar(
         self, base_flags: int
     ) -> tuple[int, tuple[int, int]] | None:
+        if os.name == "nt":
+            # Windows refuses to unlink a hard-link alias while its descriptor
+            # has an msvcrt byte-range lock (WinError 32). Publish the
+            # canonical name with atomic O_EXCL, then acquire and verify its
+            # exact inode before any journal effect. A competing claimant may
+            # win this narrow pre-lock window, but cannot create two writers:
+            # the loser fails closed, and the NEW marker never grants effects.
+            try:
+                fd = os.open(self._lock_path, base_flags | os.O_CREAT | os.O_EXCL, 0o600)
+            except FileExistsError:
+                return None
+            except OSError as exc:
+                raise JournalIntegrityError(
+                    "writer lock sidecar is not atomically creatable"
+                ) from exc
+
+            locked = False
+            try:
+                opened = os.fstat(fd)
+                if not stat.S_ISREG(opened.st_mode):
+                    raise JournalIntegrityError(
+                        "writer lock sidecar must be a regular file"
+                    )
+                self._write_lock_marker(fd, _LOCK_NEW_MAGIC)
+                _acquire_process_lock(fd)
+                locked = True
+                current = os.lstat(self._lock_path)
+                identity = (opened.st_dev, opened.st_ino)
+                if (
+                    not stat.S_ISREG(current.st_mode)
+                    or (current.st_dev, current.st_ino) != identity
+                ):
+                    raise JournalIntegrityError(
+                        "writer lock sidecar identity is ambiguous after publish"
+                    )
+                return fd, identity
+            except BaseException:
+                if locked:
+                    try:
+                        _release_process_lock(fd)
+                    except OSError:
+                        pass
+                os.close(fd)
+                # On uncertainty retain the marker: never remove a pathname
+                # possibly acquired by a competing writer.
+                raise
+
         temp_path = self._lock_path.with_name(
             f".{self._lock_path.name}.{uuid.uuid4().hex}.claim"
         )

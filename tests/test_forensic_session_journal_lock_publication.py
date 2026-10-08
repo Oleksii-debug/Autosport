@@ -40,3 +40,27 @@ def test_fresh_sidecar_is_locked_before_canonical_publication(
     )
     journal.close()
     assert observed["probed"] is True
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows staging-file sharing regression")
+def test_windows_lock_publication_has_no_locked_staging_alias(
+    tmp_path: Path,
+) -> None:
+    """Win32 must not unlink an open locked temp alias during first startup."""
+
+    path = tmp_path / "forensic-session.jsonl"
+    journal = ForensicSessionJournal(
+        path,
+        clock=lambda: datetime(2026, 9, 21, 18, 55, tzinfo=timezone.utc),
+        session_id=str(uuid.UUID(int=57)),
+    )
+    assert not list(tmp_path.glob("*.claim"))
+    with pytest.raises(JournalLockedError):
+        ForensicSessionJournal(path, session_id=str(uuid.UUID(int=58)))
+    journal.close()
+    reopened = ForensicSessionJournal(
+        path,
+        clock=lambda: datetime(2026, 9, 21, 18, 56, tzinfo=timezone.utc),
+        session_id=str(uuid.UUID(int=59)),
+    )
+    reopened.close()
+    assert len(module.verify_journal(path)) == 4

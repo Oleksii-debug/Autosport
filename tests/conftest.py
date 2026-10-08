@@ -270,3 +270,52 @@ def _deterministic_betfair_mid_frame_reconnect_clock(request, monkeypatch):
         return value
 
     monkeypatch.setattr(stream.time, "monotonic", monotonic)
+
+# Historical Data tests retain K07 account-details acquisition on the canonical
+# urllib seam after the exact-dispatch account-identity repair.
+import json as _historical_json
+import urllib.request as _historical_urllib_request
+
+@pytest.fixture(autouse=True)
+def _historical_data_k07_network_fixture_bridge(request, monkeypatch):
+    module = request.module
+    if module is None or module.__name__.rsplit(".", 1)[-1] != "test_betfair_historical_entitlement":
+        return
+
+    def install_details_transport(test_monkeypatch: pytest.MonkeyPatch) -> None:
+        class Response:
+            def __init__(self, payload: bytes) -> None:
+                self._payload = payload
+            def __enter__(self):
+                return self
+            def __exit__(self, exc_type, exc, traceback):
+                return False
+            def read(self, limit: int) -> bytes:
+                assert limit >= len(self._payload)
+                return self._payload
+
+        class Opener:
+            def open(self, fullurl, data=None, timeout: float = 0):
+                assert data is None
+                req = fullurl
+                assert req.full_url == module.ACCOUNT_JSON_RPC_ENDPOINT
+                decoded = _historical_json.loads(req.data.decode("utf-8"))
+                payload = _historical_json.dumps(
+                    {
+                        "jsonrpc": "2.0",
+                        "id": decoded["id"],
+                        "result": {
+                            "currencyCode": "EUR",
+                            "localeCode": "en",
+                            "region": "GBR",
+                            "timezone": "Europe/London",
+                        },
+                    },
+                    sort_keys=True,
+                    separators=(",", ":"),
+                ).encode("utf-8")
+                return Response(payload)
+
+        test_monkeypatch.setattr(_historical_urllib_request, "_opener", Opener())
+
+    monkeypatch.setattr(module, "_install_details_transport", install_details_transport)

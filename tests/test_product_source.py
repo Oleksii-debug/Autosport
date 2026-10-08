@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
+from datetime import datetime, timezone
 from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
@@ -23,9 +25,46 @@ from autosport.product_source import (
     create_parlay_product_source,
 )
 from autosport.providers import ProviderBatch, ProviderQuote
+from autosport.source_rights_manifest import (
+    authorize_source_use,
+    load_source_rights_manifest,
+)
 
 
 _SOURCE_ID = "parlayapi:table_tennis"
+
+
+def _write_source_rights_manifest(
+    root: Path,
+    *,
+    privacy: str = "NON_PERSONAL_DATA",
+    evidence_class: str = "HUMAN_APPROVED_SOURCE_RIGHTS",
+    approval_reference: str = "entitlement-record:parlay-fixture",
+) -> Path:
+    path = root / "parlay-source-rights.json"
+    path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "autosport_source_rights_manifest",
+                "source_identity": _SOURCE_ID,
+                "authorized_scopes": ["provider.market_data.read"],
+                "privacy_classification": privacy,
+                "evidence_class": evidence_class,
+                "terms_reference": "terms:parlayapi:v1",
+                "retention_authority_reference": "retention:parlayapi:v1",
+                "effective_at": "2026-09-01T00:00:00Z",
+                "expires_at": "2026-12-01T00:00:00Z",
+                "human_approved": True,
+                "approved_by": "release-owner",
+                "approval_reference": approval_reference,
+                "approved_at": "2026-08-31T12:00:00Z",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    return path
 
 
 class _Provider:
@@ -156,6 +195,82 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 restored.resolve_event(next_deltas[0]).decimal_odds,
                 Decimal("1.90"),
             )
+
+    def test_pending_acquisition_remains_bound_to_exact_source_rights_snapshot(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "workspace"
+            authority_root = root / "authority"
+            rights_path = _write_source_rights_manifest(root)
+            manifest = load_source_rights_manifest(rights_path)
+            authorization = authorize_source_use(
+                manifest,
+                source_identity=_SOURCE_ID,
+                required_scope="provider.market_data.read",
+                at=datetime(2026, 10, 7, 12, 0, tzinfo=timezone.utc),
+            )
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-rights-1")]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                source_rights_authorization=authorization,
+                clock=lambda: "2026-10-07T12:00:01+00:00",
+            )
+            page = source.fetch_catalog_page(None)
+            self.assertEqual(page.cursor, "snapshot-rights-1")
+            durable = json.loads(source.state_path.read_text(encoding="utf-8"))
+            self.assertIsNotNone(durable["pending"])
+            binding = durable["source_rights_binding"]
+            self.assertEqual(binding["manifest_sha256"], manifest.manifest_sha256)
+            self.assertEqual(binding["source_identity"], _SOURCE_ID)
+
+            later_authorization = authorize_source_use(
+                manifest,
+                source_identity=_SOURCE_ID,
+                required_scope="provider.market_data.read",
+                at=datetime(2026, 10, 7, 12, 5, tzinfo=timezone.utc),
+            )
+            restored = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                source_rights_authorization=later_authorization,
+                clock=lambda: "2026-10-07T12:05:01+00:00",
+            )
+            restored_state = json.loads(
+                restored.state_path.read_text(encoding="utf-8")
+            )
+            self.assertEqual(restored_state["source_rights_binding"], binding)
+            self.assertEqual(restored_state["pending"]["catalog_cursor"], page.cursor)
+
+            _write_source_rights_manifest(
+                root,
+                approval_reference="entitlement-record:replacement",
+            )
+            replacement_manifest = load_source_rights_manifest(rights_path)
+            replacement_authorization = authorize_source_use(
+                replacement_manifest,
+                source_identity=_SOURCE_ID,
+                required_scope="provider.market_data.read",
+                at=datetime(2026, 10, 7, 12, 10, tzinfo=timezone.utc),
+            )
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "durable source-rights binding does not match current authorization",
+            ):
+                ParlayApiProductSource(
+                    _Provider([]),
+                    workspace=workspace,
+                    authority_root=authority_root,
+                    lawful_terms_ref="terms:parlayapi:v1",
+                    retention_ref="retention:parlayapi:v1",
+                    source_rights_authorization=replacement_authorization,
+                    clock=lambda: "2026-10-07T12:10:01+00:00",
+                )
 
     def test_uncommitted_snapshot_is_replayed_instead_of_fetching_past_it(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -426,6 +541,167 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                 create_parlay_product_source()
 
 
+    def test_factory_requires_verified_source_rights_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = str(Path(directory) / "workspace")
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": workspace,
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_rejects_unknown_privacy_source_rights(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root, privacy="UNKNOWN")
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "source rights authorization failed",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_rejects_unknown_evidence_class_source_rights(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root, evidence_class="UNKNOWN")
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "source rights authorization failed",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_rejects_terms_reference_not_bound_to_rights_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root)
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:other:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "source rights authorization is inconsistent",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_rejects_retention_reference_not_bound_to_rights_manifest(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root)
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:other:v1",
+                },
+                clear=True,
+            ):
+                with self.assertRaisesRegex(
+                    ProductSourceError,
+                    "source rights authorization is inconsistent",
+                ):
+                    create_parlay_product_source()
+
+    def test_factory_persists_rights_snapshot_and_rejects_same_path_rebinding(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            rights = _write_source_rights_manifest(root)
+            environment = {
+                "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                "AUTOSPORT_PRODUCT_WORKSPACE": str(root / "workspace"),
+                "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(root / "authority"),
+            }
+            with patch.dict("os.environ", environment, clear=True):
+                source = create_parlay_product_source()
+                state = json.loads(source.state_path.read_text(encoding="utf-8"))
+                binding = state["source_rights_binding"]
+                self.assertEqual(binding["source_identity"], _SOURCE_ID)
+                self.assertEqual(
+                    binding["required_scope"], "provider.market_data.read"
+                )
+                self.assertEqual(
+                    binding["privacy_classification"], "NON_PERSONAL_DATA"
+                )
+                self.assertEqual(
+                    binding["evidence_class"], "HUMAN_APPROVED_SOURCE_RIGHTS"
+                )
+                self.assertEqual(
+                    binding["terms_reference"], "terms:parlayapi:v1"
+                )
+                self.assertEqual(
+                    binding["retention_authority_reference"],
+                    "retention:parlayapi:v1",
+                )
+                self.assertEqual(
+                    binding["approval_reference"],
+                    "entitlement-record:parlay-fixture",
+                )
+                self.assertEqual(len(binding["manifest_sha256"]), 64)
+
+                restored = create_parlay_product_source()
+                self.assertEqual(restored.state_path, source.state_path)
+                self.assertEqual(
+                    json.loads(restored.state_path.read_text(encoding="utf-8"))[
+                        "source_rights_binding"
+                    ],
+                    binding,
+                )
+
+                _write_source_rights_manifest(
+                    root,
+                    approval_reference="entitlement-record:other-authority",
+                )
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "durable source-rights binding does not match current authorization",
+                ):
+                    create_parlay_product_source()
+
     def test_factory_constructor_dependencies_are_import_composed(self) -> None:
         class AttackerProvider:
             source_id = _SOURCE_ID
@@ -446,7 +722,9 @@ class ParlayApiProductSourceTests(unittest.TestCase):
 
         canonical_factory = create_parlay_product_source
         with tempfile.TemporaryDirectory() as directory:
-            workspace = str(Path(directory) / "workspace")
+            root = Path(directory)
+            workspace = str(root / "workspace")
+            rights = _write_source_rights_manifest(root)
             with (
                 patch.object(
                     product_source_module,
@@ -468,6 +746,7 @@ class ParlayApiProductSourceTests(unittest.TestCase):
                     {
                         "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
                         "AUTOSPORT_PRODUCT_WORKSPACE": workspace,
+                        "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
                         "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
                         "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
                         "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(

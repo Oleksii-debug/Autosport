@@ -163,3 +163,30 @@ def test_registry_rejects_unknown_nested_versioned_fields(tmp_path, injection) -
     with pytest.raises(BookmakerCapabilityRegistryError):
         BookmakerCapabilityRegistry(path).governance_history("book-a", "acct-a")
     assert path.read_bytes() == corrupt_bytes
+
+
+@pytest.mark.parametrize("field", [
+    "venue_id", "account_id", "jurisdiction", "terms_version", "source_ref",
+])
+def test_governance_rejects_malformed_unicode_without_publishing(tmp_path, field) -> None:
+    # A lone surrogate is legal inside a Python str but cannot encode to
+    # canonical UTF-8. Technical and legal/terms identities share this fence.
+    from dataclasses import replace
+
+    invalid = "x" + chr(0xD800)
+    path = tmp_path / "registry.json"
+    with pytest.raises(BookmakerCapabilityRegistryError, match="valid UTF-8"):
+        replace(_governance(), **{field: invalid})
+    with pytest.raises(BookmakerCapabilityRegistryError, match="valid UTF-8"):
+        BookmakerCapabilityRegistry(path).governance_history(invalid, "acct-a")
+    assert not path.exists()
+
+
+def test_governance_valid_non_ascii_identity_survives_restart(tmp_path) -> None:
+    from dataclasses import replace
+
+    path = tmp_path / "registry.json"
+    evidence = replace(_governance(), jurisdiction="Україна")
+    assert BookmakerCapabilityRegistry(path).register_governance(evidence)
+    reopened = BookmakerCapabilityRegistry(path)
+    assert reopened.governance_history("book-a", "acct-a") == (evidence,)

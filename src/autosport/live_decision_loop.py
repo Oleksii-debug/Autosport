@@ -8,7 +8,7 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
 from enum import Enum
 from pathlib import Path
-from time import monotonic
+from time import monotonic, perf_counter_ns
 from typing import Callable, Protocol
 
 from . import _paperbook_preload_authority_guard as _paperbook_authority
@@ -914,6 +914,7 @@ class PersistentLiveDecisionLoop:
         self._freshness_deadlines: dict[str, datetime | None] = {}
         self._freshness_generations: dict[str, int] = {}
         self._freshness_heap: list[tuple[datetime, str, int]] = []
+        self._last_cycle_stage_latencies_ns: tuple[tuple[str, int], ...] = ()
 
     def close(self) -> None:
         """Release the optional long-lived default market-store connection."""
@@ -1057,7 +1058,24 @@ class PersistentLiveDecisionLoop:
                 break
         return tuple(results)
 
+    @property
+    def last_cycle_stage_latencies_ns(self) -> tuple[tuple[str, int], ...]:
+        """Observer-only five-stage latencies; never execution authority."""
+        return self._last_cycle_stage_latencies_ns
+
     def run_cycle(self) -> LiveCycleResult:
+        self._last_cycle_stage_latencies_ns = ()
+        stage_measurements: list[tuple[str, int]] = []
+        prior_tick_ns = perf_counter_ns()
+
+        def record_stage(name: str) -> None:
+            nonlocal prior_tick_ns
+            tick_ns = perf_counter_ns()
+            if tick_ns < prior_tick_ns:
+                raise LiveDecisionProgressError("monotonic performance clock regressed")
+            stage_measurements.append((name, tick_ns - prior_tick_ns))
+            prior_tick_ns = tick_ns
+
         if self.stopped:
             return LiveCycleResult(
                 LiveCycleStatus.STOPPED,
@@ -1086,6 +1104,7 @@ class PersistentLiveDecisionLoop:
                 _require_utc_clock(self.clock),
                 exc,
             )
+        record_stage("ingest")
 
         now = _require_utc_clock(self.clock)
         batch = self.mirror_updates.drain(
@@ -1131,6 +1150,7 @@ class PersistentLiveDecisionLoop:
         decision_time = now
         snapshots = self._capture_input_views(refresh_input_ids, decision_time)
         current_market_sha = self._market_state_sha256()
+        record_stage("mirror")
 
         clean_committed_restart = (
             self._needs_cache_rebuild
@@ -1163,6 +1183,7 @@ class PersistentLiveDecisionLoop:
             gate=_GATE_NORMAL,
         )
         self._refresh_intents_from_snapshots(snapshots)
+        record_stage("opportunity")
 
         intents = self._all_cached_intents()
         graph = (
@@ -1178,6 +1199,7 @@ class PersistentLiveDecisionLoop:
             dependency_graph=graph,
             market_outcome_authorities=(),
         )
+        record_stage("portfolio")
         result = self._persist_plan(
             plan=plan,
             intents=intents,
@@ -1185,6 +1207,8 @@ class PersistentLiveDecisionLoop:
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
         )
+        record_stage("decision")
+        self._last_cycle_stage_latencies_ns = tuple(stage_measurements)
         self._pending_affected.clear()
         self._needs_cache_rebuild = False
         return result

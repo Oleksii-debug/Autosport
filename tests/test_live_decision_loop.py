@@ -482,6 +482,42 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             selection_ids="selection-b",
         )
 
+    def test_real_pipeline_stage_timings_are_observer_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace, [(self._event(selection="selection-a"),)]
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            self._register_two(loop)
+            self.assertEqual(loop.last_cycle_stage_latencies_ns, ())
+            decision = loop.run_cycle()
+            self.assertEqual(decision.status, LiveCycleStatus.DECIDED)
+            observations = loop.last_cycle_stage_latencies_ns
+            self.assertEqual(
+                tuple(stage for stage, _elapsed in observations),
+                ("ingest", "mirror", "opportunity", "portfolio", "decision"),
+            )
+            self.assertTrue(all(type(ns) is int and ns >= 0 for _, ns in observations))
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            unchanged = loop.run_cycle()
+            self.assertEqual(unchanged.status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(loop.last_cycle_stage_latencies_ns, ())
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            loop.close()
+
     def test_first_cycle_rebuilds_all_then_only_affected_input_recomputes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

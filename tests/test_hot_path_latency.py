@@ -324,3 +324,19 @@ def test_partial_overload_report_remains_explicit_wait_only():
     assert not observed.target_machine_acceptance
     with pytest.raises(HotPathError, match="cannot claim success"):
         HotPathReport(SHA, "WAIT", "WITHIN_BUDGET", (), 0, 0)
+
+
+def test_hostile_manual_report_label_never_dispatches_private_equality():
+    from autosport.hot_path_latency import HotPathReport
+
+    class HostileStageLabel:
+        def __eq__(self, other):
+            raise RuntimeError("PRIVATE_STAGE_LABEL_CANARY")
+
+    with pytest.raises(HotPathError, match="invalid ordered stage latency") as failure:
+        HotPathReport(
+            SHA, "WAIT", "BACKLOG", ((HostileStageLabel(), 5),), 5, 3
+        )
+    assert "CANARY" not in str(failure.value)
+    assert failure.value.__cause__ is None
+    assert failure.value.__context__ is None

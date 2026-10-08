@@ -5,12 +5,13 @@
 - New Sections: 67.
 - Numbered Subsections: 201.
 - New Section 0 count: 0.
+- Drive folder/file naming normalized: `Проєктні плани`; `1. Перший план` … `8. Восьмий план`.
 - Legacy coverage: 46/46, unmapped 0.
 
 ## Dependency model
 Plans 1–6 are independent engineering plans and may finish in any order.
 Plan 4 bookmaker/provider/execution engineering is offline/fixture-capable and requires no real bookmaker credentials for component DONE.
-Plan 7 is provider-free PAPER/SHADOW convergence and waits on terminal Plans 1,2,3,5,6. Plan 4 is not a hard prerequisite.
+Plan 7 is provider-free PAPER/SHADOW convergence and waits on terminal Plans 1–6. Plan 4 remains parallel/offline-actionable, but its provider/public-browser qualification is required for the final end-to-end convergence.
 Plan 8 is dependency-aware external/real-execution/NVDA/final release.
 
 ## Migrated truth

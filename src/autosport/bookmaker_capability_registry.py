@@ -111,6 +111,12 @@ def _text(value: str, field: str) -> str:
         raise BookmakerCapabilityRegistryError(
             f"{field} must be a non-empty canonical string"
         )
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise BookmakerCapabilityRegistryError(
+            f"{field} must be valid UTF-8"
+        ) from exc
     return value
 
 

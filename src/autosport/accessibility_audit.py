@@ -11,11 +11,13 @@ from .integrity import atomic_write_json
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS, WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
+from .windows_replay_stop import REPLAY_STOP_AUTOMATION_ID
 
 
 _REQUIRED_PATTERNS = {
     AUTOMATION_IDS["choose_dataset"]: {"INVOKE"},
     AUTOMATION_IDS["run_replay"]: {"INVOKE"},
+    REPLAY_STOP_AUTOMATION_ID: {"INVOKE"},
     AUTOMATION_IDS["repair_workspace"]: {"INVOKE"},
     AUTOMATION_IDS["export_evidence"]: {"INVOKE"},
     AUTOMATION_IDS["replay_speed"]: {"VALUE"},
@@ -49,6 +51,7 @@ _REQUIRED_PATTERNS = {
 _EXPECTED_ROLES = {
     AUTOMATION_IDS["choose_dataset"]: "PUSH_BUTTON",
     AUTOMATION_IDS["run_replay"]: "PUSH_BUTTON",
+    REPLAY_STOP_AUTOMATION_ID: "PUSH_BUTTON",
     AUTOMATION_IDS["repair_workspace"]: "PUSH_BUTTON",
     AUTOMATION_IDS["export_evidence"]: "PUSH_BUTTON",
     AUTOMATION_IDS["replay_speed"]: "COMBO_BOX",
@@ -194,8 +197,11 @@ def summarize_description(
     shell_state_readonly: bool | None = None,
     owner_economic_state_readonly: bool | None = None,
     workbench_result_readonly: bool | None = None,
+    require_replay_stop: bool = False,
 ) -> dict[str, Any]:
     expected_ids = set(_REQUIRED_PATTERNS)
+    if not require_replay_stop:
+        expected_ids.discard(REPLAY_STOP_AUTOMATION_ID)
     controls: dict[int, dict[str, Any]] = {}
     failures: list[str] = []
 
@@ -296,8 +302,8 @@ def summarize_description(
         "providers_stood_down_because": description.providers_stood_down_because,
         "evidence_scope": (
             "in-process tk-uia annotation/provider audit plus runtime Tk readonly-state audit "
-            "of the packaged Windows GUI and canonical product-shell controls, including the "
-            "always-present owner-economic dialog readback/close shell; not external UIA client "
+            "of the packaged Windows GUI and canonical product-shell controls, including cooperative "
+            "replay STOP and the always-present owner-economic dialog readback/close shell; not external UIA client "
             "or NVDA speech proof"
         ),
         "human_tested": False,
@@ -341,6 +347,7 @@ def run_accessibility_audit(output_path: str | Path) -> int:
             shell_state_readonly=_shell_state_is_readonly(app),
             owner_economic_state_readonly=_owner_economic_state_is_readonly(app),
             workbench_result_readonly=_disabled_text_is_readonly(controls.get("result")),
+            require_replay_stop=True,
         )
     except Exception as exc:
         report = {

@@ -6,11 +6,12 @@ from typing import Mapping
 from . import localization_v2 as _v2
 from .localization_gui_evidence_export import GUI_EVIDENCE_EXPORT_UK_UA
 from .localization_owner_economic import OWNER_ECONOMIC_AUTHORITY_UK_UA
+from .localization_windows_replay_stop import WINDOWS_REPLAY_STOP_UK_UA
 from .localization_windows_surfaces import WINDOWS_SURFACE_CONTENT_UK_UA
 
 
 DEFAULT_LOCALE = _v2.DEFAULT_LOCALE
-CATALOG_VERSION = 7
+CATALOG_VERSION = 8
 
 # Public v4 keeps one localization API while preserving the proven v2 catalog
 # as an immutable base resource. Windows shell chrome and surface-contract
@@ -175,18 +176,30 @@ if _GUI_EVIDENCE_COLLISIONS:
         f"localization v7 GUI evidence resources collide: {sorted(_GUI_EVIDENCE_COLLISIONS)!r}"
     )
 
+_REPLAY_STOP_COLLISIONS = set(WINDOWS_REPLAY_STOP_UK_UA).intersection(
+    set(_WINDOWS_SHELL_UK_UA)
+    | set(WINDOWS_SURFACE_CONTENT_UK_UA)
+    | set(OWNER_ECONOMIC_AUTHORITY_UK_UA)
+    | set(GUI_EVIDENCE_EXPORT_UK_UA)
+)
+if _REPLAY_STOP_COLLISIONS:
+    raise RuntimeError(
+        f"localization v8 replay STOP resources collide: {sorted(_REPLAY_STOP_COLLISIONS)!r}"
+    )
+
 _CUSTOM_UK_UA = MappingProxyType(
     {
         **_WINDOWS_SHELL_UK_UA,
         **WINDOWS_SURFACE_CONTENT_UK_UA,
         **OWNER_ECONOMIC_AUTHORITY_UK_UA,
         **GUI_EVIDENCE_EXPORT_UK_UA,
+        **WINDOWS_REPLAY_STOP_UK_UA,
     }
 )
 _BASE_UK_UA = _v2.catalog(DEFAULT_LOCALE)
 _COLLISIONS = set(_BASE_UK_UA).intersection(_CUSTOM_UK_UA)
 if _COLLISIONS:
-    raise RuntimeError(f"localization v7 duplicates v2 keys: {sorted(_COLLISIONS)!r}")
+    raise RuntimeError(f"localization v8 duplicates v2 keys: {sorted(_COLLISIONS)!r}")
 
 _UK_UA = MappingProxyType({**_BASE_UK_UA, **_CUSTOM_UK_UA})
 _CATALOGS: Mapping[str, Mapping[str, str]] = MappingProxyType({DEFAULT_LOCALE: _UK_UA})

@@ -7,14 +7,18 @@ import secrets
 import threading
 import time
 import uuid
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Callable, Iterable
+from typing import Callable, Iterable, Iterator
 
 from .domain import MarketEvent, utc_now_iso
 from .json_integrity import jsonl_bytes_are_blank, strict_json_loads
 from .market_mirror import MarketMirror, MirrorUpdate
+
+
+_REPLAY_STOP_CONTEXT = threading.local()
 
 
 def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
@@ -32,6 +36,83 @@ def _parse_jsonl_event(line: str, line_number: int) -> MarketEvent:
 
 class FutureLeakageError(RuntimeError):
     pass
+
+
+class ReplayStopRequested(RuntimeError):
+    """Cooperative operator STOP before a replay may complete and unlock results."""
+
+
+class ReplayStopToken:
+    """Single-worker STOP authority with an atomic completion boundary."""
+
+    def __init__(self) -> None:
+        self._event = threading.Event()
+        self._lock = threading.Lock()
+        self._accepting = True
+
+    @property
+    def accepting(self) -> bool:
+        with self._lock:
+            return self._accepting
+
+    def request(self) -> bool:
+        """Request STOP only while the replay can still honor it truthfully."""
+
+        with self._lock:
+            if not self._accepting:
+                return False
+            self._event.set()
+            return True
+
+    def checkpoint(self) -> None:
+        if self._event.is_set():
+            raise ReplayStopRequested("paper replay stopped by operator")
+
+    def wait(self, timeout: float) -> bool:
+        return self._event.wait(timeout)
+
+    def finish(self, complete: Callable[[], None]) -> None:
+        """Atomically choose STOP or completion; never acknowledge both."""
+
+        with self._lock:
+            if not self._accepting or self._event.is_set():
+                self._accepting = False
+                raise ReplayStopRequested("paper replay stopped by operator")
+            try:
+                complete()
+            finally:
+                self._accepting = False
+
+    def disarm(self) -> None:
+        with self._lock:
+            self._accepting = False
+
+
+@contextmanager
+def replay_stop_scope(stop_token: ReplayStopToken | None) -> Iterator[None]:
+    """Bind one cooperative STOP token to only the current replay worker thread."""
+
+    had_previous = hasattr(_REPLAY_STOP_CONTEXT, "token")
+    previous = getattr(_REPLAY_STOP_CONTEXT, "token", None)
+    _REPLAY_STOP_CONTEXT.token = stop_token
+    try:
+        yield
+    finally:
+        if had_previous:
+            _REPLAY_STOP_CONTEXT.token = previous
+        else:
+            delattr(_REPLAY_STOP_CONTEXT, "token")
+
+
+def _active_replay_stop_token() -> ReplayStopToken | None:
+    token = getattr(_REPLAY_STOP_CONTEXT, "token", None)
+    return token if isinstance(token, ReplayStopToken) else None
+
+
+def _checkpoint_replay_stop() -> None:
+    token = _active_replay_stop_token()
+    if token is not None:
+        token.checkpoint()
 
 
 class ReplayLeakageFirewall:
@@ -158,40 +239,56 @@ class ReplayEngine:
         run_id: str | None = None,
         on_raw_event: Callable[[MarketEvent], object] | None = None,
     ) -> ReplayRun:
-        # Claim before any strategy-visible callback. The raw completion capability
-        # remains local to this run; the firewall stores only its digest. A failed
-        # run deliberately leaves the firewall retired IN_USE and therefore sealed.
+        stop_token = _active_replay_stop_token()
+        # An already accepted STOP must not retire a fresh firewall merely by
+        # entering run(). The completion capability remains private to this run.
+        _checkpoint_replay_stop()
         completion_capability = self.firewall._claim_for_replay()
         previous: float | None = None
         started = utc_now_iso()
         count = 0
         replay_mirror = MarketMirror()
-        for event in self._events:
-            if speed > 0:
-                current = _event_available_datetime(event).timestamp()
-                if previous is not None:
-                    time.sleep(max(0.0, current - previous) / speed)
-                previous = current
+        try:
+            for event in self._events:
+                _checkpoint_replay_stop()
+                if speed > 0:
+                    current = _event_available_datetime(event).timestamp()
+                    if previous is not None:
+                        delay = max(0.0, current - previous) / speed
+                        if delay > 0:
+                            if stop_token is None:
+                                time.sleep(delay)
+                            elif stop_token.wait(delay):
+                                raise ReplayStopRequested("paper replay stopped by operator")
+                    previous = current
+                _checkpoint_replay_stop()
 
-            # Preserve the live durable-first boundary: every causally ordered
-            # raw arrival may be persisted before source-local current-state
-            # semantics decide whether it is strategy-visible. The callback gets
-            # a detached value so it cannot mutate the engine's hash-bound state.
-            if on_raw_event is not None:
-                on_raw_event(_snapshot_replay_event(event))
+                # Preserve the live durable-first boundary: every causally ordered
+                # raw arrival may be persisted before source-local current-state
+                # semantics decide whether it is strategy-visible.
+                if on_raw_event is not None:
+                    on_raw_event(_snapshot_replay_event(event))
 
-            # Expose only the same source-local current-state transitions that the
-            # live MarketMirror would make strategy-visible. Lower sequences and
-            # exact duplicates are retained yet suppressed; conflicting sequence
-            # reuse fails closed after the raw durable boundary has observed it.
-            update = replay_mirror.apply(event)
-            count += 1
-            if update.status == MirrorUpdate.APPLIED:
-                # A strategy callback receives a value snapshot, never the engine's
-                # hash-bound internal event. Callback mutation therefore cannot
-                # rewrite later audit inspection or the durable replay identity.
-                on_event(_snapshot_replay_event(event))
-        self.firewall._complete_replay(completion_capability)
+                # A STOP accepted after raw durable publication may still prevent
+                # strategy visibility and economic work for this event.
+                _checkpoint_replay_stop()
+                update = replay_mirror.apply(event)
+                count += 1
+                if update.status == MirrorUpdate.APPLIED:
+                    on_event(_snapshot_replay_event(event))
+
+            # Completion and STOP acknowledgement share one token lock, so request()
+            # cannot report acceptance after result unlock has won the boundary.
+            if stop_token is None:
+                self.firewall._complete_replay(completion_capability)
+            else:
+                stop_token.finish(
+                    lambda: self.firewall._complete_replay(completion_capability)
+                )
+        except BaseException:
+            if stop_token is not None:
+                stop_token.disarm()
+            raise
         return ReplayRun(
             run_id=run_id or str(uuid.uuid4()),
             dataset_hash=self.dataset_hash,
@@ -199,7 +296,6 @@ class ReplayEngine:
             started_at=started,
             completed_at=utc_now_iso(),
         )
-
 
 def _dataset_hash(events: list[MarketEvent]) -> str:
     digest = hashlib.sha256()

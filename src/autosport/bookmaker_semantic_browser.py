@@ -13,7 +13,6 @@ from datetime import datetime
 from decimal import Decimal
 from hashlib import sha256
 import json
-from typing import Callable
 
 from .bookmaker_capability import BookmakerCapabilityProfile
 from .bookmaker_integration_boundary import (
@@ -207,9 +206,16 @@ def plan_semantic_browser_selection(
     observed = _instant(snapshot.observed_at, "observed_at")
     current = _instant(now, "now")
     quote_time = _instant(quote.observed_ts, "quote.observed_ts")
+    ingest_time = _instant(quote.ingest_ts, "quote.ingest_ts")
+    source_time = (
+        _instant(quote.source_ts, "quote.source_ts")
+        if quote.source_ts is not None else None
+    )
     if (
         observed > current
         or quote_time > observed
+        or ingest_time > observed
+        or (source_time is not None and source_time > observed)
         or (current - observed).total_seconds() > max_age_seconds
         or (current - quote_time).total_seconds() > max_age_seconds
     ):

@@ -453,5 +453,116 @@ class SupportedProductEntrypointTests(unittest.TestCase):
             self.assertFalse(workspace.exists())
 
 
+
+    def test_forensic_journal_clean_restart_and_exact_lifecycle(self) -> None:
+        from autosport.forensic_session_journal import verify_journal
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "product"
+            source_module = _module(_Source)
+            with patch.dict(sys.modules, {"autosport_test_product_source": source_module}):
+                for _ in range(2):
+                    with redirect_stdout(io.StringIO()):
+                        self.assertEqual(
+                            run_product(
+                                workspace=workspace,
+                                source_factory="autosport_test_product_source:make_source",
+                                initial_bankroll="100",
+                                max_cycles=1,
+                                poll_seconds=0,
+                                install_signal_handlers=False,
+                            ),
+                            0,
+                        )
+            records = verify_journal(workspace / "forensic-session.jsonl")
+            self.assertEqual(
+                [record.event_type for record in records],
+                ["lifecycle.startup", "product.start", "product.tick",
+                 "lifecycle.shutdown"] * 2,
+            )
+            self.assertEqual(
+                [record.seq for record in records],
+                list(range(1, len(records) + 1)),
+            )
+            self.assertNotIn("lifecycle.unclean_restart",
+                             [record.event_type for record in records])
+
+    def test_forensic_journal_corruption_blocks_runtime_construction(self) -> None:
+        from autosport.forensic_session_journal import JournalIntegrityError
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "product"
+            workspace.mkdir()
+            journal = workspace / "forensic-session.jsonl"
+            journal.write_bytes(b"torn-record\n")
+            source_module = _module(_Source)
+            with patch.dict(sys.modules, {"autosport_test_product_source": source_module}):
+                with patch("autosport.product_entrypoint.build_autonomous_product_runtime") as build:
+                    with self.assertRaises(JournalIntegrityError):
+                        run_product(
+                            workspace=workspace,
+                            source_factory="autosport_test_product_source:make_source",
+                            initial_bankroll="100",
+                            max_cycles=1,
+                            poll_seconds=0,
+                            install_signal_handlers=False,
+                        )
+                    build.assert_not_called()
+            self.assertEqual(journal.read_bytes(), b"torn-record\n")
+
+    def test_forensic_journal_waits_are_observational_only(self) -> None:
+        from autosport.forensic_session_journal import verify_journal
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "product"
+            source_module = _module(_Source)
+            sleeps = []
+            with patch.dict(sys.modules, {"autosport_test_product_source": source_module}):
+                with redirect_stdout(io.StringIO()):
+                    self.assertEqual(
+                        run_product(
+                            workspace=workspace,
+                            source_factory="autosport_test_product_source:make_source",
+                            initial_bankroll="100",
+                            max_cycles=2,
+                            poll_seconds=0.25,
+                            sleep=sleeps.append,
+                            install_signal_handlers=False,
+                        ),
+                        0,
+                    )
+            self.assertEqual(sleeps, [0.25])
+            records = verify_journal(workspace / "forensic-session.jsonl")
+            waits = [r for r in records if r.event_type == "product.wait"]
+            self.assertEqual(len(waits), 1)
+            self.assertEqual(waits[0].payload, {"poll_seconds": 0.25})
+
+    def test_forensic_journal_write_failure_never_echoes_synthetic_secret(self) -> None:
+        sentinel = "FAKE-CREDENTIAL-NEVER-OUTPUT"
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "product"
+            source_module = _module(_Source)
+            output = io.StringIO()
+            with patch.dict(sys.modules, {"autosport_test_product_source": source_module}):
+                with patch(
+                    "autosport.product_entrypoint.ForensicSessionJournal.append_material",
+                    side_effect=OSError("injected " + sentinel),
+                ):
+                    with redirect_stdout(output):
+                        code = run_product_command(
+                            workspace=workspace,
+                            source_factory="autosport_test_product_source:make_source",
+                            initial_bankroll="100",
+                            max_cycles=1,
+                            poll_seconds=0,
+                        )
+            self.assertEqual(code, 4)
+            self.assertNotIn(sentinel, output.getvalue())
+            self.assertNotIn(
+                sentinel,
+                (workspace / "forensic-session.jsonl").read_text(encoding="utf-8"),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

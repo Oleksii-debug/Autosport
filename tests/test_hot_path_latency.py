@@ -90,3 +90,44 @@ def test_invalid_source_revision_and_callback_order_fail_before_effect():
     with pytest.raises(HotPathError):
         run_hot_path(source_sha=SHA, policy=POLICY, observed_at_ns=0, backlog=0, stages=dict(reversed(list(make_callbacks(calls).items()))))
     assert not calls
+
+
+def test_repeated_windows_are_bounded_without_stored_state():
+    calls = []
+    for n in range(2000):
+        origin = 1000 + n * 100
+        ticks = (origin, origin, origin + 1, origin + 1, origin + 2,
+                 origin + 2, origin + 3, origin + 3, origin + 4,
+                 origin + 4, origin + 5)
+        result = run_hot_path(source_sha=SHA, policy=POLICY, observed_at_ns=origin,
+                              backlog=0, stages=make_callbacks(calls), clock_ns=clock(*ticks))
+        assert result.disposition == "OK" and len(result.stage_latencies_ns) == 5
+        assert result.total_elapsed_ns == 5
+    assert len(calls) == 10_000
+
+
+def test_process_restart_fixture_has_same_source_bound_result(tmp_path):
+    import json
+    import os
+    from pathlib import Path
+    import subprocess
+    import sys
+
+    code = """import json
+from autosport.hot_path_latency import STAGES, HotPathPolicy, run_hot_path
+sha = 'a' * 40
+calls = []
+steps = {s: (lambda s=s: calls.append(s)) for s in STAGES}
+ticks = iter((100,100,101,101,102,102,103,103,104,104,105))
+r = run_hot_path(source_sha=sha, policy=HotPathPolicy(10,100,0,100), observed_at_ns=100, backlog=0, stages=steps, clock_ns=lambda: next(ticks))
+print(json.dumps({'sha':r.source_sha,'disposition':r.disposition,'samples':r.stage_latencies_ns,'calls':calls}))
+"""
+    env = dict(os.environ)
+    env["PYTHONPATH"] = str(Path(__file__).resolve().parents[1] / "src")
+    outputs = []
+    for _ in range(2):
+        run = subprocess.run([sys.executable, "-c", code], capture_output=True,
+                             text=True, timeout=10, env=env, check=True)
+        outputs.append(json.loads(run.stdout))
+    assert outputs[0] == outputs[1]
+    assert outputs[0]["sha"] == SHA and outputs[0]["calls"] == list(STAGES)

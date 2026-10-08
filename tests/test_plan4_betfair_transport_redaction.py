@@ -49,7 +49,8 @@ def test_transport_failure_is_redacted_and_never_retried(exception_type):
         client.read_account_details()
 
     assert transport.calls == 1
-    assert raised.value.__suppress_context__  # traceback does not display raw error
+    assert raised.value.__context__ is None  # no retained secret-bearing exception
+    assert raised.value.__cause__ is None
     assert _APP not in str(raised.value)
     assert _SESSION not in str(raised.value)
     assert _APP not in repr(raised.value)

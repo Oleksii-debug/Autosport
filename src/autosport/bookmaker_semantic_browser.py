@@ -144,6 +144,7 @@ class BrowserSelectionProposal:
     """Read-only, deterministic fixture evidence. Never execution authority."""
 
     profile_id: str
+    integration_evidence_id: str
     quote_hash: str
     page_source_sha256: str
     selection_role: str
@@ -204,6 +205,8 @@ def plan_semantic_browser_selection(
     if snapshot.status != "OPEN":
         raise SemanticBrowserContractError("market is not unambiguously open")
     observed = _instant(snapshot.observed_at, "observed_at")
+    profile_time = _instant(profile.observed_at, "profile.observed_at")
+    integration_time = _instant(integration.observed_at, "integration.observed_at")
     current = _instant(now, "now")
     quote_time = _instant(quote.observed_ts, "quote.observed_ts")
     ingest_time = _instant(quote.ingest_ts, "quote.ingest_ts")
@@ -213,6 +216,8 @@ def plan_semantic_browser_selection(
     )
     if (
         observed > current
+        or profile_time > observed
+        or integration_time > observed
         or quote_time > observed
         or ingest_time > observed
         or (source_time is not None and source_time > observed)
@@ -253,6 +258,7 @@ def plan_semantic_browser_selection(
         "observed_at": snapshot.observed_at,
         "page_source_sha256": snapshot.source_payload_sha256,
         "profile_id": profile.profile_id,
+        "integration_evidence_id": integration.evidence_id,
         "quote_hash": quote_hash,
         "selection_role": target_role,
     }
@@ -262,6 +268,7 @@ def plan_semantic_browser_selection(
     ).hexdigest()
     return BrowserSelectionProposal(
         profile_id=profile.profile_id,
+        integration_evidence_id=integration.evidence_id,
         quote_hash=quote_hash,
         page_source_sha256=snapshot.source_payload_sha256,
         selection_role=target_role,

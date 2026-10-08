@@ -96,6 +96,7 @@ def test_semantic_fixture_binds_exact_role_name_quote_without_ui_effect():
     assert one.selection_role == "button"
     assert one.accessible_name == LABEL
     assert one.profile_id == profile.profile_id
+    assert one.integration_evidence_id == integration.evidence_id
     assert one.page_source_sha256 == "d" * 64
     assert len(one.evidence_sha256) == 64
     assert not hasattr(one, "click")
@@ -157,6 +158,50 @@ def test_future_quote_and_cross_source_quote_never_resolve_target():
             quote, source_ts="2026-10-08T12:00:05+00:00"
         ), snapshot)
 
+
+
+
+def test_future_capability_and_integration_evidence_cannot_authorize_old_page():
+    profile, integration, quote, snapshot = _fixture()
+    # Existing integration evidence can refer to a future observation while
+    # keeping the same capability/profile identity. It must fail closed.
+    future_integration = replace(
+        integration, observed_at="2026-10-08T12:00:04+00:00",
+    )
+    with pytest.raises(SemanticBrowserContractError, match="future"):
+        _plan(profile, future_integration, quote, snapshot)
+
+    # Rebind a self-consistent later capability + integration to the earlier
+    # page. Identity checks alone must never backdate their availability.
+    future_profile = replace(
+        profile, observed_at="2026-10-08T12:00:04+00:00",
+    )
+    future_bound = bind_bookmaker_integration(
+        future_profile,
+        integration_kind=BookmakerIntegrationKind.BROWSER_AUTOMATION,
+        observed_at="2026-10-08T12:00:04+00:00",
+        source_ref="fixture://integration-later",
+        source_payload_sha256="b" * 64,
+    )
+    future_snapshot = replace(snapshot, profile_id=future_profile.profile_id)
+    with pytest.raises(SemanticBrowserContractError, match="future"):
+        _plan(future_profile, future_bound, quote, future_snapshot)
+
+
+def test_integration_source_revision_must_change_proposal_identity():
+    profile, integration, quote, snapshot = _fixture()
+    original = _plan(profile, integration, quote, snapshot)
+    changed_integration = replace(
+        integration, source_payload_sha256="f" * 64,
+    )
+    changed = _plan(profile, changed_integration, quote, snapshot)
+    assert original.integration_evidence_id == integration.evidence_id
+    assert changed.integration_evidence_id == changed_integration.evidence_id
+    assert changed.integration_evidence_id != original.integration_evidence_id
+    assert changed.evidence_sha256 != original.evidence_sha256
+    assert changed.authority == original.authority == "OFFLINE_PROPOSAL_ONLY"
+    assert not hasattr(changed, "click")
+    assert not hasattr(changed, "submit")
 
 def test_official_api_evidence_is_not_browser_permission():
     profile, integration, quote, snapshot = _fixture()

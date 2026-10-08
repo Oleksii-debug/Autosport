@@ -305,7 +305,10 @@ class BetfairStandardLimitPriceBoundEvidence:
         return payload
 
 
-class _CapturedPlaceOrdersRequest(RuntimeError):
+# Internal fail-before-I/O capture signal must bypass the production
+# place_action `except Exception` transport-to-UNKNOWN boundary. This is
+# never exposed by a real provider transport.
+class _CapturedPlaceOrdersRequest(BaseException):
     def __init__(self, body: bytes) -> None:
         super().__init__("captured canonical placeOrders request")
         self.body = body

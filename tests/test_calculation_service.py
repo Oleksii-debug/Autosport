@@ -242,15 +242,19 @@ class CalculationServiceTests(unittest.TestCase):
             )
 
     def test_ingest_timestamp_before_observation_is_rejected_as_invalid_chronology(self) -> None:
+        # Construction now rejects impossible chronology. Simulate a mutated
+        # valid quote to prove the calculation-time use boundary also fails closed.
+        invalid = self._event(
+            observed_ts="2026-09-14T12:00:00+00:00",
+            ingest_ts="2026-09-14T12:00:00+00:00",
+        )
+        object.__setattr__(invalid, "ingest_ts", "2026-09-14T11:59:59+00:00")
         with self.assertRaisesRegex(
             ValueError,
             "ingest_ts is before observed_ts",
         ):
             self.service.implied_probability_for_event(
-                self._event(
-                    observed_ts="2026-09-14T12:00:00+00:00",
-                    ingest_ts="2026-09-14T11:59:59+00:00",
-                ),
+                invalid,
                 causal_cutoff_ts="2026-09-14T12:01:00+00:00",
             )
 

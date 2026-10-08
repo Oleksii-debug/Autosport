@@ -148,6 +148,14 @@ def test_future_quote_and_cross_source_quote_never_resolve_target():
         _plan(profile, integration, replace(
             quote, source_id="foreign-venue"
         ), snapshot)
+    with pytest.raises(SemanticBrowserContractError):
+        _plan(profile, integration, replace(
+            quote, ingest_ts="2026-10-08T12:00:05+00:00"
+        ), snapshot)
+    with pytest.raises(SemanticBrowserContractError):
+        _plan(profile, integration, replace(
+            quote, source_ts="2026-10-08T12:00:05+00:00"
+        ), snapshot)
 
 
 def test_official_api_evidence_is_not_browser_permission():

@@ -311,7 +311,6 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
 
     def test_focused_replay_uses_same_selectors_without_future_leakage(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
-            store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
                 mirror = MarketMirror()
                 runtime = BoundedMirrorInvalidationBuffer(mirror)
@@ -341,6 +340,9 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                 )
                 clock_patch.start()
                 self.addCleanup(clock_patch.stop)
+                # Bootstrap establishes durable product availability; patch its
+                # clock BEFORE store initialization, not only before append.
+                store = SQLiteMarketStore(Path(directory) / "market.db")
                 for event in (first, future, other_provider):
                     if event is future:
                         product_now[0] = "2026-09-16T19:00:02+00:00"

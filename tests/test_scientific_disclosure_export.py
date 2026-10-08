@@ -58,6 +58,10 @@ _MANIFEST = membership_manifest_sha256(_MEMBERS)
 @pytest.fixture(autouse=True)
 def _product_machine_authority(tmp_path, monkeypatch):
     root = (tmp_path / "product-machine-authority").resolve(strict=False)
+    # The registry's integrity layer and the dataset-lineage/holdout ledger
+    # share one monotonic root per workspace. Match the public default resolver
+    # to the test-specific root instead of establishing conflicting bindings.
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(root))
     monkeypatch.setattr(
         lineage_trust_root,
         "_machine_account_authority_root",

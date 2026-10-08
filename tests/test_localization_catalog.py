@@ -134,7 +134,7 @@ _LANGUAGE_NEUTRAL_CRITICAL_VALUES = {
 _FORMAT_FIELD = re.compile(r"\{[^{}]*\}")
 _CYRILLIC_LETTER = re.compile(r"[\u0400-\u04FF]")
 _ENGLISH_UI_DIRECTIVE = re.compile(
-    r"\b(?:press|click|retry|reopen|settings|please|try\s+again|failed\s+to|unable\s+to)\b",
+    r"\b(?:press|click|retry|reopen|settings|please|confirm|submit|try\s+again|failed\s+to|unable\s+to)\b",
     re.IGNORECASE,
 )
 
@@ -197,6 +197,8 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
         "Press Retry і",
         "Error: press Retry and reopen Settings — і",
         "Please click тут",
+        "CONFIRM REAL BET і",
+        "SUBMIT REAL BET і",
     ):
         with pytest.raises(AssertionError, match="English-only critical UI directive"):
             _assert_critical_ukrainian_template(
@@ -472,6 +474,9 @@ def _assert_ukrainian_critical_presentation(key: str, value: str) -> None:
     assert any(
         character in _UKRAINIAN_PRESENTATION_LETTERS for character in value
     ), f"{key} has no Ukrainian presentation text: {value!r}"
+    assert not _ENGLISH_UI_DIRECTIVE.search(value), (
+        f"{key} contains an English-only critical UI directive: {value!r}"
+    )
     untranslated = _untranslated_latin_product_words(value)
     assert not untranslated, (
         f"{key} contains untranslated Latin product words: {untranslated!r}; "
@@ -506,6 +511,17 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
             "sample.english_only",
             "Retry Betfair API request after timeout.",
         )
+
+    # All-uppercase English commands must not bypass the critical UI gate
+    # merely because the display string contains one Ukrainian letter.
+    for english_uppercase_command in (
+        "CONFIRM REAL BET і",
+        "SUBMIT REAL BET і",
+    ):
+        with pytest.raises(AssertionError, match="English-only critical UI directive"):
+            _assert_ukrainian_critical_presentation(
+                "sample.unsafe_uppercase_command", english_uppercase_command
+            )
 
     with pytest.raises(AssertionError, match="untranslated Latin product words"):
         _assert_ukrainian_critical_presentation(

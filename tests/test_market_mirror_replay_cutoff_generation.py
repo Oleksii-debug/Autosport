@@ -2184,11 +2184,13 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 def mutate_after_binding_check(
                     authority,
                     *,
+                    cutoff_id: str,
                     expected_binding_sha256: str,
                 ) -> None:
                     nonlocal tampered_once
                     original_require(
                         authority,
+                        cutoff_id=cutoff_id,
                         expected_binding_sha256=expected_binding_sha256,
                     )
                     if tampered_once:

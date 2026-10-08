@@ -107,14 +107,23 @@ def _holdout_lineage(tmp_path, *snapshots: DatasetSnapshot) -> DatasetSnapshotLi
         registry,
         authority_root=_authority_root(tmp_path),
     )
-    parent_snapshot_id: str | None = None
+    previous_snapshot: DatasetSnapshot | None = None
     for snapshot in snapshots:
+        # Append ancestry is valid only within an exact source/licence lineage.
+        # Independent physical populations use a separate canonical root.
+        parent_snapshot_id = (
+            previous_snapshot.dataset_snapshot_id
+            if previous_snapshot is not None
+            and previous_snapshot.source_identity == snapshot.source_identity
+            and previous_snapshot.license_identity == snapshot.license_identity
+            else None
+        )
         lineage.register(
             snapshot_id=snapshot.dataset_snapshot_id,
             member_sha256=_members_for_manifest(snapshot.manifest_sha256),
             parent_snapshot_id=parent_snapshot_id,
         )
-        parent_snapshot_id = snapshot.dataset_snapshot_id
+        previous_snapshot = snapshot
     return lineage
 
 
@@ -433,7 +442,11 @@ def test_restoring_older_valid_ledger_is_rejected_by_external_monotonic_authorit
     first_snapshot = _snapshot(snapshot_id="window-a")
     # Anti-rollback must first create two lawful, physically disjoint consumptions:
     # overlapping populations are rightly rejected by the new holdout guard.
-    second_snapshot = _snapshot(snapshot_id="window-b", manifest_sha256=_HOLDOUT_MANIFEST_C)
+    second_snapshot = _snapshot(
+        snapshot_id="window-b",
+        manifest_sha256=_HOLDOUT_MANIFEST_C,
+        source_identity="provider:independent-holdout-source",
+    )
     lineage = _holdout_lineage(tmp_path, first_snapshot, second_snapshot)
     ledger = HoldoutConsumptionLedger(path, authority_root=authority_root, lineage_authority=lineage)
     ledger.consume(

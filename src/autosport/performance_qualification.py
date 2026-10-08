@@ -91,6 +91,12 @@ def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]
             )
         if type(value) is str:
             charge_text(value)
+            try:
+                value.encode("utf-8", errors="strict")
+            except UnicodeEncodeError:
+                raise PerformanceQualificationError(
+                    "endurance report contains invalid UTF-8 text"
+                ) from None
             return value
         if value is None or type(value) in (int, float, bool):
             return value
@@ -111,10 +117,10 @@ def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]
                         )
                     try:
                         key.encode("utf-8", errors="strict")
-                    except UnicodeEncodeError as exc:
+                    except UnicodeEncodeError:
                         raise PerformanceQualificationError(
                             "endurance report object keys must be valid UTF-8"
-                        ) from exc
+                        ) from None
                     charge_text(key)
                     detached[key] = detach(item, depth + 1)
                 return detached

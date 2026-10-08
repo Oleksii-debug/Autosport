@@ -643,6 +643,23 @@ def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
         raise ValueError("current quote projection row has unexpected shape")
 
     source_id, quote_key, observed_ts, sequence, payload_json = row
+    # Prove redundant columns before model construction. A hostile payload can
+    # violate chronology (for example, a future observed_ts after ingest_ts)
+    # and fail decoding before the ordinary identity checks below. That must
+    # not be mistaken for a repairable derived cache entry at append time.
+    if isinstance(payload_json, str):
+        raw_identity = _load_history_payload(payload_json)
+        for field_name, persisted in (
+            ("source_id", source_id),
+            ("observed_ts", observed_ts),
+            ("sequence", sequence),
+        ):
+            if field_name in raw_identity and not _typed_equal(
+                persisted, raw_identity[field_name]
+            ):
+                raise ValueError(
+                    f"current quote projection row identity mismatch: {field_name}"
+                )
     event = _event_from_current_payload(payload_json)
 
     expected = (

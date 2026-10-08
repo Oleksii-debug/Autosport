@@ -127,7 +127,7 @@ def test_line_wrapped_base64_cannot_hide_canary_across_chunks(
     assert canary not in repr(report)
 
 
-@pytest.mark.parametrize("line_ending", [b"\\n", b"\\r\\n"])
+@pytest.mark.parametrize("line_ending", [b"\n", b"\r\n"])
 def test_folded_base64_real_newlines_not_mistaken_for_literal_slashes(
     tmp_path: Path,
     line_ending: bytes,

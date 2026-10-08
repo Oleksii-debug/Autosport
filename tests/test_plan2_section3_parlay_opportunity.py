@@ -58,6 +58,16 @@ def _forecast(quote: QuoteRef, index: int) -> ForecastRef:
     return ForecastRef.from_forecast(forecast, quote)
 
 
+def test_parlay_single_leg_is_not_a_valid_combination() -> None:
+    for decision in (OpportunityDecision.WAIT, OpportunityDecision.ACTIONABLE):
+        with pytest.raises(OpportunityContractError, match="at least two distinct quotes"):
+            Opportunity(
+                strategy_class=StrategyClass.PARLAY,
+                decision=decision,
+                quotes=(_quote(1),),
+            )
+
+
 def test_parlay_is_first_class_structural_opportunity_and_roundtrips() -> None:
     quotes = (_quote(2), _quote(1))
     opportunity = Opportunity(

@@ -651,7 +651,9 @@ def scan_secret_canary(
         for entry in ordered:
             path = Path(entry.path)
             try:
-                metadata = entry.stat(follow_symlinks=False)
+                # Windows DirEntry.stat() zeroes st_dev/st_ino/st_nlink;
+                # acquire complete no-follow identity for OS/file-descriptor binding.
+                metadata = path.lstat()
                 entry_identity = _identity_from_stat(metadata)
                 if stat.S_ISLNK(metadata.st_mode):
                     errors.append(

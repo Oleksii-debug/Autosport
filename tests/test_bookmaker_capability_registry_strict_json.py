@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,86 @@ def test_registry_rejects_nonstandard_json_constant(tmp_path) -> None:
         encoding="utf-8",
     )
     _assert_corrupt(path)
+
+
+@pytest.mark.parametrize("aliased_version", [True, 1.0])
+def test_registry_rejects_schema_version_aliases(tmp_path, aliased_version) -> None:
+    path = tmp_path / "registry.json"
+    path.write_text(json.dumps({
+        "schema_version": aliased_version, "profiles": [], "governance": []
+    }), encoding="utf-8")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="schema_version"):
+        BookmakerCapabilityRegistry(path).profile_history(
+            "book-a", "acct-a", "adapter-a"
+        )
+
+
+@pytest.mark.parametrize("injection", [
+    "root", "profile_entry", "profile", "fact", "governance_entry", "governance"
+])
+def test_registry_rejects_unknown_nested_versioned_fields(tmp_path, injection) -> None:
+    path = tmp_path / "registry.json"
+    registry = BookmakerCapabilityRegistry(path)
+    assert registry.register_profile(_profile())
+    assert registry.register_governance(_governance())
+    document = json.loads(path.read_text(encoding="utf-8"))
+    targets = {
+        "root": document,
+        "profile_entry": document["profiles"][0],
+        "profile": document["profiles"][0]["profile"],
+        "fact": document["profiles"][0]["profile"]["facts"][0],
+        "governance_entry": document["governance"][0],
+        "governance": document["governance"][0]["evidence"],
+    }
+    targets[injection]["unknown_future_authority"] = True
+    path.write_text(json.dumps(document), encoding="utf-8")
+    # The public decoder intentionally wraps nested fact-schema errors; both
+    # surfaces must reject the record rather than silently accept unknown data.
+    expected_error = (
+        "invalid capability profile payload" if injection == "fact"
+        else "schema fields"
+    )
+    with pytest.raises(BookmakerCapabilityRegistryError, match=expected_error):
+        registry.profile_history("book-a", "acct-a", "adapter-a")
+
+    # A future schema must not be erased by a later read-modify-write,
+    # including an idempotent replay. Reopen must remain fail-closed.
+    corrupt_bytes = path.read_bytes()
+    for mutation in (
+        lambda: registry.register_profile(_profile()),
+        lambda: registry.register_governance(_governance()),
+    ):
+        with pytest.raises(BookmakerCapabilityRegistryError):
+            mutation()
+        assert path.read_bytes() == corrupt_bytes
+
+    with pytest.raises(BookmakerCapabilityRegistryError):
+        BookmakerCapabilityRegistry(path).governance_history("book-a", "acct-a")
+    assert path.read_bytes() == corrupt_bytes
+
+
+@pytest.mark.parametrize("field", [
+    "venue_id", "account_id", "jurisdiction", "terms_version", "source_ref",
+])
+def test_governance_rejects_malformed_unicode_without_publishing(tmp_path, field) -> None:
+    # A lone surrogate is legal inside a Python str but cannot encode to
+    # canonical UTF-8. Technical and legal/terms identities share this fence.
+    from dataclasses import replace
+
+    invalid = "x" + chr(0xD800)
+    path = tmp_path / "registry.json"
+    with pytest.raises(BookmakerCapabilityRegistryError, match="valid UTF-8"):
+        replace(_governance(), **{field: invalid})
+    with pytest.raises(BookmakerCapabilityRegistryError, match="valid UTF-8"):
+        BookmakerCapabilityRegistry(path).governance_history(invalid, "acct-a")
+    assert not path.exists()
+
+
+def test_governance_valid_non_ascii_identity_survives_restart(tmp_path) -> None:
+    from dataclasses import replace
+
+    path = tmp_path / "registry.json"
+    evidence = replace(_governance(), jurisdiction="Україна")
+    assert BookmakerCapabilityRegistry(path).register_governance(evidence)
+    reopened = BookmakerCapabilityRegistry(path)
+    assert reopened.governance_history("book-a", "acct-a") == (evidence,)

@@ -36,10 +36,10 @@ def _text(value: object, name: str) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
+    text = _text(value, name)
     if len(text) != 64 or any(char not in evidence._HEX for char in text):
         raise evidence.PointInTimeEvidenceError(
-            f"{name} must be a canonical SHA-256 hex string"
+            f"{name} must be a canonical lowercase SHA-256 hex string"
         )
     return text
 
@@ -63,6 +63,16 @@ def _utc(value: object, name: str) -> str:
 
 def _digest(payload: Mapping[str, Any]) -> str:
     return evidence._digest(payload)
+
+
+def _exact_dict_fields(payload: object) -> frozenset[str] | None:
+    """Return exact built-in string keys without hashing caller-controlled subtypes."""
+    if type(payload) is not dict:
+        return None
+    keys = tuple(payload.keys())
+    if any(type(key) is not str for key in keys):
+        return None
+    return frozenset(keys)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,10 +139,16 @@ class FeatureArtifactProvenance:
             "dataset_available_at_utc": self.dataset_available_at_utc,
             "feature_set_id": self.feature_set_id,
             "feature_version": self.feature_version,
-            "feature_definition_sha256": self.feature_definition_sha256,
-            "feature_source_sha256": self.feature_source_sha256,
+            "feature_definition_sha256": _sha256(
+                self.feature_definition_sha256, "feature_definition_sha256"
+            ),
+            "feature_source_sha256": _sha256(
+                self.feature_source_sha256, "feature_source_sha256"
+            ),
             "feature_available_at_utc": self.feature_available_at_utc,
-            "feature_payload_sha256": self.feature_payload_sha256,
+            "feature_payload_sha256": _sha256(
+                self.feature_payload_sha256, "feature_payload_sha256"
+            ),
         }
 
     @property
@@ -194,11 +210,15 @@ class FeatureArtifactProvenance:
             "feature_payload_sha256",
             "provenance_sha256",
         }
-        if type(payload) is not dict or set(payload) != expected:
+        if _exact_dict_fields(payload) != frozenset(expected):
             raise evidence.PointInTimeEvidenceError(
                 "feature artifact provenance fields mismatch"
             )
-        if payload["kind"] != _PROVENANCE_KIND or payload["schema_version"] != 1:
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["kind"] != _PROVENANCE_KIND
+            or payload["schema_version"] != _SCHEMA_VERSION
+        ):
             raise evidence.PointInTimeEvidenceError(
                 "feature artifact provenance schema mismatch"
             )
@@ -288,16 +308,28 @@ class FeatureAvailabilityEvidence:
             "schema_version": _SCHEMA_VERSION,
             "feature_identity": self.feature_identity,
             "feature_version": self.feature_version,
-            "feature_definition_sha256": self.feature_definition_sha256,
+            "feature_definition_sha256": _sha256(
+                self.feature_definition_sha256, "feature_definition_sha256"
+            ),
             "source_identity": self.source_identity,
-            "source_revision": self.source_revision,
+            "source_revision": _sha256(self.source_revision, "source_revision"),
             "revision_policy_id": self.revision_policy_id,
             "dataset_snapshot_id": self.dataset_snapshot_id,
-            "dataset_record_sha256": self.dataset_record_sha256,
-            "dataset_manifest_sha256": self.dataset_manifest_sha256,
-            "dataset_lineage_proof_sha256": self.dataset_lineage_proof_sha256,
-            "feature_provenance_sha256": self.feature_provenance_sha256,
-            "feature_payload_sha256": self.feature_payload_sha256,
+            "dataset_record_sha256": _sha256(
+                self.dataset_record_sha256, "dataset_record_sha256"
+            ),
+            "dataset_manifest_sha256": _sha256(
+                self.dataset_manifest_sha256, "dataset_manifest_sha256"
+            ),
+            "dataset_lineage_proof_sha256": _sha256(
+                self.dataset_lineage_proof_sha256, "dataset_lineage_proof_sha256"
+            ),
+            "feature_provenance_sha256": _sha256(
+                self.feature_provenance_sha256, "feature_provenance_sha256"
+            ),
+            "feature_payload_sha256": _sha256(
+                self.feature_payload_sha256, "feature_payload_sha256"
+            ),
             "as_of_utc": self.as_of_utc,
             "available_at_utc": self.available_at_utc,
             "decision_cutoff_utc": self.decision_cutoff_utc,
@@ -346,8 +378,12 @@ def _require_provenance_matches(
         ),
         "feature_set_id": feature_set.feature_set_id,
         "feature_version": feature_set.version,
-        "feature_definition_sha256": feature_set.definition_sha256.lower(),
-        "feature_source_sha256": feature_set.source_sha256.lower(),
+        "feature_definition_sha256": _sha256(
+            feature_set.definition_sha256, "feature_set.definition_sha256"
+        ),
+        "feature_source_sha256": _sha256(
+            feature_set.source_sha256, "feature_set.source_sha256"
+        ),
         "feature_available_at_utc": _utc(
             feature_set.available_at_utc, "feature_set.available_at"
         ),
@@ -391,9 +427,9 @@ def _bind(
         raise evidence.PointInTimeEvidenceError(
             "feature_provenance must be an exact FeatureArtifactProvenance"
         )
-    if not isinstance(lineage_authority, DatasetSnapshotLineageAuthority):
+    if type(lineage_authority) is not DatasetSnapshotLineageAuthority:
         raise evidence.PointInTimeEvidenceError(
-            "lineage_authority must be a DatasetSnapshotLineageAuthority"
+            "lineage_authority must be an exact DatasetSnapshotLineageAuthority"
         )
 
     decision_cutoff = _instant(decision_cutoff_utc, "decision_cutoff_utc")
@@ -437,7 +473,10 @@ def _bind(
             "dataset snapshot lacks canonical lineage authority"
         )
     if (
-        lineage.manifest_sha256 != dataset_snapshot.manifest_sha256.lower()
+        lineage.manifest_sha256
+        != _sha256(
+            dataset_snapshot.manifest_sha256, "dataset_snapshot.manifest_sha256"
+        )
         or lineage.source_identity != dataset_snapshot.source_identity
         or lineage.license_identity != dataset_snapshot.license_identity
     ):

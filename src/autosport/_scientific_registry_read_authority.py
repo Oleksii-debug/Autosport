@@ -187,9 +187,12 @@ def _read_authority_verified(self: _registry.ScientificRegistry) -> dict[str, An
         )
     except json.JSONDecodeError as exc:
         raise ValueError("scientific registry must be valid UTF-8 JSON") from exc
-    if type(state) is not dict or state.get("schema_version") != 1:
+    if type(state) is not dict:
         raise ValueError("scientific registry schema_version mismatch")
-    records = state.get("records")
+    schema_version = dict.get(state, "schema_version")
+    if type(schema_version) is not int or schema_version != 1:
+        raise ValueError("scientific registry schema_version mismatch")
+    records = dict.get(state, "records")
     if type(records) is not list:
         raise ValueError("scientific registry records must be a list")
     seen: set[tuple[str, str]] = set()

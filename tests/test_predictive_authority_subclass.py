@@ -5,7 +5,9 @@ from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
-from autosport.opportunity import ForecastRef, Opportunity
+import pytest
+
+from autosport.opportunity import ForecastRef, Opportunity, OpportunityContractError
 from autosport.paper import PaperBook
 from autosport.portfolio_plan import PortfolioAction, build_portfolio_plan
 
@@ -55,23 +57,11 @@ def test_forecast_ref_subclass_cannot_mint_predictive_portfolio_authority() -> N
     intent = helpers._intent(goal, suffix="subclass-bypass", signal=Decimal("0.05"))
     original = intent.opportunity.forecasts[0]
     forged = _ForgedForecastRef.from_dict(original.to_dict())
-    intent = replace(
-        intent,
-        opportunity=replace(intent.opportunity, forecasts=(forged,)),
-    )
-    book = PaperBook("1000")
-
-    plan = build_portfolio_plan(
-        book,
-        (intent,),
-        helpers._policy(goal),
-        helpers.DECISION_TS,
-        dependency_graph=helpers._graph(book, (intent,)),
-    )
-
-    assert plan.action is PortfolioAction.WAIT
-    assert plan.stakes == (Decimal("0"),)
-    assert "not resolved from canonical ScientificRegistry authority" in plan.reason
+    with pytest.raises(
+        OpportunityContractError,
+        match="opportunity forecasts must be ForecastRef values",
+    ):
+        replace(intent.opportunity, forecasts=(forged,))
 
 
 def test_opportunity_subclass_cannot_override_predictive_authority_or_haircut() -> None:
@@ -91,17 +81,5 @@ def test_opportunity_subclass_cannot_override_predictive_authority_or_haircut() 
         forecasts=original.forecasts,
         evidence_refs=original.evidence_refs,
     )
-    intent = replace(intent, opportunity=forged)
-    book = PaperBook("1000")
-
-    plan = build_portfolio_plan(
-        book,
-        (intent,),
-        helpers._policy(goal),
-        helpers.DECISION_TS,
-        dependency_graph=helpers._graph(book, (intent,)),
-    )
-
-    assert plan.action is PortfolioAction.WAIT
-    assert plan.stakes == (Decimal("0"),)
-    assert "exact canonical Opportunity authority" in plan.reason
+    with pytest.raises(ValueError, match="exact canonical Opportunity authority"):
+        replace(intent, opportunity=forged)

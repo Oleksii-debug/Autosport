@@ -341,3 +341,167 @@ def test_persisted_digest_tamper_is_rejected(tmp_path, monkeypatch):
         match="frame_sha256 does not bind exact provider frame",
     ):
         _store(tmp_path).load(snapshot.evidence_sha256)
+
+
+class _HostileProviderIdentityStr(str):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError("hostile provider identity string dispatched before exact-type rejection")
+
+    __eq__ = _dispatch
+    __ne__ = _dispatch
+    __iter__ = _dispatch
+    __len__ = _dispatch
+    strip = _dispatch
+    encode = _dispatch
+    lower = _dispatch
+
+
+class _HostileTuple(tuple):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError("hostile tuple dispatched before exact-type rejection")
+
+    __iter__ = _dispatch
+    __eq__ = _dispatch
+    __ne__ = _dispatch
+    __len__ = _dispatch
+
+
+class _HostilePayload(dict):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError("hostile payload mapping dispatched before exact-type rejection")
+
+    __getitem__ = _dispatch
+    get = _dispatch
+    keys = _dispatch
+    __iter__ = _dispatch
+
+
+class _HostileList(list):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError("hostile payload list dispatched before exact-type rejection")
+
+    __iter__ = _dispatch
+    __len__ = _dispatch
+
+
+def test_request_from_payload_rejects_mapping_subclass_before_dispatch() -> None:
+    payload = _HostilePayload(_request().to_payload())
+    with pytest.raises(ProviderObservationIntegrityError, match="exact JSON object"):
+        CompleteGameBoardRequest.from_payload(payload)
+
+
+def test_request_from_payload_rejects_list_subclass_before_iteration() -> None:
+    payload = _request().to_payload()
+    payload["bookmakers"] = _HostileList(payload["bookmakers"])
+    with pytest.raises(ProviderObservationIntegrityError, match="exact JSON arrays"):
+        CompleteGameBoardRequest.from_payload(payload)
+
+
+def test_snapshot_from_payload_rejects_mapping_subclass_before_dispatch() -> None:
+    snapshot = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at=CAPTURED_AT,
+        frame_json=json.dumps(_complete_frame()),
+    )
+    payload = _HostilePayload(snapshot.to_payload())
+    with pytest.raises(ProviderObservationIntegrityError, match="exact JSON object"):
+        CompleteGameBoardSnapshot.from_payload(payload)
+
+
+def test_snapshot_from_payload_rejects_nested_mapping_subclass_before_dispatch() -> None:
+    snapshot = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at=CAPTURED_AT,
+        frame_json=json.dumps(_complete_frame()),
+    )
+    payload = snapshot.to_payload()
+    payload["request"] = _HostilePayload(payload["request"])
+    with pytest.raises(ProviderObservationIntegrityError, match="request payload must be an exact JSON object"):
+        CompleteGameBoardSnapshot.from_payload(payload)
+
+
+def test_snapshot_from_payload_rejects_row_hash_list_subclass_before_iteration() -> None:
+    snapshot = CompleteGameBoardSnapshot(
+        request=_request(),
+        captured_at=CAPTURED_AT,
+        frame_json=json.dumps(_complete_frame()),
+    )
+    payload = snapshot.to_payload()
+    payload["row_sha256s"] = _HostileList(payload["row_sha256s"])
+    with pytest.raises(ProviderObservationIntegrityError, match="row_sha256s"):
+        CompleteGameBoardSnapshot.from_payload(payload)
+
+
+def test_request_identity_text_subclass_fails_before_virtual_dispatch() -> None:
+    with pytest.raises(ProviderObservationIntegrityError):
+        CompleteGameBoardRequest(
+            sport_key=_HostileProviderIdentityStr("table_tennis"),
+            bookmakers=("bovada",),
+        )
+
+
+def test_request_bookmaker_tuple_subclass_fails_before_iteration() -> None:
+    with pytest.raises(ProviderObservationIntegrityError):
+        CompleteGameBoardRequest(
+            sport_key="table_tennis",
+            bookmakers=_HostileTuple(("bovada",)),
+        )
+
+
+def test_request_market_tuple_subclass_fails_before_comparison() -> None:
+    with pytest.raises(ProviderObservationUnsupportedError):
+        CompleteGameBoardRequest(
+            sport_key="table_tennis",
+            bookmakers=("bovada",),
+            markets=_HostileTuple(GAME_LINE_MARKETS),
+        )
+
+
+def test_request_kind_subclass_fails_before_equality_dispatch() -> None:
+    with pytest.raises(ProviderObservationUnsupportedError):
+        CompleteGameBoardRequest(
+            sport_key="table_tennis",
+            bookmakers=("bovada",),
+            kind=_HostileProviderIdentityStr("game"),
+        )
+
+
+def test_snapshot_rejects_request_subclass_before_attribute_dispatch() -> None:
+    class SubRequest(CompleteGameBoardRequest):
+        pass
+
+    request = SubRequest(sport_key="table_tennis", bookmakers=("bovada",))
+    with pytest.raises(ProviderObservationIntegrityError):
+        CompleteGameBoardSnapshot(
+            request=request,
+            captured_at=CAPTURED_AT,
+            frame_json=json.dumps(_complete_frame()),
+        )
+
+
+def test_snapshot_frame_json_subclass_fails_before_json_dispatch() -> None:
+    with pytest.raises(ProviderObservationIntegrityError):
+        CompleteGameBoardSnapshot(
+            request=_request(),
+            captured_at=CAPTURED_AT,
+            frame_json=_HostileProviderIdentityStr(json.dumps(_complete_frame())),
+        )
+
+
+def test_capture_rejects_request_subclass_before_provider_dispatch(monkeypatch) -> None:
+    class SubRequest(CompleteGameBoardRequest):
+        pass
+
+    request = SubRequest(sport_key="table_tennis", bookmakers=("bovada",))
+    monkeypatch.setattr(
+        authority_module,
+        "_read_production_initial_state",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("provider dispatch must not run")
+        ),
+    )
+    with pytest.raises(TypeError, match="exact CompleteGameBoardRequest"):
+        capture_parlay_complete_game_board(
+            api_key="secret",
+            request=request,
+        )

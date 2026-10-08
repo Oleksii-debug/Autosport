@@ -238,8 +238,8 @@ class OpportunityIntent:
 
     def __post_init__(self) -> None:
         _canonical_text("intent_id", self.intent_id)
-        if not isinstance(self.opportunity, Opportunity):
-            raise TypeError("opportunity must be canonical Opportunity")
+        if type(self.opportunity) is not Opportunity:
+            raise ValueError("opportunity must be exact canonical Opportunity authority")
         if not isinstance(self.evidence, OpportunityEvidence):
             raise TypeError("evidence must be OpportunityEvidence")
         if not isinstance(self.risk_context, ProposedTicketRiskContext):

@@ -43,16 +43,21 @@ _RECORD_TYPES = frozenset(
 
 
 def _text(value: object, name: str) -> str:
-    if type(value) is not str or not value or value != value.strip():
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise ValueError(f"{name} must be a non-empty canonical string")
     value.encode("utf-8")
     return value
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
+    text = _text(value, name)
     if len(text) != 64 or any(char not in _HEX for char in text):
-        raise ValueError(f"{name} must be a canonical SHA-256 hex string")
+        raise ValueError(f"{name} must be a canonical lowercase SHA-256 hex string")
     return text
 
 
@@ -72,8 +77,8 @@ def _instant(value: object, name: str) -> datetime:
 
 
 def _text_tuple(value: object, name: str, *, allow_empty: bool = False) -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise ValueError(f"{name} must be a tuple")
+    if type(value) is not tuple:
+        raise ValueError(f"{name} must be an exact tuple")
     items = tuple(_text(item, f"{name} item") for item in value)
     if not allow_empty and not items:
         raise ValueError(f"{name} must not be empty")
@@ -138,8 +143,12 @@ def promotion_holdout_access_id(
 def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     text = _text(value, "binding.promotion_rule")
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
         raise PromotionEvidenceError("frozen promotion rule is not canonical JSON") from exc
     if type(payload) is not dict or payload.get("kind") != "autosport-promotion-rule-v1":
         raise PromotionEvidenceError("frozen promotion rule kind is unsupported")
@@ -148,7 +157,17 @@ def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     minimum_effective_sample_size = payload.get("minimum_effective_sample_size")
     if type(primary_metric) is not str or not primary_metric:
         raise PromotionEvidenceError("frozen promotion rule lacks primary metric")
-    if isinstance(minimum_improvement, bool) or not isinstance(minimum_improvement, (int, float)) or not math.isfinite(minimum_improvement):
+    if type(minimum_improvement) not in (int, float):
+        raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
+    try:
+        finite_improvement = math.isfinite(minimum_improvement)
+    except OverflowError as exc:
+        # JSON may contain a finite integer too large to convert to float.
+        # Untrusted frozen evidence must fail closed rather than crash promotion.
+        raise PromotionEvidenceError(
+            "frozen promotion rule minimum improvement is invalid"
+        ) from exc
+    if not finite_improvement:
         raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
     if isinstance(minimum_effective_sample_size, bool) or not isinstance(minimum_effective_sample_size, int) or minimum_effective_sample_size <= 0:
         raise PromotionEvidenceError("frozen promotion rule minimum effective sample size is invalid")
@@ -256,8 +275,8 @@ class ResearchProtocol:
     available_at_utc: str
 
     def __post_init__(self) -> None:
-        if not isinstance(self.binding, ScientificProtocolBinding):
-            raise ValueError("binding must be a ScientificProtocolBinding")
+        if type(self.binding) is not ScientificProtocolBinding:
+            raise ValueError("binding must be an exact ScientificProtocolBinding")
         _sha256(self.source_sha256, "source_sha256")
         _sha256(self.environment_sha256, "environment_sha256")
         _sha256(self.dataset_manifest_sha256, "dataset_manifest_sha256")
@@ -666,6 +685,8 @@ class PromotionEvidence:
     created_at: str
 
     def __post_init__(self) -> None:
+        if type(self) is not PromotionEvidence:
+            raise ValueError("promotion evidence must be an exact PromotionEvidence")
         for name in (
             "promotion_evidence_id", "experiment_id", "research_protocol_id",
             "research_question_id", "hypothesis_id", "candidate_strategy_version_id",
@@ -701,7 +722,7 @@ class PromotionEvidence:
             raise ValueError("effect interval low must not exceed high")
         if practical < low or practical > high:
             raise ValueError("practical improvement must lie inside effect interval")
-        expected_id = _digest(self.to_payload(include_id=False))
+        expected_id = _digest(PromotionEvidence.to_payload(self, include_id=False))
         if self.promotion_evidence_id != expected_id:
             raise ValueError("promotion_evidence_id does not match canonical evidence identity")
 
@@ -892,6 +913,42 @@ class RegistryEntry:
         return value if isinstance(value, str) else None
 
 
+_LOCAL_SCIENTIFIC_RECORD_TYPES = {
+    "ResearchQuestion": ResearchQuestion,
+    "Hypothesis": Hypothesis,
+    "ResearchProtocol": ResearchProtocol,
+    "DatasetSnapshot": DatasetSnapshot,
+    "FeatureSet": FeatureSet,
+    "ModelVersion": ModelVersion,
+    "StrategyVersion": StrategyVersion,
+    "EvaluationBundle": EvaluationBundleRef,
+    "Experiment": ExperimentRecord,
+    "PromotionDecision": PromotionDecision,
+    "PromotionEvidence": PromotionEvidence,
+    "Postmortem": Postmortem,
+    "CounterfactualQualification": CounterfactualQualification,
+    "CounterfactualSourceEvidence": CounterfactualSourceEvidence,
+}
+_LOCAL_SCIENTIFIC_RECORD_CLASSES = tuple(_LOCAL_SCIENTIFIC_RECORD_TYPES.values())
+
+
+def _external_scientific_record_types() -> dict[str, type[Any]]:
+    """Resolve canonical cross-module registry records without import cycles."""
+
+    from .champion_eligibility import ChampionEligibilityDecision
+    from .drift_control import DriftFinding, DriftObservation, DriftReference
+    from .voc_evaluation import PairedVOCEvaluation, VOCCohort
+
+    return {
+        "DriftReference": DriftReference,
+        "DriftObservation": DriftObservation,
+        "DriftFinding": DriftFinding,
+        "PairedVOCEvaluation": PairedVOCEvaluation,
+        "VOCCohort": VOCCohort,
+        "ChampionEligibilityDecision": ChampionEligibilityDecision,
+    }
+
+
 class ScientificRegistryError(RuntimeError):
     pass
 
@@ -943,7 +1000,11 @@ class ScientificRegistry:
             state = json.loads(raw, object_pairs_hook=_reject_duplicate_keys, parse_constant=_reject_nonfinite)
         except json.JSONDecodeError as exc:
             raise ValueError("scientific registry must be valid UTF-8 JSON") from exc
-        if type(state) is not dict or state.get("schema_version") != self.SCHEMA_VERSION:
+        if (
+            type(state) is not dict
+            or type(state.get("schema_version")) is not int
+            or state.get("schema_version") != self.SCHEMA_VERSION
+        ):
             raise ValueError("scientific registry schema_version mismatch")
         records = state.get("records")
         if type(records) is not list:
@@ -979,6 +1040,107 @@ class ScientificRegistry:
         _iso(raw_entry["available_at"], "available_at")
         if type(raw_entry["payload"]) is not dict:
             raise ValueError("scientific registry payload must be an object")
+        payload = raw_entry["payload"]
+        record_type = raw_entry["record_type"]
+        identity_field = {
+            "ResearchQuestion": "question_id",
+            "Hypothesis": "hypothesis_id",
+            "ResearchProtocol": "research_protocol_id",
+            "DatasetSnapshot": "dataset_snapshot_id",
+            "FeatureSet": "feature_set_id",
+            "ModelVersion": "model_version_id",
+            "StrategyVersion": "strategy_version_id",
+            "EvaluationBundle": "evaluation_bundle_id",
+            "Experiment": "experiment_id",
+            "PromotionDecision": "promotion_decision_id",
+            "PromotionEvidence": "promotion_evidence_id",
+            "Postmortem": "postmortem_id",
+            "DriftFinding": "finding_id",
+            "PairedVOCEvaluation": "evaluation_id",
+            "VOCCohort": "cohort_id",
+            "ChampionEligibilityDecision": "decision_id",
+        }.get(record_type)
+        if identity_field is not None:
+            payload_record_id = _text(
+                payload.get(identity_field),
+                f"{record_type}.{identity_field}",
+            )
+        elif record_type in {"DriftReference", "DriftObservation"}:
+            payload_record_id = _digest(payload)
+        elif record_type == "CounterfactualQualification":
+            authority_id = _text(
+                payload.get("authority_id"),
+                "CounterfactualQualification.authority_id",
+            )
+            authority_version = _text(
+                payload.get("authority_version"),
+                "CounterfactualQualification.authority_version",
+            )
+            payload_record_id = f"{authority_id}@{authority_version}"
+        elif record_type == "CounterfactualSourceEvidence":
+            authority_id = _text(
+                payload.get("authority_id"),
+                "CounterfactualSourceEvidence.authority_id",
+            )
+            authority_version = _text(
+                payload.get("authority_version"),
+                "CounterfactualSourceEvidence.authority_version",
+            )
+            sample_id = _text(
+                payload.get("sample_id"),
+                "CounterfactualSourceEvidence.sample_id",
+            )
+            payload_record_id = f"{authority_id}@{authority_version}:{sample_id}"
+        else:
+            payload_record_id = None
+        if payload_record_id is not None and payload_record_id != raw_entry["record_id"]:
+            raise ValueError("scientific registry record identity mismatch")
+
+        # Revalidate every persisted identity/version/hash-shaped member before
+        # accepting a self-consistent envelope digest.  The writer validates the
+        # canonical DTO before persistence, but restart must not let JSON type drift
+        # (for example dataset_snapshot_id=7) become a new spelling of the same
+        # identity merely because record_sha256 was honestly recomputed.
+        def validate_identity_shape(value: object, path: str) -> None:
+            if type(value) is dict:
+                for key, member in value.items():
+                    if type(key) is not str:
+                        raise ValueError(f"{path} keys must be canonical strings")
+                    member_path = f"{path}.{key}"
+                    if key == "schema_version":
+                        if type(member) is not int or member <= 0:
+                            raise ValueError(
+                                f"{member_path} must be a positive integer"
+                            )
+                    elif key.endswith("_sha256"):
+                        if member is not None:
+                            _sha256(member, member_path)
+                    elif key in {
+                        "baseline_compute_identity",
+                        "challenger_compute_identity",
+                    }:
+                        if type(member) is not dict:
+                            raise ValueError(
+                                f"{member_path} must be a canonical identity object"
+                            )
+                    elif key.endswith("_version"):
+                        if member is not None:
+                            if type(member) is int:
+                                if member <= 0:
+                                    raise ValueError(
+                                        f"{member_path} must be a positive integer or canonical string"
+                                    )
+                            else:
+                                _text(member, member_path)
+                    elif key.endswith("_id") or key.endswith("_identity"):
+                        if member is not None:
+                            _text(member, member_path)
+                    validate_identity_shape(member, member_path)
+            elif type(value) is list:
+                for index, member in enumerate(value):
+                    validate_identity_shape(member, f"{path}[{index}]")
+
+        validate_identity_shape(payload, f"{record_type}.payload")
         expected = _digest({"record_type": raw_entry["record_type"],
                             "record_id": raw_entry["record_id"],
                             "available_at": raw_entry["available_at"],
@@ -988,25 +1150,90 @@ class ScientificRegistry:
 
     @staticmethod
     def _entry(record: ScientificRecord) -> dict[str, Any]:
-        if record.record_type not in _RECORD_TYPES:
+        # Every registry record type has one canonical writer class. Re-run the
+        # exact constructor contract before virtual property/payload dispatch so
+        # subclasses and post-construction mutation cannot alter or normalize
+        # durable identity.
+        matched_class: type[Any] | None = None
+        for record_class in _LOCAL_SCIENTIFIC_RECORD_CLASSES:
+            if isinstance(record, record_class):
+                if type(record) is not record_class:
+                    raise ValueError(
+                        "scientific record must use an exact canonical record type"
+                    )
+                record_class.__post_init__(record)
+                matched_class = record_class
+                break
+
+        external_types: dict[str, type[Any]] | None = None
+        if matched_class is None:
+            external_types = _external_scientific_record_types()
+            for record_class in external_types.values():
+                if isinstance(record, record_class):
+                    if type(record) is not record_class:
+                        raise ValueError(
+                            "scientific record must use an exact canonical record type"
+                        )
+                    record_class.__post_init__(record)
+                    matched_class = record_class
+                    break
+
+        if matched_class is None:
+            raise ValueError(
+                "scientific record must use an exact canonical record type"
+            )
+
+        record_type = record.record_type
+        expected_class = _LOCAL_SCIENTIFIC_RECORD_TYPES.get(record_type)
+        if expected_class is None:
+            if external_types is None:
+                external_types = _external_scientific_record_types()
+            expected_class = external_types.get(record_type)
+        if expected_class is None:
+            if record_type in _RECORD_TYPES:
+                raise ValueError(
+                    "supported scientific record type lacks canonical write authority"
+                )
             raise ValueError("unsupported scientific record type")
+        if type(record) is not expected_class:
+            raise ValueError(
+                "scientific record_type must use its canonical record class"
+            )
+
         record_id = _text(record.record_id, "record_id")
         available_at = _iso(record.available_at, "available_at")
         payload = record.to_payload()
         if type(payload) is not dict:
             raise ValueError("scientific record payload must be an object")
-        envelope = {"record_type": record.record_type, "record_id": record_id,
+        envelope = {"record_type": record_type, "record_id": record_id,
                     "available_at": available_at, "payload": payload}
         envelope["record_sha256"] = _digest(envelope)
         return envelope
 
     def append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
-        if record.record_type == "PromotionDecision":
-            raise PromotionEvidenceError("promotion decisions must be recorded through record_promotion")
-        return self._append(record, allow_repeat_experiment=allow_repeat_experiment)
+        entry = self._entry(record)
+        if entry["record_type"] == "PromotionDecision":
+            raise PromotionEvidenceError(
+                "promotion decisions must be recorded through record_promotion"
+            )
+        if type(allow_repeat_experiment) is not bool:
+            raise ValueError("allow_repeat_experiment must be boolean")
+        with WorkspaceEconomicLock(self.path.parent):
+            state = self._read()
+            return self._append_entry_locked(
+                state,
+                entry,
+                allow_repeat_experiment=allow_repeat_experiment,
+            )
 
     def _append(self, record: ScientificRecord, *, allow_repeat_experiment: bool = False) -> str:
+        """Private canonical append authority retained for frozen cross-module callers."""
+
         entry = self._entry(record)
+        if entry["record_type"] == "PromotionDecision":
+            raise PromotionEvidenceError(
+                "promotion decisions must be recorded through record_promotion"
+            )
         if type(allow_repeat_experiment) is not bool:
             raise ValueError("allow_repeat_experiment must be boolean")
         with WorkspaceEconomicLock(self.path.parent):
@@ -1129,13 +1356,14 @@ class ScientificRegistry:
         return None
 
     def causal_records(self, record_type: str, *, as_of: str) -> tuple[RegistryEntry, ...]:
-        if record_type not in _RECORD_TYPES:
+        canonical_record_type = _text(record_type, "record_type")
+        if canonical_record_type not in _RECORD_TYPES:
             raise ValueError("unsupported record_type")
         cutoff = _instant(as_of, "as_of")
         values: list[RegistryEntry] = []
         state = self._read()
         for raw in state["records"]:
-            if raw["record_type"] != record_type:
+            if raw["record_type"] != canonical_record_type:
                 continue
             if raw["record_type"] == "PromotionEvidence":
                 try:
@@ -1393,6 +1621,10 @@ class ScientificRegistry:
                         "PROMOTE requires a frozen typed promotion rule"
                     )
                 frozen_rule_payload = _frozen_promotion_rule_payload(frozen_rule)
+                if frozen_rule_payload["primary_metric"] != hypothesis["payload"].get("primary_metric"):
+                    raise PromotionEvidenceError(
+                        "frozen promotion primary metric disagrees with the bound hypothesis"
+                    )
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:

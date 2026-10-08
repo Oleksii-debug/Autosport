@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import uuid
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 from enum import StrEnum
 from pathlib import Path
 from typing import Any, Callable, Protocol
@@ -16,7 +18,12 @@ from .causal_collector import (
     SyncState,
 )
 from .collector_service import HeadlessCollectorService
-from .event_lifecycle import ContinuousEventLifecycle, EventLifecycleRecord, EventPhase
+from .event_lifecycle import (
+    ContinuousEventLifecycle,
+    EventLifecycleRecord,
+    EventPhase,
+    canonical_event_identity_aliases,
+)
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .market_mirror_runtime import (
@@ -256,8 +263,13 @@ class ContinuousSessionStatus:
 
 
 def _text(value: object, field: str) -> str:
-    if type(value) is not str or not value or value.strip() != value:
-        raise ValueError(f"{field} must be a non-empty trimmed string")
+    if (
+        type(value) is not str
+        or not value
+        or value.strip() != value
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{field} must be a non-empty canonical string")
     return value
 
 
@@ -364,36 +376,37 @@ class _ContinuousSessionState:
     def _validate_settlement_evidence(raw: object) -> tuple[dict[str, str], ...]:
         if type(raw) is not list:
             raise ContinuousSessionError("settlement_evidence must be a list")
+        legacy = {
+            "event_identity", "settlement_ref", "evidence_id",
+            "evidence_sha256", "available_at",
+        }
+        bound = legacy | {"quote_outcomes_binding_version", "quote_outcomes_sha256"}
         values: list[dict[str, str]] = []
+        known: dict[str, dict[str, str]] = {}
         for item in raw:
-            if type(item) is not dict:
-                raise ContinuousSessionError(
-                    "settlement_evidence entries must be objects"
-                )
-            if set(item) != {
-                "event_identity",
-                "settlement_ref",
-                "evidence_id",
-                "evidence_sha256",
-                "available_at",
-            }:
-                raise ContinuousSessionError(
-                    "settlement_evidence entry fields mismatch"
-                )
-            _text(item["event_identity"], "settlement_evidence event_identity")
-            _text(item["settlement_ref"], "settlement_evidence settlement_ref")
-            _text(item["evidence_id"], "settlement_evidence evidence_id")
+            if type(item) is not dict or set(item) not in (legacy, bound):
+                raise ContinuousSessionError("settlement_evidence entry fields mismatch")
+            for field in ("event_identity", "settlement_ref", "evidence_id"):
+                _text(item[field], f"settlement_evidence {field}")
             _sha256(item["evidence_sha256"], "settlement_evidence evidence_sha256")
             _instant(item["available_at"], "settlement_evidence available_at")
-            values.append(
-                {
-                    "event_identity": item["event_identity"],
-                    "settlement_ref": item["settlement_ref"],
-                    "evidence_id": item["evidence_id"],
-                    "evidence_sha256": item["evidence_sha256"],
-                    "available_at": item["available_at"],
-                }
-            )
+            if set(item) == bound:
+                if type(item["quote_outcomes_binding_version"]) is not str or (
+                    item["quote_outcomes_binding_version"] != "canonical-json-sha256-v1"
+                ):
+                    raise ContinuousSessionError(
+                        "settlement_evidence outcome binding version is unsupported"
+                    )
+                _sha256(item["quote_outcomes_sha256"], "settlement_evidence quote_outcomes_sha256")
+            normalized = dict(item)
+            evidence_id = normalized["evidence_id"]
+            previous = known.get(evidence_id)
+            if previous is not None:
+                raise ContinuousSessionError(
+                    "settlement_evidence cannot contain duplicate evidence_id"
+                )
+            known[evidence_id] = normalized
+            values.append(normalized)
         return tuple(values)
 
     def _read(self) -> dict[str, Any]:
@@ -407,6 +420,7 @@ class _ContinuousSessionState:
             type(raw) is not dict
             or set(raw) != self._FIELDS
             or raw["schema"] != self._SCHEMA
+            or type(raw["schema_version"]) is not int
             or raw["schema_version"] != self._VERSION
             or raw["source_id"] != self.source_id
         ):
@@ -526,15 +540,32 @@ class _ContinuousSessionState:
     def _normalized_settlement_evidence(
         evidence: SettlementResolution,
     ) -> dict[str, str]:
+        if type(evidence) is not SettlementResolution:
+            raise TypeError("settlement evidence must be an exact SettlementResolution")
+        evidence.validate(as_of=evidence.available_at)
+        # The provider SHA authenticates provider evidence, not necessarily the
+        # resolved payout mapping. Bind that exact validated mapping separately.
+        # Sorted canonical JSON preserves exact quote identity across restart.
+        outcome_bytes = json.dumps(
+            evidence.quote_outcomes,
+            sort_keys=True,
+            ensure_ascii=False,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        outcome_digest = hashlib.sha256(
+            b"autosport.paper.settlement.outcomes.v1\x00" + outcome_bytes
+        ).hexdigest()
         return {
             "event_identity": evidence.event_identity,
             "settlement_ref": evidence.settlement_ref,
             "evidence_id": evidence.evidence_id,
             "evidence_sha256": evidence.evidence_sha256,
             "available_at": _instant(
-                evidence.available_at,
-                "available_at",
+                evidence.available_at, "available_at",
             ).isoformat(),
+            "quote_outcomes_binding_version": "canonical-json-sha256-v1",
+            "quote_outcomes_sha256": outcome_digest,
         }
 
     def validate_settlement_evidence(
@@ -542,6 +573,8 @@ class _ContinuousSessionState:
         *,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
         raw = self._read()
         known = {
             item["evidence_id"]: item
@@ -549,12 +582,50 @@ class _ContinuousSessionState:
         }
         for evidence in settlement_evidence:
             normalized = self._normalized_settlement_evidence(evidence)
-            existing = known.get(evidence.evidence_id)
+            evidence_id = normalized["evidence_id"]
+            existing = known.get(evidence_id)
             if existing is not None and existing != normalized:
                 raise ContinuousSessionError(
                     "settlement evidence id conflicts with durable evidence"
                 )
-            known[evidence.evidence_id] = normalized
+            known[evidence_id] = normalized
+
+    def bind_settlement_evidence(
+        self, *, settlement_evidence: tuple[SettlementResolution, ...],
+    ) -> None:
+        """Durably bind outcome contents before any PAPER payout or learning hook.
+
+        Legacy metadata-only receipts may be read, but a replay cannot silently
+        upgrade one to verified outcome identity without an independent witness.
+        A distinct evidence ID for a correction is admitted as new evidence;
+        this operation itself never reverses an already committed PAPER payout.
+        """
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
+        normalized = tuple(
+            self._normalized_settlement_evidence(evidence)
+            for evidence in settlement_evidence
+        )
+        if not normalized:
+            return
+
+        def mutate(raw: dict[str, Any]) -> None:
+            known = {
+                item["evidence_id"]: item
+                for item in raw["settlement_evidence"]
+            }
+            for entry in normalized:
+                previous = known.get(entry["evidence_id"])
+                if previous is not None and previous != entry:
+                    raise ContinuousSessionError(
+                        "settlement evidence id conflicts with durable evidence"
+                    )
+                known[entry["evidence_id"]] = entry
+            raw["settlement_evidence"] = list(
+                sorted(known.values(), key=lambda item: item["evidence_id"])
+            )
+
+        self._update(mutate)
 
     def record_source_projection(
         self,
@@ -562,11 +633,52 @@ class _ContinuousSessionState:
         deltas: tuple[CollectorDelta, ...],
         backlog: bool,
     ) -> None:
+        if type(deltas) is not tuple:
+            raise TypeError("deltas must be an exact tuple")
         if type(backlog) is not bool:
             raise TypeError("backlog must be boolean")
         for delta in deltas:
-            if not isinstance(delta, CollectorDelta):
-                raise TypeError("deltas must contain CollectorDelta values")
+            if type(delta) is not CollectorDelta:
+                raise TypeError("deltas must contain exact CollectorDelta values")
+            if type(delta.schema_version) is not int or delta.schema_version != 1:
+                raise TypeError("collector delta schema_version must be exact version 1")
+            for field_name in (
+                "delta_id",
+                "source_id",
+                "lawful_terms_ref",
+                "retention_ref",
+                "stream_epoch",
+                "source_cursor",
+                "event_dedupe_key",
+                "event_id",
+                "source_payload_digest",
+                "canonical_event_digest",
+            ):
+                if type(getattr(delta, field_name)) is not str:
+                    raise TypeError(
+                        f"collector delta {field_name} must be exact identity text"
+                    )
+            for field_name in ("cursor_position", "revision_number"):
+                if type(getattr(delta, field_name)) is not int:
+                    raise TypeError(
+                        f"collector delta {field_name} must be an exact integer"
+                    )
+            for field_name in ("revision_of", "gap_from_cursor", "gap_to_cursor"):
+                value = getattr(delta, field_name)
+                if value is not None and type(value) is not str:
+                    raise TypeError(
+                        f"collector delta {field_name} must be exact identity text or None"
+                    )
+            if type(delta.quality_flags) is not tuple or any(
+                type(flag) is not str for flag in delta.quality_flags
+            ):
+                raise TypeError(
+                    "collector delta quality_flags must be an exact tuple of exact strings"
+                )
+            if type(delta.gap_state) is not GapState:
+                raise TypeError("collector delta gap_state must be exact GapState")
+            if type(delta.sync_state) is not SyncState:
+                raise TypeError("collector delta sync_state must be exact SyncState")
             delta.validate()
             if delta.source_id != self.source_id:
                 raise ContinuousSessionError(
@@ -612,6 +724,12 @@ class _ContinuousSessionState:
         full_refresh: bool,
         settlement_evidence: tuple[SettlementResolution, ...],
     ) -> None:
+        if type(settlement_evidence) is not tuple:
+            raise TypeError("settlement_evidence must be an exact tuple")
+        normalized_evidence = tuple(
+            self._normalized_settlement_evidence(evidence)
+            for evidence in settlement_evidence
+        )
         timestamp = _instant(at, "at")
 
         def mutate(raw: dict[str, Any]) -> None:
@@ -625,16 +743,16 @@ class _ContinuousSessionState:
                 item["evidence_id"]: item
                 for item in raw["settlement_evidence"]
             }
-            for evidence in settlement_evidence:
-                existing = known.get(evidence.evidence_id)
-                normalized = self._normalized_settlement_evidence(evidence)
+            for normalized in normalized_evidence:
+                evidence_id = normalized["evidence_id"]
+                existing = known.get(evidence_id)
                 if existing is not None:
                     if existing != normalized:
                         raise ContinuousSessionError(
                             "settlement evidence id conflicts with durable evidence"
                         )
                     continue
-                known[evidence.evidence_id] = normalized
+                known[evidence_id] = normalized
             raw["settlement_evidence"] = list(
                 sorted(known.values(), key=lambda item: item["evidence_id"])
             )
@@ -675,7 +793,7 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         max_invalidation_batches_per_tick: int = 4,
         max_invalidation_items_per_batch: int = 250,
         causal_view: CausalView = CausalView.AS_KNOWN_AT_DECISION,
-        initial_bankroll: str = "10000",
+        initial_bankroll: str | Decimal = "10000",
     ) -> None:
         if not isinstance(workspace, (str, Path)):
             raise TypeError("workspace must be a path-like value")
@@ -747,12 +865,22 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             self.causal_view = CausalView(causal_view)
         except ValueError as exc:
             raise ValueError("unsupported causal_view") from exc
+        # Do not launder binary floats or caller-owned __str__ into PAPER money.
+        # This boundary is typed as text for persisted session compatibility;
+        # exact built-in Decimal is also accepted without lossy conversion.
+        if type(initial_bankroll) not in (str, Decimal):
+            raise ValueError(
+                "initial_bankroll must be an exact Decimal or decimal string"
+            )
         try:
-            initial_bankroll = str(initial_bankroll)
             PaperBook(initial_bankroll)
         except Exception as exc:
             raise ValueError("initial_bankroll must construct a valid PaperBook") from exc
-        self.initial_bankroll = initial_bankroll
+        self.initial_bankroll = (
+            initial_bankroll
+            if type(initial_bankroll) is str
+            else str(initial_bankroll)
+        )
         self._state = _ContinuousSessionState(
             self.workspace / "continuous_session.json",
             session_id=session_id,
@@ -874,10 +1002,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             resolution = self.outcome_authority.resolve(record, as_of=as_of)
             if resolution is None:
                 continue
-            if not isinstance(resolution, SettlementResolution):
+            if type(resolution) is not SettlementResolution:
                 raise ContinuousSessionError(
-                    "outcome authority must return SettlementResolution or None"
+                    "outcome authority must return exact SettlementResolution or None"
                 )
+            # Validate the exact DTO before any identity/reference comparison.
+            # Construction is intentionally permissive enough for deserialization, so
+            # hostile scalar subclasses must fail closed before __eq__/__ne__ dispatch.
+            resolution.validate(as_of=as_of)
             if resolution.event_identity != record.identity:
                 raise ContinuousSessionError(
                     "settlement evidence event identity does not match lifecycle identity"
@@ -886,9 +1018,40 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 raise ContinuousSessionError(
                     "settlement evidence reference does not match lifecycle evidence"
                 )
-            resolution.validate(as_of=as_of)
             resolutions.append(resolution)
-        return tuple(resolutions)
+        # External outcome providers can retain their mutable dict after return.
+        # Detach before this DTO acquires product settlement authority.
+        return self._detached_settlement_resolutions(tuple(resolutions))
+
+    @staticmethod
+    def _detached_settlement_resolutions(
+        resolutions: tuple[SettlementResolution, ...],
+    ) -> tuple[SettlementResolution, ...]:
+        """Snapshot outcome maps before passing a resolution across a trust seam."""
+        if type(resolutions) is not tuple:
+            raise TypeError("settlement resolutions must be an exact tuple")
+        detached: list[SettlementResolution] = []
+        seen: dict[str, SettlementResolution] = {}
+        for resolution in resolutions:
+            if type(resolution) is not SettlementResolution:
+                raise TypeError("settlement resolutions must be exact SettlementResolution values")
+            # Copy first, then validate that exact detached payload. Never
+            # validate one mutable mapping and consume a later revision of it.
+            # Reject dict subclasses before dispatching their copy() methods.
+            if type(resolution.quote_outcomes) is not dict:
+                raise ValueError("quote_outcomes must be a non-empty exact dict")
+            snapshot = replace(resolution, quote_outcomes=resolution.quote_outcomes.copy())
+            snapshot.validate(as_of=snapshot.available_at)
+            previous = seen.get(snapshot.evidence_id)
+            # Reject inconsistent duplicate receipts before exposing settlement
+            # evidence to any learning or reconciliation preparation hook.
+            if previous is not None and previous != snapshot:
+                raise ContinuousSessionError(
+                    "conflicting settlement payload for reused evidence_id"
+                )
+            seen.setdefault(snapshot.evidence_id, snapshot)
+            detached.append(snapshot)
+        return tuple(detached)
 
     def _load_book(self) -> PaperBook:
         if self.paper_book_path.exists():
@@ -903,14 +1066,30 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         resolutions: tuple[SettlementResolution, ...],
         _settlement_engine_type: type[SettlementEngine],
     ) -> tuple[tuple[str, ...], tuple[str, ...]]:
-        if not resolutions:
-            return (), ()
+        if type(resolutions) is not tuple:
+            raise TypeError("resolutions must be an exact tuple")
         if SettlementEngine is not _settlement_engine_type:
             raise ContinuousSessionError(
                 "settlement engine constructor origin changed"
             )
+        for resolution in resolutions:
+            if type(resolution) is not SettlementResolution:
+                raise TypeError(
+                    "resolutions must contain exact SettlementResolution values"
+                )
+            resolution.validate(as_of=resolution.available_at)
+        if not resolutions:
+            return (), ()
         unique: dict[str, SettlementResolution] = {}
         for resolution in resolutions:
+            previous = unique.get(resolution.evidence_id)
+            # Idempotency applies only to identical evidence payloads. A reused
+            # receipt/evidence ID with different quote outcomes cannot silently
+            # discard the second result and choose a financial outcome by order.
+            if previous is not None and previous != resolution:
+                raise ContinuousSessionError(
+                    "conflicting settlement payload for reused evidence_id"
+                )
             unique.setdefault(resolution.evidence_id, resolution)
 
         with WorkspaceEconomicLock(self.workspace):
@@ -940,9 +1119,15 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
         book: PaperBook,
         event_identity: str,
     ) -> set[str]:
-        parts = {event_identity}
-        if ":" in event_identity:
-            parts.add(event_identity.split(":", 1)[1])
+        if type(book) is not PaperBook:
+            raise TypeError("book must be an exact PaperBook")
+        _text(event_identity, "event_identity")
+        try:
+            parts = set(canonical_event_identity_aliases(event_identity))
+        except ValueError as exc:
+            raise ContinuousSessionError(
+                "settlement evidence event identity is not canonical"
+            ) from exc
         return {
             leg.quote_key
             for ticket in book.tickets.values()
@@ -1041,6 +1226,11 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
             self._state.validate_settlement_evidence(
                 settlement_evidence=resolutions
             )
+            # Journal the exact outcome fingerprint before any external hook,
+            # paper cash mutation, or crash-sensitive settlement sequence.
+            self._state.bind_settlement_evidence(
+                settlement_evidence=resolutions
+            )
             if self.settlement_learning_handoff is not None:
                 prepare = getattr(
                     self.settlement_learning_handoff,
@@ -1050,14 +1240,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if prepare is not None:
                     prepare(
                         paper_book_path=self.paper_book_path,
-                        resolutions=resolutions,
+                        resolutions=self._detached_settlement_resolutions(resolutions),
                         at=now,
                     )
             settled, evidence_ids = self._settle(resolutions=resolutions)
             if self.settlement_learning_handoff is not None:
                 self.settlement_learning_handoff.reconcile_after_settlement(
                     paper_book_path=self.paper_book_path,
-                    resolutions=resolutions,
+                    resolutions=self._detached_settlement_resolutions(resolutions),
                     settled_ticket_ids=settled,
                     at=now,
                 )

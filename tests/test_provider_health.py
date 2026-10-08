@@ -5,6 +5,7 @@ import pytest
 from autosport.bookmaker_capability import (
     BookmakerCapability,
     BookmakerCapabilityFact,
+    BookmakerCapabilityError,
     BookmakerCapabilityProfile,
     BookmakerCapabilityState,
 )
@@ -380,19 +381,18 @@ def test_profile_subclasses_do_not_gain_health_evidence_authority() -> None:
         pass
 
     base = _profile(1)
-    evil = EvilProfile(
-        venue_id=base.venue_id,
-        account_id=base.account_id,
-        adapter_id=base.adapter_id,
-        adapter_version=base.adapter_version,
-        profile_version=base.profile_version,
-        facts=base.facts,
-        observed_at=base.observed_at,
-        source_ref=base.source_ref,
-        source_payload_sha256=base.source_payload_sha256,
-    )
-    with pytest.raises(ProviderHealthEvidenceError, match="exact BookmakerCapabilityProfile"):
-        replace(_health(), profile=evil)
+    with pytest.raises(BookmakerCapabilityError, match="exact BookmakerCapabilityProfile"):
+        EvilProfile(
+            venue_id=base.venue_id,
+            account_id=base.account_id,
+            adapter_id=base.adapter_id,
+            adapter_version=base.adapter_version,
+            profile_version=base.profile_version,
+            facts=base.facts,
+            observed_at=base.observed_at,
+            source_ref=base.source_ref,
+            source_payload_sha256=base.source_payload_sha256,
+        )
 
 
 def test_malformed_source_digest_fails_closed() -> None:

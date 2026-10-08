@@ -482,7 +482,7 @@ def test_product_verifier_rejects_copied_runtime_profile(
             )
 
 
-def test_product_verifier_rechecks_runtime_profile_before_positive_return(
+def test_product_verifier_rejects_reopen_constructor_mutation_before_execution(
     monkeypatch, tmp_path: Path
 ) -> None:
     bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
@@ -500,24 +500,22 @@ def test_product_verifier_rechecks_runtime_profile_before_positive_return(
         bound=bound,
         action_id=action.action_id,
     )
+    attacker_called = False
+
+    def hostile_reopen(self, path):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated ledger constructor must never execute")
 
     with _active_runtime_profile(store.workspace) as runtime_profile:
-        original_init = RealExecutionLedger.__init__
-
-        def revoke_during_reopen(self, path):
-            original_init(self, path)
-            trusted_runtime_profile.revoke_trusted_runtime_code_profile(
-                runtime_profile
-            )
-
         monkeypatch.setattr(
             RealExecutionLedger,
             "__init__",
-            revoke_during_reopen,
+            hostile_reopen,
         )
         with pytest.raises(
             BetfairStandardLimitPriceBoundError,
-            match="canonical product runtime authority is missing or changed",
+            match="reopen authority changed",
         ):
             verify_product_betfair_standard_limit_price_bound(
                 evidence=evidence,
@@ -527,6 +525,8 @@ def test_product_verifier_rechecks_runtime_profile_before_positive_return(
                 execution_plan_id=bound.execution_plan.plan_id,
                 action_id=action.action_id,
             )
+
+    assert attacker_called is False
 
 
 def test_product_verifier_does_not_inherit_caller_selected_issuance_authority_root(
@@ -569,3 +569,144 @@ def test_product_verifier_does_not_inherit_caller_selected_issuance_authority_ro
                 execution_plan_id=bound.execution_plan.plan_id,
                 action_id=action.action_id,
             )
+
+
+def test_product_verifier_path_global_rebinding_cannot_redirect_workspace(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import autosport.betfair_standard_limit_price_bound_product_verifier as module
+
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    attacker_called = False
+
+    def attacker_path(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound Path must never own workspace authority")
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        monkeypatch.setattr(module, "Path", attacker_path)
+        verified = module.verify_product_betfair_standard_limit_price_bound(
+            evidence=evidence,
+            ledger=ledger,
+            issuance_store=store,
+            runtime_profile=runtime_profile,
+            execution_plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+    assert verified.action_id == action.action_id
+
+
+def test_product_verifier_rejects_runtime_profile_descriptor_rebinding_before_execution(
+    monkeypatch, tmp_path: Path
+) -> None:
+    import autosport.trusted_runtime_code_profile as runtime_module
+
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    attacker_called = False
+
+    def attacker_workspace(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound runtime workspace descriptor must never execute")
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        with monkeypatch.context() as local_patch:
+            local_patch.setattr(
+                runtime_module.TrustedRuntimeCodeProfile,
+                "workspace",
+                property(attacker_workspace),
+            )
+            with pytest.raises(
+                BetfairStandardLimitPriceBoundError,
+                match="canonical Betfair product verifier authority changed",
+            ):
+                verify_product_betfair_standard_limit_price_bound(
+                    evidence=evidence,
+                    ledger=ledger,
+                    issuance_store=store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=bound.execution_plan.plan_id,
+                    action_id=action.action_id,
+                )
+
+    assert attacker_called is False
+
+
+def test_product_verifier_rejects_path_handle_class_shadow_before_getter_execution(
+    monkeypatch, tmp_path: Path
+) -> None:
+    bound, approval, store, _issued = _issue(monkeypatch, tmp_path)
+    action = bound.execution_plan.actions[0]
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    ledger.bind_supervised_approval(
+        plan_id=bound.execution_plan.plan_id,
+        approval_id=approval.ledger_identity,
+        approval_fingerprint=approval.fingerprint,
+        approved_at=approval.approved_at,
+        evidence_sha256=approval.evidence_sha256,
+    )
+    evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+    attacker_called = False
+
+    def attacker_workspace(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("store workspace descriptor must never execute")
+
+    with _active_runtime_profile(store.workspace) as runtime_profile:
+        with monkeypatch.context() as local_patch:
+            local_patch.setattr(
+                SupervisedPlanIssuanceStore,
+                "workspace",
+                property(attacker_workspace),
+                raising=False,
+            )
+            with pytest.raises(
+                BetfairStandardLimitPriceBoundError,
+                match="reopen authority changed",
+            ):
+                verify_product_betfair_standard_limit_price_bound(
+                    evidence=evidence,
+                    ledger=ledger,
+                    issuance_store=store,
+                    runtime_profile=runtime_profile,
+                    execution_plan_id=bound.execution_plan.plan_id,
+                    action_id=action.action_id,
+                )
+
+    assert attacker_called is False

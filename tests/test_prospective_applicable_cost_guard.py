@@ -141,6 +141,91 @@ def test_exact_class_positive_object_new_forge_fails_before_rebound_resolver_exe
     assert attacker_called is False
 
 
+def test_guard_ignores_rebound_builtin_dispatch(monkeypatch):
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+
+        def hostile(*args, **kwargs):
+            raise AssertionError("rebound guard builtin executed")
+
+        monkeypatch.setattr(guard, "type", hostile, raising=False)
+        monkeypatch.setattr(guard, "len", hostile, raising=False)
+        monkeypatch.setattr(guard, "enumerate", hostile, raising=False)
+        monkeypatch.setattr(guard, "zip", hostile, raising=False)
+
+        accepted = _require(asserted, case)
+
+    assert accepted is not asserted
+
+
+def test_betfair_guard_ignores_rebound_builtin_dispatch_before_source_validation(
+    monkeypatch,
+):
+    attacker_called = False
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound Betfair guard builtin executed")
+
+    with canonical_applicable_cost_case() as case:
+        intent, plan, store, request, decision_at = case
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+
+        monkeypatch.setattr(guard, "type", hostile, raising=False)
+        monkeypatch.setattr(guard, "len", hostile, raising=False)
+        monkeypatch.setattr(guard, "enumerate", hostile, raising=False)
+        monkeypatch.setattr(guard, "zip", hostile, raising=False)
+
+        with pytest.raises(
+            cost.ProspectiveApplicableCostError,
+            match="slippage_evidence must be exact",
+        ):
+            guard.require_canonical_prospective_applicable_costs_with_betfair_standard_limit(
+                asserted,
+                intent=intent,
+                plan=plan,
+                router_store=store,
+                model_request_id=request.request_id,
+                decision_at=decision_at,
+                slippage_evidence=None,
+                ledger=None,
+                issuance_store=None,
+                runtime_profile=None,
+                execution_plan_id="source-validation-boundary",
+                action_id="source-validation-boundary",
+            )
+
+    assert attacker_called is False
+
+
+def test_guard_ignores_rebound_object_getattribute(monkeypatch):
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+
+        class HostileObject:
+            @staticmethod
+            def __getattribute__(*args, **kwargs):
+                raise AssertionError("rebound object.__getattribute__ executed")
+
+        monkeypatch.setattr(guard, "object", HostileObject)
+        accepted = _require(asserted, case)
+
+    assert accepted is not asserted
+
+
 def test_guard_resolver_type_and_field_globals_are_non_authoritative(monkeypatch):
     attacker_called = False
 
@@ -212,6 +297,45 @@ def test_source_resolver_type_validator_and_semantic_globals_are_non_authoritati
     assert len(accepted.components) == 5
 
 
+def test_source_backed_known_zero_assertion_is_not_authority_by_possession():
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        components = list(canonical.components)
+        index = next(
+            i for i, item in enumerate(components)
+            if item.cost_class is CostClass.EXECUTION_SLIPPAGE
+        )
+        forged = _copy_component(components[index])
+        object.__setattr__(
+            forged,
+            "status",
+            cost.ProspectiveCostResolutionStatus.KNOWN_ZERO,
+        )
+        object.__setattr__(
+            forged,
+            "reason",
+            cost.ProspectiveApplicableCostReason.BETFAIR_STANDARD_LIMIT_ZERO_ADVERSE_PRICE,
+        )
+        object.__setattr__(forged, "dependency_axes", ())
+        object.__setattr__(
+            forged,
+            "source_family",
+            "autosport.betfair_standard_limit_price_bound",
+        )
+        object.__setattr__(forged, "source_evidence_id", "a" * 64)
+        object.__setattr__(forged, "source_sha256", "a" * 64)
+        components[index] = forged
+        asserted = _copy_resolution(canonical, components=tuple(components))
+
+        # Shape/provenance syntax alone is intentionally insufficient.
+        cost._SEALED_RESOLUTION_VALIDATOR(asserted)
+        with pytest.raises(
+            cost.ProspectiveApplicableCostError,
+            match="status|reason|source_evidence_id|source_family",
+        ):
+            _require(asserted, case)
+
+
 def test_noncanonical_resolution_subclass_rejected_before_rebound_resolver_executes(
     monkeypatch,
 ):
@@ -237,3 +361,109 @@ def test_noncanonical_resolution_subclass_rejected_before_rebound_resolver_execu
             _require(asserted, case)
 
     assert attacker_called is False
+
+
+def test_guard_rejects_in_place_base_resolver_code_mutation():
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+        resolver = guard.resolve_prospective_applicable_costs
+        original_code = resolver.__code__
+
+        def attacker_resolver(**_kwargs):
+            raise AssertionError("mutated resolver body must never execute")
+
+        try:
+            resolver.__code__ = attacker_resolver.__code__
+            with pytest.raises(
+                cost.ProspectiveApplicableCostError,
+                match="resolver authority changed",
+            ):
+                _require(asserted, case)
+        finally:
+            resolver.__code__ = original_code
+
+
+def test_guard_rejects_in_place_betfair_cost_resolver_code_mutation():
+    with canonical_applicable_cost_case() as case:
+        intent, plan, store, request, decision_at = case
+        asserted = _canonical(case)
+        resolver = guard.resolve_prospective_applicable_costs_with_betfair_standard_limit
+        original_code = resolver.__code__
+
+        def attacker_resolver(**_kwargs):
+            raise AssertionError("mutated Betfair resolver body must never execute")
+
+        try:
+            resolver.__code__ = attacker_resolver.__code__
+            with pytest.raises(
+                cost.ProspectiveApplicableCostError,
+                match="Betfair applicable-cost resolver authority changed",
+            ):
+                guard.require_canonical_prospective_applicable_costs_with_betfair_standard_limit(
+                    asserted,
+                    intent=intent,
+                    plan=plan,
+                    router_store=store,
+                    model_request_id=request.request_id,
+                    decision_at=decision_at,
+                    slippage_evidence=None,
+                    ledger=None,
+                    issuance_store=None,
+                    runtime_profile=None,
+                    execution_plan_id="blocked-before-source-validation",
+                    action_id="blocked-before-source-validation",
+                )
+        finally:
+            resolver.__code__ = original_code
+
+
+def test_guard_rejects_in_place_resolution_validator_code_mutation():
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+        validator = cost._SEALED_RESOLUTION_VALIDATOR
+        original_code = validator.__code__
+
+        def attacker_validator(_value):
+            return None
+
+        try:
+            validator.__code__ = attacker_validator.__code__
+            with pytest.raises(
+                cost.ProspectiveApplicableCostError,
+                match="resolution validator authority changed",
+            ):
+                _require(asserted, case)
+        finally:
+            validator.__code__ = original_code
+
+
+def test_guard_rejects_in_place_component_validator_code_mutation():
+    with canonical_applicable_cost_case() as case:
+        canonical = _canonical(case)
+        asserted = _copy_resolution(
+            canonical,
+            components=tuple(_copy_component(item) for item in canonical.components),
+        )
+        validator = cost._SEALED_COMPONENT_VALIDATOR
+        original_code = validator.__code__
+
+        def attacker_validator(_value):
+            return None
+
+        try:
+            validator.__code__ = attacker_validator.__code__
+            with pytest.raises(
+                cost.ProspectiveApplicableCostError,
+                match="component validator authority changed",
+            ):
+                _require(asserted, case)
+        finally:
+            validator.__code__ = original_code

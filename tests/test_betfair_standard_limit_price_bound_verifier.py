@@ -7,6 +7,14 @@ import tempfile
 
 import pytest
 
+import autosport.betfair_standard_limit_price_bound_verifier as verifier_module
+import autosport.real_execution_ledger as ledger_module
+import autosport.supervised_plan_issuance as issuance_module
+import autosport.monotonic_workspace_authority as monotonic_module
+import autosport.json_integrity as json_integrity_module
+import autosport.integrity as integrity_module
+import autosport.workspace_lock as workspace_lock_module
+import autosport.supervised_execution as supervised_module
 from autosport.betfair_standard_limit_price_bound import (
     BetfairStandardLimitPriceBoundError,
     BetfairStandardLimitPriceBoundEvidence,
@@ -72,6 +80,50 @@ def _verify(*, evidence, ledger, store, bound, action_id):
         execution_plan_id=bound.execution_plan.plan_id,
         action_id=action_id,
     )
+
+
+def test_verifier_ignores_rebound_builtin_and_object_dispatch(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def hostile(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound verifier builtin must never execute")
+
+    class HostileObject:
+        @staticmethod
+        def __getattribute__(*_args, **_kwargs):
+            nonlocal attacker_called
+            attacker_called = True
+            raise AssertionError("rebound verifier object.__getattribute__ must never execute")
+
+    monkeypatch.setattr(verifier_module, "type", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "object", HostileObject)
+    monkeypatch.setattr(verifier_module, "str", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "tuple", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "getattr", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "hasattr", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "any", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "vars", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "len", hostile, raising=False)
+    monkeypatch.setattr(verifier_module, "AttributeError", RuntimeError, raising=False)
+    monkeypatch.setattr(verifier_module, "TypeError", RuntimeError, raising=False)
+    monkeypatch.setattr(verifier_module, "KeyError", RuntimeError, raising=False)
+    monkeypatch.setattr(verifier_module, "ExecutionAction", object)
+    monkeypatch.setattr(verifier_module, "BoundSupervisedExecutionPlan", object)
+
+    result = _verify(
+        evidence=evidence,
+        ledger=ledger,
+        store=store,
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert attacker_called is False
+    assert result.execution_plan_id == evidence.execution_plan_id
+    assert result.action_id == evidence.action_id
 
 
 def test_object_new_forge_with_changed_price_is_not_accepted() -> None:
@@ -193,3 +245,1330 @@ def test_reserved_plan_without_durable_supervised_approval_is_rejected() -> None
             bound=bound,
             action_id=action.action_id,
         )
+
+
+
+def test_global_snapshot_helper_rebinding_cannot_accept_forged_evidence(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    forged = _forge_clone(evidence)
+    object.__setattr__(forged, "price_floor_odds", Decimal("1.99"))
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_exact_snapshot",
+        lambda _evidence: (("attacker", object, "same"),),
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="does not match fresh canonical re-resolution",
+    ):
+        _verify(
+            evidence=forged,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_global_continuity_helper_rebinding_cannot_bypass_approval_gate(monkeypatch) -> None:
+    bound, approval, goal = _bound(_profile())
+    action = bound.execution_plan.actions[0]
+    store = _issuance_store(bound, goal)
+    store.issue(bound=bound, approval=approval)
+    ledger = RealExecutionLedger(store.workspace / "execution-ledger.jsonl")
+    ledger.reserve_plan(bound.execution_plan)
+    raw_evidence = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_require_execution_state_continuity",
+        lambda **_kwargs: None,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="durable supervised approval is missing or revoked",
+    ):
+        _verify(
+            evidence=raw_evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_global_issuance_request_helper_rebinding_is_non_authoritative(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    def attacker_helper(**_kwargs):
+        raise AssertionError("module-global issuance helper must never execute")
+
+    monkeypatch.setattr(
+        verifier_module,
+        "_require_issuance_time_provider_request",
+        attacker_helper,
+    )
+
+    verified = _verify(
+        evidence=evidence,
+        ledger=ledger,
+        store=store,
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert verified is not evidence
+    assert verified.action_id == action.action_id
+
+
+def test_in_place_approval_method_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    method = RealExecutionLedger.supervised_approval_is_active
+    original_code = method.__code__
+
+    def attacker_method(*_args, **_kwargs):
+        return True
+
+    try:
+        method.__code__ = attacker_method.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        method.__code__ = original_code
+
+def test_rebound_issuance_load_locked_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_load_locked(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound durable issuance loader must never execute")
+
+    monkeypatch.setattr(
+        SupervisedPlanIssuanceStore,
+        "_load_locked",
+        attacker_load_locked,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_issuance_authority_factory_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_authority(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound monotonic authority factory must never execute")
+
+    monkeypatch.setattr(
+        SupervisedPlanIssuanceStore,
+        "_authority",
+        attacker_authority,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+def test_instance_shadowed_issuance_loader_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_load_locked(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("instance-shadowed durable issuance loader must never execute")
+
+    store._load_locked = attacker_load_locked
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="issuance_store method shadow is not allowed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_instance_shadowed_issuance_authority_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_authority(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("instance-shadowed monotonic authority must never execute")
+
+    store._authority = attacker_authority
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="issuance_store method shadow is not allowed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+def test_rebound_ledger_event_reader_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_events(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound ledger event reader must never execute")
+
+    monkeypatch.setattr(RealExecutionLedger, "_events", attacker_events)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_ledger_event_reader_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    reader = RealExecutionLedger._events
+    original_code = reader.__code__
+    attacker_called = False
+
+    def attacker_events(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated ledger event reader must never execute")
+
+    try:
+        reader.__code__ = attacker_events.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        reader.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_instance_shadowed_ledger_event_reader_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_events():
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("instance-shadowed ledger event reader must never execute")
+
+    ledger._events = attacker_events
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="ledger authority method shadow is not allowed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+def test_rebound_ledger_parser_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_parse(_cls, _raw):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound ledger parser must never execute")
+
+    monkeypatch.setattr(RealExecutionLedger, "_parse", classmethod(attacker_parse))
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_ledger_parser_code_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    parser = RealExecutionLedger._parse.__func__
+    original_code = parser.__code__
+    attacker_called = False
+
+    def attacker_parse(_cls, _raw):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated ledger parser must never execute")
+
+    try:
+        parser.__code__ = attacker_parse.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        parser.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_instance_shadowed_ledger_parser_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_parse(_raw):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("instance-shadowed ledger parser must never execute")
+
+    ledger._parse = attacker_parse
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="ledger authority method shadow is not allowed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+def test_rebound_ledger_json_loader_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_loads(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound ledger JSON loader must never execute")
+
+    monkeypatch.setattr(ledger_module.json, "loads", attacker_loads)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_ledger_json_loader_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    loader = ledger_module.json.loads
+    original_code = loader.__code__
+    attacker_called = False
+
+    def attacker_loads(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated ledger JSON loader must never execute")
+
+    try:
+        loader.__code__ = attacker_loads.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        loader.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_ledger_digest_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_digest(_value):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    monkeypatch.setattr(ledger_module, "_digest", attacker_digest)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_ledger_digest_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    digest = ledger_module._digest
+    original_code = digest.__code__
+    attacker_called = False
+
+    def attacker_digest(_value):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    try:
+        digest.__code__ = attacker_digest.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        digest.__code__ = original_code
+
+    assert attacker_called is False
+
+def test_rebound_issuance_strict_json_decoder_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_loads(_text):
+        nonlocal attacker_called
+        attacker_called = True
+        return {}
+
+    monkeypatch.setattr(issuance_module, "strict_json_loads", attacker_loads)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_issuance_digest_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    digest = issuance_module._digest
+    original_code = digest.__code__
+    attacker_called = False
+
+    def attacker_digest(_payload):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    try:
+        digest.__code__ = attacker_digest.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        digest.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_issuance_bound_decoder_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_decode(_raw):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound issuance bound decoder must never execute")
+
+    monkeypatch.setattr(issuance_module, "_decode_bound", attacker_decode)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_monotonic_recover_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_recover(self, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound monotonic recover must never execute")
+
+    monkeypatch.setattr(
+        issuance_module.MonotonicWorkspaceAuthority,
+        "recover",
+        attacker_recover,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_monotonic_history_loader_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    loader = monotonic_module.MonotonicWorkspaceAuthority._load_history
+    original_code = loader.__code__
+    attacker_called = False
+
+    def attacker_load_history(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated monotonic history loader must never execute")
+
+    try:
+        loader.__code__ = attacker_load_history.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        loader.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_monotonic_record_hash_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_record_hash(_payload):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    monkeypatch.setattr(monotonic_module, "_record_hash", attacker_record_hash)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+def test_rebound_issuance_provider_resolver_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_resolver(**_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound issuance provider resolver must never execute")
+
+    monkeypatch.setattr(
+        issuance_module,
+        "resolve_betfair_standard_limit_price_bound",
+        attacker_resolver,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_issuance_authority_domain_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(
+        issuance_module,
+        "_AUTHORITY_DOMAIN",
+        "attacker.supervised-plan-issuance",
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_rebound_issuance_execution_plan_type_is_rejected_before_decode(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(issuance_module, "ExecutionPlan", object)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_rebound_issuance_schema_keys_are_rejected_before_decode(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(
+        issuance_module,
+        "_PROVIDER_REQUEST_KEYS",
+        frozenset({"action_id"}),
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+def test_rebound_strict_json_loader_is_rejected_before_durable_decode(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_loads(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return {}
+
+    monkeypatch.setattr(json_integrity_module.json, "loads", attacker_loads)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_strict_json_validator_mutation_is_rejected_before_decode() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    validator = json_integrity_module._validate_strict_json_value
+    original_code = validator.__code__
+    attacker_called = False
+
+    def attacker_validator(_value):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    try:
+        validator.__code__ = attacker_validator.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        validator.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_strict_json_integer_limit_is_rejected_before_decode(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(json_integrity_module, "_JSON_INTEGER_MAX_DIGITS", 1)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+def test_rebound_monotonic_root_resolver_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_root(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return store.workspace / "attacker-authority"
+
+    monkeypatch.setattr(monotonic_module, "resolve_monotonic_authority_root", attacker_root)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_workspace_binding_resolver_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_resolve(cls, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("rebound workspace binding resolver must never execute")
+
+    monkeypatch.setattr(
+        monotonic_module.WorkspaceIdentityBinding,
+        "resolve",
+        classmethod(attacker_resolve),
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_root_selection_resolver_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    resolver = monotonic_module.AuthorityRootSelectionBinding.__dict__["resolve"].__func__
+    original_code = resolver.__code__
+    attacker_called = False
+
+    def attacker_resolve(cls, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated root-selection resolver must never execute")
+
+    try:
+        resolver.__code__ = attacker_resolve.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        resolver.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_monotonic_authority_id_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+
+    monkeypatch.setattr(monotonic_module, "AUTHORITY_ID", "attacker.machine.authority")
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+def test_in_place_issued_plan_constructor_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    constructor = issuance_module.IssuedSupervisedPlan.__init__
+    original_code = constructor.__code__
+    attacker_called = False
+
+    def attacker_init(self, *args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated issued-plan constructor must never execute")
+
+    try:
+        constructor.__code__ = attacker_init.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        constructor.__code__ = original_code
+
+    assert attacker_called is False
+
+def test_in_place_execution_plan_constructor_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    constructor = issuance_module.ExecutionPlan.__init__
+    original_code = constructor.__code__
+    attacker_called = False
+
+    def attacker_init(self, *args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated execution-plan constructor must never execute")
+
+    try:
+        constructor.__code__ = attacker_init.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        constructor.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_in_place_bound_constructor_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    constructor = issuance_module.BoundSupervisedExecutionPlan.__init__
+    original_code = constructor.__code__
+    attacker_called = False
+
+    def attacker_init(self, *args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated bound constructor must never execute")
+
+    try:
+        constructor.__code__ = attacker_init.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        constructor.__code__ = original_code
+
+    assert attacker_called is False
+
+def test_in_place_workspace_lock_acquire_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    acquire = issuance_module.WorkspaceEconomicLock.acquire
+    original_code = acquire.__code__
+    attacker_called = False
+
+    def attacker_acquire(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    try:
+        acquire.__code__ = attacker_acquire.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        acquire.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_in_place_durable_path_lock_body_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    body = issuance_module.durable_path_lock.__wrapped__
+    original_code = body.__code__
+    attacker_called = False
+
+    def attacker_lock(_path):
+        nonlocal attacker_called
+        attacker_called = True
+        yield
+
+    try:
+        body.__code__ = attacker_lock.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        body.__code__ = original_code
+
+    assert attacker_called is False
+
+def test_in_place_integrity_lock_helper_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    helper = integrity_module._lock_handle
+    original_code = helper.__code__
+    attacker_called = False
+
+    def attacker_lock(_handle):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    try:
+        helper.__code__ = attacker_lock.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        helper.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_rebound_workspace_lock_handle_validator_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_validate(self, _handle):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    monkeypatch.setattr(
+        workspace_lock_module.WorkspaceEconomicLock,
+        "_validate_open_handle_identity",
+        attacker_validate,
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+def test_rebound_bound_binding_helper_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_binding(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    monkeypatch.setattr(supervised_module, "_bound_binding_sha256", attacker_binding)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="bound-plan dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_rebound_execution_plan_fingerprint_property_is_rejected_before_getter(
+    monkeypatch,
+) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_fingerprint(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return bound.execution_plan.fingerprint
+
+    monkeypatch.setattr(
+        supervised_module.ExecutionPlan,
+        "fingerprint",
+        property(attacker_fingerprint),
+    )
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="bound-plan dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_approval_fingerprint_getter_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    getter = supervised_module.SupervisedApproval.fingerprint.fget
+    original_code = getter.__code__
+    attacker_called = False
+
+    def attacker_getter(_self):
+        nonlocal attacker_called
+        attacker_called = True
+        return "0" * 64
+
+    try:
+        getter.__code__ = attacker_getter.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="bound-plan dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        getter.__code__ = original_code
+
+    assert attacker_called is False
+
+def test_rebound_ledger_plan_event_is_rejected_before_execution(monkeypatch) -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_plan_event(_events, _plan_id):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    monkeypatch.setattr(RealExecutionLedger, "_plan_event", staticmethod(attacker_plan_event))
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="verifier dependency authority changed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_ledger_state_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    state = RealExecutionLedger._state.__func__
+    original_code = state.__code__
+    attacker_called = False
+
+    def attacker_state(_cls, _events):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    try:
+        state.__code__ = attacker_state.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        state.__code__ = original_code
+
+    assert attacker_called is False
+
+
+def test_instance_shadowed_ledger_plan_event_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    attacker_called = False
+
+    def attacker_plan_event(*_args, **_kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        return None
+
+    ledger._plan_event = attacker_plan_event
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="ledger authority method shadow is not allowed",
+    ):
+        _verify(
+            evidence=evidence,
+            ledger=ledger,
+            store=store,
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+    assert attacker_called is False
+
+
+def test_in_place_execution_saga_constructor_mutation_is_rejected_before_execution() -> None:
+    bound, action, evidence, ledger, store = _product_issued_evidence()
+    constructor = ledger_module.ExecutionSaga.__init__
+    original_code = constructor.__code__
+    attacker_called = False
+
+    def attacker_init(self, *args, **kwargs):
+        nonlocal attacker_called
+        attacker_called = True
+        raise AssertionError("mutated saga constructor must never execute")
+
+    try:
+        constructor.__code__ = attacker_init.__code__
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="verifier dependency authority changed",
+        ):
+            _verify(
+                evidence=evidence,
+                ledger=ledger,
+                store=store,
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        constructor.__code__ = original_code
+
+    assert attacker_called is False
+

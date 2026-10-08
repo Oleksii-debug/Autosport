@@ -48,6 +48,11 @@ _PROVIDER_CONTRACT_REF = (
 _WRITE_ADAPTER_ID = WRITE_ADAPTER_ID
 _WRITE_ADAPTER_VERSION = WRITE_ADAPTER_VERSION
 _CANONICAL_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
+_CANONICAL_PROVIDER_CLIENT_TYPE = BetfairSupervisedPlaceOrdersClient
+_CANONICAL_PROVIDER_CONTRACT_ID = _PROVIDER_CONTRACT_ID
+_CANONICAL_PROVIDER_CONTRACT_REF = _PROVIDER_CONTRACT_REF
+_CANONICAL_WRITE_ADAPTER_ID = _WRITE_ADAPTER_ID
+_CANONICAL_WRITE_ADAPTER_VERSION = _WRITE_ADAPTER_VERSION
 _CAPTURE_PROVIDER_ORDER_REF = "0" * 32
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -262,11 +267,16 @@ class BetfairStandardLimitPriceBoundEvidence:
             )
 
     @property
-    def evidence_id(self) -> str:
+    def evidence_id(self, _digest=_digest) -> str:
         self._validate()
         return _digest(self.to_dict(include_evidence_id=False))
 
-    def to_dict(self, *, include_evidence_id: bool = True) -> dict[str, Any]:
+    def to_dict(
+        self,
+        *,
+        include_evidence_id: bool = True,
+        _digest=_digest,
+    ) -> dict[str, Any]:
         self._validate()
         payload: dict[str, Any] = {
             "schema": "autosport.betfair_standard_limit_price_bound",
@@ -338,7 +348,11 @@ class _CaptureTransport:
         raise _CapturedPlaceOrdersRequest(body)
 
 
-def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
+def _capture_canonical_instruction(
+    action: ExecutionAction,
+    _client_type=_CANONICAL_PROVIDER_CLIENT_TYPE,
+    _place_action=_CANONICAL_PLACE_ACTION,
+) -> dict[str, Any]:
     """Capture the exact instruction emitted by the real provider-write method.
 
     The transport is a local fail-before-I/O capture object. Therefore this path
@@ -348,7 +362,7 @@ def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
     duplicated request builder or an adapter-version bump.
     """
 
-    client = object.__new__(BetfairSupervisedPlaceOrdersClient)
+    client = object.__new__(_client_type)
     client._credentials = _CaptureCredentials()
     client._gate = _CaptureGate()
     client._transport = _CaptureTransport()
@@ -357,7 +371,7 @@ def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
     client._request_id = 0
 
     try:
-        _CANONICAL_PLACE_ACTION(
+        _place_action(
             client,
             action,
             profile=None,
@@ -423,7 +437,40 @@ def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
     }
 
 
-def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]:
+_CANONICAL_EXECUTION_ACTION_TO_DICT = ExecutionAction.to_dict
+_CANONICAL_EXECUTION_ACTION_TO_DICT_CODE = _CANONICAL_EXECUTION_ACTION_TO_DICT.__code__
+
+
+def _canonical_action_payload(
+    action: ExecutionAction,
+    _to_dict=_CANONICAL_EXECUTION_ACTION_TO_DICT,
+    _to_dict_code=_CANONICAL_EXECUTION_ACTION_TO_DICT_CODE,
+) -> dict[str, object]:
+    if (
+        _to_dict is not ExecutionAction.to_dict
+        or _to_dict.__code__ is not _to_dict_code
+        or ExecutionAction.to_dict is not _to_dict
+        or ExecutionAction.to_dict.__code__ is not _to_dict_code
+    ):
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical ExecutionAction serializer authority changed"
+        )
+    payload = _to_dict(action)
+    if type(payload) is not dict:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical ExecutionAction serializer returned non-canonical payload"
+        )
+    return payload
+
+
+_CANONICAL_CAPTURE_INSTRUCTION = _capture_canonical_instruction
+_CANONICAL_INSTRUCTION_DIGEST = _digest
+
+
+def _canonical_instruction_projection(
+    action: ExecutionAction,
+    _capture=_CANONICAL_CAPTURE_INSTRUCTION,
+) -> dict[str, Any]:
     """Return the exact semantic projection emitted by the real write request."""
 
     if type(action) is not ExecutionAction:
@@ -441,7 +488,7 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
             "canonical Betfair placeOrders implementation is unavailable"
         )
 
-    instruction = _capture_canonical_instruction(action)
+    instruction = _capture(action)
     limit_order = instruction.get("limitOrder")
     if type(limit_order) is not dict or set(limit_order) != {
         "size",
@@ -461,10 +508,11 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
         raise BetfairStandardLimitPriceBoundError(
             "Betfair selection_id must be canonical positive integer text"
         )
-    action_payload = ExecutionAction.to_dict(action)
+    action_payload = _canonical_action_payload(action)
     if (
         type(instruction.get("selectionId")) is not int
         or instruction.get("selectionId") != selection_id
+        or type(instruction.get("handicap")) is not int
         or instruction.get("handicap") != 0
         or instruction.get("orderType") != "LIMIT"
         or instruction.get("side") != "BACK"
@@ -483,9 +531,13 @@ def _issue_evidence(
     bound: BoundSupervisedExecutionPlan,
     action: ExecutionAction,
     instruction_sha256: str,
+    _provider_contract_id=_CANONICAL_PROVIDER_CONTRACT_ID,
+    _provider_contract_ref=_CANONICAL_PROVIDER_CONTRACT_REF,
+    _write_adapter_id=_CANONICAL_WRITE_ADAPTER_ID,
+    _write_adapter_version=_CANONICAL_WRITE_ADAPTER_VERSION,
 ) -> BetfairStandardLimitPriceBoundEvidence:
     item = object.__new__(BetfairStandardLimitPriceBoundEvidence)
-    action_payload = ExecutionAction.to_dict(action)
+    action_payload = _canonical_action_payload(action)
     values = {
         "execution_plan_id": bound.execution_plan.plan_id,
         "execution_plan_sha256": bound.execution_plan.fingerprint,
@@ -506,10 +558,10 @@ def _issue_evidence(
         "quote_expires_at": action.expires_at,
         "decision_at": bound.execution_plan.created_at,
         "instruction_sha256": instruction_sha256,
-        "provider_contract_id": _PROVIDER_CONTRACT_ID,
-        "provider_contract_ref": _PROVIDER_CONTRACT_REF,
-        "write_adapter_id": _WRITE_ADAPTER_ID,
-        "write_adapter_version": _WRITE_ADAPTER_VERSION,
+        "provider_contract_id": _provider_contract_id,
+        "provider_contract_ref": _provider_contract_ref,
+        "write_adapter_id": _write_adapter_id,
+        "write_adapter_version": _write_adapter_version,
         "status": BetfairStandardLimitPriceBoundStatus.PROVIDER_BOUND_ZERO_ADVERSE_PRICE_DETERIORATION,
         "matchme_applicability_proven": True,
         "zero_adverse_price_deterioration": True,
@@ -526,6 +578,8 @@ def resolve_betfair_standard_limit_price_bound(
     *,
     bound: BoundSupervisedExecutionPlan,
     action_id: str,
+    _issue=_issue_evidence,
+    _digest=_CANONICAL_INSTRUCTION_DIGEST,
 ) -> BetfairStandardLimitPriceBoundEvidence:
     """Re-resolve one exact current standard BACK LIMIT adverse-price bound.
 
@@ -572,7 +626,7 @@ def resolve_betfair_standard_limit_price_bound(
         )
 
     instruction = _canonical_instruction_projection(action)
-    return _issue_evidence(
+    return _issue(
         bound=bound,
         action=action,
         instruction_sha256=_digest(instruction),

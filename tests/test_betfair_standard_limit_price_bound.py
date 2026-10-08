@@ -105,10 +105,12 @@ def test_exact_bound_type_is_required() -> None:
         )
 
 
-def test_public_provider_client_rebinding_cannot_mint_a_different_contract(monkeypatch) -> None:
+def test_public_provider_client_rebinding_cannot_redirect_canonical_capture(
+    monkeypatch,
+) -> None:
     import autosport.betfair_standard_limit_price_bound as module
 
-    bound, action, _resolved_evidence = _evidence()
+    bound, action, expected = _evidence()
 
     class ShadowClient:
         pass
@@ -120,14 +122,162 @@ def test_public_provider_client_rebinding_cannot_mint_a_different_contract(monke
         raising=False,
     )
 
+    actual = resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert actual.to_dict() == expected.to_dict()
+
+
+def test_provider_contract_rebinding_cannot_rewrite_issued_identity(
+    monkeypatch,
+) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, expected = _evidence()
+
+    monkeypatch.setattr(
+        module,
+        "_PROVIDER_CONTRACT_ID",
+        "forged-provider-contract",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        "_PROVIDER_CONTRACT_REF",
+        "https://invalid.example/forged",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        "_WRITE_ADAPTER_ID",
+        "forged-write-adapter",
+        raising=False,
+    )
+    monkeypatch.setattr(
+        module,
+        "_WRITE_ADAPTER_VERSION",
+        "999",
+        raising=False,
+    )
+
+    actual = module.resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert actual.provider_contract_id == expected.provider_contract_id
+    assert actual.provider_contract_ref == expected.provider_contract_ref
+    assert actual.write_adapter_id == expected.write_adapter_id
+    assert actual.write_adapter_version == expected.write_adapter_version
+
+
+def test_execution_action_serializer_rebinding_fails_before_capture(
+    monkeypatch,
+) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, _expected = _evidence()
+    original = ExecutionAction.to_dict
+
+    def hostile_to_dict(_self):
+        raise AssertionError("hostile action serializer executed")
+
+    monkeypatch.setattr(ExecutionAction, "to_dict", hostile_to_dict)
+
     with pytest.raises(
         BetfairStandardLimitPriceBoundError,
-        match="canonical Betfair placeOrders request could not be captured",
+        match="ExecutionAction serializer authority changed",
     ):
-        resolve_betfair_standard_limit_price_bound(
+        module.resolve_betfair_standard_limit_price_bound(
             bound=bound,
             action_id=action.action_id,
         )
+
+
+def test_emitted_evidence_identity_ignores_digest_module_rebinding(monkeypatch) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    _bound, _action, expected = _evidence()
+
+    def hostile_digest(_payload):
+        raise AssertionError("hostile digest executed for emitted evidence")
+
+    monkeypatch.setattr(module, "_digest", hostile_digest)
+
+    assert expected.evidence_id == expected.evidence_id
+    assert expected.to_dict() == expected.to_dict()
+
+
+def test_evidence_issue_uses_sealed_action_serializer_after_projection(monkeypatch) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, expected = _evidence()
+    instruction = module._canonical_instruction_projection(action)
+    instruction_sha256 = module._digest(instruction)
+
+    def hostile_to_dict(_self):
+        raise AssertionError("live action serializer executed during evidence issuance")
+
+    monkeypatch.setattr(ExecutionAction, "to_dict", hostile_to_dict)
+
+    actual = module._issue_evidence(
+        bound=bound,
+        action=action,
+        instruction_sha256=instruction_sha256,
+    )
+
+    assert actual.to_dict() == expected.to_dict()
+
+
+def test_execution_action_serializer_in_place_code_mutation_fails_closed(
+    monkeypatch,
+) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, _expected = _evidence()
+    original = ExecutionAction.to_dict
+    original_code = original.__code__
+
+    def hostile_to_dict(self):
+        raise AssertionError("mutated action serializer executed")
+
+    monkeypatch.setattr(original, "__code__", hostile_to_dict.__code__)
+
+    try:
+        with pytest.raises(
+            BetfairStandardLimitPriceBoundError,
+            match="ExecutionAction serializer authority changed",
+        ):
+            module.resolve_betfair_standard_limit_price_bound(
+                bound=bound,
+                action_id=action.action_id,
+            )
+    finally:
+        original.__code__ = original_code
+
+
+def test_capture_and_digest_helpers_ignore_module_rebinding(monkeypatch) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    bound, action, expected = _evidence()
+
+    def forged_capture(_action):
+        raise AssertionError("rebound capture helper executed")
+
+    def forged_digest(_payload):
+        raise AssertionError("rebound digest helper executed")
+
+    monkeypatch.setattr(module, "_capture_canonical_instruction", forged_capture)
+    monkeypatch.setattr(module, "_digest", forged_digest)
+
+    actual = module.resolve_betfair_standard_limit_price_bound(
+        bound=bound,
+        action_id=action.action_id,
+    )
+
+    assert actual.to_dict() == expected.to_dict()
 
 
 def test_instruction_projection_is_captured_from_real_place_action_request() -> None:
@@ -215,6 +365,24 @@ def test_same_version_time_in_force_write_drift_fails_closed(monkeypatch) -> Non
     with pytest.raises(
         BetfairStandardLimitPriceBoundError,
         match="nonstandard Betfair order transformation",
+    ):
+        resolve_betfair_standard_limit_price_bound(
+            bound=bound,
+            action_id=action.action_id,
+        )
+
+
+def test_same_version_boolean_handicap_write_drift_fails_closed(monkeypatch) -> None:
+    bound, action, _resolved_evidence = _evidence()
+
+    def replace_handicap_with_boolean(instruction) -> None:
+        instruction["handicap"] = False
+
+    _replace_captured_request(monkeypatch, replace_handicap_with_boolean)
+
+    with pytest.raises(
+        BetfairStandardLimitPriceBoundError,
+        match="does not preserve the bound standard LIMIT",
     ):
         resolve_betfair_standard_limit_price_bound(
             bound=bound,

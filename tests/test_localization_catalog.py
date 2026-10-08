@@ -7,7 +7,6 @@ from types import SimpleNamespace
 import pytest
 
 from autosport.domain import TicketLeg
-from autosport.paper import PaperBook
 from autosport.localization import (
     CATALOG_VERSION,
     DEFAULT_LOCALE,
@@ -15,6 +14,7 @@ from autosport.localization import (
     require_keys,
     text,
 )
+from autosport.paper import PaperBook
 from autosport.ui_model import (
     observation_quote_lines,
     observation_summary,
@@ -123,6 +123,128 @@ _RUNTIME_RECOVERY_KEYS = {
     "ui.status.replay.reopen_blocked",
     "ui.status.close.recovery_busy",
 }
+
+
+_LANGUAGE_NEUTRAL_CRITICAL_VALUES = {
+    "ui.speed.10x": "10×",
+    "ui.speed.100x": "100×",
+    "ui.speed.1000x": "1000×",
+}
+_FORMAT_FIELD = re.compile(r"\{[^{}]*\}")
+_CYRILLIC_LETTER = re.compile(r"[\u0400-\u04FF]")
+_ENGLISH_UI_DIRECTIVE = re.compile(
+    r"\b(?:press|click|retry|reopen|settings|please|confirm|submit|place|cancel|try\s+again|failed\s+to|unable\s+to)\b",
+    re.IGNORECASE,
+)
+
+
+_UPPERCASE_PROSE_SPAN = re.compile(r"\b[A-Z]{2,}(?:\s+[A-Z]{2,})+\b")
+_ALLOWED_UPPERCASE_TECHNICAL_WORDS = frozenset(
+    {"API", "UIA", "NVDA", "UTC", "SHA", "ID", "STOP", "PAPER", "SHADOW", "LIVE"}
+)
+
+
+def _has_untranslated_uppercase_prose(value: str) -> bool:
+    # Technical abbreviations and the native STOP command are not prose.
+    # Two or more other adjacent uppercase words are a product-copy escape,
+    # even when one Cyrillic character was appended to launder the string.
+    for match in _UPPERCASE_PROSE_SPAN.finditer(value):
+        words = match.group(0).split()
+        untranslated = [
+            word for word in words if word not in _ALLOWED_UPPERCASE_TECHNICAL_WORDS
+        ]
+        if len(untranslated) >= 2:
+            return True
+    return False
+
+
+def _assert_critical_ukrainian_template(key: str, value: str) -> None:
+    stripped = value.strip()
+    assert stripped, f"{key} resolved to an empty/whitespace critical value"
+    assert stripped != key, f"{key} resolved by echoing its localization key"
+
+    neutral_value = _LANGUAGE_NEUTRAL_CRITICAL_VALUES.get(key)
+    if neutral_value is not None:
+        assert stripped == neutral_value, (
+            f"{key} changed from its exact language-neutral technical value: {value!r}"
+        )
+        return
+
+    language_text = _FORMAT_FIELD.sub("", stripped)
+    assert _CYRILLIC_LETTER.search(language_text), (
+        f"{key} has no Ukrainian/Cyrillic presentation signal: {value!r}"
+    )
+    assert not _ENGLISH_UI_DIRECTIVE.search(language_text), (
+        f"{key} contains an English-only critical UI directive: {value!r}"
+    )
+    assert not _has_untranslated_uppercase_prose(language_text), (
+        f"{key} contains untranslated uppercase operator prose: {value!r}"
+    )
+
+
+def test_critical_catalog_is_fail_closed_against_blank_key_echo_and_english_fallback() -> None:
+    messages = catalog()
+    guarded_keys = _CRITICAL_UI_KEYS | _RUNTIME_RECOVERY_KEYS
+    require_keys(guarded_keys)
+
+    # The bounded manifests deliberately include visible controls, UIA/NVDA
+    # presentation resources, and startup/recovery status/error text, so all of
+    # those critical paths share the same fail-closed language guard.
+    assert any(key.startswith("ui.button.") for key in guarded_keys)
+    assert any(key.startswith("ui.accessibility.") for key in guarded_keys)
+    assert any(key.startswith("ui.error.recovery.") for key in guarded_keys)
+    assert any(key.startswith("ui.status.recovery.") for key in guarded_keys)
+
+    for key in sorted(guarded_keys):
+        _assert_critical_ukrainian_template(key, messages[key])
+
+
+def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_context() -> None:
+    _assert_critical_ukrainian_template(
+        "ui.example.provider_status",
+        "Статус Betfair API: доступний; час UTC.",
+    )
+    _assert_critical_ukrainian_template(
+        "ui.example.technical_context",
+        "Betfair API UIA NVDA UTC SHA-256: стан доступний.",
+    )
+
+    with pytest.raises(AssertionError, match="no Ukrainian/Cyrillic presentation signal"):
+        _assert_critical_ukrainian_template(
+            "ui.example.provider_status",
+            "Betfair API status: ready; time UTC.",
+        )
+    # A stray Cyrillic character must not launder an English operator command.
+    for english_with_cyrillic in (
+        "Press Retry і",
+        "Error: press Retry and reopen Settings — і",
+        "Please click тут",
+        "CONFIRM REAL BET і",
+        "SUBMIT REAL BET і",
+        "PLACE REAL BET і",
+        "CANCEL REAL BET і",
+    ):
+        with pytest.raises(AssertionError, match="English-only critical UI directive"):
+            _assert_critical_ukrainian_template(
+                "ui.example.unsafe_english_directive", english_with_cyrillic
+            )
+    for untranslated_uppercase in (
+        "START REAL BET і",
+        "DELETE ALL DATA і",
+        "EXPORT PRIVATE DATA і",
+    ):
+        with pytest.raises(
+            AssertionError, match="untranslated uppercase operator prose"
+        ):
+            _assert_critical_ukrainian_template(
+                "ui.example.unsafe_uppercase_prose", untranslated_uppercase
+            )
+    with pytest.raises(AssertionError, match="empty/whitespace"):
+        _assert_critical_ukrainian_template("ui.example.blank", "   ")
+    with pytest.raises(AssertionError, match="echoing its localization key"):
+        _assert_critical_ukrainian_template("ui.example.echo", "ui.example.echo")
+    with pytest.raises(AssertionError, match="exact language-neutral technical value"):
+        _assert_critical_ukrainian_template("ui.speed.10x", "Fast")
 
 
 def test_catalog_is_versioned_ukrainian_default_and_fails_closed() -> None:
@@ -387,6 +509,12 @@ def _assert_ukrainian_critical_presentation(key: str, value: str) -> None:
     assert any(
         character in _UKRAINIAN_PRESENTATION_LETTERS for character in value
     ), f"{key} has no Ukrainian presentation text: {value!r}"
+    assert not _ENGLISH_UI_DIRECTIVE.search(value), (
+        f"{key} contains an English-only critical UI directive: {value!r}"
+    )
+    assert not _has_untranslated_uppercase_prose(value), (
+        f"{key} contains untranslated uppercase operator prose: {value!r}"
+    )
     untranslated = _untranslated_latin_product_words(value)
     assert not untranslated, (
         f"{key} contains untranslated Latin product words: {untranslated!r}; "
@@ -412,6 +540,7 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         "Betfair API: помилка автентифікації; перевірте ключ.",
         "Час UTC; SHA-256=abcdef123456.",
         "Provider-ID=raw-17; стан перевірено українською мовою.",
+        "NVDA UIA та STOP: українська семантика доступна.",
     )
     for index, sample in enumerate(allowed_samples):
         _assert_ukrainian_critical_presentation(f"sample.{index}", sample)
@@ -422,7 +551,32 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
             "Retry Betfair API request after timeout.",
         )
 
-    with pytest.raises(AssertionError, match="untranslated Latin product words"):
+    # All-uppercase English commands must not bypass the critical UI gate
+    # merely because the display string contains one Ukrainian letter.
+    for english_uppercase_command in (
+        "CONFIRM REAL BET і",
+        "SUBMIT REAL BET і",
+        "PLACE REAL BET і",
+        "CANCEL REAL BET і",
+    ):
+        with pytest.raises(AssertionError, match="English-only critical UI directive"):
+            _assert_ukrainian_critical_presentation(
+                "sample.unsafe_uppercase_command", english_uppercase_command
+            )
+
+    for untranslated_uppercase in (
+        "START REAL BET і",
+        "DELETE ALL DATA і",
+        "EXPORT PRIVATE DATA і",
+    ):
+        with pytest.raises(
+            AssertionError, match="untranslated uppercase operator prose"
+        ):
+            _assert_ukrainian_critical_presentation(
+                "sample.unsafe_uppercase_prose", untranslated_uppercase
+            )
+
+    with pytest.raises(AssertionError, match="English-only critical UI directive"):
         _assert_ukrainian_critical_presentation(
             "sample.mixed_fallback",
             "Betfair API: Retry request після помилки.",

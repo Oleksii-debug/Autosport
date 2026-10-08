@@ -138,6 +138,26 @@ _ENGLISH_UI_DIRECTIVE = re.compile(
 )
 
 
+_UPPERCASE_PROSE_SPAN = re.compile(r"\b[A-Z]{2,}(?:\s+[A-Z]{2,})+\b")
+_ALLOWED_UPPERCASE_TECHNICAL_WORDS = frozenset(
+    {"API", "UIA", "NVDA", "UTC", "SHA", "ID", "STOP", "PAPER", "SHADOW", "LIVE"}
+)
+
+
+def _has_untranslated_uppercase_prose(value: str) -> bool:
+    # Technical abbreviations and the native STOP command are not prose.
+    # Two or more other adjacent uppercase words are a product-copy escape,
+    # even when one Cyrillic character was appended to launder the string.
+    for match in _UPPERCASE_PROSE_SPAN.finditer(value):
+        words = match.group(0).split()
+        untranslated = [
+            word for word in words if word not in _ALLOWED_UPPERCASE_TECHNICAL_WORDS
+        ]
+        if len(untranslated) >= 2:
+            return True
+    return False
+
+
 def _assert_critical_ukrainian_template(key: str, value: str) -> None:
     stripped = value.strip()
     assert stripped, f"{key} resolved to an empty/whitespace critical value"
@@ -156,6 +176,9 @@ def _assert_critical_ukrainian_template(key: str, value: str) -> None:
     )
     assert not _ENGLISH_UI_DIRECTIVE.search(language_text), (
         f"{key} contains an English-only critical UI directive: {value!r}"
+    )
+    assert not _has_untranslated_uppercase_prose(language_text), (
+        f"{key} contains untranslated uppercase operator prose: {value!r}"
     )
 
 
@@ -204,6 +227,17 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
         with pytest.raises(AssertionError, match="English-only critical UI directive"):
             _assert_critical_ukrainian_template(
                 "ui.example.unsafe_english_directive", english_with_cyrillic
+            )
+    for untranslated_uppercase in (
+        "START REAL BET і",
+        "DELETE ALL DATA і",
+        "EXPORT PRIVATE DATA і",
+    ):
+        with pytest.raises(
+            AssertionError, match="untranslated uppercase operator prose"
+        ):
+            _assert_critical_ukrainian_template(
+                "ui.example.unsafe_uppercase_prose", untranslated_uppercase
             )
     with pytest.raises(AssertionError, match="empty/whitespace"):
         _assert_critical_ukrainian_template("ui.example.blank", "   ")
@@ -478,6 +512,9 @@ def _assert_ukrainian_critical_presentation(key: str, value: str) -> None:
     assert not _ENGLISH_UI_DIRECTIVE.search(value), (
         f"{key} contains an English-only critical UI directive: {value!r}"
     )
+    assert not _has_untranslated_uppercase_prose(value), (
+        f"{key} contains untranslated uppercase operator prose: {value!r}"
+    )
     untranslated = _untranslated_latin_product_words(value)
     assert not untranslated, (
         f"{key} contains untranslated Latin product words: {untranslated!r}; "
@@ -503,6 +540,7 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         "Betfair API: помилка автентифікації; перевірте ключ.",
         "Час UTC; SHA-256=abcdef123456.",
         "Provider-ID=raw-17; стан перевірено українською мовою.",
+        "NVDA UIA та STOP: українська семантика доступна.",
     )
     for index, sample in enumerate(allowed_samples):
         _assert_ukrainian_critical_presentation(f"sample.{index}", sample)
@@ -524,6 +562,18 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         with pytest.raises(AssertionError, match="English-only critical UI directive"):
             _assert_ukrainian_critical_presentation(
                 "sample.unsafe_uppercase_command", english_uppercase_command
+            )
+
+    for untranslated_uppercase in (
+        "START REAL BET і",
+        "DELETE ALL DATA і",
+        "EXPORT PRIVATE DATA і",
+    ):
+        with pytest.raises(
+            AssertionError, match="untranslated uppercase operator prose"
+        ):
+            _assert_ukrainian_critical_presentation(
+                "sample.unsafe_uppercase_prose", untranslated_uppercase
             )
 
     with pytest.raises(AssertionError, match="English-only critical UI directive"):

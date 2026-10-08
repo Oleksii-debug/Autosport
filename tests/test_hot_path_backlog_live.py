@@ -182,3 +182,58 @@ def test_slow_final_backlog_probe_cannot_forge_ok_after_deadline():
     assert result.disposition == "WAIT" and result.reason == "STALE_SOURCE"
     assert result.total_elapsed_ns == 200
     assert result.execution_authority is False
+
+
+def test_slow_pre_stage_overload_probe_is_counted_in_wait_elapsed():
+    """A slow sampler must not backdate the evidence to before sampling."""
+    now_ns = [100]
+    calls = []
+
+    def overloaded():
+        now_ns[0] = 300
+        return 5
+
+    report = run_hot_path(
+        source_sha="a" * 40,
+        policy=HotPathPolicy(1000, 1000, 2, 1000),
+        observed_at_ns=100,
+        backlog=0,
+        stages=_steps(calls),
+        clock_ns=lambda: now_ns[0],
+        backlog_reader=overloaded,
+    )
+    assert (report.disposition, report.reason) == ("WAIT", "BACKLOG")
+    assert report.total_elapsed_ns == 200
+    assert report.backlog == 5
+    assert calls == []
+    assert not report.execution_authority
+
+
+def test_slow_post_stage_overload_probe_is_counted_in_wait_elapsed():
+    """A dynamic overload after ingest must include sampler cost, not only callback cost."""
+    now_ns = [100]
+    calls = []
+    samples = [0]
+
+    def overloaded_after_ingest():
+        samples[0] += 1
+        if samples[0] == 2:
+            now_ns[0] = 350
+            return 5
+        return 0
+
+    report = run_hot_path(
+        source_sha="a" * 40,
+        policy=HotPathPolicy(1000, 1000, 2, 1000),
+        observed_at_ns=100,
+        backlog=0,
+        stages=_steps(calls),
+        clock_ns=lambda: now_ns[0],
+        backlog_reader=overloaded_after_ingest,
+    )
+    assert samples == [2]
+    assert (report.disposition, report.reason) == ("WAIT", "BACKLOG")
+    assert report.total_elapsed_ns == 250
+    assert report.backlog == 5
+    assert calls == ["ingest"]
+    assert not report.execution_authority

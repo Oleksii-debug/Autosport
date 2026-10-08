@@ -7,6 +7,7 @@ import pytest
 
 from autosport.opportunity import (
     OpportunityContractError,
+    Opportunity,
     PlanAllocation,
     QuoteRef,
 )
@@ -52,3 +53,22 @@ def test_exact_decimal_values_keep_canonical_roundtrip() -> None:
     assert PlanAllocation.from_dict(allocation.to_dict()) == allocation
     quote = _quote(Decimal("2.05"))
     assert QuoteRef.from_dict(quote.to_dict()) == quote
+
+
+def test_hostile_decimal_subclass_cannot_override_intent_signal_ingress() -> None:
+    """Fail before invoking untrusted numeric methods or nested typed witnesses."""
+    from autosport.portfolio_plan import OpportunityEvidence, OpportunityIntent
+    from autosport.risk import ProposedTicketRiskContext
+
+    # Intentionally uninitialized *exact* typed placeholders: all are checked
+    # for nominal type before signal validation and must not be dereferenced.
+    with pytest.raises(ValueError, match="signal_strength must be a finite exact Decimal"):
+        OpportunityIntent(
+            intent_id="hostile-signal",
+            opportunity=object.__new__(Opportunity),
+            evidence=object.__new__(OpportunityEvidence),
+            risk_context=object.__new__(ProposedTicketRiskContext),
+            signal_strength=HostileDecimal("0.20"),
+            strategy_id="recorded-signal",
+            config_sha256="a" * 64,
+        )

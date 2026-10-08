@@ -156,6 +156,15 @@ from . import _scientific_registry_read_authority as _scientific_registry_read_a
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
 
+# Holdout freshness is physical evaluation content, not a protocol/source/licence/
+# family label. Compose the existing ledger with registry-backed factory history while
+# retaining old stored freshness ids as readable migration input only.
+from . import _holdout_physical_content_guard as _holdout_physical_content_guard  # noqa: F401,E402
+# Preserve that composition across explicit reloads of the runtime-repair and factory
+# implementation without bypassing existing compatibility seals.
+from . import _holdout_physical_runtime_reload_guard as _holdout_physical_runtime_reload_guard  # noqa: F401,E402
+from . import _holdout_physical_factory_reload_guard as _holdout_physical_factory_reload_guard  # noqa: F401,E402
+
 # Sequential multiplicity evidence and PromotionEvidence live in separate durable
 # journals. Seal the registry prefix observed at look registration so a later write
 # can never retroactively authorize an already-durable promotion record.
@@ -173,6 +182,10 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# Family-close evidence is useful only if canonical re-resolution cannot be paired
+# with caller-rebound evidence constructors/digests. Seal its publication surface.
+from . import _research_multiplicity_family_close_dispatch_guard as _research_multiplicity_family_close_dispatch_guard  # noqa: F401,E402
 
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical

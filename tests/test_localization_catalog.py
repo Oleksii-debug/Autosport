@@ -251,7 +251,7 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
         "EXPORT PRIVATE DATA і",
     ):
         with pytest.raises(
-            AssertionError, match="untranslated uppercase operator prose"
+            AssertionError, match="untranslated English critical action"
         ):
             _assert_critical_ukrainian_template(
                 "ui.example.unsafe_uppercase_prose", untranslated_uppercase
@@ -613,7 +613,7 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         "EXPORT PRIVATE DATA і",
     ):
         with pytest.raises(
-            AssertionError, match="untranslated uppercase operator prose"
+            AssertionError, match="untranslated English critical action"
         ):
             _assert_ukrainian_critical_presentation(
                 "sample.unsafe_uppercase_prose", untranslated_uppercase

@@ -115,4 +115,7 @@ def run_hot_path(
             return stop("STAGE_BUDGET", after)
         if after - started > policy.total_budget_ns:
             return stop("TOTAL_BUDGET", after)
+        # An observation that expires during the final stage cannot return OK.
+        if after - observed_at_ns > policy.max_source_age_ns:
+            return stop("STALE_SOURCE", after)
     return HotPathReport(source_sha, "OK", "WITHIN_BUDGET", tuple(samples), samples and after - started or 0, backlog)

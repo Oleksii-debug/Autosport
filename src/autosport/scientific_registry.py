@@ -1621,6 +1621,10 @@ class ScientificRegistry:
                         "PROMOTE requires a frozen typed promotion rule"
                     )
                 frozen_rule_payload = _frozen_promotion_rule_payload(frozen_rule)
+                if frozen_rule_payload["primary_metric"] != hypothesis["payload"].get("primary_metric"):
+                    raise PromotionEvidenceError(
+                        "frozen promotion primary metric disagrees with the bound hypothesis"
+                    )
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:

@@ -555,9 +555,8 @@ def test_reproducibility_bundle_is_deterministic_reference_only(tmp_path):
     assert "DatasetSnapshot" in first["references"]
     assert "dataset_bytes" not in first and "raw_rows" not in first
 
-    # A locally deterministic bundle is not authorization to disclose
-    # outcome-bearing scientific records. Direct file export must fail closed;
-    # the product's ScientificDisclosureExporter consumes holdout first.
+    # A deterministic in-memory bundle is not outward publication authority.
+    # Outcome-bearing file export requires the canonical holdout-consumption gate.
     from autosport.scientific_disclosure_export import ScientificDisclosureExportError
 
     target = tmp_path / "repro.json"

@@ -143,8 +143,12 @@ def promotion_holdout_access_id(
 def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     text = _text(value, "binding.promotion_rule")
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
         raise PromotionEvidenceError("frozen promotion rule is not canonical JSON") from exc
     if type(payload) is not dict or payload.get("kind") != "autosport-promotion-rule-v1":
         raise PromotionEvidenceError("frozen promotion rule kind is unsupported")
@@ -153,7 +157,17 @@ def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     minimum_effective_sample_size = payload.get("minimum_effective_sample_size")
     if type(primary_metric) is not str or not primary_metric:
         raise PromotionEvidenceError("frozen promotion rule lacks primary metric")
-    if isinstance(minimum_improvement, bool) or not isinstance(minimum_improvement, (int, float)) or not math.isfinite(minimum_improvement):
+    if type(minimum_improvement) not in (int, float):
+        raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
+    try:
+        finite_improvement = math.isfinite(minimum_improvement)
+    except OverflowError as exc:
+        # JSON may contain a finite integer too large to convert to float.
+        # Untrusted frozen evidence must fail closed rather than crash promotion.
+        raise PromotionEvidenceError(
+            "frozen promotion rule minimum improvement is invalid"
+        ) from exc
+    if not finite_improvement:
         raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
     if isinstance(minimum_effective_sample_size, bool) or not isinstance(minimum_effective_sample_size, int) or minimum_effective_sample_size <= 0:
         raise PromotionEvidenceError("frozen promotion rule minimum effective sample size is invalid")
@@ -1607,6 +1621,10 @@ class ScientificRegistry:
                         "PROMOTE requires a frozen typed promotion rule"
                     )
                 frozen_rule_payload = _frozen_promotion_rule_payload(frozen_rule)
+                if frozen_rule_payload["primary_metric"] != hypothesis["payload"].get("primary_metric"):
+                    raise PromotionEvidenceError(
+                        "frozen promotion primary metric disagrees with the bound hypothesis"
+                    )
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:

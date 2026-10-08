@@ -133,6 +133,10 @@ _LANGUAGE_NEUTRAL_CRITICAL_VALUES = {
 }
 _FORMAT_FIELD = re.compile(r"\{[^{}]*\}")
 _CYRILLIC_LETTER = re.compile(r"[\u0400-\u04FF]")
+_ENGLISH_UI_DIRECTIVE = re.compile(
+    r"\b(?:press|click|retry|reopen|settings|please|try\s+again|failed\s+to|unable\s+to)\b",
+    re.IGNORECASE,
+)
 
 
 def _assert_critical_ukrainian_template(key: str, value: str) -> None:
@@ -150,6 +154,9 @@ def _assert_critical_ukrainian_template(key: str, value: str) -> None:
     language_text = _FORMAT_FIELD.sub("", stripped)
     assert _CYRILLIC_LETTER.search(language_text), (
         f"{key} has no Ukrainian/Cyrillic presentation signal: {value!r}"
+    )
+    assert not _ENGLISH_UI_DIRECTIVE.search(language_text), (
+        f"{key} contains an English-only critical UI directive: {value!r}"
     )
 
 
@@ -185,6 +192,16 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
             "ui.example.provider_status",
             "Betfair API status: ready; time UTC.",
         )
+    # A stray Cyrillic character must not launder an English operator command.
+    for english_with_cyrillic in (
+        "Press Retry і",
+        "Error: press Retry and reopen Settings — і",
+        "Please click тут",
+    ):
+        with pytest.raises(AssertionError, match="English-only critical UI directive"):
+            _assert_critical_ukrainian_template(
+                "ui.example.unsafe_english_directive", english_with_cyrillic
+            )
     with pytest.raises(AssertionError, match="empty/whitespace"):
         _assert_critical_ukrainian_template("ui.example.blank", "   ")
     with pytest.raises(AssertionError, match="echoing its localization key"):

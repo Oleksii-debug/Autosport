@@ -72,7 +72,7 @@ def test_exception_secret_is_not_echoed_or_chained():
     with pytest.raises(HotPathError) as e:
         run_hot_path(source_sha=SHA, policy=POLICY, observed_at_ns=100, backlog=0, stages=calls, clock_ns=clock(100, 100))
     assert "CANARY" not in str(e.value)
-    assert e.value.__cause__ is None and e.value.__suppress_context__
+    assert e.value.__cause__ is None and e.value.__context__ is None
 
 
 def test_backward_monotonic_fails_closed_no_decision():
@@ -249,3 +249,16 @@ def test_interstage_monotonic_rewind_is_rejected_before_downstream_callback():
         )
     assert calls == ["ingest"]
     assert failure.value.__cause__ is None
+
+
+def test_clock_exception_does_not_retain_private_context():
+    calls = []
+    def failed_clock():
+        raise RuntimeError("PRIVATE_CLOCK_TOKEN_CANARY")
+    with pytest.raises(HotPathError, match="monotonic clock unavailable") as failure:
+        run_hot_path(source_sha=SHA, policy=POLICY, observed_at_ns=100,
+                     backlog=0, stages=make_callbacks(calls), clock_ns=failed_clock)
+    assert failure.value.__cause__ is None
+    assert failure.value.__context__ is None
+    assert "CANARY" not in str(failure.value)
+    assert calls == []

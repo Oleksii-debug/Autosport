@@ -355,6 +355,74 @@ def test_new_protocol_id_cannot_launder_consumed_physical_holdout(tmp_path) -> N
         )
 
 
+def test_family_alias_cannot_launder_consumed_physical_holdout_after_restart(tmp_path) -> None:
+    path = tmp_path / "holdout_consumption.json"
+    original = _snapshot(snapshot_id="confirmation-window-original")
+    alias = _snapshot(snapshot_id="confirmation-window-alias")
+    lineage = _holdout_lineage(tmp_path, original, alias)
+    first = HoldoutConsumptionLedger(path, lineage_authority=lineage).consume(
+        dataset_snapshot=original,
+        research_protocol_id="protocol-42",
+        confirmation_trial_family_id="family-9",
+        consumer_identity="experiment:challenger-a",
+        purpose="final-confirmation",
+        consumed_at_utc="2026-09-20T10:05:00Z",
+    )
+
+    restarted = HoldoutConsumptionLedger(path, lineage_authority=lineage)
+    assert restarted.freshness_id(
+        dataset_snapshot=alias,
+        confirmation_trial_family_id="family-renamed",
+    ) != first.holdout_freshness_id
+
+    with pytest.raises(HoldoutAlreadyConsumedError, match="already consumed"):
+        restarted.assert_unused(
+            dataset_snapshot=alias,
+            research_protocol_id="protocol-43",
+            confirmation_trial_family_id="family-renamed",
+        )
+    with pytest.raises(HoldoutAlreadyConsumedError, match="physical holdout"):
+        restarted.consume(
+            dataset_snapshot=alias,
+            research_protocol_id="protocol-43",
+            confirmation_trial_family_id="family-renamed",
+            consumer_identity="experiment:challenger-b",
+            purpose="renamed-family-confirmation",
+            consumed_at_utc="2026-09-20T10:06:00Z",
+        )
+    assert restarted.records() == (first,)
+
+
+def test_family_alias_guard_uses_captured_runtime_delegate(tmp_path, monkeypatch) -> None:
+    path = tmp_path / "holdout_consumption.json"
+    snapshot = _snapshot(snapshot_id="confirmation-window")
+    lineage = _holdout_lineage(tmp_path, snapshot)
+    ledger = HoldoutConsumptionLedger(path, lineage_authority=lineage)
+    ledger.consume(
+        dataset_snapshot=snapshot,
+        research_protocol_id="protocol-42",
+        confirmation_trial_family_id="family-9",
+        consumer_identity="experiment:challenger-a",
+        purpose="final-confirmation",
+        consumed_at_utc="2026-09-20T10:05:00Z",
+    )
+
+    monkeypatch.setattr(
+        point_in_time_module,
+        "_find_physical_holdout_consumption",
+        lambda records, *, dataset_snapshot: None,
+    )
+    with pytest.raises(HoldoutAlreadyConsumedError, match="physical holdout"):
+        ledger.consume(
+            dataset_snapshot=snapshot,
+            research_protocol_id="protocol-43",
+            confirmation_trial_family_id="family-renamed",
+            consumer_identity="experiment:challenger-b",
+            purpose="renamed-family-confirmation",
+            consumed_at_utc="2026-09-20T10:06:00Z",
+        )
+
+
 def test_exact_retry_is_idempotent_and_keeps_original_consumption_time(tmp_path) -> None:
     path = tmp_path / "holdout_consumption.json"
     snapshot = _snapshot()

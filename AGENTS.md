@@ -9,7 +9,7 @@ Before mutation read PROJECT_PLAN_INDEX.md, MULTI_PLAN_PARALLELISM_CONTRACT.md, 
 - Drive status lines are migration snapshots only.
 - Existing PR/branch/source: REUSE -> REPAIR -> CONVERGE.
 - Plan 4 provider/bookmaker engineering is ACTIONABLE_OFFLINE using existing code, public/recorded sources and fixtures; do not request real credentials to close engineering.
-- Plan 7 is provider-free PAPER/SHADOW convergence and waits on Plans 1,2,3,5,6; Plan 4 is not a hard prerequisite.
+- Plan 7 is provider-free PAPER/SHADOW convergence and waits on terminal Plans 1–6. Plan 4 stays fully parallel/offline-actionable during engineering, but its provider/public-browser qualification is required at the final convergence gate.
 - Plan 8 uses per-Section external gates. Real money / account / NVDA evidence never blocks Plans 1–7.
 - Fixture/source/PAPER/real/physical evidence classes are never interchangeable.
 - DONE remains terminal under Simplified Section Closure Protocol v3.

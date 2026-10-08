@@ -3,6 +3,7 @@ from __future__ import annotations
 import base64
 import json
 import os
+import time
 from pathlib import Path
 
 import pytest
@@ -614,3 +615,22 @@ def test_symlink_swap_immediately_before_open_fails_closed(
     assert report.status == "INCOMPLETE"
     assert report.exit_code == 3
     assert report.findings == ()
+
+
+def test_unbroken_base64_alphabet_has_bounded_scan_time(tmp_path: Path) -> None:
+    """An unbroken Base64-like log line must not trigger quadratic regex misses."""
+
+    canary = "planted-credential-Ж-0123456789"
+    (tmp_path / "long-base64-like-log.txt").write_bytes(
+        b"A" * 64_000 + b"\n!"
+    )
+    started = time.perf_counter()
+    report = secret_canary_scan.scan_secret_canary(
+        tmp_path, canary, chunk_size=64 * 1024
+    )
+    elapsed = time.perf_counter() - started
+
+    assert report.status == "CLEAN"
+    assert report.exit_code == 0
+    assert not report.findings and not report.errors
+    assert elapsed < 8.0, f"Base64 scan exceeded safe bounded time: {elapsed:.2f}s"

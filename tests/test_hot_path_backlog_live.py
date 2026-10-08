@@ -89,3 +89,39 @@ def test_previous_high_pressure_cannot_be_cleared_before_final_decision():
     assert report.disposition == "WAIT" and report.reason == "BACKLOG"
     assert report.backlog == 99
     assert calls == ["ingest"]
+
+
+@pytest.mark.parametrize(
+    ("max_age", "total_budget", "expected"),
+    [
+        (50, 500, "STALE_SOURCE"),
+        (500, 50, "TOTAL_BUDGET"),
+    ],
+)
+def test_costly_backlog_sample_cannot_start_stale_decision(max_age, total_budget, expected):
+    """A slow dynamic pressure probe must not bypass the pre-decision time gate."""
+    calls = []
+    reads = [0]
+    now_ns = [100]
+
+    def costly_backlog_probe():
+        reads[0] += 1
+        # Four earlier stages have two probes each. The ninth probe is
+        # immediately before decision, after its prior timestamp was sampled.
+        if reads[0] == 9:
+            now_ns[0] = 200
+        return 0
+
+    result = run_hot_path(
+        source_sha="a" * 40,
+        policy=HotPathPolicy(10, total_budget, 2, max_age),
+        observed_at_ns=100,
+        backlog=0,
+        stages=_steps(calls),
+        clock_ns=lambda: now_ns[0],
+        backlog_reader=costly_backlog_probe,
+    )
+    assert reads == [9]
+    assert result.disposition == "WAIT" and result.reason == expected
+    assert calls == list(STAGES[:-1])
+    assert result.execution_authority is False

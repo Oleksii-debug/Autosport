@@ -333,7 +333,7 @@ def test_durable_checkpoint_detects_complete_valid_tail_truncation(
 
     original = journal.path.read_text(encoding="utf-8").splitlines()
     assert len(original) == 3
-    journal.path.write_text("\n".join(original[:-1]) + "\n", encoding="utf-8")
+    journal.path.write_text("\n".join(original[:-1]) + "\n", encoding="utf-8", newline="\n")
 
     with pytest.raises(
         JournalIntegrityError,
@@ -419,7 +419,7 @@ def test_malformed_utf8_fails_closed(tmp_path: Path) -> None:
 
 def test_malformed_json_fails_closed(tmp_path: Path) -> None:
     path = tmp_path / "forensic-session.jsonl"
-    path.write_text("not-json\n", encoding="utf-8")
+    path.write_text("not-json\n", encoding="utf-8", newline="\n")
     with pytest.raises(JournalIntegrityError, match="valid JSON"):
         ForensicSessionJournal(path, clock=FakeClock())
 
@@ -431,7 +431,7 @@ def test_schema_drift_fails_closed(tmp_path: Path) -> None:
     first = json.loads(lines[0])
     first["unexpected"] = True
     lines[0] = json.dumps(first, sort_keys=True, separators=(",", ":"))
-    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(JournalIntegrityError, match="schema drift"):
         verify_journal(journal.path)
 
@@ -444,7 +444,7 @@ def test_payload_tamper_is_detected_by_record_hash(tmp_path: Path) -> None:
     target = json.loads(lines[1])
     target["payload"]["accepted"] = True
     lines[1] = json.dumps(target, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(JournalIntegrityError, match="record hash mismatch"):
         verify_journal(journal.path)
 
@@ -456,7 +456,7 @@ def test_record_deletion_is_detected_by_sequence_or_predecessor(tmp_path: Path) 
     journal.close()
     lines = journal.path.read_text(encoding="utf-8").splitlines()
     del lines[1]
-    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(JournalIntegrityError, match="sequence|predecessor"):
         verify_journal(journal.path)
 
@@ -468,7 +468,7 @@ def test_record_reordering_is_detected(tmp_path: Path) -> None:
     journal.close()
     lines = journal.path.read_text(encoding="utf-8").splitlines()
     lines[1], lines[2] = lines[2], lines[1]
-    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(JournalIntegrityError, match="sequence|predecessor"):
         verify_journal(journal.path)
 
@@ -623,7 +623,7 @@ def test_randomized_single_record_tamper_never_verifies(tmp_path: Path) -> None:
         target = json.loads(lines[target_index])
         target["payload"]["tampered"] = case
         lines[target_index] = json.dumps(target, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
-        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
 
         with pytest.raises(JournalIntegrityError):
             verify_journal(path)
@@ -636,7 +636,7 @@ def test_noncanonical_json_serialization_is_rejected_even_if_semantics_and_hash_
     lines = journal.path.read_text(encoding="utf-8").splitlines()
     target = json.loads(lines[1])
     lines[1] = json.dumps(target, ensure_ascii=False, sort_keys=False, separators=(", ", ": "))
-    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    journal.path.write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
     with pytest.raises(JournalIntegrityError, match="canonical JSON"):
         verify_journal(journal.path)
 
@@ -664,7 +664,7 @@ def test_duplicate_json_keys_are_rejected_instead_of_last_wins(tmp_path: Path) -
         '"payload":{"x":1},"payload":{"x":2},'
         f'"prev_sha256":"{"0" * 64}","sha256":"{digest}"}}\n'
     )
-    path.write_text(raw, encoding="utf-8")
+    path.write_text(raw, encoding="utf-8", newline="\n")
     with pytest.raises(JournalIntegrityError, match="duplicate JSON object key"):
         verify_journal(path)
 
@@ -677,6 +677,7 @@ def test_nonstandard_nan_constant_is_rejected_as_integrity_error(tmp_path: Path)
         + '","schema_version":1,"seq":1,"session_id":"00000000-0000-0000-0000-00000000004d",'
         + '"sha256":"' + "0" * 64 + '","timestamp_utc":"2026-09-21T11:30:00.000000Z"}\n',
         encoding="utf-8",
+        newline="\n",
     )
     with pytest.raises(JournalIntegrityError, match="non-standard JSON constant"):
         verify_journal(path)
@@ -713,6 +714,7 @@ def test_verifier_rejects_hash_valid_record_with_unredacted_secret(tmp_path: Pat
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
     with pytest.raises(JournalIntegrityError, match="unredacted sensitive"):
         verify_journal(path)
@@ -885,15 +887,19 @@ def test_constructor_never_adopts_path_replacement_after_verified_bytes(
         parse_then_replace,
     )
 
-    with pytest.raises(
-        JournalIntegrityError,
-        match="journal path identity changed during verification",
-    ):
+    # POSIX permits pathname substitution while the verified descriptor stays
+    # open; Windows can reject the rename at the OS sharing boundary instead.
+    # Both outcomes must fail closed without adopting the replacement journal.
+    with pytest.raises((JournalIntegrityError, PermissionError)) as failure:
         ForensicSessionJournal(
             journal_path,
             clock=FakeClock(),
             session_id=str(uuid.UUID(int=2)),
         )
+    if isinstance(failure.value, JournalIntegrityError):
+        assert "journal path identity changed during verification" in str(failure.value)
+    else:
+        assert os.name == "nt"
 
     assert swapped is True
     assert journal_path.read_bytes() == original
@@ -1047,6 +1053,7 @@ def test_verifier_rejects_hash_valid_record_with_unredacted_canonical_alias(
         )
         + "\n",
         encoding="utf-8",
+        newline="\n",
     )
 
     with pytest.raises(JournalIntegrityError, match="unredacted sensitive"):

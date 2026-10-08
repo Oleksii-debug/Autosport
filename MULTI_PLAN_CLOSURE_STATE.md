@@ -16,8 +16,8 @@ This is the live status authority for the new architecture.
 | Section | State | Note |
 |---:|---|---|
 |1|DONE|legacy Section 2; accepted main evidence|
-|2|QUALIFYING|legacy Section 3; canonical PR #2238, frozen candidate per legacy live registry|
-|3|PARTIAL_EXISTING|legacy Section 4; PR #2261 prequalification lineage|
+|2|QUALIFYING — FAILED GATES / REPAIR REQUIRED|legacy Section 3; canonical PR #2238 current head `de1663b3d399a9a3aade7cb06c0a01803a60afe1` (9 commits ahead of stale recorded frozen `ab182a0`); exact-head CI 37699969910 FAILED (101 failed), Windows 37699969821 CANCELLED, Endurance 37699969904 CANCELLED; no DONE. Repair causal/replay/projection regressions in same lineage, re-freeze, qualify all named gates, integrate and read back.|
+|3|PARTIAL_EXISTING — WAITING FOR SECTION 2|legacy Section 4; canonical stacked PR #2261@`8a814cf0c1b80df0d0bf28deae4562222762111d`, based on older Section-2 candidate; exact-head CI 37658703334 FAILED (346 failed), Windows 37658703336 CANCELLED; no DONE. After Section 2 terminal integration, reconverge same lineage, qualify source rights/provenance/coverage/corrections/retention/restart and read back.|
 |4|PARTIAL_EXISTING|legacy Section 6 storage/history/checkpoint implementation|
 |5|PARTIAL_EXISTING|legacy Section 14 collector/sync implementation|
 |6|PARTIAL_EXISTING|legacy Section 15 lifecycle/memory implementation|

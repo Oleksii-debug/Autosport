@@ -45,6 +45,52 @@ class HotPathReport:
     execution_authority: bool = False
     target_machine_acceptance: bool = False
 
+    def __post_init__(self) -> None:
+        # Public evidence can be reconstructed by callers. A forged result must
+        # never silently claim execution or target-machine acceptance.
+        if (
+            type(self.source_sha) is not str
+            or len(self.source_sha) != 40
+            or any(c not in "0123456789abcdef" for c in self.source_sha)
+        ):
+            raise HotPathError("invalid source revision in performance report")
+        if self.execution_authority is not False or self.target_machine_acceptance is not False:
+            raise HotPathError("performance report cannot grant execution or target acceptance")
+        if type(self.disposition) is not str or self.disposition not in {"OK", "WAIT"}:
+            raise HotPathError("invalid performance disposition")
+        if type(self.reason) is not str or self.reason not in {
+            "WITHIN_BUDGET", "BACKLOG", "STALE_SOURCE", "TOTAL_BUDGET", "STAGE_BUDGET"
+        }:
+            raise HotPathError("invalid performance reason")
+        if (
+            type(self.total_elapsed_ns) is not int
+            or self.total_elapsed_ns < 0
+            or type(self.backlog) is not int
+            or self.backlog < 0
+        ):
+            raise HotPathError("invalid performance elapsed time or backlog")
+        if (
+            type(self.stage_latencies_ns) is not tuple
+            or len(self.stage_latencies_ns) > len(STAGES)
+        ):
+            raise HotPathError("invalid stage samples")
+        for index, sample in enumerate(self.stage_latencies_ns):
+            if (
+                type(sample) is not tuple
+                or len(sample) != 2
+                or sample[0] != STAGES[index]
+                or type(sample[1]) is not int
+                or sample[1] < 0
+            ):
+                raise HotPathError("invalid ordered stage latency")
+        if self.total_elapsed_ns < sum(ns for _, ns in self.stage_latencies_ns):
+            raise HotPathError("stage latency exceeds total elapsed time")
+        if self.disposition == "OK":
+            if self.reason != "WITHIN_BUDGET" or len(self.stage_latencies_ns) != len(STAGES):
+                raise HotPathError("incomplete OK performance report")
+        elif self.reason == "WITHIN_BUDGET":
+            raise HotPathError("WAIT performance report cannot claim success")
+
 
 def run_hot_path(
     *,

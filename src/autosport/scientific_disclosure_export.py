@@ -38,7 +38,6 @@ from .scientific_registry import (
 )
 
 
-_MAX_AS_OF = "9999-12-31T23:59:59.999999+00:00"
 _DIRECT_EXPORT_BLOCKED = (
     "direct scientific reproducibility export is disabled; use "
     "ScientificDisclosureExporter so holdout consumption is bound before publication"
@@ -207,7 +206,7 @@ class ScientificDisclosureExporter:
         _require_registry_surface(self._registry)
         _require_disclosure_record_surface(self._gate)
 
-    def _resolve(self, experiment_id: str):
+    def _resolve(self, experiment_id: str, *, disclosed_at_utc: str):
         self._require_stable_authority()
         if type(experiment_id) is not str or not experiment_id or experiment_id != experiment_id.strip():
             raise ScientificDisclosureExportError(
@@ -229,6 +228,29 @@ class ScientificDisclosureExporter:
         protocol = _entry(self._registry, "ResearchProtocol", protocol_id)
         dataset = _entry(self._registry, "DatasetSnapshot", dataset_id)
         evaluation = _entry(self._registry, "EvaluationBundle", evaluation_id)
+        feature_set = _entry(self._registry, "FeatureSet", _text(ep, "feature_set_id"))
+        strategy = _entry(self._registry, "StrategyVersion", strategy_id)
+        references = [experiment, protocol, dataset, evaluation, feature_set, strategy]
+        if model_id is not None:
+            references.append(_entry(self._registry, "ModelVersion", model_id))
+
+        # A caller cannot backdate the outward export to before an outcome,
+        # evaluated artifact, or referenced model/feature existed. Reuse the
+        # canonical registry's causal/reveal cutoff rather than parsing an
+        # independent time or trusting the caller's timestamp as authority.
+        for reference in references:
+            available = _CANONICAL_CAUSAL_RECORDS(
+                self._registry, reference.record_type, as_of=disclosed_at_utc
+            )
+            if not any(
+                entry.record_id == reference.record_id
+                and entry.record_sha256 == reference.record_sha256
+                for entry in available
+            ):
+                raise ScientificDisclosureExportError(
+                    f"scientific {reference.record_type}:{reference.record_id} "
+                    "was not available at disclosure cutoff"
+                )
 
         if evaluation.payload.get("dataset_snapshot_id") != dataset_id:
             raise ScientificDisclosureExportError(
@@ -272,7 +294,7 @@ class ScientificDisclosureExporter:
             for entry in _CANONICAL_CAUSAL_RECORDS(
                 self._registry,
                 "PromotionEvidence",
-                as_of=_MAX_AS_OF,
+                as_of=disclosed_at_utc,
             )
             if entry.payload.get("experiment_id") == experiment_id
             and entry.payload.get("research_protocol_id") == protocol_id
@@ -303,7 +325,7 @@ class ScientificDisclosureExporter:
                 for entry in _CANONICAL_CAUSAL_RECORDS(
                     self._registry,
                     "PromotionDecision",
-                    as_of=_MAX_AS_OF,
+                    as_of=disclosed_at_utc,
                 )
                 if entry.payload.get("promotion_evidence_id") == evidence.record_id
                 and entry.payload.get("research_protocol_id") == protocol_id
@@ -347,7 +369,7 @@ class ScientificDisclosureExporter:
             snapshot,
             protocol_id,
             trial_family_id,
-        ) = self._resolve(experiment_id)
+        ) = self._resolve(experiment_id, disclosed_at_utc=disclosed_at_utc)
 
         disclosure = _CANONICAL_DISCLOSURE_RECORD(
             self._gate,

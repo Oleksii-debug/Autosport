@@ -423,6 +423,40 @@ def test_publish_failure_stays_consumed_and_exact_retry_is_idempotent(
     assert result.holdout_consumption_id == consumed_id
 
 
+def test_export_rejects_outcome_before_causal_availability_without_consumption(tmp_path) -> None:
+    _, _, _, _, ledger, exporter = _system(
+        tmp_path, with_evidence=False, with_decision=False,
+        outcome=ResearchOutcome.NEGATIVE,
+    )
+    target = tmp_path / "premature-outcome.json"
+
+    # Experiment and EvaluationBundle become available at T2, not T1.
+    with pytest.raises(ScientificDisclosureExportError, match="disclosure cutoff"):
+        exporter.export_reproducibility_bundle(
+            "experiment-1", target, disclosed_at_utc=T1,
+        )
+
+    assert not target.exists()
+    assert len(ledger.records()) == 0
+
+
+def test_export_cutoff_excludes_future_promotion_evidence_and_decision(tmp_path) -> None:
+    _, _, _, _, ledger, exporter = _system(tmp_path)
+    target = tmp_path / "as-of-outcome.json"
+
+    # At T2 the Experiment can be disclosed, but both PromotionEvidence and
+    # PromotionDecision are dated T3. Neither can be credited at T2.
+    result = exporter.export_reproducibility_bundle(
+        "experiment-1", target, disclosed_at_utc=T2,
+    )
+
+    assert target.exists()
+    assert result.promotion_evidence_id is None
+    assert result.promotion_decision_id is None
+    assert len(ledger.records()) == 1
+    assert json.loads(target.read_text(encoding="utf-8"))["experiment"]["outcome"] == "POSITIVE"
+
+
 def test_instance_shadow_cannot_forge_disclosure_receipt_or_export(
     tmp_path, monkeypatch
 ) -> None:

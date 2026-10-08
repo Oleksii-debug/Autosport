@@ -32,10 +32,11 @@ def test_backlog_and_stale_waits_do_not_launder_as_success():
     assert dict(v.wait_reasons)['BACKLOG'] == 1
     assert dict(v.wait_reasons)['STALE_SOURCE'] == 1
     assert v.stage_p95_ns == tuple((s,5) for s in STAGES)
+    assert v.p95_elapsed_ns == 25  # includes WAIT windows without filtering
 
 def test_all_wait_remains_nonterminal_with_no_percentiles():
     v = summarize_hot_path_windows((wait(),), expected_source_sha=SHA)
-    assert v.complete_count == 0 and v.p95_elapsed_ns is None and v.stage_p95_ns == ()
+    assert v.complete_count == 0 and v.p95_elapsed_ns == 3 and v.stage_p95_ns == ()
 
 @pytest.mark.parametrize('input', [(), [], (ok(),)*(MAX_CAPACITY_WINDOWS+1), (object(),), (ok(),wait(source=OTHER))])
 def test_invalid_size_type_or_revision_fails_closed(input):
@@ -53,8 +54,16 @@ def test_frozen_bypass_cannot_grant_target_authority():
     with pytest.raises(HotPathError):
         summarize_hot_path_windows((v,),expected_source_sha=SHA)
 
-@pytest.mark.parametrize('changes',[{'execution_authority':True}, {'target_machine_acceptance':True}, {'wait_count':10}, {'window_count':0}, {'p95_elapsed_ns':9999}, {'windows_sha256':'bad'}, {'stage_p95_ns':(('evil',5),)*5}])
+@pytest.mark.parametrize('changes',[{'execution_authority':True}, {'target_machine_acceptance':True}, {'wait_count':10}, {'window_count':0}, {'p95_elapsed_ns':9999}, {'p95_elapsed_ns':None}, {'windows_sha256':'bad'}, {'stage_p95_ns':(('evil',5),)*5}])
 def test_result_forgery_rejected(changes):
     v = summarize_hot_path_windows((ok(),),expected_source_sha=SHA)
     with pytest.raises(HotPathError):
         dataclasses.replace(v,**changes)
+
+
+def test_wait_congestion_counts_in_total_percentile():
+    reports = tuple(ok(1) for _ in range(10)) + tuple(HotPathReport(SHA,'WAIT','TOTAL_BUDGET',(),1_000_000,0) for _ in range(10))
+    v = summarize_hot_path_windows(reports,expected_source_sha=SHA)
+    assert v.p95_elapsed_ns == 1_000_000
+    assert v.stage_p95_ns == tuple((s,1) for s in STAGES)
+    assert v.wait_count == 10

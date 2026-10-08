@@ -331,7 +331,19 @@ class BoundedMirrorInvalidationBufferTests(unittest.TestCase):
                     sequence=1,
                     odds="3.00",
                 )
+                # The first append must be physically available before the
+                # decision cutoff; later records must not be made visible by
+                # their historical source/observation timestamps.
+                product_now = ["2026-09-16T19:00:01+00:00"]
+                clock_patch = patch(
+                    "autosport.storage._market_product_utc_now",
+                    side_effect=lambda: product_now[0],
+                )
+                clock_patch.start()
+                self.addCleanup(clock_patch.stop)
                 for event in (first, future, other_provider):
+                    if event is future:
+                        product_now[0] = "2026-09-16T19:00:02+00:00"
                     store.append(event)
                     runtime.accept_persisted(event)
                 runtime.drain()

@@ -185,11 +185,11 @@ def _assert_critical_ukrainian_template(key: str, value: str) -> None:
     assert not _ENGLISH_UI_DIRECTIVE.search(language_text), (
         f"{key} contains an English-only critical UI directive: {value!r}"
     )
-    assert not _has_untranslated_uppercase_prose(language_text), (
-        f"{key} contains untranslated uppercase operator prose: {value!r}"
-    )
     assert not _ENGLISH_CRITICAL_ACTION_PHRASE.search(language_text), (
         f"{key} contains untranslated English critical action: {value!r}"
+    )
+    assert not _has_untranslated_uppercase_prose(language_text), (
+        f"{key} contains untranslated uppercase operator prose: {value!r}"
     )
 
 
@@ -542,11 +542,11 @@ def _assert_ukrainian_critical_presentation(key: str, value: str) -> None:
     assert not _ENGLISH_UI_DIRECTIVE.search(value), (
         f"{key} contains an English-only critical UI directive: {value!r}"
     )
-    assert not _has_untranslated_uppercase_prose(value), (
-        f"{key} contains untranslated uppercase operator prose: {value!r}"
-    )
     assert not _ENGLISH_CRITICAL_ACTION_PHRASE.search(value), (
         f"{key} contains untranslated English critical action: {value!r}"
+    )
+    assert not _has_untranslated_uppercase_prose(value), (
+        f"{key} contains untranslated uppercase operator prose: {value!r}"
     )
     untranslated = _untranslated_latin_product_words(value)
     assert not untranslated, (

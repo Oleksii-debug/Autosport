@@ -497,6 +497,11 @@ def _validate_research_evidence_causal_use(
         ("available_at", item.available_at),
     ):
         _validate_canonical_string(value, label)
+    # Frozen dataclasses can still be mutated via object.__setattr__; never
+    # trust construction-time hash checks when consuming decision evidence.
+    _validate_sha256(item.content_sha256, "content_sha256")
+    if item.market_snapshot_hash is not None:
+        _validate_sha256(item.market_snapshot_hash, "market_snapshot_hash")
     observed = parse_iso_timestamp(item.observed_at)
     available = parse_iso_timestamp(item.available_at)
     if available < observed:

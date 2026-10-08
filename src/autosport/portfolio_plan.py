@@ -1532,7 +1532,7 @@ class PortfolioPlan:
             raise ValueError("stakes must be a tuple")
         for stake in self.stakes:
             if (
-                not isinstance(stake, Decimal)
+                type(stake) is not Decimal
                 or not stake.is_finite()
                 or stake < Decimal("0")
             ):

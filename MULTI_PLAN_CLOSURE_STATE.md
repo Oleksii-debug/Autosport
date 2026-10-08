@@ -35,8 +35,12 @@ This is the live status authority for the new architecture.
 |8|OPEN|Plan-wide financial/PAPER qualification.|
 
 ### Plan 3 — Intelligence / research / learning / multi-sport
-Sections 1–9: PARTIAL_EXISTING from legacy 11,23–29,31 and current research/agent/model/memory code.
-Section 10: OPEN plan qualification.
+| Section | State | Evidence / next gate |
+|---:|---|---|
+|1|QUALIFYING_NOT_DONE|Frozen promotion protocol repairs merged via #2264 at `179dddba10503d3a8a34de79157766045d0afd8a`; exact-head CI `37737367000` SUCCESS (Ubuntu/Windows) and Windows candidate `37737366994` SUCCESS; post-merge scientific registry blob `5fcfcf96b4240c0111ee33d8710017e3eaa0941d`. Multiplicity family-close #1888 merged at `f04ed3512f163d0e83d84750ea4d699c4cbf349d`, CI `37726876194` SUCCESS and Windows `37726875859` SUCCESS at its PR SHA, post-merge family-close blob `afa592a6bb03ea1f38544881520a850844edf8a2`. **NOT DONE:** holdout physical-content #819 exact-head CI `37726628662` FAILED; disclosure/export #925 exact-head CI `37726795061` FAILED (including monotonic workspace root conflicts). Repair/requalify those existing lineages, verify integrated holdout consumption and negative-result preservation, run combined exact-main scientific/restart/causal regression, then terminal readback before DONE. Source/PAPER/real authority remains separate; research/model cannot extend Risk/owner authority.|
+|2|PARTIAL_EXISTING / NEXT_AFTER_SECTION1|Universal Opportunity Engine: existing `opportunity.py` and opportunity contract/authority/revalidation tests must be audited and qualified only after Section 1 reaches terminal DONE; do not claim opportunity or financial execution authority from fixture outputs.|
+|3–9|PARTIAL_EXISTING|Legacy Sections 23–29,31 and current research/agent/model/memory code; sequential closure within Plan 3 only.|
+|10|OPEN|Plan-wide qualification.|
 
 ### Plan 4 — Bookmakers / execution engineering
 Sections 1–7: PARTIAL_EXISTING / ACTIONABLE_OFFLINE from legacy 13,33–37 and current Betfair/BETDAQ/provider/execution/browser code.

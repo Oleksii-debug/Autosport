@@ -78,6 +78,7 @@ class HotPathReport:
             if (
                 type(sample) is not tuple
                 or len(sample) != 2
+                or type(sample[0]) is not str
                 or sample[0] != STAGES[index]
                 or type(sample[1]) is not int
                 or sample[1] < 0

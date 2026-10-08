@@ -482,6 +482,38 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             selection_ids="selection-b",
         )
 
+    def test_clock_failure_after_decision_does_not_change_economic_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace, [(self._event(selection="selection-a"),)]
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            self._register_two(loop)
+            with patch(
+                "autosport.live_decision_loop.perf_counter_ns",
+                side_effect=[100, 120, 140, 160, 180, 170],
+            ):
+                decision = loop.run_cycle()
+            self.assertEqual(decision.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(loop.last_cycle_stage_latencies_ns, ())
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            loop.close()
+
     def test_real_pipeline_stage_timings_are_observer_only(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

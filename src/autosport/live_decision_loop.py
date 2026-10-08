@@ -1066,13 +1066,29 @@ class PersistentLiveDecisionLoop:
     def run_cycle(self) -> LiveCycleResult:
         self._last_cycle_stage_latencies_ns = ()
         stage_measurements: list[tuple[str, int]] = []
-        prior_tick_ns = perf_counter_ns()
+        timing_valid = True
+        try:
+            prior_tick_ns = perf_counter_ns()
+        except Exception:
+            prior_tick_ns = 0
+            timing_valid = False
+        if type(prior_tick_ns) is not int or prior_tick_ns < 0:
+            timing_valid = False
 
         def record_stage(name: str) -> None:
-            nonlocal prior_tick_ns
-            tick_ns = perf_counter_ns()
-            if tick_ns < prior_tick_ns:
-                raise LiveDecisionProgressError("monotonic performance clock regressed")
+            nonlocal prior_tick_ns, timing_valid
+            if not timing_valid:
+                return
+            try:
+                tick_ns = perf_counter_ns()
+            except Exception:
+                timing_valid = False
+                stage_measurements.clear()
+                return
+            if type(tick_ns) is not int or tick_ns < prior_tick_ns:
+                timing_valid = False
+                stage_measurements.clear()
+                return
             stage_measurements.append((name, tick_ns - prior_tick_ns))
             prior_tick_ns = tick_ns
 
@@ -1208,7 +1224,9 @@ class PersistentLiveDecisionLoop:
             gate=_GATE_NORMAL,
         )
         record_stage("decision")
-        self._last_cycle_stage_latencies_ns = tuple(stage_measurements)
+        self._last_cycle_stage_latencies_ns = (
+            tuple(stage_measurements) if timing_valid else ()
+        )
         self._pending_affected.clear()
         self._needs_cache_rebuild = False
         return result

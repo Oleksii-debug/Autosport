@@ -152,3 +152,67 @@ def test_no_context_precision_loss_or_over_budget_projection() -> None:
     over_budget = _plan(book, policy, stake=Decimal("101"))
     with pytest.raises(ValueError, match="insufficient virtual bankroll"):
         PortfolioDelta.derive(book, over_budget, policy)
+
+
+def test_complete_mixed_stake_vector_is_exact_and_preserves_zero_members() -> None:
+    book, policy = _context()
+    source_sha = PaperRiskPolicy.risk_of_ruin_portfolio_sha256(book)
+    assert source_sha
+    goal_sha = provenance_for(policy.economic_goal).contract_sha256
+    ids = ("intent-one", "intent-zero", "intent-three")
+    hashes = ("a" * 64, "b" * 64, "c" * 64)
+    candidates = ("d" * 64, "e" * 64, "f" * 64)
+    stakes = (Decimal("2.2501"), Decimal("0"), Decimal("3.2499"))
+    plan = PortfolioPlan(
+        decision_ts="2026-10-08T12:00:00+00:00",
+        action=PortfolioAction.STAKE_VECTOR,
+        stakes=stakes,
+        intent_ids=ids,
+        intent_sha256s=hashes,
+        opportunity_classes=("parlay", "predictive_edge", "hybrid"),
+        portfolio_sha256=source_sha,
+        dependency_graph=PortfolioDependencyGraph(
+            portfolio_sha256=source_sha,
+            intent_sha256s=hashes,
+            candidate_sha256s=candidates,
+        ),
+        terminal_economics=None,
+        economic_goal_contract_sha256=goal_sha,
+        risk_policy_sha256=policy.provenance_sha256,
+        portfolio_truth=EvidenceTruth.EXACT,
+        reason="mixed candidate vector remains a proposal",
+    )
+    projected = PortfolioDelta.derive(book, plan, policy)
+    assert projected.intent_ids == ids
+    assert projected.intent_sha256s == hashes
+    assert projected.stake_vector == stakes
+    assert projected.proposed_stake_total == Decimal("5.5000")
+    assert projected.hypothetical_cash_after == Decimal("94.5000")
+    assert projected.hypothetical_committed_stake_after == Decimal("5.5000")
+    assert book.committed_stake == Decimal("0")
+    assert PortfolioDelta.readback(
+        projected.to_dict(), book=book, plan=plan, risk_policy=policy
+    ) == projected
+
+
+def test_concurrent_book_change_or_late_settlement_invalidates_original_cut() -> None:
+    from autosport.domain import TicketLeg
+
+    book, policy = _context()
+    original_plan = _plan(book, policy, stake=Decimal("3"))
+    original = PortfolioDelta.derive(book, original_plan, policy).to_dict()
+    leg = TicketLeg("event-1", "market-1", "selection-1", locked_odds=Decimal("2"))
+    ticket = book.open_ticket([leg], Decimal("1"), placed_at="2026-10-08T12:01:00+00:00")
+    with pytest.raises(ValueError, match="stale or missing"):
+        PortfolioDelta.readback(
+            original, book=book, plan=original_plan, risk_policy=policy
+        )
+    open_plan = _plan(book, policy)
+    open_delta = PortfolioDelta.derive(book, open_plan, policy)
+    assert open_delta.committed_stake_before == Decimal("1")
+    assert open_delta.available_cash_before == Decimal("99.00")
+    book.settle(ticket.ticket_id, {leg.quote_key})
+    with pytest.raises(ValueError, match="stale or missing"):
+        PortfolioDelta.readback(
+            open_delta.to_dict(), book=book, plan=open_plan, risk_policy=policy
+        )

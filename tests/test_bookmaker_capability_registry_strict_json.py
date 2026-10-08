@@ -140,11 +140,7 @@ def test_registry_rejects_unknown_nested_versioned_fields(tmp_path, injection) -
     }
     targets[injection]["unknown_future_authority"] = True
     path.write_text(json.dumps(document), encoding="utf-8")
-    # The public decoder intentionally wraps nested fact-schema errors; both
-    # surfaces must reject the record rather than silently accept unknown data.
-    expected_error = (
-        "invalid capability profile payload" if injection == "fact"
-        else "schema fields"
-    )
-    with pytest.raises(BookmakerCapabilityRegistryError, match=expected_error):
+    # Every versioned object must fail closed on unknown fields, including
+    # nested facts. _require_exact_fields raises before payload construction.
+    with pytest.raises(BookmakerCapabilityRegistryError, match="schema fields"):
         registry.profile_history("book-a", "acct-a", "adapter-a")

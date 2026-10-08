@@ -141,6 +141,11 @@ def run_hot_path(
         before = read_clock()
         if check_backlog():
             return stop("BACKLOG", before)
+        # A dynamic backlog probe may itself consume the freshness or total
+        # budget. Re-sample immediately before the proposal-only decision;
+        # otherwise it could start after the deadline despite an earlier tick.
+        if name == "decision" and backlog_reader is not None:
+            before = read_clock()
         if before < started or before < observed_at_ns:
             raise HotPathError("monotonic clock moved backwards")
         if before - observed_at_ns > policy.max_source_age_ns:

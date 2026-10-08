@@ -544,7 +544,7 @@ class PortfolioDependencyEvidence:
                 raise ValueError("dependency evidence pair must reference exact candidate set")
             if pair in seen:
                 raise ValueError("dependency evidence pair must be unique")
-            if not isinstance(bound, Decimal) or not bound.is_finite() or bound < 0 or bound > 1:
+            if type(bound) is not Decimal or not bound.is_finite() or bound < 0 or bound > 1:
                 raise ValueError("dependency evidence pair bound must be an exact Decimal between 0 and 1")
             item = (pair[0], pair[1], bound)
             if previous is not None and item < previous:
@@ -558,7 +558,7 @@ class PortfolioDependencyEvidence:
             ("fee_fraction", self.fee_fraction),
             ("partial_fill_stress_fraction", self.partial_fill_stress_fraction),
         ):
-            if not isinstance(value, Decimal) or not value.is_finite() or value < 0 or value > 1:
+            if type(value) is not Decimal or not value.is_finite() or value < 0 or value > 1:
                 raise ValueError(f"dependency evidence {name} must be an exact Decimal between 0 and 1")
 
     @property

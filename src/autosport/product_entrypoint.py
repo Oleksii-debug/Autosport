@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
 from .collector_service import _load_source_factory
+from .forensic_session_journal import ForensicSessionJournal, verify_journal
 from .product_runtime import AutonomousProductRuntime, build_autonomous_product_runtime
 from .secret_redaction import _safe_exception_type_label
 
@@ -435,6 +436,10 @@ def run_product(
         raise ValueError("unbounded product run requires a positive poll interval")
 
     source = _validated_source(source_factory, workspace=workspace)
+    journal_path = Path(workspace).resolve(strict=False) / "forensic-session.jsonl"
+    # Reject torn or altered forensic history before constructing durable product state.
+    # The writer re-verifies after acquiring its OS lease to close this TOCTOU gap.
+    verify_journal(journal_path)
     runtime = build_autonomous_product_runtime(
         workspace=workspace,
         source=source,
@@ -446,6 +451,7 @@ def run_product(
     started = False
     terminalized = False
     terminal_stop_attempted = False
+    journal: ForensicSessionJournal | None = None
     try:
         if install_signal_handlers:
             previous_handlers = {
@@ -456,8 +462,11 @@ def run_product(
                 signal.signal(signum, stop_request.handle)
                 installed_handlers.append(signum)
 
+        journal = ForensicSessionJournal(journal_path)
         start_status = runtime.start()
         started = True
+        # Record only fixed, non-secret, non-authoritative facts from the driver.
+        journal.append_material("product.start", {"paper_only": True})
         _print_record(
             "product_status",
             runtime=runtime,
@@ -482,6 +491,7 @@ def run_product(
 
             result = runtime.tick()
             cycles += 1
+            journal.append_material("product.tick", {"cycle_index": cycles})
             _print_record(
                 "product_tick",
                 runtime=runtime,
@@ -512,6 +522,7 @@ def run_product(
                     output_format=output_format,
                 )
                 break
+            journal.append_material("product.wait", {"poll_seconds": poll_interval})
             if install_signal_handlers and sleep is time.sleep:
                 stop_request.wait(poll_interval)
             else:
@@ -559,6 +570,30 @@ def run_product(
                     )
                 except BaseException:
                     pass
+
+        if journal is not None:
+            try:
+                journal.close(
+                    {
+                        "exit": (
+                            "clean"
+                            if primary_failure is None and cleanup_failure is None
+                            else "error"
+                        ),
+                        "runtime_started": started,
+                    }
+                )
+            except BaseException as exc:
+                if primary_failure is None and cleanup_failure is None:
+                    cleanup_failure = exc
+                elif primary_failure is not None:
+                    try:
+                        primary_failure.add_note(
+                            "forensic journal close also failed during cleanup: "
+                            f"{_canonical_exception_type_label(exc)}"
+                        )
+                    except BaseException:
+                        pass
 
         for signum in reversed(installed_handlers):
             try:

@@ -187,6 +187,12 @@ from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  
 # with caller-rebound evidence constructors/digests. Seal its publication surface.
 from . import _research_multiplicity_family_close_dispatch_guard as _research_multiplicity_family_close_dispatch_guard  # noqa: F401,E402
 
+# Reproducibility bundles contain Experiment outcome. Their outward file-export path
+# therefore consumes the canonically resolved confirmation holdout before publication;
+# legacy direct export is fail-closed so callers cannot substitute holdout identity.
+from . import scientific_disclosure_export as _scientific_disclosure_export  # noqa: F401,E402
+from . import _scientific_disclosure_export_reload_guard as _scientific_disclosure_export_reload_guard  # noqa: F401,E402
+
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical
 # existing issuer hash and send only that detached product-owned value.

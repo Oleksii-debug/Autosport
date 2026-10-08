@@ -245,7 +245,7 @@ class OpportunityIntent:
         if not isinstance(self.risk_context, ProposedTicketRiskContext):
             raise TypeError("risk_context must be ProposedTicketRiskContext")
         if (
-            not isinstance(self.signal_strength, Decimal)
+            type(self.signal_strength) is not Decimal
             or not self.signal_strength.is_finite()
         ):
             raise ValueError("signal_strength must be a finite exact Decimal")

@@ -186,7 +186,7 @@ def build_closed_loop_factory(tmp_path, registry, question, environment_id):
         "lawful-provider:fixture",
         "license-evidence:v1",
         T2,
-        T0,
+        T2,
         outcome_reveal_after=T2,
     )
     features = FeatureSet(

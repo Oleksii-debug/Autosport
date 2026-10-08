@@ -48,7 +48,7 @@ Sections 1–6: PARTIAL_EXISTING from legacy 12,38,43 and current Windows/WebVie
 Section 7: OPEN plan qualification.
 
 ### Plan 7 — Provider-free PAPER/SHADOW convergence
-Sections 1–7: WAITING_UPSTREAM until terminal outputs from Plans 1–6. Plan 4 is developed in parallel and is required here because public/read-only/provider/browser qualification is part of the complete end-to-end PAPER/SHADOW convergence.
+Sections 1–7: WAITING_UPSTREAM until terminal Plans 1,2,3,5,6 plus terminal Plan 4 Sections 1,2,7 (capability registry, read-only/provider path, public web-lab). Other Plan-4 execution Sections are not M1 blockers.
 
 ### Plan 8 — External / real execution / NVDA / final
 | Section | State |

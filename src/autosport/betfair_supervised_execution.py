@@ -659,11 +659,19 @@ class BetfairSupervisedPlaceOrdersClient:
                 body=body,
                 timeout_seconds=self._timeout_seconds,
             )
-        except (BetfairReadOnlyError, TimeoutError, OSError) as exc:
+        except Exception:
+            # Provider transports may raise arbitrary exceptions containing
+            # authentication headers. Do not retain their exception context or
+            # assume that a failed response means no external order was placed.
+            transport_failed = True
+            payload = None
+        else:
+            transport_failed = False
+        if transport_failed:
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport outcome is ambiguous; "
                 "authoritative readback required"
-            ) from exc
+            )
         if not isinstance(payload, bytes):
             raise BetfairPlaceOrdersAmbiguous(
                 "placeOrders transport returned non-bytes response"

@@ -411,18 +411,20 @@ class MarketMirrorTests(unittest.TestCase):
         impossible = self.event(
             selection="invalid-local-chronology",
             observed_ts="2026-09-16T18:59:59+00:00",
-            ingest_ts="2026-09-16T18:59:58+00:00",
+            ingest_ts="2026-09-16T18:59:59+00:00",
             source_ts="2026-09-16T18:59:57+00:00",
         )
-        mirror.apply(impossible)
+        # Revalidate a corrupted frozen value at admission, not just at read.
+        object.__setattr__(impossible, "ingest_ts", "2026-09-16T18:59:58+00:00")
+        with self.assertRaisesRegex(ValueError, "ingest_ts cannot be before observed_ts"):
+            mirror.apply(impossible)
 
         active = mirror.active_snapshot(
             as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
             max_age=timedelta(minutes=5),
         )
-
         self.assertEqual(active, ())
-        self.assertEqual(mirror.snapshot(), (impossible,))
+        self.assertEqual(mirror.snapshot(), ())
 
     def test_active_snapshot_prefers_source_time_over_observation_time(self) -> None:
         mirror = MarketMirror()

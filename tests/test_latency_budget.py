@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import json
+from itertools import repeat
 
 import pytest
 
 from autosport.latency_budget import (
+    MAX_LATENCY_SAMPLES,
     LatencyBudget,
     LatencyBudgetError,
     LatencyMeasurement,
@@ -272,3 +274,34 @@ def test_canonical_metric_scalars_and_budget_reject_subclasses() -> None:
             budget=budget,
             clock_ns=lambda: _IntSubclass(1),
         )
+
+
+def test_maximum_latency_sample_window_remains_measurable() -> None:
+    budget = LatencyBudget("bounded", 1)
+    report = summarize_latency(repeat(0, MAX_LATENCY_SAMPLES), budget=budget)
+    assert report.sample_count == MAX_LATENCY_SAMPLES
+    assert report.total_ns == report.max_ns == report.min_ns == 0
+    assert report.breach_count == 0
+    assert report.within_budget
+
+
+def test_infinite_latency_sample_stream_fails_closed_at_fixed_bound() -> None:
+    budget = LatencyBudget("bounded", 1)
+    consumed = 0
+
+    def infinite_samples():
+        nonlocal consumed
+        while True:
+            consumed += 1
+            yield 0
+
+    with pytest.raises(LatencyBudgetError, match="exceeds maximum"):
+        summarize_latency(infinite_samples(), budget=budget)
+    assert consumed == MAX_LATENCY_SAMPLES + 1
+
+
+def test_latency_sample_limit_precedes_untrusted_overflow_payload_validation() -> None:
+    budget = LatencyBudget("bounded", 1)
+    malformed_overflow = [0] * MAX_LATENCY_SAMPLES + [object()]
+    with pytest.raises(LatencyBudgetError, match="exceeds maximum"):
+        summarize_latency(malformed_overflow, budget=budget)

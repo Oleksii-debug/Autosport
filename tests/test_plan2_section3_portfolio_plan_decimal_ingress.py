@@ -94,3 +94,17 @@ def test_normal_decimal_roundtrip_and_wait_zero_are_stable():
         assert projected.proposed_stake_total == Decimal("0")
         assert projected.hypothetical_cash_after == Decimal("100.00")
     assert book.balance == Decimal("100.00") and not book.tickets
+
+
+@pytest.mark.parametrize("invalid_version", (4.0, Decimal("4")))
+def test_portfolio_plan_rejects_noninteger_schema_version(invalid_version):
+    """Schema identity is exact; float/Decimal 4 must not decode as integer 4."""
+    book, plan, _ = _valid_proposal()
+    serialized = plan.to_dict()
+    assert serialized["schema_version"] == 4
+    serialized["schema_version"] = invalid_version
+    # The canonical plan digest must not make a noncanonical wire type valid.
+    with pytest.raises(ValueError, match="schema_version"):
+        PortfolioPlan.from_dict(serialized)
+    assert PortfolioPlan.from_dict(plan.to_dict()).plan_sha256 == plan.plan_sha256
+    assert book.balance == Decimal("100.00") and not book.tickets

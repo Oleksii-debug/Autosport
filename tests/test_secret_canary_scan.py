@@ -57,7 +57,7 @@ def test_detects_supported_secret_encodings(
 
     report = scan_secret_canary(tmp_path, CANARY, chunk_size=11)
 
-    assert report.status == "LEAK"
+    assert report.status == "LEAK", tuple(error.error_type for error in report.errors)
     assert report.exit_code == 2
     assert len(report.findings) == 1
     assert report.findings[0].encodings

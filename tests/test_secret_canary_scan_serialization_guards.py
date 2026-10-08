@@ -177,7 +177,7 @@ def test_json_string_serialization_cannot_hide_canary(
         chunk_size=3,
     )
 
-    assert report.status == "LEAK"
+    assert report.status == "LEAK", tuple(error.error_type for error in report.errors)
     assert report.exit_code == 2
     assert len(report.findings) == 1
     expected = "json-string-ascii" if ensure_ascii else "json-string-utf8"
@@ -261,7 +261,7 @@ def test_malformed_surrogate_sequence_does_not_fabricate_json_semantic_match(
         chunk_size=5,
     )
 
-    assert report.status == "CLEAN"
+    assert report.status == "CLEAN", tuple(error.error_type for error in report.errors)
     assert report.exit_code == 0
     assert report.findings == ()
 

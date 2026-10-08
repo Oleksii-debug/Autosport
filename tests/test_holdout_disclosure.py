@@ -256,7 +256,7 @@ def test_snapshot_alias_cannot_make_disclosed_physical_holdout_fresh(tmp_path) -
         )
 
 
-def test_disjoint_holdout_family_retains_independent_confirmation_capacity(
+def test_family_relabel_cannot_reset_consumed_physical_holdout(
     tmp_path,
 ) -> None:
     snapshot = _snapshot()
@@ -273,11 +273,14 @@ def test_disjoint_holdout_family_retains_independent_confirmation_capacity(
         disclosed_at_utc=_DISCLOSED_AT,
     )
 
-    ledger.assert_unused(
-        dataset_snapshot=snapshot,
-        research_protocol_id="protocol-v1",
-        confirmation_trial_family_id="family-b",
-    )
+    # #819 physical freshness uses the dataset manifest; family labels are
+    # provenance, not proof of a different unseen confirmation population.
+    with pytest.raises(HoldoutAlreadyConsumedError):
+        ledger.assert_unused(
+            dataset_snapshot=snapshot,
+            research_protocol_id="protocol-v1",
+            confirmation_trial_family_id="family-b",
+        )
 
 
 def test_disjoint_manifest_retains_independent_confirmation_capacity(tmp_path) -> None:

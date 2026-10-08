@@ -41,10 +41,12 @@ def _detached_report_snapshot(report: Mapping[str, object]) -> dict[str, object]
         raise PerformanceQualificationError("endurance report must be an object")
     try:
         materialized = dict(report)
-    except (TypeError, ValueError, RuntimeError) as exc:
+    except Exception:
+        # An untrusted Mapping may raise an exception containing private report data.
+        # Preserve the fail-closed type, never its unsafe context or exception text.
         raise PerformanceQualificationError(
             "endurance report could not be snapshotted"
-        ) from exc
+        ) from None
 
     active_containers: set[int] = set()
 

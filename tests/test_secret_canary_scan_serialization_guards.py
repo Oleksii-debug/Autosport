@@ -266,6 +266,32 @@ def test_malformed_surrogate_sequence_does_not_fabricate_json_semantic_match(
     assert report.findings == ()
 
 
+def test_cross_api_identity_uses_windows_birthtime_without_weakening_posix_ctime() -> None:
+    # Python Windows path-stat and fstat need not agree on st_ctime_ns.
+    # The same file still must match by stable creation identity on Windows.
+    class Metadata:
+        st_dev = 9
+        st_ino = 13
+        st_mode = 0o100600
+        st_size = 17
+        st_mtime = 100.0
+        st_mtime_ns = 100_000_000_000
+        st_ctime = 50.0
+        st_birthtime_ns = 50_000_000_000
+
+        def __init__(self, ctime_ns: int) -> None:
+            self.st_ctime_ns = ctime_ns
+
+    path_identity = secret_canary_scan._identity_from_stat(Metadata(50_000_000_000))
+    descriptor_identity = secret_canary_scan._identity_from_stat(Metadata(51_000_000_000))
+    if os.name == "nt":
+        assert path_identity == descriptor_identity
+        assert path_identity.ctime_ns == 50_000_000_000
+    else:
+        assert path_identity != descriptor_identity
+        assert descriptor_identity.ctime_ns == 51_000_000_000
+
+
 def test_windows_reparse_attribute_is_treated_as_link_like() -> None:
     class FakeStat:
         st_file_attributes = secret_canary_scan._REPARSE_POINT_FLAG

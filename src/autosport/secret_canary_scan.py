@@ -85,6 +85,17 @@ def _path_digest(root: Path, path: Path) -> str:
 
 
 def _identity_from_stat(metadata: os.stat_result) -> _PathIdentity:
+    # Windows path stat and descriptor fstat can expose different meanings
+    # for st_ctime_ns (creation versus metadata change, depending on Python).
+    # Use the stable creation-time field on Windows for cross-API identity.
+    # Preserve st_ctime_ns on POSIX, where it detects metadata changes.
+    change_ns = getattr(
+        metadata,
+        "st_ctime_ns",
+        int(float(metadata.st_ctime) * 1_000_000_000),
+    )
+    if os.name == "nt":
+        change_ns = getattr(metadata, "st_birthtime_ns", change_ns)
     return _PathIdentity(
         device=int(getattr(metadata, "st_dev", 0)),
         inode=int(getattr(metadata, "st_ino", 0)),
@@ -97,13 +108,7 @@ def _identity_from_stat(metadata: os.stat_result) -> _PathIdentity:
                 int(float(metadata.st_mtime) * 1_000_000_000),
             )
         ),
-        ctime_ns=int(
-            getattr(
-                metadata,
-                "st_ctime_ns",
-                int(float(metadata.st_ctime) * 1_000_000_000),
-            )
-        ),
+        ctime_ns=int(change_ns),
     )
 
 

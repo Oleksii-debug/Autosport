@@ -138,8 +138,10 @@ def _open_readonly_no_follow(path: Path) -> int:
 _PERCENT_HEX = re.compile(r"%[0-9A-F]{2}")
 _PERCENT_HEX_BYTES = re.compile(rb"%[0-9A-Fa-f]{2}")
 _BASE64_RUN_BYTES = re.compile(rb"[A-Za-z0-9+/_-]{4,}={0,2}")
-_BASE64_FOLDED_RUN_BYTES = re.compile(
-    rb"(?:[A-Za-z0-9+/_-]{4,}\r?\n)+[A-Za-z0-9+/_-]{2,}={0,2}"
+# Remove CRLF/LF only between Base64-alphabet bytes before the normal linear
+# run matcher; the previous repeated greedy folded regex had quadratic misses.
+_BASE64_FOLD_SPLIT_BYTES = re.compile(
+    rb"(?<=[A-Za-z0-9+/_-])\r?\n(?=[A-Za-z0-9+/_-])"
 )
 _HEX_DIGITS = frozenset(b"0123456789abcdefABCDEF")
 
@@ -183,9 +185,14 @@ def _base64_decoded_contains(value: bytes, needle: bytes) -> bool:
 
     if not needle:
         return False
-    for pattern in (_BASE64_RUN_BYTES, _BASE64_FOLDED_RUN_BYTES):
-        for match in pattern.finditer(value):
-            token = match.group(0).replace(b"\r", b"").replace(b"\n", b"")
+    windows = (value,)
+    if b"\n" in value:
+        unfolded = _BASE64_FOLD_SPLIT_BYTES.sub(b"", value)
+        if unfolded != value:
+            windows = (value, unfolded)
+    for window in windows:
+        for match in _BASE64_RUN_BYTES.finditer(window):
+            token = match.group(0)
             for offset in range(min(4, len(token))):
                 candidate = token[offset:]
                 if len(candidate) < 4:

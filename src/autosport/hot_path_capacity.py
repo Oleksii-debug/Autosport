@@ -57,7 +57,7 @@ class HotPathCapacityEvidence:
         # would understate congestion while claiming a source-bound metric.
         if type(self.p95_elapsed_ns) is not int or not 0 <= self.p95_elapsed_ns <= self.max_elapsed_ns:
             raise HotPathError("invalid capacity percentile")
-        if type(self.stage_p95_ns) is not tuple or len(self.stage_p95_ns) != (len(STAGES) if self.complete_count else 0):
+        if type(self.stage_p95_ns) is not tuple or (len(self.stage_p95_ns) != len(STAGES) if self.complete_count else len(self.stage_p95_ns) > len(STAGES)):
             raise HotPathError("incomplete capacity stage percentiles")
         for i, pair in enumerate(self.stage_p95_ns):
             if type(pair) is not tuple or len(pair) != 2 or type(pair[0]) is not str or pair[0] != STAGES[i] or type(pair[1]) is not int or pair[1] < 0:
@@ -88,6 +88,9 @@ def summarize_hot_path_windows(
         raise HotPathError("invalid expected capacity source revision")
 
     completed: list[HotPathReport] = []
+    # Include observed partial stages from WAIT windows in per-stage percentiles.
+    # Counting only complete cycles hides latency spikes that caused degradation.
+    stage_samples: dict[str, list[int]] = {stage: [] for stage in STAGES}
     max_backlog = 0
     max_elapsed = 0
     counts = {reason: 0 for reason in _WAIT_REASONS}
@@ -109,6 +112,8 @@ def summarize_hot_path_windows(
             completed.append(observation)
         else:
             counts[observation.reason] += 1
+        for stage, duration in observation.stage_latencies_ns:
+            stage_samples[stage].append(duration)
         max_backlog = max(max_backlog, observation.backlog)
         max_elapsed = max(max_elapsed, observation.total_elapsed_ns)
         canonical_windows.append((
@@ -127,9 +132,9 @@ def summarize_hot_path_windows(
         max_elapsed_ns=max_elapsed,
         p95_elapsed_ns=_p95([r.total_elapsed_ns for r in reports]),
         stage_p95_ns=tuple(
-            (stage, _p95([r.stage_latencies_ns[index][1] for r in completed]))
-            for index, stage in enumerate(STAGES)
-        ) if completed else (),
+            (stage, _p95(stage_samples[stage]))
+            for stage in STAGES if stage_samples[stage]
+        ),
         wait_reasons=tuple(counts.items()),
         windows_sha256=hashlib.sha256(encoded).hexdigest(),
     )

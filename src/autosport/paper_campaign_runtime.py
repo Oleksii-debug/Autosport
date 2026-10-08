@@ -251,10 +251,15 @@ class PaperCampaignRuntime(_base.PaperCampaignRuntime):
         # handoff already exists; the pre-settlement reflection commitment above
         # still verifies that the retried plan is exactly the one that was bound.
         deadline = self.reflection_plan.research_deadline_at
-        research_run_id = self.agent_loop.snapshot().research_run_id
+        loop_snapshot = self.agent_loop.snapshot()
+        research_run_id = loop_snapshot.research_run_id
+        recovering_unacked_handoff = (
+            loop_snapshot.phase is _base.AgentLoopPhase.RESEARCH_HANDOFF
+        )
         if (
             deadline is not None
             and research_run_id is None
+            and not recovering_unacked_handoff
             and _base._instant(
                 deadline,
                 "research_deadline_at",

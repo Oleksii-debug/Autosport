@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -420,3 +421,47 @@ def test_publish_failure_stays_consumed_and_exact_retry_is_idempotent(
     assert target.exists()
     assert len(ledger.records()) == 1
     assert result.holdout_consumption_id == consumed_id
+
+
+def test_instance_shadow_cannot_forge_disclosure_receipt_or_export(
+    tmp_path, monkeypatch
+) -> None:
+    _, _, _, _, ledger, exporter = _system(
+        tmp_path, with_evidence=False, with_decision=False
+    )
+    target = tmp_path / "forged-instance-outcome.json"
+    fake = lambda **_kwargs: SimpleNamespace(
+        consumption=SimpleNamespace(consumption_id="forged-consumption")
+    )
+    monkeypatch.setattr(exporter._gate, "record", fake)
+
+    with pytest.raises(
+        ScientificDisclosureExportError, match="instance-shadowed"
+    ):
+        exporter.export_reproducibility_bundle(
+            "experiment-1", target, disclosed_at_utc=T4
+        )
+    assert not target.exists()
+    assert len(ledger.records()) == 0
+
+
+def test_class_rebinding_cannot_forge_disclosure_receipt_or_export(
+    tmp_path, monkeypatch
+) -> None:
+    _, _, _, _, ledger, exporter = _system(
+        tmp_path, with_evidence=False, with_decision=False
+    )
+    target = tmp_path / "forged-class-outcome.json"
+    fake = lambda _self, **_kwargs: SimpleNamespace(
+        consumption=SimpleNamespace(consumption_id="forged-consumption")
+    )
+    monkeypatch.setattr(HoldoutDisclosureGate, "record", fake)
+
+    with pytest.raises(
+        ScientificDisclosureExportError, match="dispatch changed"
+    ):
+        exporter.export_reproducibility_bundle(
+            "experiment-1", target, disclosed_at_utc=T4
+        )
+    assert not target.exists()
+    assert len(ledger.records()) == 0

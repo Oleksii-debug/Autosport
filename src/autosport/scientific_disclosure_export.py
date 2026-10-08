@@ -48,6 +48,7 @@ _CANONICAL_GET = ScientificRegistry.get
 _CANONICAL_CAUSAL_RECORDS = ScientificRegistry.causal_records
 _CANONICAL_REPRODUCIBILITY_BUNDLE = ScientificRegistry.reproducibility_bundle
 _ORIGINAL_DIRECT_EXPORT = ScientificRegistry.export_reproducibility_bundle
+_CANONICAL_DISCLOSURE_RECORD = HoldoutDisclosureGate.record
 
 
 class ScientificDisclosureExportError(RuntimeError):
@@ -104,6 +105,19 @@ def _require_registry_surface(registry: ScientificRegistry) -> None:
     if ScientificRegistry.export_reproducibility_bundle is not _blocked_direct_export:
         raise ScientificDisclosureExportError(
             "direct scientific export fence is not installed"
+        )
+
+
+def _require_disclosure_record_surface(gate: HoldoutDisclosureGate) -> None:
+    # Once the exporter is constructed, neither instance-local shadowing nor
+    # class method replacement may turn a durable consume into a fake receipt.
+    if "record" in vars(gate):
+        raise ScientificDisclosureExportError(
+            "canonical disclosure gate record must not be instance-shadowed"
+        )
+    if HoldoutDisclosureGate.record is not _CANONICAL_DISCLOSURE_RECORD:
+        raise ScientificDisclosureExportError(
+            "canonical disclosure gate record dispatch changed"
         )
 
 
@@ -171,6 +185,7 @@ class ScientificDisclosureExporter:
                 "disclosure gate lacks canonical dataset-lineage ScientificRegistry authority"
             )
         _require_registry_surface(registry)
+        _require_disclosure_record_surface(gate)
         self._gate = gate
         self._ledger = ledger
         self._lineage = lineage
@@ -190,6 +205,7 @@ class ScientificDisclosureExporter:
                 "scientific registry authority changed after exporter construction"
             )
         _require_registry_surface(self._registry)
+        _require_disclosure_record_surface(self._gate)
 
     def _resolve(self, experiment_id: str):
         self._require_stable_authority()
@@ -333,7 +349,8 @@ class ScientificDisclosureExporter:
             trial_family_id,
         ) = self._resolve(experiment_id)
 
-        disclosure = self._gate.record(
+        disclosure = _CANONICAL_DISCLOSURE_RECORD(
+            self._gate,
             dataset_snapshot=snapshot,
             research_protocol_id=protocol_id,
             confirmation_trial_family_id=trial_family_id,

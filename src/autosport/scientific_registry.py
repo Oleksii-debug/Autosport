@@ -1168,16 +1168,19 @@ class ScientificRegistry:
                     raise ValueError(
                         "DatasetSnapshot payload/envelope availability mismatch"
                     )
-            # A frozen research cutoff is the upper bound on eligible
-            # observations, not the snapshot publication timestamp. A
-            # previously published snapshot may legitimately be evaluated at
-            # a later cutoff. Preserve the cutoff's strict timestamp syntax;
-            # actual evidence availability is checked at the decision/use
-            # boundary and protocol promotion binds the exact frozen cutoff.
-            _instant(
+            # The causal cutoff is part of this immutable snapshot's data
+            # identity. A snapshot may not claim observations from a time
+            # later than its own product-available timestamp, even when its
+            # payload and envelope hashes have been recomputed consistently.
+            # Apply this on read as well as append for legacy payloads.
+            causal_cutoff = _instant(
                 payload.get("causal_cutoff"),
                 "DatasetSnapshot.causal_cutoff",
             )
+            if causal_cutoff > payload_available:
+                raise ValueError(
+                    "DatasetSnapshot available_at must not precede causal_cutoff"
+                )
             reveal_after = payload.get("outcome_reveal_after")
             if reveal_after is not None:
                 _instant(reveal_after, "DatasetSnapshot.outcome_reveal_after")

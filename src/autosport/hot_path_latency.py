@@ -87,13 +87,21 @@ def run_hot_path(
         raise HotPathError("backlog_reader must be callable")
     callbacks = tuple(stages[name] for name in STAGES)
 
+    previous_tick: int | None = None
+
     def read_clock() -> int:
+        nonlocal previous_tick
         try:
             tick = clock_ns()
         except Exception:
             raise HotPathError("monotonic clock unavailable") from None
         if type(tick) is not int or tick < 0:
             raise HotPathError("monotonic clock returned invalid timestamp")
+        # Every sample must be >= the prior sample, including across stages.
+        # Comparing only a stage's before/after would miss an interstage rewind.
+        if previous_tick is not None and tick < previous_tick:
+            raise HotPathError("monotonic clock moved backwards")
+        previous_tick = tick
         return tick
 
     started = read_clock()

@@ -231,3 +231,21 @@ def test_pre_mutated_policy_is_revalidated_before_any_stage():
             clock_ns=clock(100),
         )
     assert calls == []
+
+def test_interstage_monotonic_rewind_is_rejected_before_downstream_callback():
+    """A clock rewind between stages must not produce a forged OK report."""
+    calls = []
+    # ingest: 110->120; next stage starts at 115 (> start 100).
+    # Earlier guards compared only stage before/after and cycle start.
+    ticks = (100, 110, 120, 115, 116, 117, 118, 119, 120, 121, 122)
+    with pytest.raises(HotPathError, match="backwards") as failure:
+        run_hot_path(
+            source_sha=SHA,
+            policy=HotPathPolicy(10, 100, 0, 100),
+            observed_at_ns=100,
+            backlog=0,
+            stages=make_callbacks(calls),
+            clock_ns=clock(*ticks),
+        )
+    assert calls == ["ingest"]
+    assert failure.value.__cause__ is None

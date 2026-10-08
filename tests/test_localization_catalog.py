@@ -527,7 +527,7 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
                 "sample.unsafe_uppercase_command", english_uppercase_command
             )
 
-    with pytest.raises(AssertionError, match="untranslated Latin product words"):
+    with pytest.raises(AssertionError, match="English-only critical UI directive"):
         _assert_ukrainian_critical_presentation(
             "sample.mixed_fallback",
             "Betfair API: Retry request після помилки.",

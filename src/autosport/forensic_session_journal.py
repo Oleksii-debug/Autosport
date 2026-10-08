@@ -22,6 +22,8 @@ _CHECKPOINT_KEYS = frozenset(
     {"schema_version", "record_count", "last_record_sha256"}
 )
 _CHECKPOINT_MAX_BYTES = 4096
+# Retain complete, independently verifiable history while bounding restart RAM/IO.
+_MAX_JOURNAL_BYTES = 64 * 1024 * 1024
 
 _EVENT_RE = re.compile(r"^[a-z][a-z0-9]*(?:[._-][a-z0-9]+)*$")
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -503,6 +505,8 @@ def _parse_line(line: str, *, expected_seq: int, expected_prev: str) -> JournalR
 
 
 def _parse_verified_record_bytes(raw: bytes) -> tuple[JournalRecord, ...]:
+    if len(raw) > _MAX_JOURNAL_BYTES:
+        raise JournalIntegrityError("forensic session journal exceeds bounded capacity")
     if not raw:
         return ()
     if not raw.endswith(b"\n"):
@@ -527,7 +531,9 @@ def _read_verified_records_only(path: str | os.PathLike[str]) -> tuple[JournalRe
     journal_path = Path(path)
     if not journal_path.exists():
         return ()
-    return _parse_verified_record_bytes(journal_path.read_bytes())
+    with journal_path.open("rb") as handle:
+        raw = handle.read(_MAX_JOURNAL_BYTES + 1)
+    return _parse_verified_record_bytes(raw)
 
 
 def _assert_bound_journal_path(
@@ -568,13 +574,19 @@ def _read_verified_records_bound(
             raise JournalIntegrityError(
                 "journal verification requires a single-link regular file"
             )
+        if before.st_size > _MAX_JOURNAL_BYTES:
+            raise JournalIntegrityError("forensic session journal exceeds bounded capacity")
         identity = (before.st_dev, before.st_ino)
 
         chunks: list[bytes] = []
+        total_bytes = 0
         while True:
             chunk = os.read(fd, 1024 * 1024)
             if not chunk:
                 break
+            total_bytes += len(chunk)
+            if total_bytes > _MAX_JOURNAL_BYTES:
+                raise JournalIntegrityError("forensic session journal exceeds bounded capacity")
             chunks.append(chunk)
         raw = b"".join(chunks)
 
@@ -942,6 +954,8 @@ class ForensicSessionJournal:
         fd: int | None = None
         pre_size = self._expected_file_size
         try:
+            if pre_size + len(serialized) > _MAX_JOURNAL_BYTES:
+                raise JournalIntegrityError("forensic session journal capacity exhausted")
             self._assert_writer_lock_continuity()
             fd = os.open(self._path, flags, 0o600)
             pre = os.fstat(fd)

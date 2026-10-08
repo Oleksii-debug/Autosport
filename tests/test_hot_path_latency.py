@@ -262,3 +262,65 @@ def test_clock_exception_does_not_retain_private_context():
     assert failure.value.__context__ is None
     assert "CANARY" not in str(failure.value)
     assert calls == []
+
+
+def test_manual_performance_report_cannot_claim_execution_or_hardware_acceptance():
+    from dataclasses import replace
+    from autosport.hot_path_latency import HotPathReport
+
+    observed = HotPathReport(
+        SHA, "OK", "WITHIN_BUDGET", tuple((name, 5) for name in STAGES), 25, 0
+    )
+    assert observed.execution_authority is False
+    assert observed.target_machine_acceptance is False
+
+    for forbidden in (
+        {"execution_authority": True},
+        {"execution_authority": 1},
+        {"target_machine_acceptance": True},
+        {"target_machine_acceptance": 1},
+    ):
+        with pytest.raises(HotPathError, match="cannot grant"):
+            replace(observed, **forbidden)
+
+
+@pytest.mark.parametrize(
+    "invalid",
+    [
+        {"source_sha": "a" * 39},
+        {"disposition": "PROCEED"},
+        {"disposition": "WAIT"},
+        {"reason": "STAGE_BUDGET"},
+        {"reason": "UNKNOWN"},
+        {"total_elapsed_ns": 1},
+        {"total_elapsed_ns": True},
+        {"backlog": True},
+        {"stage_latencies_ns": ()},
+        {"stage_latencies_ns": (("mirror", 5),)},
+        {"stage_latencies_ns": (("ingest", True),)},
+        {"stage_latencies_ns": [("ingest", 5)]},
+    ],
+)
+def test_reconstructed_performance_evidence_requires_exact_consistency(invalid):
+    from dataclasses import replace
+    from autosport.hot_path_latency import HotPathReport
+
+    observed = HotPathReport(
+        SHA, "OK", "WITHIN_BUDGET", tuple((name, 5) for name in STAGES), 25, 0
+    )
+    with pytest.raises(HotPathError):
+        replace(observed, **invalid)
+
+
+def test_partial_overload_report_remains_explicit_wait_only():
+    from autosport.hot_path_latency import HotPathReport
+
+    observed = HotPathReport(
+        SHA, "WAIT", "BACKLOG", (("ingest", 5),), 10, 100
+    )
+    assert observed.disposition == "WAIT"
+    assert observed.backlog == 100
+    assert not observed.execution_authority
+    assert not observed.target_machine_acceptance
+    with pytest.raises(HotPathError, match="cannot claim success"):
+        HotPathReport(SHA, "WAIT", "WITHIN_BUDGET", (), 0, 0)

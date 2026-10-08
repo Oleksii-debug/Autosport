@@ -894,7 +894,15 @@ class BetfairReadOnlyClient:
         request_id = self._next_request_id()
         body = json.dumps({"jsonrpc": "2.0", "method": method, "params": dict(params), "id": request_id}, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
         headers = {"Accept": "application/json", "Content-Type": "application/json", "X-Application": self._credentials.application_key, "X-Authentication": self._credentials.session_token}
-        payload = self._transport.post(endpoint, headers=headers, body=body, timeout_seconds=self._timeout_seconds)
+        try:
+            payload = self._transport.post(
+                endpoint, headers=headers, body=body, timeout_seconds=self._timeout_seconds
+            )
+        except Exception:
+            # Even an injected or third-party transport can include authentication
+            # headers or request data in its exception text. Never expose it to
+            # callers, diagnostics, or automated retry authorities.
+            raise BetfairReadOnlyError("Betfair read-only transport failed") from None
         if not isinstance(payload, bytes):
             raise BetfairReadOnlyError("Betfair transport must return bytes")
         evidence = BetfairEvidence(self._observed_at(), sha256(payload).hexdigest())

@@ -1,14 +1,12 @@
 from __future__ import annotations
 
 import re
-import re
 from decimal import Decimal
 from types import SimpleNamespace
 
 import pytest
 
 from autosport.domain import TicketLeg
-from autosport.paper import PaperBook
 from autosport.localization import (
     CATALOG_VERSION,
     DEFAULT_LOCALE,
@@ -16,6 +14,7 @@ from autosport.localization import (
     require_keys,
     text,
 )
+from autosport.paper import PaperBook
 from autosport.ui_model import (
     observation_quote_lines,
     observation_summary,

@@ -455,9 +455,10 @@ def test_fixture_replacement_after_validation_is_not_silently_excluded(
     assert report.status == "INCOMPLETE"
     assert report.exit_code == 3
     assert report.excluded_files == 0
-    assert report.scanned_files >= 1
+    # The parent directory may reject the rename before fixture identity is
+    # checked; both fail closed without excluding the substituted fixture.
     assert any(
-        error.error_type == "FixtureIdentityChanged"
+        error.error_type in {"DirectoryIdentityChanged", "FixtureIdentityChanged"}
         for error in report.errors
     )
 

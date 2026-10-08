@@ -1,3 +1,4 @@
+import json
 from pathlib import Path
 
 import pytest
@@ -106,3 +107,38 @@ def test_registry_rejects_nonstandard_json_constant(tmp_path) -> None:
         encoding="utf-8",
     )
     _assert_corrupt(path)
+
+
+@pytest.mark.parametrize("aliased_version", [True, 1.0])
+def test_registry_rejects_schema_version_aliases(tmp_path, aliased_version) -> None:
+    path = tmp_path / "registry.json"
+    path.write_text(json.dumps({
+        "schema_version": aliased_version, "profiles": [], "governance": []
+    }), encoding="utf-8")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="schema_version"):
+        BookmakerCapabilityRegistry(path).profile_history(
+            "book-a", "acct-a", "adapter-a"
+        )
+
+
+@pytest.mark.parametrize("injection", [
+    "root", "profile_entry", "profile", "fact", "governance_entry", "governance"
+])
+def test_registry_rejects_unknown_nested_versioned_fields(tmp_path, injection) -> None:
+    path = tmp_path / "registry.json"
+    registry = BookmakerCapabilityRegistry(path)
+    assert registry.register_profile(_profile())
+    assert registry.register_governance(_governance())
+    document = json.loads(path.read_text(encoding="utf-8"))
+    targets = {
+        "root": document,
+        "profile_entry": document["profiles"][0],
+        "profile": document["profiles"][0]["profile"],
+        "fact": document["profiles"][0]["profile"]["facts"][0],
+        "governance_entry": document["governance"][0],
+        "governance": document["governance"][0]["evidence"],
+    }
+    targets[injection]["unknown_future_authority"] = True
+    path.write_text(json.dumps(document), encoding="utf-8")
+    with pytest.raises(BookmakerCapabilityRegistryError, match="schema fields"):
+        registry.profile_history("book-a", "acct-a", "adapter-a")

@@ -148,3 +148,18 @@ def test_registry_rejects_unknown_nested_versioned_fields(tmp_path, injection) -
     )
     with pytest.raises(BookmakerCapabilityRegistryError, match=expected_error):
         registry.profile_history("book-a", "acct-a", "adapter-a")
+
+    # A future schema must not be erased by a later read-modify-write,
+    # including an idempotent replay. Reopen must remain fail-closed.
+    corrupt_bytes = path.read_bytes()
+    for mutation in (
+        lambda: registry.register_profile(_profile()),
+        lambda: registry.register_governance(_governance()),
+    ):
+        with pytest.raises(BookmakerCapabilityRegistryError):
+            mutation()
+        assert path.read_bytes() == corrupt_bytes
+
+    with pytest.raises(BookmakerCapabilityRegistryError):
+        BookmakerCapabilityRegistry(path).governance_history("book-a", "acct-a")
+    assert path.read_bytes() == corrupt_bytes

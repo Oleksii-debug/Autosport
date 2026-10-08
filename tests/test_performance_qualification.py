@@ -507,3 +507,109 @@ def test_hostile_report_mapping_error_is_redacted(
     assert secret not in rendered
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__ is True
+
+
+def test_unbounded_report_mapping_iteration_rejected_without_len_or_retry() -> None:
+    """An infinite Mapping iterator cannot force unbounded dict(report) work."""
+    reads: list[int] = []
+
+    class InfiniteKeys(Mapping[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            index = 0
+            while True:
+                yield f"entry{index}"
+                index += 1
+
+        def __len__(self) -> int:
+            raise AssertionError("untrusted Mapping length must not be read")
+
+        def __getitem__(self, key: str) -> object:
+            reads.append(1)
+            return "fixture"
+
+    with pytest.raises(PerformanceQualificationError, match="snapshot node limit"):
+        qualify_endurance_report(
+            InfiniteKeys(), _budget(), source_sha=SOURCE_SHA,
+            machine_profile="bounded-iterator-negative-fixture",
+        )
+    assert len(reads) == 10_000
+
+
+def test_report_snapshot_rejects_deep_bombs_without_recursion_error() -> None:
+    payload: dict[str, object] = {}
+    current = payload
+    for _ in range(80):
+        child: dict[str, object] = {}
+        current["child"] = child
+        current = child
+    report = _report()
+    report["host_metadata"] = payload
+    with pytest.raises(PerformanceQualificationError, match="snapshot depth limit"):
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="deep-snapshot-negative-fixture",
+        )
+
+
+def test_report_snapshot_rejects_wide_bombs_without_unbounded_materialization() -> None:
+    report = _report()
+    report["host_metadata"] = [None] * 10_001
+    with pytest.raises(PerformanceQualificationError, match="snapshot node limit"):
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="wide-snapshot-negative-fixture",
+        )
+
+
+def test_report_snapshot_rejects_excessive_text_before_canonical_json() -> None:
+    report = _report()
+    report["host_metadata"] = "x" * 8_000_001
+    with pytest.raises(PerformanceQualificationError, match="snapshot text limit"):
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="oversized-text-negative-fixture",
+        )
+
+
+def test_report_snapshot_rejects_duplicate_keys_before_any_validation() -> None:
+    class DuplicateKeys(Mapping[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            return iter(("status", "status"))
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, key: str) -> object:
+            return "PASS"
+
+    with pytest.raises(PerformanceQualificationError, match="duplicate keys"):
+        qualify_endurance_report(
+            DuplicateKeys(), _budget(), source_sha=SOURCE_SHA,
+            machine_profile="duplicate-mapping-negative-fixture",
+        )
+
+
+def test_mapping_owned_exception_of_qualification_type_is_still_redacted() -> None:
+    import traceback
+
+    secret = "CANARY_PRIVATE_MAPPING_EXCEPTION_NEVER_ECHO"
+
+    class HostileReport(Mapping[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            raise PerformanceQualificationError(secret)
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            raise PerformanceQualificationError(secret)
+
+    with pytest.raises(PerformanceQualificationError, match="could not be snapshotted") as caught:
+        qualify_endurance_report(
+            HostileReport(), _budget(), source_sha=SOURCE_SHA,
+            machine_profile="private-exception-negative-fixture",
+        )
+    diagnostic = "".join(traceback.format_exception(type(caught.value), caught.value, caught.value.__traceback__))
+    assert secret not in diagnostic
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True

@@ -138,6 +138,14 @@ def _digest(value: str, field: str) -> str:
     return value
 
 
+def _require_exact_fields(value: object, fields: frozenset[str], label: str) -> None:
+    """Reject unknown versioned evidence fields before they can be silently dropped."""
+    if type(value) is not dict or value.keys() != fields:
+        raise BookmakerCapabilityRegistryError(
+            f"{label} has missing or unknown schema fields"
+        )
+
+
 @dataclass(frozen=True, slots=True)
 class BookmakerGovernanceEvidence:
     """Immutable terms/jurisdiction evidence; never execution authorization."""
@@ -358,11 +366,14 @@ class BookmakerCapabilityRegistry:
             raise BookmakerCapabilityRegistryError(
                 "capability registry is unreadable or corrupt"
             ) from exc
-        if not isinstance(document, dict):
-            raise BookmakerCapabilityRegistryError(
-                "capability registry root must be an object"
-            )
-        if document.get("schema_version") != self.SCHEMA_VERSION:
+        _require_exact_fields(
+            document, frozenset({"schema_version", "profiles", "governance"}),
+            "capability registry root",
+        )
+        if (
+            type(document["schema_version"]) is not int
+            or document["schema_version"] != self.SCHEMA_VERSION
+        ):
             raise BookmakerCapabilityRegistryError(
                 "unsupported capability registry schema_version"
             )
@@ -385,11 +396,10 @@ class BookmakerCapabilityRegistry:
         ids: set[str] = set()
         keys: dict[tuple[str, str, str, int], str] = {}
         for entry in raw_entries:
-            if not isinstance(entry, dict):
-                raise BookmakerCapabilityRegistryError(
-                    "profile registry entry must be an object"
-                )
-            profile = self._decode_profile(entry.get("profile"))
+            _require_exact_fields(
+                entry, frozenset({"profile", "profile_id"}), "profile registry entry"
+            )
+            profile = self._decode_profile(entry["profile"])
             stored_id = entry.get("profile_id")
             if not isinstance(stored_id, str) or stored_id != profile.profile_id:
                 raise BookmakerCapabilityRegistryError(
@@ -421,11 +431,11 @@ class BookmakerCapabilityRegistry:
         ids: set[str] = set()
         keys: dict[tuple[str, str, str, str, str], str] = {}
         for entry in raw_entries:
-            if not isinstance(entry, dict):
-                raise BookmakerCapabilityRegistryError(
-                    "governance registry entry must be an object"
-                )
-            evidence = self._decode_governance(entry.get("evidence"))
+            _require_exact_fields(
+                entry, frozenset({"evidence", "evidence_id"}),
+                "governance registry entry",
+            )
+            evidence = self._decode_governance(entry["evidence"])
             stored_id = entry.get("evidence_id")
             if not isinstance(stored_id, str) or stored_id != evidence.evidence_id:
                 raise BookmakerCapabilityRegistryError(
@@ -448,14 +458,23 @@ class BookmakerCapabilityRegistry:
 
     @staticmethod
     def _decode_profile(raw: object) -> BookmakerCapabilityProfile:
-        if not isinstance(raw, dict):
-            raise BookmakerCapabilityRegistryError(
-                "profile payload must be an object"
-            )
+        _require_exact_fields(
+            raw,
+            frozenset({
+                "venue_id", "account_id", "adapter_id", "adapter_version",
+                "profile_version", "facts", "observed_at", "source_ref",
+                "source_payload_sha256",
+            }),
+            "capability profile",
+        )
         try:
             raw_facts = raw["facts"]
             if not isinstance(raw_facts, list):
                 raise TypeError("facts")
+            for item in raw_facts:
+                _require_exact_fields(
+                    item, frozenset({"capability", "state"}), "capability fact"
+                )
             facts = tuple(
                 BookmakerCapabilityFact(
                     capability=BookmakerCapability(item["capability"]),
@@ -484,10 +503,15 @@ class BookmakerCapabilityRegistry:
 
     @staticmethod
     def _decode_governance(raw: object) -> BookmakerGovernanceEvidence:
-        if not isinstance(raw, dict):
-            raise BookmakerCapabilityRegistryError(
-                "governance payload must be an object"
-            )
+        _require_exact_fields(
+            raw,
+            frozenset({
+                "venue_id", "account_id", "jurisdiction", "terms_version",
+                "automation_permission", "observed_at", "source_ref",
+                "source_payload_sha256",
+            }),
+            "governance evidence",
+        )
         try:
             return BookmakerGovernanceEvidence(
                 venue_id=raw["venue_id"],

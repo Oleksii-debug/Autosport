@@ -131,3 +131,32 @@ print(json.dumps({'sha':r.source_sha,'disposition':r.disposition,'samples':r.sta
         outputs.append(json.loads(run.stdout))
     assert outputs[0] == outputs[1]
     assert outputs[0]["sha"] == SHA and outputs[0]["calls"] == list(STAGES)
+
+
+def test_final_stage_expiry_is_wait_not_success():
+    """Regression: final stage finishes after the source expiry deadline."""
+    calls = []
+    p = HotPathPolicy(stage_budget_ns=20, total_budget_ns=100,
+                      max_backlog=0, max_source_age_ns=15)
+    ticks = (100, 100, 103, 103, 106, 106, 109, 109, 112, 112, 120)
+    result = run_hot_path(source_sha=SHA, policy=p, observed_at_ns=100,
+                          backlog=0, stages=make_callbacks(calls),
+                          clock_ns=clock(*ticks))
+    assert calls == list(STAGES)
+    assert result.disposition == "WAIT"
+    assert result.reason == "STALE_SOURCE"
+    assert not result.execution_authority
+    assert not result.target_machine_acceptance
+
+
+def test_last_stage_source_age_boundary_is_inclusive():
+    calls = []
+    p = HotPathPolicy(stage_budget_ns=20, total_budget_ns=100,
+                      max_backlog=0, max_source_age_ns=20)
+    ticks = (100, 100, 103, 103, 106, 106, 109, 109, 112, 112, 120)
+    result = run_hot_path(source_sha=SHA, policy=p, observed_at_ns=100,
+                          backlog=0, stages=make_callbacks(calls),
+                          clock_ns=clock(*ticks))
+    assert result.disposition == "OK"
+    assert result.total_elapsed_ns == 20
+    assert calls == list(STAGES)

@@ -131,7 +131,7 @@ _LANGUAGE_NEUTRAL_CRITICAL_VALUES = {
     "ui.speed.1000x": "1000×",
 }
 _FORMAT_FIELD = re.compile(r"\{[^{}]*\}")
-_CYRILLIC_LETTER = re.compile(r"[\u0400-\u04FF]")
+
 _ENGLISH_UI_DIRECTIVE = re.compile(
     r"\b(?:press|click|retry|reopen|settings|please|confirm|submit|place|cancel|try\s+again|failed\s+to|unable\s+to)\b",
     re.IGNORECASE,
@@ -179,8 +179,8 @@ def _assert_critical_ukrainian_template(key: str, value: str) -> None:
         return
 
     language_text = _FORMAT_FIELD.sub("", stripped)
-    assert _CYRILLIC_LETTER.search(language_text), (
-        f"{key} has no Ukrainian/Cyrillic presentation signal: {value!r}"
+    assert any(character in _UKRAINIAN_PRESENTATION_LETTERS for character in language_text), (
+        f"{key} has no Ukrainian presentation text: {value!r}"
     )
     assert not _ENGLISH_UI_DIRECTIVE.search(language_text), (
         f"{key} contains an English-only critical UI directive: {value!r}"
@@ -220,10 +220,15 @@ def test_critical_ukrainian_guard_allows_technical_tokens_only_with_ukrainian_co
         "Betfair API UIA NVDA UTC SHA-256: стан доступний.",
     )
 
-    with pytest.raises(AssertionError, match="no Ukrainian/Cyrillic presentation signal"):
+    with pytest.raises(AssertionError, match="no Ukrainian presentation text"):
         _assert_critical_ukrainian_template(
             "ui.example.provider_status",
             "Betfair API status: ready; time UTC.",
+        )
+    # Generic Cyrillic is not a Ukrainian language signal (e.g. Russian ы).
+    with pytest.raises(AssertionError, match="no Ukrainian presentation text"):
+        _assert_critical_ukrainian_template(
+            "ui.example.russian_letter_only", "English fallback ы"
         )
     # A stray Cyrillic character must not launder an English operator command.
     for english_with_cyrillic in (
@@ -577,6 +582,10 @@ def test_critical_language_guard_allows_canonical_technical_tokens_in_ukrainian_
         _assert_ukrainian_critical_presentation(
             "sample.english_only",
             "Retry Betfair API request after timeout.",
+        )
+    with pytest.raises(AssertionError, match="no Ukrainian presentation text"):
+        _assert_ukrainian_critical_presentation(
+            "sample.russian_letter_only", "English fallback ы"
         )
 
     # All-uppercase English commands must not bypass the critical UI gate

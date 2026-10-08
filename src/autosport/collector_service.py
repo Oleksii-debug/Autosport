@@ -1,5 +1,15 @@
 from __future__ import annotations
 
+# ``python -m autosport.collector_service`` imports the autosport package first.
+# Package composition deliberately imports this module under its canonical name and
+# installs the collector state/cycle/backoff guards there.  runpy would otherwise
+# execute this file a second time as ``__main__`` and construct fresh, uncomposed
+# classes.  Delegate immediately to the already-composed canonical module instead.
+if __name__ == "__main__":
+    from . import collector_service as _canonical_collector_service
+
+    raise SystemExit(_canonical_collector_service.main())
+
 import argparse
 import importlib
 import json

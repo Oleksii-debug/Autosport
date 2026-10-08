@@ -142,9 +142,9 @@ def run_hot_path(
         if check_backlog():
             return stop("BACKLOG", before)
         # A dynamic backlog probe may itself consume the freshness or total
-        # budget. Re-sample immediately before the proposal-only decision;
-        # otherwise it could start after the deadline despite an earlier tick.
-        if name == "decision" and backlog_reader is not None:
+        # budget. Re-sample before EVERY callback (not just decision); a slow
+        # sampler must not start a stale intermediate stage.
+        if backlog_reader is not None:
             before = read_clock()
         if before < started or before < observed_at_ns:
             raise HotPathError("monotonic clock moved backwards")
@@ -166,11 +166,13 @@ def run_hot_path(
         samples.append((name, delta))
         if check_backlog():
             return stop("BACKLOG", after)
+        # Post-stage sampling can also consume the deadline, including after
+        # the final decision. Never publish OK from the earlier clock tick.
+        checked_at = read_clock() if backlog_reader is not None else after
         if delta > policy.stage_budget_ns:
-            return stop("STAGE_BUDGET", after)
-        if after - started > policy.total_budget_ns:
-            return stop("TOTAL_BUDGET", after)
-        # An observation that expires during the final stage cannot return OK.
-        if after - observed_at_ns > policy.max_source_age_ns:
-            return stop("STALE_SOURCE", after)
-    return HotPathReport(source_sha, "OK", "WITHIN_BUDGET", tuple(samples), samples and after - started or 0, observed_backlog)
+            return stop("STAGE_BUDGET", checked_at)
+        if checked_at - started > policy.total_budget_ns:
+            return stop("TOTAL_BUDGET", checked_at)
+        if checked_at - observed_at_ns > policy.max_source_age_ns:
+            return stop("STALE_SOURCE", checked_at)
+    return HotPathReport(source_sha, "OK", "WITHIN_BUDGET", tuple(samples), samples and checked_at - started or 0, observed_backlog)

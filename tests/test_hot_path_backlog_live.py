@@ -125,3 +125,60 @@ def test_costly_backlog_sample_cannot_start_stale_decision(max_age, total_budget
     assert result.disposition == "WAIT" and result.reason == expected
     assert calls == list(STAGES[:-1])
     assert result.execution_authority is False
+
+
+def test_slow_backlog_probe_cannot_start_stale_intermediate_stage():
+    """Regression: mirror must not begin after a slow, zero-pressure probe."""
+    calls = []
+    now_ns = [100]
+    probes = [0]
+
+    def sample_backlog():
+        probes[0] += 1
+        # ingest has two probes; the third precedes mirror.
+        if probes[0] == 3:
+            now_ns[0] = 300
+        return 0
+
+    result = run_hot_path(
+        source_sha="a" * 40,
+        policy=HotPathPolicy(500, 500, 2, 50),
+        observed_at_ns=100,
+        backlog=0,
+        stages=_steps(calls),
+        clock_ns=lambda: now_ns[0],
+        backlog_reader=sample_backlog,
+    )
+    assert probes == [3]
+    assert calls == ["ingest"]
+    assert result.disposition == "WAIT" and result.reason == "STALE_SOURCE"
+    assert result.total_elapsed_ns == 200
+    assert result.execution_authority is False
+
+
+def test_slow_final_backlog_probe_cannot_forge_ok_after_deadline():
+    """Regression: final probe time counts even when pressure stays zero."""
+    calls = []
+    now_ns = [100]
+    probes = [0]
+
+    def sample_backlog():
+        probes[0] += 1
+        if probes[0] == 10:
+            now_ns[0] = 300
+        return 0
+
+    result = run_hot_path(
+        source_sha="a" * 40,
+        policy=HotPathPolicy(500, 500, 2, 50),
+        observed_at_ns=100,
+        backlog=0,
+        stages=_steps(calls),
+        clock_ns=lambda: now_ns[0],
+        backlog_reader=sample_backlog,
+    )
+    assert probes == [10]
+    assert calls == list(STAGES)
+    assert result.disposition == "WAIT" and result.reason == "STALE_SOURCE"
+    assert result.total_elapsed_ns == 200
+    assert result.execution_authority is False

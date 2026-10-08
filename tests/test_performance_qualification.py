@@ -613,3 +613,37 @@ def test_mapping_owned_exception_of_qualification_type_is_still_redacted() -> No
     assert secret not in diagnostic
     assert caught.value.__cause__ is None
     assert caught.value.__suppress_context__ is True
+
+
+def test_malformed_unicode_report_value_fails_closed_without_private_trace() -> None:
+    import traceback
+
+    secret = "PRIVATE_REPORT_VALUE_NEVER_EMIT"
+    report = _report()
+    report["host_metadata"] = secret + "\ud800"
+    with pytest.raises(PerformanceQualificationError, match="invalid UTF-8 text") as caught:
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="surrogate-negative-fixture",
+        )
+    diagnostic = "".join(traceback.format_exception(type(caught.value), caught.value, caught.value.__traceback__))
+    assert secret not in diagnostic
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
+def test_malformed_unicode_report_key_fails_closed_without_private_trace() -> None:
+    import traceback
+
+    secret = "PRIVATE_REPORT_KEY_NEVER_EMIT"
+    report = _report()
+    report[secret + "\ud800"] = "fixture"
+    with pytest.raises(PerformanceQualificationError, match="keys must be valid UTF-8") as caught:
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="surrogate-key-negative-fixture",
+        )
+    diagnostic = "".join(traceback.format_exception(type(caught.value), caught.value, caught.value.__traceback__))
+    assert secret not in diagnostic
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True

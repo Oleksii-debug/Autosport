@@ -3,6 +3,7 @@ from decimal import Decimal
 from pathlib import Path
 import tempfile
 import unittest
+from unittest.mock import patch
 
 from autosport.domain import MarketEvent
 from autosport.market_mirror import MarketMirror, MirrorUpdate
@@ -10,6 +11,18 @@ from autosport.storage import SQLiteMarketStore
 
 
 class MarketMirrorTests(unittest.TestCase):
+    def _recorded_product_clock(self, initial: str) -> list[str]:
+        # Test-only physical availability: never backdate a later append to
+        # a decision cutoff merely because the provider observation is old.
+        clock = [initial]
+        product_patch = patch(
+            "autosport.storage._market_product_utc_now",
+            side_effect=lambda: clock[0],
+        )
+        product_patch.start()
+        self.addCleanup(product_patch.stop)
+        return clock
+
     @staticmethod
     def event(
         *,
@@ -143,7 +156,8 @@ class MarketMirrorTests(unittest.TestCase):
             )
 
     def test_sport_aware_lookup_survives_store_restore_and_replay(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+         product_clock = self._recorded_product_clock("2026-09-16T18:59:02+00:00")
+       with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "market.db"
             store = SQLiteMarketStore(path)
             try:
@@ -188,6 +202,7 @@ class MarketMirrorTests(unittest.TestCase):
                     "soccer",
                 )
 
+                product_clock[0] = "2026-09-16T19:00:00+00:00"
                 replay = MarketMirror.replay_view_from_store(
                     store,
                     as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
@@ -573,7 +588,8 @@ class MarketMirrorTests(unittest.TestCase):
                 reopened_store.close()
 
     def test_replay_view_reconstructs_pre_update_state_without_future_leakage(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+         product_clock = self._recorded_product_clock("2026-09-16T18:59:01+00:00")
+       with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
                 store.append_many(
@@ -585,6 +601,11 @@ class MarketMirrorTests(unittest.TestCase):
                             source_ts="2026-09-16T18:58:55+00:00",
                             ingest_ts="2026-09-16T18:59:01+00:00",
                         ),
+                    ]
+                )
+                product_clock[0] = "2026-09-16T19:01:01+00:00"
+                store.append_many(
+                    [
                         self.event(
                             sequence=2,
                             odds="9.99",
@@ -594,7 +615,6 @@ class MarketMirrorTests(unittest.TestCase):
                         ),
                     ]
                 )
-
                 replay = MarketMirror.replay_view_from_store(
                     store,
                     as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
@@ -609,7 +629,8 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
     def test_replay_view_excludes_late_ingestion_even_when_provider_evidence_is_earlier(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+         product_clock = self._recorded_product_clock("2026-09-16T18:58:40+00:00")
+       with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
                 store.append_many(
@@ -621,6 +642,11 @@ class MarketMirrorTests(unittest.TestCase):
                             source_ts="2026-09-16T18:58:20+00:00",
                             ingest_ts="2026-09-16T18:58:40+00:00",
                         ),
+                    ]
+                )
+                product_clock[0] = "2026-09-16T19:01:00+00:00"
+                store.append_many(
+                    [
                         self.event(
                             sequence=2,
                             odds="9.99",
@@ -630,7 +656,6 @@ class MarketMirrorTests(unittest.TestCase):
                         ),
                     ]
                 )
-
                 replay = MarketMirror.replay_view_from_store(
                     store,
                     as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),
@@ -645,7 +670,8 @@ class MarketMirrorTests(unittest.TestCase):
                 store.close()
 
     def test_replay_view_applies_live_freshness_and_focused_selectors_at_one_revision(self) -> None:
-        with tempfile.TemporaryDirectory() as directory:
+         product_clock = self._recorded_product_clock("2026-09-16T18:59:40+00:00")
+       with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
                 store.append_many(
@@ -665,6 +691,11 @@ class MarketMirrorTests(unittest.TestCase):
                             selection="other",
                             observed_ts="2026-09-16T18:59:40+00:00",
                         ),
+                    ]
+                )
+                product_clock[0] = "2026-09-16T19:00:01+00:00"
+                store.append_many(
+                    [
                         self.event(
                             source="provider-a",
                             selection="future",
@@ -672,7 +703,6 @@ class MarketMirrorTests(unittest.TestCase):
                         ),
                     ]
                 )
-
                 replay = MarketMirror.replay_view_from_store(
                     store,
                     as_of=datetime(2026, 9, 16, 19, 0, tzinfo=timezone.utc),

@@ -47,7 +47,7 @@ Real account/money evidence is NOT required here.
 | Section | State | Evidence / next gate |
 |---:|---|---|
 |1|DONE|Canonical runtime START/STOP/recovery and one-active-lease authority reused; secret-bearing secondary exception notes repaired in PR #2263 (`a909c552d3766657ab8b310c1cb00e99be886388`). Exact-head CI 37726753316 SUCCESS (Ubuntu/Windows Python 3.11/3.12; Windows 3.12 7828 passed, 14 skipped), Windows candidate 37726753340 SUCCESS; no review threads; merged `bb581b82b48ff23a7930e57733c1fbc641245231`. Post-merge product-runtime/test blobs `803c9ec1cb1324ae8b99e19e01e63ffa8092889f` / `be19b16b889de22767715ca080afee94dee15f36` verified. No real bookmaker/financial authority or physical NVDA claimed.|
-|2|PARTIAL_EXISTING|Next ACTIONABLE Plan-5 Section: session/secret_redaction/integrity/trusted-runtime security boundaries; reuse current source/tests, qualify exact head and integrate before DONE.|
+|2|QUALIFYING|Existing security/secret_redaction/session/trusted-runtime/owner authority reused; three-file canary leakage falsifier converged in SAME PR #1694 at frozen `e8844826d95b78bfb8b323b0df9bb382630d7c69` (parent current main `b6587daceeaad9cc0342ea5f6ecd99e9846dad2e`, only three scanner/test paths, behind=0, no review threads). Exact-head CI 37734730008 and Windows Candidate 37734729993 QUEUED NOT PASS; draft-triggered skipped jobs are not evidence. Must qualify exact scanner head, merge expected SHA, verify readback then terminal DONE. No financial or external execution authority.|
 |3–8|PARTIAL_EXISTING|Legacy 8,32,39–42 and current forensic evidence/QA/verification/reliability/performance/Windows-lab architecture; each separately qualifies.|
 Section 9: OPEN plan qualification.
 

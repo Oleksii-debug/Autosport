@@ -555,9 +555,15 @@ def test_reproducibility_bundle_is_deterministic_reference_only(tmp_path):
     assert "DatasetSnapshot" in first["references"]
     assert "dataset_bytes" not in first and "raw_rows" not in first
 
+    # A locally deterministic bundle is not authorization to disclose
+    # outcome-bearing scientific records. Direct file export must fail closed;
+    # the product's ScientificDisclosureExporter consumes holdout first.
+    from autosport.scientific_disclosure_export import ScientificDisclosureExportError
+
     target = tmp_path / "repro.json"
-    assert registry.export_reproducibility_bundle("experiment-1", target) == first["bundle_sha256"]
-    assert json.loads(target.read_text(encoding="utf-8")) == first
+    with pytest.raises(ScientificDisclosureExportError, match="direct scientific"):
+        registry.export_reproducibility_bundle("experiment-1", target)
+    assert not target.exists()
 
 
 def test_active_workspace_writer_blocks_second_writer_without_corruption(tmp_path):

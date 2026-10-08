@@ -899,10 +899,15 @@ class BetfairReadOnlyClient:
                 endpoint, headers=headers, body=body, timeout_seconds=self._timeout_seconds
             )
         except Exception:
-            # Even an injected or third-party transport can include authentication
-            # headers or request data in its exception text. Never expose it to
-            # callers, diagnostics, or automated retry authorities.
-            raise BetfairReadOnlyError("Betfair read-only transport failed") from None
+            # A suppressed exception chain still retains __context__, including
+            # credential-bearing transport messages. Exit the handler before
+            # raising the sanitized error so no secret-bearing exception is kept.
+            transport_failed = True
+            payload = None
+        else:
+            transport_failed = False
+        if transport_failed:
+            raise BetfairReadOnlyError("Betfair read-only transport failed")
         if not isinstance(payload, bytes):
             raise BetfairReadOnlyError("Betfair transport must return bytes")
         evidence = BetfairEvidence(self._observed_at(), sha256(payload).hexdigest())

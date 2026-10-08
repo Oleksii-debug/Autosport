@@ -165,3 +165,54 @@ def test_native_workspace_configuration_dialog_uses_catalog_and_keeps_native_fal
 def test_native_configuration_dialog_requires_message_catalog_key() -> None:
     function = _target_functions()["_show_workspace_configuration_error"]
     assert "ui.windows.workspace_configuration.message" in _localization_keys(function)
+
+def test_native_workspace_errors_redact_secrets_and_preserve_ukrainian_guidance() -> None:
+    from autosport.windows_entry import _workspace_access_error_message
+    from autosport.secret_redaction import REDACTED
+
+    workspace = Path("C:/Папка?api_key=workspace-secret-1842")
+    error = OSError("Access denied; password=provider-secret-1843; token=private-1844")
+    rendered = _workspace_access_error_message(workspace, error)
+
+    assert "workspace-secret-1842" not in rendered
+    assert "provider-secret-1843" not in rendered
+    assert "private-1844" not in rendered
+    assert REDACTED in rendered
+    assert "Робоча тека" in rendered
+    assert "Права адміністратора не потрібні" in rendered
+
+
+def test_native_workspace_error_stringification_failure_is_localized_and_safe() -> None:
+    from autosport.localization import text
+    from autosport.windows_entry import _workspace_access_error_message
+
+    class HostileOSError(OSError):
+        def __str__(self) -> str:
+            raise RuntimeError("token=must-not-appear")
+
+    rendered = _workspace_access_error_message(Path("C:/Робоча тека"), HostileOSError())
+    assert text("ui.windows.workspace_access.unknown_error") in rendered
+    assert "must-not-appear" not in rendered
+    assert "HostileOSError" not in rendered
+    assert "OSError" in rendered
+
+
+def test_native_configuration_dialog_redacts_untrusted_detail(monkeypatch) -> None:
+    import ctypes
+    from types import SimpleNamespace
+    from autosport.windows_entry import _show_workspace_configuration_error
+
+    calls = []
+    def message_box(parent, message, title, flags):
+        calls.append((message, title, flags))
+        return 1
+
+    monkeypatch.setattr(ctypes, "windll", SimpleNamespace(
+        user32=SimpleNamespace(MessageBoxW=message_box)
+    ), raising=False)
+    _show_workspace_configuration_error("Невірний шлях; password=config-secret-1845")
+    assert len(calls) == 1
+    assert "config-secret-1845" not in calls[0][0]
+    assert "[REDACTED]" in calls[0][0]
+    assert "Автоспорт" in calls[0][1]
+    assert calls[0][2] == 0x00000010

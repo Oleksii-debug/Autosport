@@ -7,6 +7,7 @@ from pathlib import Path
 _REPO_ROOT = Path(__file__).resolve().parents[1]
 _WINDOWS_ENTRY = _REPO_ROOT / "src" / "autosport" / "windows_entry.py"
 _REQUIRED_KEYS = {
+    "_show_workspace_configuration_error": "ui.windows.workspace_configuration.title",
     "_workspace_access_error_message": "ui.windows.workspace_access.message",
     "_show_workspace_access_error": "ui.windows.workspace_access.title",
 }
@@ -123,3 +124,44 @@ def test_workspace_access_message_uses_localized_unknown_error_fallback() -> Non
     )
     assert fallback in message
 
+
+
+def test_native_workspace_configuration_dialog_uses_catalog_and_keeps_native_fallback(
+    monkeypatch,
+) -> None:
+    import ctypes
+    from types import SimpleNamespace
+
+    from autosport.localization import text
+    from autosport.windows_entry import _show_workspace_configuration_error
+
+    calls: list[tuple[object, str, str, int]] = []
+
+    def message_box(parent: object, message: str, title: str, flags: int) -> int:
+        calls.append((parent, message, title, flags))
+        return 1
+
+    monkeypatch.setattr(
+        ctypes,
+        "windll",
+        SimpleNamespace(user32=SimpleNamespace(MessageBoxW=message_box)),
+        raising=False,
+    )
+    detail = r"Недійсний шлях C:\Користувачі\Тест"
+    _show_workspace_configuration_error(detail)
+
+    assert calls == [
+        (
+            None,
+            text("ui.windows.workspace_configuration.message", detail=detail),
+            text("ui.windows.workspace_configuration.title"),
+            0x00000010,
+        )
+    ]
+    assert "interactive workspace" not in calls[0][1]
+    assert "Economic і live state" not in calls[0][1]
+
+
+def test_native_configuration_dialog_requires_message_catalog_key() -> None:
+    function = _target_functions()["_show_workspace_configuration_error"]
+    assert "ui.windows.workspace_configuration.message" in _localization_keys(function)

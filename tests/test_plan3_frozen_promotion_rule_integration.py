@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import json
+
 import pytest
 
 import test_scientific_registry_promotion_protocol_guards as protocol_guards
@@ -73,3 +75,29 @@ def test_restarted_registry_accepts_unambiguous_frozen_promotion_once(tmp_path) 
 
     assert ScientificRegistry(path).record_promotion(decision) == first_digest
     assert path.read_bytes() == accepted_bytes
+
+def test_frozen_rule_metric_cannot_override_immutable_hypothesis(tmp_path, monkeypatch) -> None:
+    # A syntactically valid frozen rule may refer to a different objective.
+    # Promotion must use the same metric that was frozen in the hypothesis.
+    rule = json.loads(protocol_guards._frozen_promotion_rule_text())
+    assert rule["primary_metric"] == "roi"
+    rule["primary_metric"] = "net_profit"
+    monkeypatch.setattr(
+        protocol_guards,
+        "_frozen_promotion_rule_text",
+        lambda: json.dumps(rule, sort_keys=True, separators=(",", ":")),
+    )
+    path = tmp_path / "scientific_registry.json"
+    registry = ScientificRegistry.initialize_pristine(path)
+    protocol, _, _, evidence_id = protocol_guards._seed_foundation(registry)
+    immutable_before = path.read_bytes()
+
+    with pytest.raises(PromotionEvidenceError, match="primary metric disagrees"):
+        ScientificRegistry(path).record_promotion(
+            protocol_guards._promotion(protocol, evidence_id)
+        )
+    assert path.read_bytes() == immutable_before
+    reopened = ScientificRegistry(path)
+    assert reopened.get("Hypothesis", "hypothesis-1") is not None
+    assert reopened.get("Experiment", "experiment-1") is not None
+    assert reopened.get("PromotionDecision", "promotion-1") is None

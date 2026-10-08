@@ -32,6 +32,7 @@ _SHA_D = "d" * 64
 _SHA_E = "e" * 64
 _HOLDOUT_MANIFEST_A = membership_manifest_sha256((_SHA_A,))
 _HOLDOUT_MANIFEST_AB = membership_manifest_sha256((_SHA_A, _SHA_B))
+_HOLDOUT_MANIFEST_C = membership_manifest_sha256((_SHA_C,))
 _FEATURE_PAYLOAD = b"canonical-feature-payload-v1"
 
 
@@ -90,6 +91,8 @@ def _members_for_manifest(manifest_sha256: str) -> tuple[str, ...]:
         return (_SHA_A,)
     if manifest_sha256 == _HOLDOUT_MANIFEST_AB:
         return (_SHA_A, _SHA_B)
+    if manifest_sha256 == _HOLDOUT_MANIFEST_C:
+        return (_SHA_C,)
     raise AssertionError("test holdout snapshot must use a canonical typed manifest")
 
 
@@ -428,7 +431,9 @@ def test_restoring_older_valid_ledger_is_rejected_by_external_monotonic_authorit
     path = tmp_path / "holdout_consumption.json"
     authority_root = _authority_root(tmp_path)
     first_snapshot = _snapshot(snapshot_id="window-a")
-    second_snapshot = _snapshot(snapshot_id="window-b", manifest_sha256=_HOLDOUT_MANIFEST_AB)
+    # Anti-rollback must first create two lawful, physically disjoint consumptions:
+    # overlapping populations are rightly rejected by the new holdout guard.
+    second_snapshot = _snapshot(snapshot_id="window-b", manifest_sha256=_HOLDOUT_MANIFEST_C)
     lineage = _holdout_lineage(tmp_path, first_snapshot, second_snapshot)
     ledger = HoldoutConsumptionLedger(path, authority_root=authority_root, lineage_authority=lineage)
     ledger.consume(

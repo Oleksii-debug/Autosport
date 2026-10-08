@@ -4,10 +4,35 @@ from dataclasses import dataclass
 from enum import Enum
 
 from .point_in_time_evidence import HoldoutConsumption, HoldoutConsumptionLedger
+from . import _point_in_time_authority_runtime_repair as _runtime
 from .scientific_registry import DatasetSnapshot
 
 
 _CANONICAL_HOLDOUT_LEDGER_CONSUME = HoldoutConsumptionLedger.consume
+# A legitimate runtime-repair reload replaces the function object without
+# changing its trusted implementation. Preserve the initial code signature so
+# reload cannot authorize a caller-injected replacement implementation.
+_CANONICAL_CONSUME_CODE = _CANONICAL_HOLDOUT_LEDGER_CONSUME.__code__
+
+
+def _canonical_current_consume():
+    current = _runtime._consume_from_lineage
+    code = getattr(current, "__code__", None)
+    if (
+        HoldoutConsumptionLedger.consume is not current
+        or code is None
+        or getattr(current, "__globals__", None) is not vars(_runtime)
+        or getattr(current, "__module__", None) != _CANONICAL_HOLDOUT_LEDGER_CONSUME.__module__
+        or code.co_code != _CANONICAL_CONSUME_CODE.co_code
+        or code.co_consts != _CANONICAL_CONSUME_CODE.co_consts
+        or code.co_names != _CANONICAL_CONSUME_CODE.co_names
+        or code.co_varnames != _CANONICAL_CONSUME_CODE.co_varnames
+        or code.co_freevars != _CANONICAL_CONSUME_CODE.co_freevars
+    ):
+        raise HoldoutDisclosureError(
+            "canonical HoldoutConsumptionLedger.consume dispatch was rebound"
+        )
+    return current
 
 
 class HoldoutDisclosureError(ValueError):
@@ -136,12 +161,12 @@ class HoldoutDisclosureGate:
             raise HoldoutDisclosureError(
                 "ledger consume dispatch must not be instance-shadowed"
             )
-        if HoldoutConsumptionLedger.consume is not _CANONICAL_HOLDOUT_LEDGER_CONSUME:
-            raise HoldoutDisclosureError(
-                "canonical HoldoutConsumptionLedger.consume dispatch was rebound"
-            )
+        # Re-resolve only the exact product-owned runtime repair. A reload may
+        # recreate its Python function object; arbitrary class/instance monkeypatch
+        # still fails closed before the durable consumption ledger is touched.
+        canonical_consume = _canonical_current_consume()
 
-        consumption = _CANONICAL_HOLDOUT_LEDGER_CONSUME(
+        consumption = canonical_consume(
             self._ledger,
             dataset_snapshot=dataset_snapshot,
             research_protocol_id=research_protocol_id,

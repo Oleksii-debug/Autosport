@@ -505,3 +505,24 @@ def test_gate_rejects_caller_substituted_policy_types(tmp_path) -> None:
             accessible_to_adaptive_actor=True,
             disclosed_at_utc=_DISCLOSED_AT,
         )
+
+def test_product_owned_runtime_reinstallation_preserves_holdout_consumption(tmp_path) -> None:
+    """Legitimate guard reinstallation must not become a false rebound rejection."""
+    from autosport import _point_in_time_authority_runtime_repair as runtime
+
+    ledger = _ledger(tmp_path)
+    gate = HoldoutDisclosureGate(ledger)
+    runtime._install_runtime_guards()
+    assert HoldoutConsumptionLedger.consume is runtime._consume_from_lineage
+
+    result = gate.record(
+        dataset_snapshot=_snapshot(),
+        research_protocol_id="protocol-v1",
+        confirmation_trial_family_id="family-v1",
+        channel=DisclosureChannel.EXPORT,
+        kind=DisclosureKind.EVENT_OUTCOME,
+        accessible_to_adaptive_actor=True,
+        disclosed_at_utc=_DISCLOSED_AT,
+    )
+    assert result.consumed is True
+    assert len(ledger.records()) == 1

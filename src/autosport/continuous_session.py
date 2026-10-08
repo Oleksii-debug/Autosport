@@ -968,7 +968,24 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                     "settlement evidence reference does not match lifecycle evidence"
                 )
             resolutions.append(resolution)
-        return tuple(resolutions)
+        # External outcome providers can retain their mutable dict after return.
+        # Detach before this DTO acquires product settlement authority.
+        return self._detached_settlement_resolutions(tuple(resolutions))
+
+    @staticmethod
+    def _detached_settlement_resolutions(
+        resolutions: tuple[SettlementResolution, ...],
+    ) -> tuple[SettlementResolution, ...]:
+        """Snapshot outcome maps before passing a resolution across a trust seam."""
+        if type(resolutions) is not tuple:
+            raise TypeError("settlement resolutions must be an exact tuple")
+        detached: list[SettlementResolution] = []
+        for resolution in resolutions:
+            if type(resolution) is not SettlementResolution:
+                raise TypeError("settlement resolutions must be exact SettlementResolution values")
+            resolution.validate(as_of=resolution.available_at)
+            detached.append(replace(resolution, quote_outcomes=resolution.quote_outcomes.copy()))
+        return tuple(detached)
 
     def _load_book(self) -> PaperBook:
         if self.paper_book_path.exists():
@@ -1144,14 +1161,14 @@ class ContinuousSessionCoordinator(metaclass=_ContinuousSessionCoordinatorMeta):
                 if prepare is not None:
                     prepare(
                         paper_book_path=self.paper_book_path,
-                        resolutions=resolutions,
+                        resolutions=self._detached_settlement_resolutions(resolutions),
                         at=now,
                     )
             settled, evidence_ids = self._settle(resolutions=resolutions)
             if self.settlement_learning_handoff is not None:
                 self.settlement_learning_handoff.reconcile_after_settlement(
                     paper_book_path=self.paper_book_path,
-                    resolutions=resolutions,
+                    resolutions=self._detached_settlement_resolutions(resolutions),
                     settled_ticket_ids=settled,
                     at=now,
                 )

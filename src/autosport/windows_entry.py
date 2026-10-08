@@ -24,13 +24,10 @@ def _show_workspace_configuration_error(detail: str) -> None:
 
     import ctypes
 
-    title = "Автоспорт — помилка конфігурації workspace"
-    message = (
-        "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
-        f"{detail}\n\n"
-        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
-        "потім перезапустіть Автоспорт. Economic і live state не змінено."
-    )
+    from autosport.localization import text
+
+    title = text("ui.windows.workspace_configuration.title")
+    message = text("ui.windows.workspace_configuration.message", detail=detail)
     # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
     # through standard Windows accessibility rather than a custom visual surface.
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)

@@ -39,3 +39,20 @@ def test_frozen_promotion_rule_rejects_duplicate_or_nonfinite_json(
 ) -> None:
     with pytest.raises(PromotionEvidenceError, match="not canonical JSON"):
         _frozen_promotion_rule_payload(malformed)
+
+
+@pytest.mark.parametrize("oversized_number", ["9" * 400, "-" + "9" * 400])
+def test_frozen_promotion_rule_rejects_oversized_integer_threshold(
+    oversized_number: str,
+) -> None:
+    # JSON integers beyond binary64 range must be rejected as untrusted
+    # evidence, not leak an OverflowError out of promotion qualification.
+    malformed = (
+        '{"kind":"autosport-promotion-rule-v1","primary_metric":"roi",'
+        '"minimum_improvement":' + oversized_number + ','
+        '"minimum_effective_sample_size":5}'
+    )
+    with pytest.raises(
+        PromotionEvidenceError, match="minimum improvement is invalid"
+    ):
+        _frozen_promotion_rule_payload(malformed)

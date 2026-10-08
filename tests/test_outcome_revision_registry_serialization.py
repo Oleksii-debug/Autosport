@@ -312,8 +312,9 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 rebound_clock.assert_not_called()
 
             durable = json.loads(path.read_text(encoding="utf-8"))
-            revision = durable["outcome_lineage_trust"][0]["revisions"][0]
-            self.assertNotIn("first_available_at", revision)
+            # The failed first issuance must not publish any trusted outcome
+            # lineage; pristine registries may omit this optional key.
+            self.assertFalse(durable.get("outcome_lineage_trust", []))
             self.assertEqual(durable["runs"], {})
             self.assertIsNone(self._resolve(registry, "9999-12-31T23:59:59Z"))
 
@@ -345,8 +346,9 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                     )
 
             durable = json.loads(path.read_text(encoding="utf-8"))
-            revision = durable["outcome_lineage_trust"][0]["revisions"][0]
-            self.assertNotIn("first_available_at", revision)
+            # The failed first issuance must not publish any trusted outcome
+            # lineage; pristine registries may omit this optional key.
+            self.assertFalse(durable.get("outcome_lineage_trust", []))
             self.assertEqual(durable["runs"], {})
 
     def test_rebinding_run_registry_clock_cannot_extend_trusted_history(self) -> None:
@@ -584,7 +586,10 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
         exact = self._binding("r1")
         hostile = object.__new__(HostileBinding)
         for field in OutcomeLineageBinding.__dataclass_fields__:
-            object.__setattr__(hostile, field, getattr(exact, field))
+            # The hostile property is intentionally unreadable and has no
+            # setter; the exact-type guard must reject before accessing it.
+            if field != "source_identity":
+                object.__setattr__(hostile, field, getattr(exact, field))
 
         with tempfile.TemporaryDirectory() as tmp:
             registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
@@ -598,7 +603,7 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
             with self.assertRaisesRegex(
-                OutcomeLineageTrustError,
+                ValueError,
                 "revision_id.*canonical",
             ):
                 registry.assert_outcome_lineage_compatible(binding)

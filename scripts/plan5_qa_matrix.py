@@ -15,7 +15,7 @@ import sys
 import tempfile
 from pathlib import Path
 
-SOURCE_SHA = re.compile(r"[0-9a-f]{40}\\Z")
+SOURCE_SHA = re.compile(r"[0-9a-f]{40}\Z")
 MAX_TEST_FILE_BYTES = 4 * 1024 * 1024
 AREAS: dict[str, tuple[str, ...]] = {
     "causal": (
@@ -60,7 +60,7 @@ def _read_fixture(root: Path, relative: str) -> str:
         raise MatrixError("invalid test path")
     path = root / relative
     try:
-        if path.is_symlink() or not path.is_file():
+        if path.parent.is_symlink() or path.is_symlink() or not path.is_file():
             raise MatrixError("missing or aliased QA test")
         stat = path.stat()
         if stat.st_size <= 0 or stat.st_size > MAX_TEST_FILE_BYTES:
@@ -91,6 +91,20 @@ def _assert_checkout(root: Path, source_sha: str) -> None:
         raise MatrixError("cannot prove checkout identity") from exc
     if check.returncode or check.stdout.strip() != source_sha:
         raise MatrixError("checkout SHA mismatch")
+    try:
+        clean = subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=no"],
+            cwd=root,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL,
+            timeout=15,
+            check=False,
+            text=True,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        raise MatrixError("cannot establish pristine tracked source") from exc
+    if clean.returncode or clean.stdout:
+        raise MatrixError("tracked checkout is not pristine")
 
 
 def _run_group(root: Path, paths: tuple[str, ...]) -> bool:
@@ -142,7 +156,7 @@ def _publish(output: Path, payload: dict[str, object]) -> None:
     output.parent.mkdir(parents=True, exist_ok=True)
     if output.is_symlink():
         raise MatrixError("output alias not permitted")
-    data = (json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\\n").encode("utf-8")
+    data = (json.dumps(payload, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode("utf-8")
     if len(data) > 65536:
         raise MatrixError("evidence exceeds resource bound")
     fd, tmp = tempfile.mkstemp(prefix=".plan5-qa-", suffix=".tmp", dir=output.parent)
@@ -165,6 +179,10 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     output = args.output.resolve(strict=False)
     try:
+        if args.output.is_symlink():
+            raise MatrixError("output alias not permitted")
+        if output.suffix.lower() != ".json" or any(part in {"src", "tests", "scripts", ".git"} for part in output.parts):
+            raise MatrixError("QA report must be separate from source and tests")
         # A stale report must not survive an attempted requalification.
         if output.is_symlink():
             raise MatrixError("output alias not permitted")

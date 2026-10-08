@@ -499,7 +499,12 @@ class CalculationServiceTests(unittest.TestCase):
                 self.assertIsNotNone(value)
                 object.__setattr__(invalid, field, TrapStr(value))
 
-                with self.assertRaisesRegex(ValueError, "quote fields are not canonical"):
+                # Exact timestamp validation precedes serialization and must
+                # reject str subclasses without dispatching TrapStr.strip().
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{field} must be a non-empty trimmed timezone-aware ISO timestamp",
+                ):
                     self.service.implied_probability_for_event(
                         invalid,
                         causal_cutoff_ts="2026-09-14T12:00:00+00:00",

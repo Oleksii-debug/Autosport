@@ -281,7 +281,14 @@ def test_dataset_causal_cutoff_after_decision_fails_closed(tmp_path) -> None:
         _canonical_feature_context(
             tmp_path, causal_cutoff="2026-09-20T10:02:01Z"
         )
-    assert not (tmp_path / "scientific-registry.json").exists()
+    # initialize_pristine itself creates an empty, durable registry before
+    # the invalid snapshot reaches append(). Refusal means NO new records,
+    # not that the already-created registry file disappears.
+    registry_file = tmp_path / "scientific-registry.json"
+    assert json.loads(registry_file.read_text(encoding="utf-8")) == {
+        "schema_version": ScientificRegistry.SCHEMA_VERSION,
+        "records": [],
+    }
     assert not (tmp_path / "dataset-snapshot-lineage.json").exists()
 
 

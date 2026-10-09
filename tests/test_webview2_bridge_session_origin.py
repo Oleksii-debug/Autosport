@@ -475,6 +475,9 @@ def test_bridge_rejects_controller_registry_record_downgrade(tmp_path) -> None:
 def test_bridge_rejects_canonical_controller_workspace_rebind(tmp_path) -> None:
     original_workspace = tmp_path / "original"
     controller = AutosportWebController(original_workspace)
+    # Preserve the exact canonical Path witness retained at construction. Rebuilding
+    # an equal Path does not restore the identity-sealed controller authority.
+    canonical_workspace_witness = controller.workspace
     bridge = AutosportWebBridge(controller)
     window = _Window()
     bridge._bind_trusted_window(window)
@@ -492,7 +495,7 @@ def test_bridge_rejects_canonical_controller_workspace_rebind(tmp_path) -> None:
         ):
             bridge._runtime_witness_path()
     finally:
-        controller.workspace = original_workspace
+        controller.workspace = canonical_workspace_witness
 
     assert bridge._trust_revoked is True
     bridge._close_from_host()

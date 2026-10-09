@@ -247,7 +247,7 @@ def test_emergency_stop_backend_result_is_focused_without_synchronous_state_refr
         "async function dispatch(actionId, payload = {}, options = {})"
     )
     dispatch_end = app_script.index(
-        "// The dedicated emergency-STOP asset reuses this frontend ordering fence.",
+        "globalThis.autosportDispatch = dispatch;",
         dispatch_start,
     )
     dispatch_body = app_script[dispatch_start:dispatch_end]

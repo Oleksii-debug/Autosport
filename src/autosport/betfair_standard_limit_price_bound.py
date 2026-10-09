@@ -26,6 +26,7 @@ import re
 from typing import Any, Mapping
 
 from .betfair_supervised_execution import (
+    _canonical_place_orders_request_body,
     PLACE_ORDERS_METHOD,
     BetfairSupervisedPlaceOrdersClient,
     WRITE_ADAPTER_ID,
@@ -47,7 +48,12 @@ _PROVIDER_CONTRACT_REF = (
 )
 _WRITE_ADAPTER_ID = WRITE_ADAPTER_ID
 _WRITE_ADAPTER_VERSION = WRITE_ADAPTER_VERSION
+_CANONICAL_CLIENT_TYPE = BetfairSupervisedPlaceOrdersClient
+# Compatibility authority for the independent product verifier. The offline
+# resolver still uses the shared exact production request serializer and never
+# dispatches through this callable or touches provider transport.
 _CANONICAL_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
+_CANONICAL_REQUEST_BODY = _canonical_place_orders_request_body
 _CAPTURE_PROVIDER_ORDER_REF = "0" * 32
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 
@@ -305,79 +311,26 @@ class BetfairStandardLimitPriceBoundEvidence:
         return payload
 
 
-# Internal fail-before-I/O capture signal must bypass the production
-# place_action `except Exception` transport-to-UNKNOWN boundary. This is
-# never exposed by a real provider transport.
-class _CapturedPlaceOrdersRequest(BaseException):
-    def __init__(self, body: bytes) -> None:
-        super().__init__("captured canonical placeOrders request")
-        self.body = body
-
-
-class _CaptureGate:
-    def require(self, **_kwargs: object) -> None:
-        return None
-
-
-class _CaptureCredentials:
-    application_key = "autosport-price-bound-capture"
-    session_token = "autosport-price-bound-capture"
-
-
-class _CaptureTransport:
-    def post(
-        self,
-        _url: str,
-        *,
-        headers: Mapping[str, str],
-        body: bytes,
-        timeout_seconds: float,
-    ) -> bytes:
-        del headers, timeout_seconds
-        if type(body) is not bytes:
-            raise BetfairStandardLimitPriceBoundError(
-                "canonical placeOrders request body is not bytes"
-            )
-        raise _CapturedPlaceOrdersRequest(body)
-
-
 def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
-    """Capture the exact instruction emitted by the real provider-write method.
+    """Inspect shared production serializer without opening final-send path.
 
-    The transport is a local fail-before-I/O capture object. Therefore this path
-    cannot contact Betfair, while any semantic change in ``place_action`` is
-    observed at the same serialized request boundary the real transport consumes.
-    Unsupported request drift fails closed instead of relying on a manually
-    duplicated request builder or an adapter-version bump.
+    This offline projection cannot invoke provider transport or mint a send
+    admission, even after mandatory durable confirmation is enabled.
     """
-
-    client = object.__new__(BetfairSupervisedPlaceOrdersClient)
-    client._credentials = _CaptureCredentials()
-    client._gate = _CaptureGate()
-    client._transport = _CaptureTransport()
-    client._timeout_seconds = 1.0
-    client._clock = lambda: "1970-01-01T00:00:00+00:00"
-    client._request_id = 0
-
-    try:
-        _CANONICAL_PLACE_ACTION(
-            client,
-            action,
-            profile=None,
-            bound=None,
-            provider_order_ref=_CAPTURE_PROVIDER_ORDER_REF,
-            execution_workspace=Path("."),
-        )
-    except _CapturedPlaceOrdersRequest as captured:
-        body = captured.body
-    except Exception as exc:
+    if BetfairSupervisedPlaceOrdersClient is not _CANONICAL_CLIENT_TYPE:
         raise BetfairStandardLimitPriceBoundError(
             "canonical Betfair placeOrders request could not be captured"
-        ) from exc
-    else:
-        raise BetfairStandardLimitPriceBoundError(
-            "canonical Betfair placeOrders path did not reach the sealed capture transport"
         )
+    try:
+        body = _CANONICAL_REQUEST_BODY(
+            action,
+            provider_order_ref=_CAPTURE_PROVIDER_ORDER_REF,
+            request_id=1,
+        )
+    except Exception:
+        raise BetfairStandardLimitPriceBoundError(
+            "canonical Betfair placeOrders request could not be captured"
+        ) from None
 
     try:
         envelope = json.loads(body.decode("utf-8"))
@@ -439,7 +392,7 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
         raise BetfairStandardLimitPriceBoundError(
             "only the canonical Betfair BACK standard-LIMIT path is supported"
         )
-    if not callable(_CANONICAL_PLACE_ACTION):
+    if not callable(_CANONICAL_REQUEST_BODY):
         raise BetfairStandardLimitPriceBoundError(
             "canonical Betfair placeOrders implementation is unavailable"
         )

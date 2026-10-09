@@ -13,6 +13,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
+
 
 SCHEMA_VERSION = 1
 _MAX_EXECUTION_DECIMAL_TEXT_LENGTH = 8192
@@ -618,23 +624,26 @@ class RealExecutionLedger:
         self._path_durable = True
 
     def _mutate(self, operation: Callable[[], _T]) -> _T:
+        """Hold a crash-releasing OS writer lock, never a stale-file existence lease.
+
+        Persistent lock-file bytes are not ownership: a killed writer must leave
+        SUBMITTED effects reconcilable without allowing duplicate provider sends.
+        """
         with self._thread_lock:
             try:
-                fd = os.open(
-                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
-            except FileExistsError as exc:
+                with WorkspaceEconomicLock(
+                    self.path.parent.resolve(),
+                    file_name=self._lock_path.name,
+                ):
+                    return operation()
+            except WorkspaceEconomicLockBusyError as exc:
                 raise ExecutionLedgerBusyError(
-                    "writer lock exists; fail closed until writer/crash ownership is resolved"
+                    "writer lock is owned by another process; fail closed"
                 ) from exc
-            try:
-                return operation()
-            finally:
-                os.close(fd)
-                try:
-                    self._lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+            except WorkspaceEconomicLockError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger crash-releasing writer lock failed"
+                ) from exc
 
     @classmethod
     def _validate_event(
@@ -1780,7 +1789,13 @@ class RealExecutionLedger:
                 payload,
             )
 
-        self._mutate(operation)
+        # Revocation and the product-owned Betfair final-send path must share
+        # one cross-process, crash-releasing authority fence.  Otherwise a
+        # revocation can commit after the sender's approval read and before
+        # the irreversible provider POST.  A concurrent revocation fails
+        # closed while a send owns the economic writer lock.
+        with WorkspaceEconomicLock(self.path.parent.resolve()):
+            self._mutate(operation)
 
     def supervised_approval_is_active(
         self,

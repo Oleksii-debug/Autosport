@@ -1,4 +1,5 @@
 import json
+import multiprocessing
 import os
 import tempfile
 import unittest
@@ -64,6 +65,24 @@ def plan(*actions: ExecutionAction, plan_id: str = "p1") -> ExecutionPlan:
     )
 
 
+def _crash_after_submitted_with_live_writer_lock(workspace: str) -> None:
+    """Simulate a real killed process holding the ledger's OS writer lease."""
+    ledger = RealExecutionLedger(Path(workspace) / "real.jsonl")
+    ledger.reserve_plan(plan(action()))
+    ledger.begin_attempt(
+        plan_id="p1",
+        action_id="a1",
+        attempt_id="try-hard-crash",
+        reserved_at=RESERVED_AT,
+    )
+    ledger.mark_submitted(
+        "try-hard-crash",
+        submitted_at=SUBMITTED_AT,
+    )
+    ledger._mutate(lambda: os._exit(91))
+    os._exit(92)
+
+
 class RealExecutionLedgerTests(unittest.TestCase):
     def test_first_create_orders_file_sync_before_path_publication_barrier(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -97,7 +116,11 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     current.fingerprint,
                 )
 
-            self.assertEqual(calls, ["file", "directory"])
+            # The crash-releasing OS writer lock may fsync its lock file
+            # before the ledger publish barrier. The ledger file must still
+            # be synced immediately before the parent directory.
+            self.assertEqual(calls[-2:], ["file", "directory"])
+            self.assertEqual(calls.count("directory"), 1)
 
     def test_failed_first_create_publish_barrier_never_returns_reservation_authority(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -1767,13 +1790,62 @@ class RealExecutionLedgerTests(unittest.TestCase):
             ):
                 ledger.verify_integrity()
 
-    def test_existing_writer_lock_fails_closed(self):
+    def test_persistent_writer_lock_without_os_owner_is_reusable(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "real.jsonl"
             ledger = RealExecutionLedger(path)
-            ledger._lock_path.write_text("owner", encoding="utf-8")
-            with self.assertRaises(ExecutionLedgerBusyError):
-                ledger.reserve_plan(plan(action()))
+            ledger._lock_path.write_text("stale-process-marker", encoding="utf-8")
+            ledger.reserve_plan(plan(action()))
+            self.assertTrue(ledger._lock_path.exists())
+            self.assertEqual(ledger.verify_integrity(), 1)
+
+    def test_live_writer_lock_fails_closed(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "real.jsonl"
+            ledger = RealExecutionLedger(path)
+            competing = RealExecutionLedger(path)
+
+            def while_writer_is_live():
+                with self.assertRaises(ExecutionLedgerBusyError):
+                    competing.reserve_plan(plan(action()))
+
+            ledger._mutate(while_writer_is_live)
+
+    def test_hard_crash_releases_submitted_writer_for_unknown_recovery(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            process = multiprocessing.get_context("spawn").Process(
+                target=_crash_after_submitted_with_live_writer_lock,
+                args=(tmp,),
+            )
+            process.start()
+            process.join(timeout=30)
+            if process.is_alive():
+                process.kill()
+                process.join()
+                self.fail("hard-crash fixture did not terminate")
+            self.assertEqual(process.exitcode, 91)
+
+            ledger = RealExecutionLedger(Path(tmp) / "real.jsonl")
+            self.assertTrue(ledger._lock_path.exists())
+            self.assertEqual(
+                ledger.attempt_state("try-hard-crash"),
+                AttemptState.SUBMITTED,
+            )
+            with patch(
+                "autosport.real_execution_ledger._now",
+                return_value=UNKNOWN_AT,
+            ):
+                self.assertEqual(
+                    ledger.recover_uncertain(),
+                    ("try-hard-crash",),
+                )
+            self.assertEqual(
+                ledger.attempt_state("try-hard-crash"),
+                AttemptState.UNKNOWN,
+            )
+            self.assertFalse(
+                ledger.can_retry_action(plan_id="p1", action_id="a1")
+            )
 
     def test_rejected_ack_cannot_claim_accepted_money(self):
         with self.assertRaises(ValueError):

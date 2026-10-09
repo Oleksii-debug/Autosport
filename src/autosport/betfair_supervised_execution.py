@@ -7,12 +7,14 @@ RealExecutionLedger remains the sole execution-effect authority.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 import json
+import sys
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -41,6 +43,7 @@ from .real_execution_ledger import (
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
+from . import supervised_execution as _supervised_execution_runtime
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,
@@ -51,6 +54,12 @@ PLACE_ORDERS_METHOD = "SportsAPING/v1.0/placeOrders"
 WRITE_ADAPTER_ID = "betfair-exchange-jsonrpc-supervised-placeorders"
 WRITE_ADAPTER_VERSION = "1"
 _MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
+
+# Process-local dispatch-context check is a secondary guard, not execution
+# authority. The durable receipt remains the required pre-POST authority.
+_FINAL_SEND_ADMISSION: ContextVar[object | None] = ContextVar(
+    "autosport_betfair_final_send_admission", default=None
+)
 
 
 class BetfairSupervisedExecutionError(RuntimeError):
@@ -549,6 +558,60 @@ def _validate_betfair_place_action(action: ExecutionAction) -> int:
     return int(raw_selection_id)
 
 
+def _canonical_place_orders_request_body(
+    action: ExecutionAction,
+    *,
+    provider_order_ref: str,
+    request_id: int,
+) -> bytes:
+    """Build exact canonical request bytes without transport or send admission.
+
+    Both provider dispatch and OFFLINE standard-LIMIT verification use this
+    builder; there is no second independent request serializer.
+    """
+    selection_id = _validate_betfair_place_action(action)
+    provider_ref = _text(provider_order_ref, "provider_order_ref")
+    if len(provider_ref) > 32 or any(
+        character not in "0123456789abcdef"
+        for character in provider_ref
+    ):
+        raise BetfairSupervisedExecutionError(
+            "provider_order_ref must be <=32 lowercase hex characters"
+        )
+    if type(request_id) is not int or request_id < 1:
+        raise BetfairSupervisedExecutionError("request_id must be positive int")
+    customer_ref = sha256(
+        f"placeOrders:{provider_ref}".encode("utf-8")
+    ).hexdigest()[:32]
+    action_payload = ExecutionAction.to_dict(action)
+    instruction = {
+        "selectionId": selection_id,
+        "handicap": 0,
+        "side": action.side,
+        "orderType": "LIMIT",
+        "limitOrder": {
+            "size": action_payload["requested_stake"],
+            "price": action_payload["requested_odds"],
+            "persistenceType": "LAPSE",
+        },
+        "customerOrderRef": provider_ref,
+    }
+    params = {
+        "marketId": action.market_id,
+        "instructions": [instruction],
+        "customerRef": customer_ref,
+        "async": False,
+    }
+    envelope = {
+        "jsonrpc": "2.0",
+        "method": PLACE_ORDERS_METHOD,
+        "params": params,
+        "id": request_id,
+    }
+    return _canonical_bytes(envelope)
+
+
+
 class BetfairSupervisedPlaceOrdersClient:
     """Action-specific placeOrders client; no arbitrary write RPC is exposed."""
 
@@ -598,6 +661,7 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None = None,
     ) -> BetfairPlaceExecutionReport:
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
@@ -606,45 +670,25 @@ class BetfairSupervisedPlaceOrdersClient:
             bound=bound,
             execution_workspace=execution_workspace,
         )
-        provider_ref = _text(provider_order_ref, "provider_order_ref")
-        if len(provider_ref) > 32 or any(
-            character not in "0123456789abcdef"
-            for character in provider_ref
+        if (
+            _before_transport is None
+            or _FINAL_SEND_ADMISSION.get() is not _before_transport
+            # ContextVar.set() is public Python API: a caller can forge a
+            # matching callback without ever entering the durable executor.
+            # Require the exact canonical call-site code object as a second
+            # local guard. The durable receipt/ledger checks remain primary.
+            or sys._getframe(1).f_code is not _CANONICAL_BETFAIR_EXECUTOR_CODE
         ):
             raise BetfairSupervisedExecutionError(
-                "provider_order_ref must be <=32 lowercase hex characters"
+                "direct placeOrders dispatch requires canonical confirmed executor"
             )
-
         request_id = self._next_request_id()
-        customer_ref = sha256(
-            f"placeOrders:{provider_ref}".encode("utf-8")
-        ).hexdigest()[:32]
-        action_payload = ExecutionAction.to_dict(action)
-        instruction = {
-            "selectionId": selection_id,
-            "handicap": 0,
-            "side": action.side,
-            "orderType": "LIMIT",
-            "limitOrder": {
-                "size": action_payload["requested_stake"],
-                "price": action_payload["requested_odds"],
-                "persistenceType": "LAPSE",
-            },
-            "customerOrderRef": provider_ref,
-        }
-        params = {
-            "marketId": action.market_id,
-            "instructions": [instruction],
-            "customerRef": customer_ref,
-            "async": False,
-        }
-        envelope = {
-            "jsonrpc": "2.0",
-            "method": PLACE_ORDERS_METHOD,
-            "params": params,
-            "id": request_id,
-        }
-        body = _canonical_bytes(envelope)
+        provider_ref = _text(provider_order_ref, "provider_order_ref")
+        body = _canonical_place_orders_request_body(
+            action,
+            provider_order_ref=provider_ref,
+            request_id=request_id,
+        )
         request_sha256 = sha256(body).hexdigest()
         headers = {
             "Accept": "application/json",
@@ -652,6 +696,17 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
+        # Private final-send admission seam. A future durable executor must
+        # resolve and consume its confirmation against these exact request bytes
+        # before allowing the transport. This hook never runs inside the
+        # provider-error/UNKNOWN handler: rejection means zero network calls.
+        if _before_transport is not None:
+            try:
+                _before_transport(request_sha256)
+            except Exception:
+                raise BetfairSupervisedExecutionError(
+                    "final-send admission failed before provider transport"
+                ) from None
         try:
             payload = self._transport.post(
                 BETTING_JSON_RPC_ENDPOINT,
@@ -791,12 +846,14 @@ def _parse_place_orders_response(
         echoed.get("limitOrder"),
         "echoed limitOrder",
     )
-    try:
-        echoed_selection = int(echoed.get("selectionId"))
-    except (TypeError, ValueError) as exc:
+    # Reject fractional, float, string and boolean echoes rather than
+    # coercing them with int(), which can silently truncate or reinterpret
+    # an untrusted provider selection identity.
+    echoed_selection = echoed.get("selectionId")
+    if type(echoed_selection) is not int or echoed_selection < 1:
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders echoed selection is malformed"
-        ) from exc
+        )
     try:
         exact_echo = (
             str(echoed_selection) == action.selection_id
@@ -920,6 +977,11 @@ def _report_outcome(
     return PlaceOrdersOutcome.UNKNOWN
 
 
+# Capture the class-owned dispatch function before any caller can shadow a
+# client instance. Approval/receipt/ledger authorities remain independent.
+_CANONICAL_BETFAIR_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
+
+
 def read_betfair_supervised_action_readback(
     client: BetfairReadOnlyClient,
     ledger: RealExecutionLedger,
@@ -967,22 +1029,32 @@ def execute_betfair_supervised_action(
     profile: BookmakerCapabilityProfile,
     client: BetfairSupervisedPlaceOrdersClient,
     clock: Callable[[], str] | None = None,
+    confirmation_receipt_id: str | None = None,
+    confirmation_review_sha256: str | None = None,
 ) -> BetfairSupervisedExecutionResult:
     """Reserve -> submit -> placeOrders -> report -> canonical ledger transition."""
 
     if not isinstance(ledger, RealExecutionLedger):
         raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(
-        client,
-        BetfairSupervisedPlaceOrdersClient,
-    ):
+    if type(client) is not BetfairSupervisedPlaceOrdersClient:
         raise TypeError(
-            "client must be BetfairSupervisedPlaceOrdersClient"
+            "client must be exact BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
-    now = clock or _now
+    # Caller clocks are observation/test conveniences, never final-send
+    # authority: a backdated clock could otherwise bypass quote/review expiry.
+    _ = clock
+    now = _supervised_execution_runtime._trusted_now
     execution_workspace = ledger.path.parent.resolve()
+    # No legacy path may produce placeOrders without an exact, durable and
+    # single-use operator receipt. Reject before any durable attempt mutation.
+    if confirmation_receipt_id is None or confirmation_review_sha256 is None:
+        raise BetfairSupervisedExecutionError(
+            "durable confirmation receipt and review identity are required"
+        )
+    _sha(confirmation_receipt_id, "confirmation_receipt_id")
+    _sha(confirmation_review_sha256, "confirmation_review_sha256")
 
     # Serialize the current owner authority through the actual provider-write
     # boundary, not just through local ledger preparation. EconomicGoalStore
@@ -1015,14 +1087,75 @@ def execute_betfair_supervised_action(
             attempt_id,
             submitted_at=now(),
         )
-        try:
-            report = client.place_action(
-                action,
-                profile=profile,
-                bound=bound,
-                provider_order_ref=provider_order_ref,
-                execution_workspace=execution_workspace,
+        def confirmation_admission(request_sha256: str) -> None:
+            # The submitted instant is recovered from the verified
+            # execution ledger, never minted by the callback.
+            from .betfair_execution_confirmation import (
+                consume_betfair_execution_confirmation,
             )
+            view = ledger.verified_execution_view(
+                bound.execution_plan.plan_id
+            )
+            attempts = [
+                entry for entry in view.attempts
+                if entry.attempt.attempt_id == attempt_id
+            ]
+            if (
+                view.plan_fingerprint != bound.execution_plan.fingerprint
+                or len(attempts) != 1
+                or attempts[0].action.action_id != action.action_id
+                or attempts[0].state is not AttemptState.SUBMITTED
+                or attempts[0].provider_order_ref != provider_order_ref
+                or attempts[0].submitted_at is None
+                or not ledger.supervised_approval_is_active(
+                    plan_id=bound.execution_plan.plan_id,
+                    approval_id=approval.ledger_identity,
+                    approval_fingerprint=approval.fingerprint,
+                )
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "durable attempt/approval changed before final send"
+                )
+            # Capture one product-owned instant for both quote and durable
+            # operator-confirmation expiry, immediately before transport.
+            final_send_at = now()
+            if _time(final_send_at, "final send time") >= _time(
+                action.expires_at, "quote expires_at"
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "quote expired before final send"
+                )
+            consume_betfair_execution_confirmation(
+                execution_workspace,
+                bound,
+                approval,
+                action_id=action_id,
+                attempt_id=attempt_id,
+                receipt_id=confirmation_receipt_id,
+                expected_review_sha256=confirmation_review_sha256,
+                request_sha256=request_sha256,
+                submitted_at=attempts[0].submitted_at,
+                final_send_at=final_send_at,
+            )
+        try:
+            # A direct caller cannot opt into an unguarded POST by supplying
+            # a no-op callback. Only this canonical executor owns the scoped
+            # callback while the existing economic writer fence is held.
+            admission_token = _FINAL_SEND_ADMISSION.set(confirmation_admission)
+            try:
+                # Dispatch via the sealed class-defined implementation, not
+                # a caller-shadowed instance attribute.
+                report = _CANONICAL_BETFAIR_PLACE_ACTION(
+                    client,
+                    action,
+                    profile=profile,
+                    bound=bound,
+                    provider_order_ref=provider_order_ref,
+                    execution_workspace=execution_workspace,
+                    _before_transport=confirmation_admission,
+                )
+            finally:
+                _FINAL_SEND_ADMISSION.reset(admission_token)
         except (
             BetfairPlaceOrdersAmbiguous,
             BetfairSupervisedExecutionError,
@@ -1112,3 +1245,8 @@ def execute_betfair_supervised_action(
         evidence_id,
         receipt,
     )
+
+
+# Snapshot the canonical final-send code object after definition. The
+# low-level place_action method must not accept caller-minted ContextVars.
+_CANONICAL_BETFAIR_EXECUTOR_CODE = execute_betfair_supervised_action.__code__

@@ -451,6 +451,70 @@ def _prepared(
     return profile, bound, approval, ledger, action, goal_store
 
 
+# Legacy provider-semantics tests issue a real durable *fixture* review/receipt.
+# They must not revive the retired unconfirmed production send path.
+_CANONICAL_EXECUTE_BETFAIR = execute_betfair_supervised_action
+_TEST_RECEIPTS: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def execute_betfair_supervised_action(*args, **kwargs):
+    """Keep legacy provider assertions behind the production one-shot gate."""
+    if "confirmation_receipt_id" not in kwargs:
+        ledger, bound, approval = args[:3]
+        attempt_id = kwargs["attempt_id"]
+        cache_key = (str(ledger.path.resolve()), attempt_id)
+        if cache_key not in _TEST_RECEIPTS:
+            from autosport.betfair_execution_confirmation import (
+                CONFIRMATION_FILENAME,
+                betfair_execution_confirmation_spec,
+            )
+            from autosport.supervised_confirmation import (
+                SupervisedConfirmationAuthority,
+            )
+            try:
+                action_id = kwargs["action_id"]
+                spec = betfair_execution_confirmation_spec(
+                    bound,
+                    approval,
+                    action_id=action_id,
+                    attempt_id=attempt_id,
+                    review_id="legacy-fixture-" + attempt_id,
+                    risk_evidence_sha256="f" * 64,
+                )
+                authority = SupervisedConfirmationAuthority(
+                    ledger.path.parent / CONFIRMATION_FILENAME,
+                    clock=lambda: datetime.fromisoformat(
+                        "2026-09-19T08:00:02.200000+00:00"
+                    ),
+                )
+                review = authority.prepare_review(
+                    review_id=spec.review_id,
+                    decision_id=spec.decision_id,
+                    bookmaker_id=spec.bookmaker_id,
+                    account_id=spec.account_id,
+                    decision_sha256=spec.decision_sha256,
+                    approval_evidence_sha256=spec.approval_evidence_sha256,
+                    risk_evidence_sha256=spec.risk_evidence_sha256,
+                    review_payload=spec.review_payload,
+                    ttl_seconds=30,
+                )
+                receipt = authority.confirm_review(
+                    review_id=review.review_id,
+                    expected_review_sha256=review.review_sha256,
+                )
+                _TEST_RECEIPTS[cache_key] = (
+                    receipt.receipt_id, review.review_sha256
+                )
+            except (ValueError, SupervisedExecutionError):
+                # A negative test with malformed plan/approval must still
+                # reach the canonical validator and fail before any effect.
+                _TEST_RECEIPTS[cache_key] = ("f" * 64, "f" * 64)
+        receipt_id, review_sha = _TEST_RECEIPTS[cache_key]
+        kwargs["confirmation_receipt_id"] = receipt_id
+        kwargs["confirmation_review_sha256"] = review_sha
+    return _CANONICAL_EXECUTE_BETFAIR(*args, **kwargs)
+
+
 def _assert_current_goal_denied_before_effect(
     tmp: str,
     successor: EconomicGoalContract,
@@ -1069,6 +1133,11 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
                 profile=profile,
                 client=retry_client,
                 clock=lambda: "2026-09-19T08:00:09+00:00",
+                # Exercise the canonical no-effect/retry guard directly.
+                # Do not let the legacy fixture helper mint a second review
+                # for the same UNKNOWN provider decision at a stale clock.
+                confirmation_receipt_id="f" * 64,
+                confirmation_review_sha256="f" * 64,
             )
         assert retry_transport.calls == []
 
@@ -1356,8 +1425,8 @@ def test_write_transport_failure_drops_secret_exception_context(transport_error)
         transport = _Transport(hostile_response)
         client = _enabled_client(profile, transport, store=goal_store)
         with pytest.raises(
-            BetfairPlaceOrdersAmbiguous,
-            match="authoritative readback required",
+            BetfairSupervisedExecutionError,
+            match="direct placeOrders dispatch requires canonical confirmed executor",
         ) as raised:
             client.place_action(
                 action,
@@ -1367,7 +1436,7 @@ def test_write_transport_failure_drops_secret_exception_context(transport_error)
                 execution_workspace=Path(tmp),
             )
 
-        assert len(transport.calls) == 1
+        assert transport.calls == []
         assert raised.value.__cause__ is None
         assert raised.value.__context__ is None
         assert "app-key" not in str(raised.value)

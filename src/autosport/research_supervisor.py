@@ -15,6 +15,7 @@ from datetime import datetime, timezone
 from enum import StrEnum
 from pathlib import Path
 from typing import Any
+from weakref import WeakKeyDictionary
 
 from .integrity import atomic_write_json
 from .scientific_registry import ScientificRegistry
@@ -241,12 +242,115 @@ class SupervisorSnapshot:
     updated_at: str
 
 
+def _scientific_registry_binding_descriptor():
+    bindings: WeakKeyDictionary[
+        object, tuple[ScientificRegistry, Path, Path, Path, Path]
+    ] = WeakKeyDictionary()
+
+    class _ScientificRegistryBinding:
+        __slots__ = ()
+
+        def __get__(self, instance, owner=None):
+            if instance is None:
+                return self
+            bound = bindings.get(instance)
+            if bound is None:
+                raise ResearchSupervisorError(
+                    "scientific registry authority is unbound"
+                )
+            (
+                registry,
+                supervisor_path,
+                registry_path,
+                resolved_supervisor_path,
+                resolved_registry_path,
+            ) = bound
+            current_supervisor_path = Path(instance.path)
+            current_registry_path = Path(registry.path)
+            try:
+                current_resolved_supervisor_path = current_supervisor_path.resolve()
+                current_resolved_registry_path = current_registry_path.resolve()
+            except (OSError, RuntimeError) as exc:
+                raise ResearchSupervisorError(
+                    "scientific registry authority path cannot be resolved"
+                ) from exc
+            if (
+                current_supervisor_path != supervisor_path
+                or current_registry_path != registry_path
+                or current_resolved_supervisor_path != resolved_supervisor_path
+                or current_resolved_registry_path != resolved_registry_path
+            ):
+                raise ResearchSupervisorError(
+                    "scientific registry authority binding changed"
+                )
+            return registry
+
+        def __set__(self, instance, value) -> None:
+            if not isinstance(value, ScientificRegistry):
+                raise TypeError("scientific_registry must be ScientificRegistry")
+            supervisor_path = Path(instance.path)
+            registry_path = Path(value.path)
+            try:
+                resolved_supervisor_path = supervisor_path.resolve()
+                resolved_registry_path = registry_path.resolve()
+            except (OSError, RuntimeError) as exc:
+                raise ResearchSupervisorError(
+                    "scientific registry authority path cannot be resolved"
+                ) from exc
+            binding = (
+                value,
+                supervisor_path,
+                registry_path,
+                resolved_supervisor_path,
+                resolved_registry_path,
+            )
+            current = bindings.get(instance)
+            if current is None:
+                bindings[instance] = binding
+                return
+            if current == binding:
+                return
+            raise ResearchSupervisorError(
+                "scientific registry authority binding is immutable"
+            )
+
+        def __delete__(self, instance) -> None:
+            raise ResearchSupervisorError(
+                "scientific registry authority binding is immutable"
+            )
+
+    return _ScientificRegistryBinding()
+
+
+_SCIENTIFIC_REGISTRY_BINDING = _scientific_registry_binding_descriptor()
+
+
+def _assert_scientific_registry_class_binding(instance: object) -> None:
+    live_binding = None
+    for owner in type(instance).__mro__:
+        if "scientific_registry" in owner.__dict__:
+            live_binding = owner.__dict__["scientific_registry"]
+            break
+    if live_binding is not _SCIENTIFIC_REGISTRY_BINDING:
+        raise ResearchSupervisorError(
+            "scientific registry authority class binding changed"
+        )
+
+
+def _scientific_registry_authority(instance: object) -> ScientificRegistry:
+    _assert_scientific_registry_class_binding(instance)
+    return _SCIENTIFIC_REGISTRY_BINDING.__get__(instance, type(instance))
+
+
 class ResearchSupervisor:
     """Durable idempotent control seam for one scientific-research workspace."""
+
+    scientific_registry = _SCIENTIFIC_REGISTRY_BINDING
 
     def __init__(self, path: str | Path, scientific_registry: ScientificRegistry) -> None:
         if not isinstance(scientific_registry, ScientificRegistry):
             raise TypeError("scientific_registry must be ScientificRegistry")
+        _assert_scientific_registry_class_binding(self)
         self.path = Path(path)
         self.scientific_registry = scientific_registry
         if self.path.parent.resolve() != scientific_registry.path.parent.resolve():
@@ -333,6 +437,10 @@ class ResearchSupervisor:
         seen_triggers: dict[str, str] = {}
         for run in state["runs"]:
             self._validate_run(run)
+            self._validate_scientific_lineage(
+                run_question_id=run["question_id"],
+                bindings=run["bindings"],
+            )
             if run["run_id"] in seen_runs:
                 raise ValueError("research supervisor contains duplicate run identity")
             seen_runs.add(run["run_id"])
@@ -519,7 +627,7 @@ class ResearchSupervisor:
         for key, value in values:
             record_type = _SCIENTIFIC_BINDINGS.get(key)
             if record_type is not None:
-                entry = self.scientific_registry.get(record_type, value)
+                entry = _scientific_registry_authority(self).get(record_type, value)
                 if entry is None:
                     raise ResearchSupervisorError(
                         f"binding references missing {record_type}:{value}"
@@ -542,6 +650,342 @@ class ResearchSupervisor:
                 raise ResearchSupervisorError(f"unsupported supervisor binding: {key}")
         return tuple(normalized)
 
+    def _validate_scientific_lineage(
+        self,
+        *,
+        run_question_id: str,
+        bindings: dict[str, str],
+    ) -> None:
+        """Fail closed when individually valid scientific IDs cross causal lineages."""
+
+        question_id = _text(run_question_id, "run_question_id")
+        question = _scientific_registry_authority(self).get("ResearchQuestion", question_id)
+        if question is None:
+            raise ResearchSupervisorError(
+                f"run references missing ResearchQuestion:{question_id}"
+            )
+        question_payload_sha256 = _digest(question.payload)
+
+        hypothesis_id = bindings.get("hypothesis_id")
+        hypothesis = None
+        if hypothesis_id is not None:
+            hypothesis = _scientific_registry_authority(self).get("Hypothesis", hypothesis_id)
+            if hypothesis is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing Hypothesis:{hypothesis_id}"
+                )
+            if hypothesis.payload.get("research_question_id") != question_id:
+                raise ResearchSupervisorError(
+                    "hypothesis research question does not match supervisor run"
+                )
+
+        protocol_id = bindings.get("research_protocol_id")
+        protocol = None
+        protocol_binding: dict[str, Any] | None = None
+        if protocol_id is not None:
+            if hypothesis is None:
+                raise ResearchSupervisorError(
+                    "research protocol requires explicit supervisor hypothesis binding"
+                )
+
+            protocol = _scientific_registry_authority(self).get("ResearchProtocol", protocol_id)
+            if protocol is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing ResearchProtocol:{protocol_id}"
+                )
+            protocol_binding = protocol.payload.get("binding")
+            if type(protocol_binding) is not dict:
+                raise ResearchSupervisorError(
+                    "research protocol lacks canonical scientific binding"
+                )
+            if protocol_binding.get("research_question_id") != question_id:
+                raise ResearchSupervisorError(
+                    "research protocol question does not match supervisor run"
+                )
+            if protocol_binding.get("research_question_sha256") != question_payload_sha256:
+                raise ResearchSupervisorError(
+                    "research protocol question digest does not match canonical question"
+                )
+
+            protocol_hypothesis_id = protocol_binding.get("hypothesis_id")
+            if type(protocol_hypothesis_id) is not str or not protocol_hypothesis_id:
+                raise ResearchSupervisorError(
+                    "research protocol lacks canonical hypothesis identity"
+                )
+            protocol_hypothesis = _scientific_registry_authority(self).get(
+                "Hypothesis", protocol_hypothesis_id
+            )
+            if protocol_hypothesis is None:
+                raise ResearchSupervisorError(
+                    "research protocol references missing canonical hypothesis"
+                )
+            if protocol_hypothesis.payload.get("research_question_id") != question_id:
+                raise ResearchSupervisorError(
+                    "research protocol hypothesis belongs to another research question"
+                )
+            if protocol_binding.get("hypothesis_sha256") != _digest(
+                protocol_hypothesis.payload
+            ):
+                raise ResearchSupervisorError(
+                    "research protocol hypothesis digest does not match canonical hypothesis"
+                )
+            if protocol_hypothesis_id != hypothesis.record_id:
+                raise ResearchSupervisorError(
+                    "research protocol hypothesis does not match supervisor binding"
+                )
+
+        def require_binding(binding_key: str, label: str) -> str:
+            value = bindings.get(binding_key)
+            if value is None:
+                raise ResearchSupervisorError(
+                    f"{label} requires explicit supervisor {binding_key} binding"
+                )
+            return value
+
+        dataset_snapshot_id = bindings.get("dataset_snapshot_id")
+        if dataset_snapshot_id is not None:
+            if protocol is None or protocol_binding is None:
+                raise ResearchSupervisorError(
+                    "dataset snapshot requires explicit supervisor research_protocol_id binding"
+                )
+            dataset = _scientific_registry_authority(self).get(
+                "DatasetSnapshot", dataset_snapshot_id
+            )
+            if dataset is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing DatasetSnapshot:{dataset_snapshot_id}"
+                )
+            if dataset.payload.get("manifest_sha256") != protocol.payload.get(
+                "dataset_manifest_sha256"
+            ):
+                raise ResearchSupervisorError(
+                    "dataset snapshot manifest does not match research protocol"
+                )
+            try:
+                dataset_cutoff = _instant(
+                    dataset.payload.get("causal_cutoff"),
+                    "DatasetSnapshot.causal_cutoff",
+                )
+                protocol_cutoff = _instant(
+                    protocol_binding.get("causal_cutoff"),
+                    "ResearchProtocol.binding.causal_cutoff",
+                )
+            except (TypeError, ValueError) as exc:
+                raise ResearchSupervisorError(
+                    "dataset/protocol causal cutoff is invalid"
+                ) from exc
+            if dataset_cutoff != protocol_cutoff:
+                raise ResearchSupervisorError(
+                    "dataset snapshot causal cutoff does not match research protocol"
+                )
+
+        feature_set_id = bindings.get("feature_set_id")
+        if feature_set_id is not None:
+            if protocol_binding is None:
+                raise ResearchSupervisorError(
+                    "feature set requires explicit supervisor research_protocol_id binding"
+                )
+            feature = _scientific_registry_authority(self).get("FeatureSet", feature_set_id)
+            if feature is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing FeatureSet:{feature_set_id}"
+                )
+            if feature.payload.get("version") != protocol_binding.get(
+                "feature_set_version"
+            ):
+                raise ResearchSupervisorError(
+                    "feature set version does not match research protocol"
+                )
+
+        model_version_id = bindings.get("model_version_id")
+        if model_version_id is not None:
+            if protocol_binding is None:
+                raise ResearchSupervisorError(
+                    "model version requires explicit supervisor research_protocol_id binding"
+                )
+            model = _scientific_registry_authority(self).get("ModelVersion", model_version_id)
+            if model is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing ModelVersion:{model_version_id}"
+                )
+            expected_model_links = {
+                "research_protocol_id": require_binding(
+                    "research_protocol_id", "model version"
+                ),
+                "dataset_snapshot_id": require_binding(
+                    "dataset_snapshot_id", "model version"
+                ),
+                "feature_set_id": require_binding("feature_set_id", "model version"),
+            }
+            for field, expected in expected_model_links.items():
+                if model.payload.get(field) != expected:
+                    raise ResearchSupervisorError(
+                        f"model version {field} does not match supervisor binding"
+                    )
+            if model.payload.get("config_sha256") != protocol_binding.get(
+                "code_config_sha256"
+            ):
+                raise ResearchSupervisorError(
+                    "model version config does not match research protocol"
+                )
+
+        strategy_version_id = bindings.get("strategy_version_id")
+        if strategy_version_id is not None:
+            if protocol_binding is None:
+                raise ResearchSupervisorError(
+                    "strategy version requires explicit supervisor research_protocol_id binding"
+                )
+            strategy = _scientific_registry_authority(self).get(
+                "StrategyVersion", strategy_version_id
+            )
+            if strategy is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing StrategyVersion:{strategy_version_id}"
+                )
+            if strategy.payload.get("config_sha256") != protocol_binding.get(
+                "code_config_sha256"
+            ):
+                raise ResearchSupervisorError(
+                    "strategy version config does not match research protocol"
+                )
+            strategy_model_id = strategy.payload.get("model_version_id")
+            if strategy_model_id is not None:
+                if strategy_model_id != require_binding(
+                    "model_version_id", "strategy version"
+                ):
+                    raise ResearchSupervisorError(
+                        "strategy version model does not match supervisor binding"
+                    )
+
+        evaluation_bundle_id = bindings.get("evaluation_bundle_id")
+        if evaluation_bundle_id is not None:
+            if protocol is None:
+                raise ResearchSupervisorError(
+                    "evaluation bundle requires explicit supervisor research_protocol_id binding"
+                )
+            evaluation = _scientific_registry_authority(self).get(
+                "EvaluationBundle", evaluation_bundle_id
+            )
+            if evaluation is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing EvaluationBundle:{evaluation_bundle_id}"
+                )
+            if evaluation.payload.get("dataset_snapshot_id") != require_binding(
+                "dataset_snapshot_id", "evaluation bundle"
+            ):
+                raise ResearchSupervisorError(
+                    "evaluation bundle dataset does not match supervisor binding"
+                )
+            if evaluation.payload.get("protocol_sha256") != protocol.payload.get(
+                "protocol_sha256"
+            ):
+                raise ResearchSupervisorError(
+                    "evaluation bundle protocol does not match supervisor binding"
+                )
+            evaluated_strategy_id = evaluation.payload.get(
+                "evaluated_strategy_version_id"
+            )
+            if (
+                evaluated_strategy_id is not None
+                and evaluated_strategy_id
+                != require_binding("strategy_version_id", "evaluation bundle")
+            ):
+                raise ResearchSupervisorError(
+                    "evaluation bundle strategy does not match supervisor binding"
+                )
+            evaluated_model_id = evaluation.payload.get("evaluated_model_version_id")
+            if (
+                evaluated_model_id is not None
+                and evaluated_model_id
+                != require_binding("model_version_id", "evaluation bundle")
+            ):
+                raise ResearchSupervisorError(
+                    "evaluation bundle model does not match supervisor binding"
+                )
+
+        experiment_id = bindings.get("experiment_id")
+        if experiment_id is not None:
+            experiment = _scientific_registry_authority(self).get("Experiment", experiment_id)
+            if experiment is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing Experiment:{experiment_id}"
+                )
+            experiment_links = {
+                "research_protocol_id": "research_protocol_id",
+                "dataset_snapshot_id": "dataset_snapshot_id",
+                "feature_set_id": "feature_set_id",
+                "strategy_version_id": "strategy_version_id",
+                "evaluation_bundle_id": "evaluation_bundle_id",
+            }
+            for field, binding_key in experiment_links.items():
+                if experiment.payload.get(field) != require_binding(
+                    binding_key, "experiment"
+                ):
+                    raise ResearchSupervisorError(
+                        f"experiment {field} does not match supervisor binding"
+                    )
+            experiment_model_id = experiment.payload.get("model_version_id")
+            if (
+                experiment_model_id is not None
+                and experiment_model_id != require_binding("model_version_id", "experiment")
+            ):
+                raise ResearchSupervisorError(
+                    "experiment model_version_id does not match supervisor binding"
+                )
+            if (
+                protocol_binding is not None
+                and experiment.payload.get("config_sha256")
+                != protocol_binding.get("code_config_sha256")
+            ):
+                raise ResearchSupervisorError(
+                    "experiment config does not match research protocol"
+                )
+
+        promotion_decision_id = bindings.get("promotion_decision_id")
+        if promotion_decision_id is not None:
+            decision = _scientific_registry_authority(self).get(
+                "PromotionDecision", promotion_decision_id
+            )
+            if decision is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing PromotionDecision:{promotion_decision_id}"
+                )
+            decision_links = {
+                "research_protocol_id": "research_protocol_id",
+                "candidate_strategy_version_id": "strategy_version_id",
+                "evaluation_bundle_id": "evaluation_bundle_id",
+            }
+            for field, binding_key in decision_links.items():
+                if decision.payload.get(field) != require_binding(
+                    binding_key, "promotion decision"
+                ):
+                    raise ResearchSupervisorError(
+                        f"promotion decision {field} does not match supervisor binding"
+                    )
+            decision_model_id = decision.payload.get("candidate_model_version_id")
+            if (
+                decision_model_id is not None
+                and decision_model_id
+                != require_binding("model_version_id", "promotion decision")
+            ):
+                raise ResearchSupervisorError(
+                    "promotion decision model does not match supervisor binding"
+                )
+
+        postmortem_id = bindings.get("postmortem_id")
+        if postmortem_id is not None:
+            postmortem = _scientific_registry_authority(self).get("Postmortem", postmortem_id)
+            if postmortem is None:
+                raise ResearchSupervisorError(
+                    f"binding references missing Postmortem:{postmortem_id}"
+                )
+            if postmortem.payload.get("experiment_id") != require_binding(
+                "experiment_id", "postmortem"
+            ):
+                raise ResearchSupervisorError(
+                    "postmortem experiment does not match supervisor binding"
+                )
+
     def _validate_drift_context(
         self,
         existing_bindings: dict[str, str],
@@ -558,7 +1002,7 @@ class ResearchSupervisor:
         drift_finding_id = merged.get("drift_finding_id")
         if drift_finding_id is None:
             return
-        finding = self.scientific_registry.get("DriftFinding", drift_finding_id)
+        finding = _scientific_registry_authority(self).get("DriftFinding", drift_finding_id)
         if finding is None:
             raise ResearchSupervisorError(
                 f"binding references missing DriftFinding:{drift_finding_id}"
@@ -591,7 +1035,7 @@ class ResearchSupervisor:
             )
             if not exclusive_trigger_prefix.endswith(":"):
                 raise ValueError("exclusive_trigger_prefix must end with ':'")
-        question = self.scientific_registry.get("ResearchQuestion", trigger.question_id)
+        question = _scientific_registry_authority(self).get("ResearchQuestion", trigger.question_id)
         if question is None:
             raise ResearchSupervisorError(
                 f"trigger references missing ResearchQuestion:{trigger.question_id}"
@@ -689,6 +1133,10 @@ class ResearchSupervisor:
                             f"immutable binding conflict for {key}"
                         )
                     merged[key] = value
+                self._validate_scientific_lineage(
+                    run_question_id=run["question_id"],
+                    bindings=merged,
+                )
                 run["bindings"] = dict(sorted(merged.items()))
                 run["consumed_budget_units"] += budget_cost
                 run["phase"] = _NEXT_PHASE[expected_phase].value

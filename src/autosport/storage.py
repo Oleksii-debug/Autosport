@@ -3261,23 +3261,40 @@ class SQLiteMarketStore:
                 assert prepared is not None
                 tx_id, binding_sha256 = prepared
                 self._require_database_path_identity()
+                # No product SQL mutation is expected while the independent
+                # journal commits. An injected same-connection SQLite write
+                # must never be reclassified as part of the attested append.
+                commit_changes = self.connection.total_changes
                 authority.recover(
                     observed_state_sha256=intended_state_sha256,
                     tx_id=tx_id,
                     semantic_binding_sha256=binding_sha256,
                 )
-                self._ensure_market_append_availability_authority(
-                    authority
-                )
-                # Inductive proof: the old exact prefix was validated under
-                # BEGIN IMMEDIATE; all new rows and transition digests were
-                # checked before COMMIT, and independent authority recovery
-                # authenticated that exact successor. Never reuse this after
-                # any SQLite mutation by another connection or this one.
-                self._trusted_positive_append_cache = (
-                    end_generation, intended_state_sha256,
-                    (*proof_version, self.connection.total_changes),
-                )
+                if self.connection.total_changes == commit_changes:
+                    self._trusted_positive_append_cache = (
+                        end_generation, intended_state_sha256,
+                        (*proof_version, commit_changes),
+                    )
+                else:
+                    self._trusted_positive_append_cache = None
+                # Availability issuance calls the same append verifier.
+                # Reuse the authenticated append tip here, before that
+                # verifier runs, while still detecting any new direct writer.
+                availability_changes = self.connection.total_changes
+                self._ensure_market_append_availability_authority(authority)
+                # A successful new append has exactly one new product-owned
+                # availability witness. Unexpected SQL effects invalidate the
+                # witness, forcing the full independent proof next time.
+                if (
+                    self._trusted_positive_append_cache is not None
+                    and self.connection.total_changes == availability_changes + 1
+                ):
+                    self._trusted_positive_append_cache = (
+                        end_generation, intended_state_sha256,
+                        (*proof_version, self.connection.total_changes),
+                    )
+                else:
+                    self._trusted_positive_append_cache = None
                 return accepted
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:

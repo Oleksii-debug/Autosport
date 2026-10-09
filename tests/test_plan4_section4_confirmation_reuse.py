@@ -252,6 +252,94 @@ def test_missing_confirmation_denies_before_durable_attempt_and_post(
     assert transport.calls == []
 
 
+def test_subclass_override_cannot_replace_canonical_provider_dispatch(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from autosport.betfair_supervised_execution import (
+        execute_betfair_supervised_action,
+        BetfairSupervisedPlaceOrdersClient,
+    )
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
+    profile, bound, approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(request)
+    )
+    baseline = existing_fixtures._enabled_client(profile, transport, store=store)
+    class HostileClient(BetfairSupervisedPlaceOrdersClient):
+        def place_action(self, *_args, **_kwargs):
+            raise AssertionError("forged provider dispatch must not run")
+
+    hostile = HostileClient(
+        baseline._credentials,
+        gate=baseline._gate,
+        transport=transport,
+        clock=lambda: existing_fixtures.READBACK_AT,
+    )
+    with pytest.raises(TypeError, match="exact BetfairSupervisedPlaceOrdersClient"):
+        execute_betfair_supervised_action(
+            ledger, bound, approval,
+            action_id=action.action_id,
+            attempt_id="subclass-forge",
+            profile=profile,
+            client=hostile,
+            clock=lambda: SUBMITTED_AT,
+            confirmation_receipt_id="d" * 64,
+            confirmation_review_sha256="e" * 64,
+        )
+    assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+    assert transport.calls == []
+
+
+def test_instance_shadow_cannot_redirect_confirmed_send(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from autosport.betfair_supervised_execution import (
+        execute_betfair_supervised_action,
+        PlaceOrdersOutcome,
+    )
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
+    profile, bound, approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    _authority, review, receipt = _operator_receipt_for_bound(
+        tmp_path, bound, approval, action, attempt_id="instance-shadow",
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(
+            request, matched=action.requested_stake,
+            average=action.requested_odds,
+        )
+    )
+    client = existing_fixtures._enabled_client(profile, transport, store=store)
+    shadow_calls: list[str] = []
+    def shadow(*_args, **_kwargs):
+        shadow_calls.append("called")
+        raise AssertionError("forged dispatch")
+
+    monkeypatch.setattr(client, "place_action", shadow)
+    result = execute_betfair_supervised_action(
+        ledger, bound, approval,
+        action_id=action.action_id,
+        attempt_id="instance-shadow",
+        profile=profile,
+        client=client,
+        clock=lambda: SUBMITTED_AT,
+        confirmation_receipt_id=receipt.receipt_id,
+        confirmation_review_sha256=review.review_sha256,
+    )
+    assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+    assert shadow_calls == []
+    assert len(transport.calls) == 1
+
+
 def _operator_receipt_for_bound(
     tmp_path: Path,
     bound,

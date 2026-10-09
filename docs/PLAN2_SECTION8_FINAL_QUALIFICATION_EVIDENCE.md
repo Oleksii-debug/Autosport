@@ -1,0 +1,39 @@
+# Autosport — Plan 2 Section 8: final financial/PAPER engineering qualification
+
+**Terminal scope:** independent closure of canonical Drive **2. Другий план**, Section 8 (8.1–8.3). Sections 1–7 are already terminal DONE in `MULTI_PLAN_CLOSURE_STATE.md`; this record does not reopen them or introduce a second financial authority. Conflict keys: `financial-core`, `paperbook`, `portfolio-risk`. No bookmaker credentials, deposits, account activity or real-money writes were used.
+
+## 8.1 — Executed exact-candidate qualification, not inferred success
+
+The accepted financial/PAPER source and test tree comes from canonical [Plan-2 PR #2270](https://github.com/Oleksii-debug/Autosport/pull/2270), exact head `1f81b7daedb180df4bab22e5877ccea998187f3d`.
+
+- [Full CI 37849986725](https://github.com/Oleksii-debug/Autosport/actions/runs/37849986725) **completed SUCCESS**. Its job-level API was independently re-read: `test (windows-latest, 3.11)`, `test (windows-latest, 3.12)`, `test (ubuntu-latest, 3.11)`, and `test (ubuntu-latest, 3.12)` all **completed SUCCESS**, not SKIPPED. Each executes `python -m pytest -v tests` plus the canonical demo.
+- [Windows Candidate 37849986798](https://github.com/Oleksii-debug/Autosport/actions/runs/37849986798) **completed SUCCESS** on that same SHA (packaging/recovery, workspace, UIA and product integration).
+- RealExecutionLedger was subsequently qualified with canonical exact head `4ea79138873b37f016162b69cde24196e5258c80`: [CI 37904783985](https://github.com/Oleksii-debug/Autosport/actions/runs/37904783985) **completed SUCCESS**, separately inspected job-level: all four Windows/Ubuntu × 3.11/3.12 test jobs **SUCCESS**; [Windows Candidate 37904784003](https://github.com/Oleksii-debug/Autosport/actions/runs/37904784003) **SUCCESS**; [Endurance 37904784053](https://github.com/Oleksii-debug/Autosport/actions/runs/37904784053) **SUCCESS**.
+- Git compare of the first tested head → `main@be039032b8db66429a5854348d045a141d5aa156` returned `ahead=270, behind=0` with **no Plan-2 financial/PAPER/portfolio/scenario production or test changes** except `src/autosport/real_execution_ledger.py` and `tests/test_real_execution_ledger.py`. Those two exact integrated blobs were independently verified against the later fully qualified `4ea79138873b37f016162b69cde24196e5258c80` head in the Section-7 readback. Thus this is an inclusive qualified source composition, not a claim that a new post-document full CI has executed.
+
+## 8.1–8.2 — Exactness, property and falsifier matrix
+
+| Boundary | Canonical implementation | Existing executed negative/conservation/recovery families |
+| --- | --- | --- |
+| Exact monetary, odds and currency identity | `paper.py`, `probability.py`, `price_truth.py`, `settlement.py`, `risk.py` | `test_plan2_section1_paper_exact_ingress.py`, `test_paperbook_decimal_chronology.py`, `test_paper_book_snapshot_integrity.py`, `test_paper_book_json_integrity.py`, `test_economic_goal_risk_binding.py`: no float/hostile numeric authority, nonfinite/duplicate JSON rejected, cash/open liability conserved; currency not summed across incompatible scopes. |
+| PAPER acceptance, partial legs and no duplicate economic effects | `paper_execution_reality.py`, `paper_execution_adoption.py`, `paper.py` | `test_paper_execution_reality.py`, `test_multileg_execution_cumulative_unknown_exposure.py`, `test_paper_execution_adoption.py`, `test_paperbook_snapshot_generation_cas.py`, `test_paperbook_atomic_publication.py`: actual accepted PAPER odds/stake, partial versus planned, UNKNOWN worst-case unresolved exposure, same-trigger idempotence, stale generation, interrupted publication, crash/restart. |
+| Settlement and late correction | `settlement.py`, `continuous_session.py`, `paper.py` | `test_settlement_batch_atomicity.py`, `test_continuous_session.py`, `test_recovery_reconciliation.py`, `test_portfolio_settlement_snapshot_integrity.py`: detached versioned evidence, same evidence ID conflict, distinct late correction without double payout, atomic batch, idempotent restart and coherent point-in-time P&L. |
+| Terminal scenario, dependency and impossible guarantees | `scenario_search.py`, `joint_scenario_distribution.py`, `portfolio.py`, `portfolio_plan.py` | `test_scenario_search.py`, `test_joint_scenario_distribution.py`, `test_joint_scenario_distribution_aba_toctou.py`, `test_portfolio_scenario_snapshot_integrity.py`, `test_portfolio_decimal_context_integrity.py`: incomplete/non-exhaustive terminal states cannot produce guaranteed profit; missing/correlated states, torn/ABA input cuts, stale snapshots and hostile Decimal context fail closed. |
+| Whole-portfolio allocation, hard Risk/owner limits | `economic_goal.py`, `risk.py`, `portfolio_plan.py`, `candidate_optimizer.py`, `_robust_portfolio_quantum_grid.py` | `test_portfolio_plan.py`, `_test_portfolio_plan_impl.py`, `test_economic_goal_endogenous_stake.py`, `test_portfolio_correlated_exposure_stress.py`, `test_robust_portfolio_quantum_grid.py`, `test_candidate_optimizer.py`: deterministic exact Decimal vector, reserve/exposure ceilings, zero/wait, risk-of-ruin constraints, no model/learning authority expansion. |
+| Read-only REAL reconciliation and cross-ledger separation | `real_execution_ledger.py`, `bookmaker_receipt_reconciliation.py`, `bookmaker_account_reconciliation.py` | `test_real_execution_ledger.py`, `test_real_execution_ledger_read_view.py`, `test_real_execution_reconciliation_identity_replay.py`, `test_bookmaker_account_reconciliation.py`, `test_bookmaker_receipt_reconciliation.py`: one immutable SHA-bound cut, no ACK-as-fill, UNKNOWN no blind retry, duplicate receipt conflict, stale/missing account positions fail closed, no fabricated real cash/P&L. |
+
+The case names and implementation-to-test mappings above have already been inspected and individually documented in the terminal evidence for Sections 4, 5, 6 and 7:
+- [Section-4 PAPER evidence](PLAN2_SECTION4_PAPERBOOK_REUSE_EVIDENCE.md)
+- [Section-5 scenario evidence](PLAN2_SECTION5_SCENARIO_REUSE_EVIDENCE.md)
+- [Section-6 portfolio evidence](PLAN2_SECTION6_PORTFOLIO_REUSE_EVIDENCE.md)
+- [Section-7 reconciliation evidence](PLAN2_SECTION7_FINANCIAL_RECONCILIATION_REUSE_EVIDENCE.md)
+
+Section 8 does not call for new production capability or an independent ledger; no demonstrated acceptance-critical missing feature remains after the integrated, source-identical full-suite qualification. The transient overlapping Section-7 PR #2278 was **closed without merge** after concurrent terminal Section-7 closure to preserve one financial authority.
+
+## 8.3 — Integration/readback and terminal limitations
+
+Integrated source identity at the verified `main@be039032b8db66429a5854348d045a141d5aa156` is covered by the tested-to-main compare and Section-4–7 source/test Git blob inventories; both tested SHA ancestors are behind current main with no missing commits. The authoritative Plan-2 registry remains `MULTI_PLAN_CLOSURE_STATE.md` and is to be updated terminal DONE, followed by the canonical Drive `2. Другий план` status readback. Registry/document-only commits do not constitute newly executed current-main CI.
+
+**Evidence classes:** `PAPER_ONLY=true`; `ACK_IS_NOT_FILL=true`; `UNKNOWN_NO_BLIND_RETRY=true`; `OWNER_RISK_NON_EXPANSION=true`; `REAL_MONEY_EXECUTION=false`; `HUMAN_TESTED=false`; `NVDA_VERIFIED=false`; `WHOLE_PRODUCT_COMPLETE=false`.
+
+**Section-8 decision:** all repository-controllable automated property, conservation, scenario, Risk, reconciliation, correction and restart requirements are covered by fully executed exact-head CI/Windows and verified byte-identical integrated authority paths. Section 8 is terminal DONE under AGENTS.md Simplified Section Closure Protocol v3; Plan 2 is now terminal as an independent engineering plan, not a claim of finished whole Autosport / live bookmaker execution.

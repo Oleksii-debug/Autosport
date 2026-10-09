@@ -415,14 +415,16 @@ def consume_betfair_execution_confirmation(
     expected_review_sha256: str,
     request_sha256: str,
     submitted_at: str,
+    final_send_at: str | None = None,
 ) -> BetfairExecutionConfirmationWitness:
     """Consume one exact receipt at the already-durable SUBMITTED instant.
 
-    The caller of this authority must derive ``submitted_at`` and
-    ``request_sha256`` from the verified execution ledger after the SUBMITTED
-    transition.  This keeps confirmation expiry in the same causal clock domain
-    as the irreversible provider-send boundary and avoids a second wall-clock
-    trust root.
+    The canonical sender derives ``submitted_at`` from the verified ledger,
+    ``request_sha256`` from actual outgoing bytes, and ``final_send_at`` from
+    the product-owned trusted clock immediately before provider transport.
+    A receipt valid at SUBMITTED but expired by final send must never authorize
+    a provider call. Omission of final_send_at is legacy/offline-only and may
+    not be used by the canonical sender.
     """
 
     # pathlib.Path() constructs the platform-specific concrete Path type
@@ -440,13 +442,23 @@ def consume_betfair_execution_confirmation(
     expected_review_sha256 = _sha(expected_review_sha256, "expected_review_sha256")
     request_sha256 = _sha(request_sha256, "request_sha256")
     submitted_instant = _instant(submitted_at, "submitted_at")
+    # SUBMITTED is evidence, not the final-send clock. Clock rollback is denied.
+    final_send_instant = (
+        _instant(final_send_at, "final_send_at")
+        if final_send_at is not None
+        else submitted_instant
+    )
+    if final_send_instant < submitted_instant:
+        raise BetfairExecutionConfirmationError(
+            "final-send instant precedes the durable submission"
+        )
     if not _authority_graph_unchanged():
         raise BetfairExecutionConfirmationError(
             "supervised confirmation authority executable graph changed"
         )
     authority_path = workspace / CONFIRMATION_FILENAME
     try:
-        authority = _AUTHORITY_TYPE(authority_path, clock=lambda: submitted_instant)
+        authority = _AUTHORITY_TYPE(authority_path, clock=lambda: final_send_instant)
         before = _RESOLVE_BINDING(
             authority,
             receipt_id=receipt_id,
@@ -459,7 +471,7 @@ def consume_betfair_execution_confirmation(
             approval=approval,
             action=action,
             attempt_id=attempt_id,
-            submitted_at=submitted_at,
+            submitted_at=final_send_instant.isoformat(),
         )
         consumer_key = _consumer_key(
             bound=bound,
@@ -494,13 +506,13 @@ def consume_betfair_execution_confirmation(
         approval=approval,
         action=action,
         attempt_id=attempt_id,
-        submitted_at=submitted_at,
+        submitted_at=final_send_instant.isoformat(),
     )
     if after.receipt.consumed_by != consumer_key or after.receipt.consumed_at is None:
         raise BetfairExecutionConfirmationError(
             "durable Betfair confirmation was not consumed by this exact send identity"
         )
-    if _instant(after.receipt.consumed_at, "consumed_at") != submitted_instant:
+    if _instant(after.receipt.consumed_at, "consumed_at") != final_send_instant:
         raise BetfairExecutionConfirmationError(
             "Betfair confirmation consumption time does not match durable send admission"
         )

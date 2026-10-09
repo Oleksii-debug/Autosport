@@ -290,6 +290,11 @@ def test_dataset_causal_cutoff_after_decision_fails_closed(tmp_path) -> None:
         "records": [],
     }
     assert not (tmp_path / "dataset-snapshot-lineage.json").exists()
+    # The rejected append must not corrupt the durable registry on restart.
+    restarted_registry = ScientificRegistry(registry_file)
+    assert restarted_registry.causal_records(
+        "DatasetSnapshot", as_of="2026-09-21T00:00:00Z"
+    ) == ()
 
 
 def test_renamed_snapshot_cannot_mint_fresh_holdout_after_restart(tmp_path) -> None:

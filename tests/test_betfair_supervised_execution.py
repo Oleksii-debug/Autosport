@@ -1133,6 +1133,11 @@ def test_transport_timeout_readback_stays_non_authoritative_for_retry(
                 profile=profile,
                 client=retry_client,
                 clock=lambda: "2026-09-19T08:00:09+00:00",
+                # Exercise the canonical no-effect/retry guard directly.
+                # Do not let the legacy fixture helper mint a second review
+                # for the same UNKNOWN provider decision at a stale clock.
+                confirmation_receipt_id="f" * 64,
+                confirmation_review_sha256="f" * 64,
             )
         assert retry_transport.calls == []
 

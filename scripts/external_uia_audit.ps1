@@ -16,11 +16,29 @@ Add-Type -AssemblyName System.Windows.Forms
 # PowerShell 7 Add-Type replaces default .NET references with explicit ones.
 # The live-region probe uses explicit Monitor.Enter/Exit in try/finally:
 # C# lock lowering otherwise emits CS0656 on the Windows runner.
+# PowerShell Core exposes implementation assemblies through the runtime, while
+# Roslyn needs the System.Runtime/System.Threading reference facades as well.
+# Do not weaken the UIA gate by ignoring compilation failure.
+$runtimeFacades = @()
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    $runtimeFacades = @(
+        (Join-Path $PSHOME 'System.Runtime.dll'),
+        (Join-Path $PSHOME 'System.Threading.dll')
+    )
+    foreach ($reference in $runtimeFacades) {
+        if (-not (Test-Path -LiteralPath $reference -PathType Leaf)) {
+            throw 'Required .NET reference facade for external UIA audit is unavailable'
+        }
+    }
+}
 $uiaReferences = @(
     [System.Threading.Monitor].Assembly.Location,
     [System.Windows.Automation.Automation].Assembly.Location,
     [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location
 ) | Select-Object -Unique
+if ($runtimeFacades.Count -gt 0) {
+    $uiaReferences = @($uiaReferences + $runtimeFacades | Select-Object -Unique)
+}
 Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'
 using System;
 using System.Windows.Automation;

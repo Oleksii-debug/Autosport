@@ -1086,7 +1086,10 @@ def execute_betfair_supervised_action(
                 raise BetfairSupervisedExecutionError(
                     "durable attempt/approval changed before final send"
                 )
-            if _time(now(), "final send time") >= _time(
+            # Capture one product-owned instant for both quote and durable
+            # operator-confirmation expiry, immediately before transport.
+            final_send_at = now()
+            if _time(final_send_at, "final send time") >= _time(
                 action.expires_at, "quote expires_at"
             ):
                 raise BetfairSupervisedExecutionError(
@@ -1102,6 +1105,7 @@ def execute_betfair_supervised_action(
                 expected_review_sha256=confirmation_review_sha256,
                 request_sha256=request_sha256,
                 submitted_at=attempts[0].submitted_at,
+                final_send_at=final_send_at,
             )
         try:
             # A direct caller cannot opt into an unguarded POST by supplying

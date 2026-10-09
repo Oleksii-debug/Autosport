@@ -117,9 +117,10 @@ def _binding(snapshot_path):
         # _snapshot_identity() and _witness_path() intentionally derive authority
         # from that spelling.  The resolved components remain part of the binding so
         # a symlink/junction retarget still invalidates already-issued authority.
-        lexical_snapshot = _LOCK_NORMCASE(
-            _LOCK_ABSPATH(_LOCK_FSPATH(snapshot_path))
-        )
+        # Preserve lexical basename case for the independent snapshot_name
+        # witness. The separately normalized identity and resolved targets
+        # below still enforce Windows case-insensitive path authority.
+        lexical_snapshot = _LOCK_ABSPATH(_LOCK_FSPATH(snapshot_path))
         resolved_witness = _PATH(_LOCK_REALPATH(_LOCK_FSPATH(witness)))
         resolved_snapshot = _PATH(_LOCK_REALPATH(_LOCK_FSPATH(snapshot_path)))
     except OSError as exc:

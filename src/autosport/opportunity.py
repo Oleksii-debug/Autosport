@@ -37,6 +37,7 @@ class StrategyClass(str, Enum):
     ARBITRAGE = "arbitrage"
     DUTCHING = "dutching"
     HEDGE_REBALANCE = "hedge_rebalance"
+    PARLAY = "parlay"
     HYBRID = "hybrid"
 
 
@@ -120,7 +121,7 @@ def _finite_decimal(
     *,
     nonnegative: bool = False,
 ) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not Decimal or not value.is_finite():
         raise OpportunityContractError(
             f"{field_name} must be an exact finite Decimal"
         )
@@ -842,10 +843,11 @@ class Opportunity:
             )
         if self.claims_probability_edge and self.strategy_class not in {
             StrategyClass.PREDICTIVE_EDGE,
+            StrategyClass.PARLAY,
             StrategyClass.HYBRID,
         }:
             raise OpportunityContractError(
-                "probability edge is supported only for PREDICTIVE_EDGE or HYBRID"
+                "probability edge is supported only for PREDICTIVE_EDGE, PARLAY or HYBRID"
             )
 
         if type(self.quotes) is not tuple:
@@ -871,6 +873,10 @@ class Opportunity:
         if len(set(quote_keys)) != len(quote_keys):
             raise OpportunityContractError(
                 "opportunity quote serialization is ambiguous across structured identities"
+            )
+        if self.strategy_class is StrategyClass.PARLAY and len(quotes) < 2:
+            raise OpportunityContractError(
+                "PARLAY requires at least two distinct quotes"
             )
         object.__setattr__(self, "quotes", quotes)
 

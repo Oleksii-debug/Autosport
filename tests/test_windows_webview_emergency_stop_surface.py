@@ -350,7 +350,19 @@ def test_emergency_stop_local_failure_keeps_dedicated_accessible_readback():
     script = _asset("emergency_stop.js")
 
     assert 'typeof dispatch !== "function"' in script
-    assert script.count("setStatus(") >= 5
-    assert script.count("focusStatus();") >= 3
+    # A single pending assertive status replaces repeated direct setStatus calls.
+    # Both in-flight and terminal messages must be keyboard/screen-reader readable.
+    assert "function beginPendingStatus(message)" in script
+    assert "function finishPendingStatus(message)" in script
+    assert 'node.setAttribute("role", "status");' in script
+    assert 'node.setAttribute("aria-live", "assertive");' in script
+    assert 'status.setAttribute("aria-live", "assertive");' in script
+    assert "node.focus();" in script
+    assert "focusPendingStatus();" in script
+    assert "finishPendingStatus(resultMessage);" in script
+    assert "focusStatus();" in script
+    assert "if (activationInFlight)" in script
+    assert "if (result === null)" in script
+    assert "Не вважайте нові виконання заблокованими без підтвердження" in script
     assert "Канал застосунку недоступний." in script
     assert "перевірте журнал STOP." in script

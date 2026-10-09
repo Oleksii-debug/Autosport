@@ -333,7 +333,7 @@ def test_confirmed_send_consumes_exact_receipt_and_preserves_matched_truth(
         expected_review_sha256=review.review_sha256,
         require_unconsumed=False,
     )
-    assert binding.receipt.consumed_at == SUBMITTED_AT
+    assert datetime.fromisoformat(binding.receipt.consumed_at) == datetime.fromisoformat(SUBMITTED_AT)
     assert binding.receipt.consumed_by.startswith("betfair-final-send:v1:")
     with pytest.raises(Exception):
         execute_betfair_supervised_action(

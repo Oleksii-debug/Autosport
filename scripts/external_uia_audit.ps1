@@ -13,7 +13,11 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 
+# PowerShell 7 Add-Type replaces the default .NET references when -ReferencedAssemblies
+# is supplied. Include the core assembly that actually implements Monitor.Exit;
+# otherwise the C# lock statements fail with CS0656 during the Windows package gate.
 $uiaReferences = @(
+    [System.Threading.Monitor].Assembly.Location,
     [System.Windows.Automation.Automation].Assembly.Location,
     [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location
 ) | Select-Object -Unique

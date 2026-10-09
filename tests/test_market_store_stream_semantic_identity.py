@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 
@@ -397,6 +398,62 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+
+    def test_duplicate_batch_amortizes_projection_proof_without_skipping_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=53)
+                second = self._event(sequence=54, odds="2.55")
+                self.assertEqual(
+                    store.append_batch_accepted((first, second)),
+                    [first, second],
+                )
+                with patch.object(
+                    store,
+                    "_repair_current_projection_for_key",
+                    wraps=store._repair_current_projection_for_key,
+                ) as repair:
+                    self.assertEqual(
+                        store.append_batch_accepted((first, second, first, second)),
+                        [],
+                    )
+                    self.assertEqual(repair.call_count, 1)
+                self.assertEqual(len(store.events()), 2)
+                self.assertEqual(
+                    store.current_by_source()[(first.source_id, first.quote_key)].dedupe_key,
+                    second.dedupe_key,
+                )
+            finally:
+                store.close()
+
+    def test_new_append_invalidates_duplicate_projection_batch_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=55)
+                next_event = self._event(sequence=56, odds="2.60")
+                self.assertTrue(store.append(first))
+                with patch.object(
+                    store,
+                    "_repair_current_projection_for_key",
+                    wraps=store._repair_current_projection_for_key,
+                ) as repair:
+                    self.assertEqual(
+                        store.append_batch_accepted((first, next_event, first)),
+                        [next_event],
+                    )
+                    self.assertEqual(repair.call_count, 3)
+                store.close()
+                store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+                self.assertEqual(len(store.events()), 2)
+                self.assertEqual(
+                    store.current_by_source()[(first.source_id, first.quote_key)].dedupe_key,
+                    next_event.dedupe_key,
+                )
+            finally:
+                store.close()
 
 if __name__ == "__main__":
     unittest.main()

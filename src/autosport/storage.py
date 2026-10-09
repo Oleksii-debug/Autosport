@@ -2913,7 +2913,12 @@ class SQLiteMarketStore:
         )
         return event
 
-    def _insert_one(self, event: MarketEvent) -> bool:
+    def _insert_one(
+        self,
+        event: MarketEvent,
+        *,
+        validated_duplicate_projections: set[tuple[str, str]] | None = None,
+    ) -> bool:
         payload = _validate_incoming_event(event)
         cursor = self.connection.execute(
             """INSERT INTO market_events
@@ -2940,8 +2945,15 @@ class SQLiteMarketStore:
             ).fetchone()
             if existing is None:
                 raise RuntimeError("market event dedupe conflict row disappeared")
-            existing_event = _event_from_history_row(existing)
-            if _source_payload(existing_event) != _source_payload(event):
+            # The complete positive history (including the redundant identity
+            # columns) was decoded and authenticated at the start of this
+            # BEGIN IMMEDIATE batch. An uncooperating SQLite writer cannot alter
+            # it before COMMIT, so avoid decoding the same row a second time
+            # for every duplicate while retaining the exact source-payload
+            # comparison (receipt clocks are intentionally excluded).
+            if _source_payload_from_raw(
+                _load_history_payload(existing[-1])
+            ) != _source_payload(event):
                 raise ValueError(
                     "conflicting duplicate market event identity: "
                     f"{event.dedupe_key}"
@@ -2960,10 +2972,21 @@ class SQLiteMarketStore:
                 raise ValueError(
                     "duplicate market event lacks valid append-generation authority"
                 )
-            self._repair_current_projection_for_key(
-                source_id=event.source_id,
-                quote_key=event.quote_key,
-            )
+            # Only one proof of an unchanged derived projection is needed for
+            # each key inside this same BEGIN IMMEDIATE transaction. Accepted
+            # inserts invalidate the cache below. This is never reused after
+            # COMMIT, rollback, crash, or another append call.
+            projection_key = (event.source_id, event.quote_key)
+            if (
+                validated_duplicate_projections is None
+                or projection_key not in validated_duplicate_projections
+            ):
+                self._repair_current_projection_for_key(
+                    source_id=event.source_id,
+                    quote_key=event.quote_key,
+                )
+                if validated_duplicate_projections is not None:
+                    validated_duplicate_projections.add(projection_key)
             return False
 
         # The just-inserted row is not yet durable. Prove its market-rule semantics
@@ -2991,6 +3014,10 @@ class SQLiteMarketStore:
                VALUES (?, ?)""",
             (event.dedupe_key, self._next_append_generation()),
         )
+        if validated_duplicate_projections is not None:
+            validated_duplicate_projections.discard(
+                (event.source_id, event.quote_key)
+            )
         self._repair_current_projection_for_key(
             source_id=event.source_id,
             quote_key=event.quote_key,
@@ -3056,8 +3083,16 @@ class SQLiteMarketStore:
                         if prior_availability_rows
                         else None
                     )
+                    # Cache scoped only to the one locked SQLite transaction.
+                    # Every duplicate retains its immutable source-payload
+                    # equality check; each stable key's derived projection is
+                    # verified once until an accepted event changes that key.
+                    validated_duplicate_projections: set[tuple[str, str]] = set()
                     for event in batch:
-                        if self._insert_one(event):
+                        if self._insert_one(
+                            event,
+                            validated_duplicate_projections=validated_duplicate_projections,
+                        ):
                             accepted.append(event)
 
                     if not accepted:

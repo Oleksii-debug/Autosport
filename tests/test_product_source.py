@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import tempfile
 import unittest
 from decimal import Decimal
@@ -42,17 +43,24 @@ class _Provider:
         return self.batches.pop(0)
 
 
-def _quote(*, odds: str = "1.80", sequence: int = 1) -> ProviderQuote:
+def _quote(
+    *,
+    odds: str = "1.80",
+    sequence: int = 1,
+    exchange_side: str | None = None,
+    observed_ts: str = "2026-09-20T17:34:00+00:00",
+    source_ts: str | None = "2026-09-20T17:33:59+00:00",
+) -> ProviderQuote:
     return ProviderQuote(
         provider_event_id="event-1",
         provider_market_id="book:h2h",
         provider_selection_id="player-a",
         decimal_odds=Decimal(odds),
-        observed_ts="2026-09-20T17:34:00+00:00",
+        observed_ts=observed_ts,
         sequence=sequence,
         market_type=MarketType.WINNER,
         status="open",
-        source_ts="2026-09-20T17:33:59+00:00",
+        source_ts=source_ts,
         metadata={
             "provider": "parlayapi",
             "sport_key": "table_tennis",
@@ -63,6 +71,7 @@ def _quote(*, odds: str = "1.80", sequence: int = 1) -> ProviderQuote:
             "market_key": "h2h",
         },
         sport="table_tennis",
+        exchange_side=exchange_side,
     )
 
 
@@ -95,6 +104,110 @@ def _stream_checkpoint(delta) -> StreamCheckpoint:
 
 
 class ParlayApiProductSourceTests(unittest.TestCase):
+    def test_source_payload_evidence_binds_exchange_side(self) -> None:
+        back = _quote(exchange_side="back")
+        lay = _quote(exchange_side="lay")
+
+        self.assertNotEqual(
+            ParlayApiProductSource._quote_payload_bytes(back),
+            ParlayApiProductSource._quote_payload_bytes(lay),
+        )
+
+    def test_source_payload_evidence_covers_every_provider_quote_field(self) -> None:
+        payload = json.loads(
+            ParlayApiProductSource._quote_payload_bytes(
+                _quote(exchange_side="back")
+            ).decode("utf-8")
+        )
+        self.assertEqual(set(payload), set(ProviderQuote.__dataclass_fields__))
+
+    def test_provider_observed_ts_rejects_nonzero_submicrosecond_precision(self) -> None:
+        quote = _quote(observed_ts="2026-09-20T17:34:00.1234567+00:00")
+        batch = ProviderBatch(source_id=_SOURCE_ID, quotes=(quote,), cursor="snapshot-1")
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([batch]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "precision finer than microseconds",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_provider_source_ts_rejects_nonzero_submicrosecond_precision(self) -> None:
+        quote = _quote(source_ts="2026-09-20T17:33:59.9999999+00:00")
+        batch = ProviderBatch(source_id=_SOURCE_ID, quotes=(quote,), cursor="snapshot-1")
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([batch]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "precision finer than microseconds",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_exact_submicrosecond_zero_tail_remains_representable(self) -> None:
+        instant = ParlayApiProductSource._instant(
+            "2026-09-20T17:34:00.1234560+00:00",
+            "test instant",
+        )
+        self.assertEqual(instant.microsecond, 123456)
+
+    def test_truncated_provider_page_must_fill_requested_acquisition_bound(self) -> None:
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(_quote(),),
+            cursor="snapshot-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([batch]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "must fill requested acquisition page",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_truncated_provider_page_fails_at_exact_snapshot_capacity(self) -> None:
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(_quote(),),
+            cursor="snapshot-1",
+            quality_flags=("TRUNCATED_BATCH",),
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([batch]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with (
+                patch.object(ParlayApiProductSource, "_READ_BATCH_ITEMS", 1),
+                patch.object(ParlayApiProductSource, "_MAX_SNAPSHOT_ITEMS", 1),
+                self.assertRaisesRegex(
+                    ProductSourcePayloadError,
+                    "exceeds bounded source capacity",
+                ),
+            ):
+                source.fetch_catalog_page(None)
+
     def test_snapshot_becomes_restart_safe_catalog_delta_and_event(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory) / "workspace"
@@ -184,6 +297,497 @@ class ParlayApiProductSourceTests(unittest.TestCase):
             self.assertEqual(replay_page.digest, first_page.digest)
             replay_delta = restored.fetch_deltas(None, (), 1)[0]
             self.assertEqual(replay_delta, first_delta)
+
+    def test_pending_snapshot_freezes_compliance_provenance_across_restart(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory) / "workspace"
+            authority_root = Path(directory) / "authority"
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:acquired",
+                retention_ref="retention:parlayapi:acquired",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            source.fetch_catalog_page(None)
+
+            restored = ParlayApiProductSource(
+                _Provider([]),
+                workspace=workspace,
+                authority_root=authority_root,
+                lawful_terms_ref="terms:parlayapi:post-restart",
+                retention_ref="retention:parlayapi:post-restart",
+                clock=lambda: "2026-09-20T17:34:03+00:00",
+            )
+            delta = restored.fetch_deltas(None, (), 10)[0]
+
+            self.assertEqual(delta.lawful_terms_ref, "terms:parlayapi:acquired")
+            self.assertEqual(delta.retention_ref, "retention:parlayapi:acquired")
+
+    def test_pending_snapshot_captures_compliance_provenance_before_provider_io(self) -> None:
+        class _MutatingProvider(_Provider):
+            mutate = None
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                if self.mutate is not None:
+                    self.mutate()
+                return super().read_batch(max_items)
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = _MutatingProvider([_batch(cursor="snapshot-1")])
+            source = ParlayApiProductSource(
+                provider,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:before-io",
+                retention_ref="retention:parlayapi:before-io",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+
+            def mutate_source_provenance() -> None:
+                source.lawful_terms_ref = "terms:parlayapi:mutated-during-io"
+                source.retention_ref = "retention:parlayapi:mutated-during-io"
+
+            provider.mutate = mutate_source_provenance
+            source.fetch_catalog_page(None)
+            delta = source.fetch_deltas(None, (), 10)[0]
+
+            self.assertEqual(delta.lawful_terms_ref, "terms:parlayapi:before-io")
+            self.assertEqual(delta.retention_ref, "retention:parlayapi:before-io")
+
+    def test_pending_snapshot_rejects_provider_rebinding_during_provider_io(self) -> None:
+        class _MutatingProvider(_Provider):
+            mutate = None
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                if self.mutate is not None:
+                    self.mutate()
+                return super().read_batch(max_items)
+
+        with tempfile.TemporaryDirectory() as directory:
+            first = _MutatingProvider([_batch(cursor="snapshot-1")])
+            second = _Provider([_batch(cursor="snapshot-1")])
+            source = ParlayApiProductSource(
+                first,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            first.mutate = lambda: setattr(source, "provider", second)
+
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "provider changed during acquisition",
+            ):
+                source.fetch_catalog_page(None)
+
+            self.assertEqual(len(second.batches), 1)
+
+    def test_pending_snapshot_rejects_normalizer_rebinding_during_provider_io(self) -> None:
+        class _MutatingProvider(_Provider):
+            mutate = None
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                if self.mutate is not None:
+                    self.mutate()
+                return super().read_batch(max_items)
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = _MutatingProvider([_batch(cursor="snapshot-1")])
+            source = ParlayApiProductSource(
+                provider,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+
+            class _HostileNormalizer:
+                calls = 0
+
+                def normalize(self, source_id, quote):
+                    self.calls += 1
+                    raise AssertionError("rebound normalizer must not execute")
+
+            hostile = _HostileNormalizer()
+            provider.mutate = lambda: setattr(source, "normalizer", hostile)
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "normalizer changed during acquisition",
+            ):
+                source.fetch_catalog_page(None)
+
+            self.assertEqual(hostile.calls, 0)
+
+    def test_pending_snapshot_rejects_provider_batch_subclass(self) -> None:
+        class _BatchSubclass(ProviderBatch):
+            pass
+
+        class _SubclassProvider:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return _BatchSubclass(
+                    source_id=_SOURCE_ID,
+                    quotes=(_quote(),),
+                    cursor="snapshot-1",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _SubclassProvider(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "exact ProviderBatch",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_pending_snapshot_revalidates_mutated_provider_quote_fields(self) -> None:
+        quote = _quote()
+        object.__setattr__(quote, "provider_event_id", "forged:event")
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(),
+            cursor="snapshot-1",
+        )
+        object.__setattr__(batch, "quotes", (quote,))
+
+        class _MutatedEvidenceProvider:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _MutatedEvidenceProvider(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "acquisition-boundary validation",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_pending_snapshot_rejects_decimal_subclass_before_virtual_dispatch(self) -> None:
+        calls: list[str] = []
+
+        class _HostileDecimal(Decimal):
+            def is_finite(self):
+                calls.append("is_finite")
+                raise AssertionError("Decimal subclass virtual dispatch must not run")
+
+        quote = _quote()
+        object.__setattr__(quote, "decimal_odds", _HostileDecimal("1.80"))
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(),
+            cursor="snapshot-1",
+        )
+        object.__setattr__(batch, "quotes", (quote,))
+
+        class _ProviderWithHostileOdds:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _ProviderWithHostileOdds(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "non-canonical acquisition value types",
+            ):
+                source.fetch_catalog_page(None)
+
+        self.assertEqual(calls, [])
+
+    def test_pending_snapshot_rejects_string_subclass_before_validation_dispatch(self) -> None:
+        calls: list[str] = []
+
+        class _HostileText(str):
+            def strip(self, *args, **kwargs):
+                calls.append("strip")
+                raise AssertionError("str subclass validation dispatch must not run")
+
+        quote = _quote()
+        object.__setattr__(quote, "provider_market_id", _HostileText("book:h2h"))
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(),
+            cursor="snapshot-1",
+        )
+        object.__setattr__(batch, "quotes", (quote,))
+
+        class _ProviderWithHostileText:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _ProviderWithHostileText(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "non-canonical acquisition value types",
+            ):
+                source.fetch_catalog_page(None)
+
+        self.assertEqual(calls, [])
+
+    def test_pending_snapshot_does_not_coerce_noncanonical_metadata_containers(self) -> None:
+        quote = _quote()
+        quote.metadata["tuple_value"] = ("must", "not", "coerce")
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(quote,),
+            cursor="snapshot-1",
+        )
+
+        class _TupleMetadataProvider:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _TupleMetadataProvider(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "non-canonical JSON value type",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_pending_snapshot_rejects_metadata_container_subclasses(self) -> None:
+        class _HostileDict(dict):
+            pass
+
+        quote = _quote()
+        object.__setattr__(quote, "metadata", _HostileDict(quote.metadata))
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(),
+            cursor="snapshot-1",
+        )
+        object.__setattr__(batch, "quotes", (quote,))
+
+        class _MetadataSubclassProvider:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _MetadataSubclassProvider(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourcePayloadError,
+                "non-canonical acquisition value types",
+            ):
+                source.fetch_catalog_page(None)
+
+    def test_pending_snapshot_freezes_mutable_provider_metadata_before_use(self) -> None:
+        quote = _quote()
+        quote.metadata["nested"] = {"value": "original"}
+        batch = ProviderBatch(
+            source_id=_SOURCE_ID,
+            quotes=(quote,),
+            cursor="snapshot-1",
+        )
+
+        class _MetadataProvider:
+            source_id = _SOURCE_ID
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                del max_items
+                return batch
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _MetadataProvider(),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            page = source.fetch_catalog_page(None)
+            quote.metadata["nested"]["value"] = "mutated-after-return"
+            delta = source.fetch_deltas(None, (), 10)[0]
+            event = source.resolve_event(delta)
+
+            self.assertEqual(page.events[0].event_id, "event-1")
+            self.assertEqual(event.metadata["nested"]["value"], "original")
+
+    def test_pending_snapshot_rejects_provider_read_code_mutation_during_io(self) -> None:
+        class _SelfMutatingProvider:
+            source_id = _SOURCE_ID
+
+            def __init__(self) -> None:
+                self.mutate = None
+                self.batches = [_batch(cursor="snapshot-1")]
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                if max_items <= 0 or not self.batches:
+                    raise AssertionError("unexpected provider read")
+                result = self.batches.pop(0)
+                if self.mutate is not None:
+                    self.mutate()
+                return result
+
+        provider = _SelfMutatingProvider()
+        read_func = provider.read_batch.__func__
+        original_code = read_func.__code__
+
+        def forged_read_batch(self, max_items: int = 1000) -> ProviderBatch:
+            raise AssertionError("mutated provider executable must never gain authority")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                provider,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            provider.mutate = lambda: setattr(
+                read_func,
+                "__code__",
+                forged_read_batch.__code__,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductSourcePayloadError,
+                    "provider read executable changed during acquisition",
+                ):
+                    source.fetch_catalog_page(None)
+            finally:
+                read_func.__code__ = original_code
+
+    def test_pending_snapshot_rejects_normalizer_code_mutation_during_provider_io(self) -> None:
+        class _MutatingProvider(_Provider):
+            mutate = None
+
+            def read_batch(self, max_items: int = 1000) -> ProviderBatch:
+                result = super().read_batch(max_items)
+                if self.mutate is not None:
+                    self.mutate()
+                return result
+
+        with tempfile.TemporaryDirectory() as directory:
+            provider = _MutatingProvider([_batch(cursor="snapshot-1")])
+            source = ParlayApiProductSource(
+                provider,
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            normalize_func = source.normalizer.normalize.__func__
+            original_code = normalize_func.__code__
+
+            def forged_normalize(self, source_id, quote):
+                raise AssertionError("mutated normalizer executable must never gain authority")
+
+            provider.mutate = lambda: setattr(
+                normalize_func,
+                "__code__",
+                forged_normalize.__code__,
+            )
+            try:
+                with self.assertRaisesRegex(
+                    ProductSourceStateError,
+                    "normalizer executable changed during acquisition",
+                ):
+                    source.fetch_catalog_page(None)
+            finally:
+                normalize_func.__code__ = original_code
+
+    def test_legacy_unassigned_pending_without_provenance_fails_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+            )
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "lacks acquisition compliance provenance",
+            ):
+                source._validate_pending(
+                    {
+                        "catalog_cursor": "legacy-snapshot",
+                        "catalog_position": 0,
+                        "catalog_events": [],
+                        "quality_flags": [],
+                        "items": [],
+                        "assigned": False,
+                        "confirmed": False,
+                    }
+                )
+
+    def test_assigned_pending_delta_must_match_frozen_compliance_provenance(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            source = ParlayApiProductSource(
+                _Provider([_batch(cursor="snapshot-1")]),
+                workspace=Path(directory) / "workspace",
+                authority_root=Path(directory) / "authority",
+                lawful_terms_ref="terms:parlayapi:v1",
+                retention_ref="retention:parlayapi:v1",
+                clock=lambda: "2026-09-20T17:34:02+00:00",
+            )
+            source.fetch_catalog_page(None)
+            source.fetch_deltas(None, (), 10)
+            state = source._read_state()
+            pending = dict(state["pending"])
+            pending["lawful_terms_ref"] = "terms:parlayapi:substituted"
+
+            with self.assertRaisesRegex(
+                ProductSourceStateError,
+                "pending delta is not bound to source evidence",
+            ):
+                source._validate_pending(pending)
 
     def test_catalog_checkpoint_must_match_exact_cursor_and_page_digest(self) -> None:
         with tempfile.TemporaryDirectory() as directory:

@@ -101,11 +101,10 @@ class WindowsLabTicket:
         if (
             type(self.scenarios) is not tuple
             or not self.scenarios
+            or any(type(s) is not str for s in self.scenarios)
             or self.scenarios != _SCENARIOS
         ):
             raise WindowsLabContractError("unknown, duplicate or unordered lab scenario")
-        if any(type(s) is not str for s in self.scenarios):
-            raise WindowsLabContractError("invalid lab scenario type")
         if any(
             getattr(self, name) is not False
             for name in (
@@ -149,7 +148,7 @@ class WindowsLabTicket:
     @classmethod
     def from_json(cls, text: str) -> "WindowsLabTicket":
         raw = _decode(text)
-        keys = set(cls("a" * 40, "b" * 64, (_SCENARIOS[0],)).to_dict())
+        keys = set(cls("a" * 40, "b" * 64, _SCENARIOS).to_dict())
         if set(raw) != keys or raw.get("schema") != _SCHEMA or type(raw.get("schema_version")) is not int or raw.get("schema_version") != _VERSION or raw.get("kind") != "ticket":
             raise WindowsLabContractError("unsupported lab ticket schema")
         try:
@@ -206,21 +205,42 @@ class WindowsLabCampaign:
     def __post_init__(self) -> None:
         if type(self.ticket) is not WindowsLabTicket or type(self.observations) is not tuple:
             raise WindowsLabContractError("invalid lab campaign")
+        # Detach from caller-held frozen-but-low-level-mutable authority objects.
+        clean_ticket = WindowsLabTicket(
+            self.ticket.source_sha, self.ticket.package_sha256, self.ticket.scenarios,
+            self.ticket.dispatch_event, self.ticket.dispatch_ref, self.ticket.repository,
+            self.ticket.runner_profile, self.ticket.execution_authority,
+            self.ticket.human_tested, self.ticket.nvda_verified,
+            self.ticket.target_machine_acceptance,
+        )
+        object.__setattr__(self, "ticket", clean_ticket)
         observed: set[str] = set()
+        safe_observations: list[WindowsLabObservation] = []
         for item in self.observations:
-            if type(item) is not WindowsLabObservation or item.ticket_id != self.ticket.ticket_id or item.scenario not in self.ticket.scenarios:
+            if type(item) is not WindowsLabObservation:
+                raise WindowsLabContractError("invalid lab observation type")
+            clean = WindowsLabObservation(
+                item.ticket_id, item.scenario, item.status, item.evidence_sha256,
+            )
+            if clean.ticket_id != clean_ticket.ticket_id or clean.scenario not in clean_ticket.scenarios:
                 raise WindowsLabContractError("observation outside ticket scope")
-            if item.scenario in observed:
+            if clean.scenario in observed:
                 raise WindowsLabContractError("duplicate scenario effect")
-            observed.add(item.scenario)
-        if tuple(s for s in self.ticket.scenarios if s in observed) != tuple(
-            item.scenario for item in self.observations
+            observed.add(clean.scenario)
+            safe_observations.append(clean)
+        if tuple(s for s in clean_ticket.scenarios if s in observed) != tuple(
+            item.scenario for item in safe_observations
         ):
             raise WindowsLabContractError("noncanonical observation chronology")
+        object.__setattr__(self, "observations", tuple(safe_observations))
 
     def admit(self, observation: WindowsLabObservation) -> "WindowsLabCampaign":
         if type(observation) is not WindowsLabObservation:
             raise WindowsLabContractError("invalid agent observation")
+        observation = WindowsLabObservation(
+            observation.ticket_id, observation.scenario,
+            observation.status, observation.evidence_sha256,
+        )
         if observation.ticket_id != self.ticket.ticket_id:
             raise WindowsLabContractError("agent observation is bound to another ticket")
         for old in self.observations:

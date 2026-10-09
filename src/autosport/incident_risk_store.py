@@ -1,0 +1,1037 @@
+"""Restart-safe durable history for the canonical incident/model-risk register.
+
+This module persists only IncidentRiskEntry values produced by the canonical
+register contract. It does not define a second incident/model-risk schema and does
+not grant execution or release authority. Once non-empty history is committed, the
+existing independent MonotonicWorkspaceAuthority prevents store-file deletion or a
+stale store image from silently becoming healthy empty/current truth while that
+machine-state authority survives.
+"""
+
+from __future__ import annotations
+
+import hashlib
+import hmac
+import json
+import os
+import stat
+from dataclasses import dataclass
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Final
+
+from .incident_risk_register import (
+    IncidentRiskEntry,
+    IncidentRiskRegisterError,
+    validate_persistence_safe,
+    validate_successor,
+)
+from .integrity import atomic_write_json, durable_path_lock
+from .json_integrity import strict_json_loads
+from .workspace_lock import _open_read_only_descriptor
+from .monotonic_workspace_authority import (
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
+
+
+STORE_SCHEMA: Final = "autosport.incident_model_risk_store"
+STORE_SCHEMA_VERSION: Final = 2
+_AUTHORITY_DOMAIN: Final = "autosport.incident-model-risk-register"
+_AUTHORITY_KEY: Final = "durable-history.v1"
+_AUTHORITY_BINDING_SHA256: Final = hashlib.sha256(
+    b"autosport.incident-model-risk-register.durable-history.monotonic.v1"
+).hexdigest()
+_ROOT_KEYS: Final = frozenset(
+    {"schema", "schema_version", "histories", "availability", "content_sha256"}
+)
+_HISTORY_KEYS: Final = frozenset({"entry_id", "revisions"})
+_AVAILABILITY_KEYS: Final = frozenset({"entry_id", "revision", "available_at"})
+_MAX_STORE_BYTES: Final = 64 * 1024 * 1024
+
+
+class IncidentRiskStoreError(ValueError):
+    """Raised when durable incident/model-risk history is invalid or ambiguous."""
+
+
+def _make_store_codec_authority():
+    """Seal the imported parser and IncidentRiskEntry codec/validator graph."""
+
+    module_globals = globals()
+    entry_type = IncidentRiskEntry
+    entry_post_init = entry_type.__dict__["__post_init__"]
+    entry_to_dict = entry_type.__dict__["to_dict"]
+    entry_from_dict_descriptor = entry_type.__dict__["from_dict"]
+    if type(entry_from_dict_descriptor) is not classmethod:
+        raise RuntimeError("IncidentRiskEntry.from_dict must remain a classmethod")
+    entry_from_dict = entry_from_dict_descriptor.__func__
+    strict_loader = strict_json_loads
+    persistence_validator = validate_persistence_safe
+    successor_validator = validate_successor
+
+    function_witnesses = (
+        ("IncidentRiskEntry.__post_init__", entry_post_init, entry_post_init.__code__),
+        ("IncidentRiskEntry.to_dict", entry_to_dict, entry_to_dict.__code__),
+        (
+            "IncidentRiskEntry.from_dict",
+            entry_from_dict,
+            entry_from_dict.__code__,
+        ),
+        ("strict_json_loads", strict_loader, strict_loader.__code__),
+        (
+            "validate_persistence_safe",
+            persistence_validator,
+            persistence_validator.__code__,
+        ),
+        ("validate_successor", successor_validator, successor_validator.__code__),
+    )
+
+    def require() -> None:
+        expected_globals = (
+            ("IncidentRiskEntry", entry_type),
+            ("strict_json_loads", strict_loader),
+            ("validate_persistence_safe", persistence_validator),
+            ("validate_successor", successor_validator),
+        )
+        for label, expected in expected_globals:
+            if module_globals.get(label) is not expected:
+                raise IncidentRiskStoreError(
+                    "incident/model-risk store codec dependency changed: "
+                    f"{label}"
+                )
+        if entry_type.__dict__.get("__post_init__") is not entry_post_init:
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec dependency changed: "
+                "IncidentRiskEntry.__post_init__"
+            )
+        if entry_type.__dict__.get("to_dict") is not entry_to_dict:
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec dependency changed: "
+                "IncidentRiskEntry.to_dict"
+            )
+        current_from_dict = entry_type.__dict__.get("from_dict")
+        if (
+            current_from_dict is not entry_from_dict_descriptor
+            or type(current_from_dict) is not classmethod
+            or current_from_dict.__func__ is not entry_from_dict
+        ):
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec dependency changed: "
+                "IncidentRiskEntry.from_dict"
+            )
+        for label, function, expected_code in function_witnesses:
+            if function.__code__ is not expected_code:
+                raise IncidentRiskStoreError(
+                    "incident/model-risk store codec dependency changed: "
+                    f"{label}.__code__"
+                )
+
+    require_code = require.__code__
+
+    def _require() -> None:
+        if require.__code__ is not require_code:
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec authority guard changed"
+            )
+        require()
+
+    def parse_json(text: str) -> object:
+        _require()
+        decoded = strict_loader(text)
+        _require()
+        return decoded
+
+    def validate_entry(entry: IncidentRiskEntry) -> None:
+        _require()
+        if type(entry) is not entry_type:
+            raise IncidentRiskStoreError(
+                "durable history accepts exact IncidentRiskEntry values only"
+            )
+        entry_post_init(entry)
+        _require()
+
+    def to_dict(entry: IncidentRiskEntry) -> dict[str, object]:
+        _require()
+        if type(entry) is not entry_type:
+            raise IncidentRiskStoreError(
+                "incident/model-risk store codec requires exact IncidentRiskEntry"
+            )
+        raw = entry_to_dict(entry)
+        _require()
+        return raw
+
+    def from_dict(raw: object) -> IncidentRiskEntry:
+        _require()
+        entry = entry_from_dict(entry_type, raw)
+        _require()
+        if type(entry) is not entry_type:
+            raise IncidentRiskStoreError(
+                "decoded durable history entry must be exact IncidentRiskEntry"
+            )
+        return entry
+
+    def validate_safe(entry: IncidentRiskEntry) -> None:
+        _require()
+        persistence_validator(entry)
+        _require()
+
+    def validate_next(
+        previous: IncidentRiskEntry,
+        candidate: IncidentRiskEntry,
+    ) -> None:
+        _require()
+        successor_validator(previous, candidate)
+        _require()
+
+    return (
+        parse_json,
+        validate_entry,
+        to_dict,
+        from_dict,
+        validate_safe,
+        validate_next,
+    )
+
+
+(
+    _STORE_STRICT_JSON_LOADS,
+    _STORE_VALIDATE_ENTRY,
+    _STORE_ENTRY_TO_DICT,
+    _STORE_ENTRY_FROM_DICT,
+    _STORE_VALIDATE_PERSISTENCE_SAFE,
+    _STORE_VALIDATE_SUCCESSOR,
+) = _make_store_codec_authority()
+del _make_store_codec_authority
+
+
+def _sha256_text(name: str, value: object) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or value != value.lower()
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise IncidentRiskStoreError(
+            f"{name} must be lowercase 64-character SHA-256 hex"
+        )
+    return value
+
+
+def _canonical_utc_timestamp(value: object, name: str) -> datetime:
+    if type(value) is not str or not value or value.strip() != value:
+        raise IncidentRiskStoreError(
+            f"{name} must be canonical trimmed ISO-8601 UTC text"
+        )
+    try:
+        parsed = datetime.fromisoformat(value)
+    except ValueError as exc:
+        raise IncidentRiskStoreError(f"{name} must be ISO-8601") from exc
+    if (
+        parsed.tzinfo is None
+        or parsed.utcoffset() is None
+        or parsed.utcoffset() != timedelta(0)
+        or parsed.isoformat() != value
+    ):
+        raise IncidentRiskStoreError(
+            f"{name} must use datetime.isoformat() canonical UTC +00:00"
+        )
+    return parsed
+
+
+def _canonical_as_of(value: object) -> datetime:
+    return _canonical_utc_timestamp(value, "as_of")
+
+
+def _availability_now() -> str:
+    """Return the product-owned publication clock for a durable revision."""
+
+    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+
+
+def _validate_histories(
+    histories: object,
+) -> tuple[tuple[IncidentRiskEntry, ...], ...]:
+    if type(histories) is not tuple:
+        raise IncidentRiskStoreError("histories must be an exact tuple")
+
+    entry_ids: list[str] = []
+    normalized: list[tuple[IncidentRiskEntry, ...]] = []
+    for history in histories:
+        if type(history) is not tuple or not history:
+            raise IncidentRiskStoreError(
+                "each incident/model-risk history must be a non-empty exact tuple"
+            )
+        if any(type(entry) is not IncidentRiskEntry for entry in history):
+            raise IncidentRiskStoreError(
+                "durable history accepts exact IncidentRiskEntry values only"
+            )
+
+        try:
+            for entry in history:
+                _STORE_VALIDATE_ENTRY(entry)
+        except (IncidentRiskRegisterError, TypeError, ValueError) as exc:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk history contains an invalid entry snapshot"
+            ) from exc
+
+        first = history[0]
+        if first.revision != 1:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk history must begin at revision 1"
+            )
+        if any(entry.entry_id != first.entry_id for entry in history):
+            raise IncidentRiskStoreError(
+                "one durable history cannot contain multiple entry_id values"
+            )
+        try:
+            for previous, candidate in zip(history, history[1:]):
+                _STORE_VALIDATE_SUCCESSOR(previous, candidate)
+        except (IncidentRiskRegisterError, TypeError, ValueError) as exc:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk revision chain is invalid"
+            ) from exc
+
+        entry_ids.append(first.entry_id)
+        normalized.append(history)
+
+    if entry_ids != sorted(set(entry_ids)):
+        raise IncidentRiskStoreError(
+            "durable histories must be sorted by unique entry_id"
+        )
+    return tuple(normalized)
+
+
+def _histories_json(
+    histories: tuple[tuple[IncidentRiskEntry, ...], ...],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "entry_id": history[0].entry_id,
+            "revisions": [_STORE_ENTRY_TO_DICT(entry) for entry in history],
+        }
+        for history in histories
+    ]
+
+
+def _validate_availability(
+    histories: tuple[tuple[IncidentRiskEntry, ...], ...],
+    availability: object,
+) -> tuple[tuple[str, int, str], ...]:
+    if type(availability) is not tuple:
+        raise IncidentRiskStoreError("availability must be an exact tuple")
+
+    expected = [
+        (entry.entry_id, entry.revision)
+        for history in histories
+        for entry in history
+    ]
+    normalized: list[tuple[str, int, str]] = []
+    seen: set[tuple[str, int]] = set()
+    for record in availability:
+        if type(record) is not tuple or len(record) != 3:
+            raise IncidentRiskStoreError(
+                "availability records must be exact (entry_id, revision, available_at) tuples"
+            )
+        entry_id, revision, available_at = record
+        if type(entry_id) is not str or not entry_id:
+            raise IncidentRiskStoreError(
+                "availability entry_id must be a non-empty string"
+            )
+        if type(revision) is not int or revision <= 0:
+            raise IncidentRiskStoreError(
+                "availability revision must be a positive exact integer"
+            )
+        _canonical_utc_timestamp(available_at, "available_at")
+        key = (entry_id, revision)
+        if key in seen:
+            raise IncidentRiskStoreError(
+                "availability cannot contain duplicate revision identities"
+            )
+        seen.add(key)
+        normalized.append((entry_id, revision, available_at))
+
+    keys = [(entry_id, revision) for entry_id, revision, _ in normalized]
+    if keys != sorted(keys):
+        raise IncidentRiskStoreError(
+            "availability records must be sorted by entry_id and revision"
+        )
+    if set(keys) != set(expected) or len(keys) != len(expected):
+        raise IncidentRiskStoreError(
+            "availability must bind every durable revision exactly once"
+        )
+
+    by_key = {
+        (entry_id, revision): _canonical_utc_timestamp(
+            available_at, "available_at"
+        )
+        for entry_id, revision, available_at in normalized
+    }
+    for history in histories:
+        prior: datetime | None = None
+        for entry in history:
+            current = by_key[(entry.entry_id, entry.revision)]
+            entry_updated = _canonical_utc_timestamp(
+                entry.updated_at, "entry.updated_at"
+            )
+            if current < entry_updated:
+                raise IncidentRiskStoreError(
+                    "revision availability cannot precede entry.updated_at"
+                )
+            if prior is not None and current < prior:
+                raise IncidentRiskStoreError(
+                    "revision availability must not move backwards"
+                )
+            prior = current
+
+    return tuple(normalized)
+
+
+def _availability_json(
+    availability: tuple[tuple[str, int, str], ...],
+) -> list[dict[str, object]]:
+    return [
+        {
+            "entry_id": entry_id,
+            "revision": revision,
+            "available_at": available_at,
+        }
+        for entry_id, revision, available_at in availability
+    ]
+
+
+def _core_payload(
+    histories: tuple[tuple[IncidentRiskEntry, ...], ...],
+    availability: tuple[tuple[str, int, str], ...],
+) -> dict[str, object]:
+    return {
+        "schema": STORE_SCHEMA,
+        "schema_version": STORE_SCHEMA_VERSION,
+        "histories": _histories_json(histories),
+        "availability": _availability_json(availability),
+    }
+
+
+def _core_sha256(
+    histories: tuple[tuple[IncidentRiskEntry, ...], ...],
+    availability: tuple[tuple[str, int, str], ...],
+) -> str:
+    payload = json.dumps(
+        _core_payload(histories, availability),
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
+def _stable_stat_metadata(left: os.stat_result, right: os.stat_result) -> bool:
+    return (
+        left.st_mode == right.st_mode
+        and left.st_size == right.st_size
+        and left.st_mtime_ns == right.st_mtime_ns
+        and left.st_ctime_ns == right.st_ctime_ns
+    )
+
+
+def _read_stable_store_text(path: Path) -> str:
+    """Read only one verified regular store object without following aliases."""
+    try:
+        path_before = os.stat(path, follow_symlinks=False)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise IncidentRiskStoreError(
+            "cannot inspect durable incident/model-risk store path"
+        ) from exc
+    if not stat.S_ISREG(path_before.st_mode) or path_before.st_nlink != 1:
+        raise IncidentRiskStoreError(
+            "durable incident/model-risk store path must be a regular non-aliased file"
+        )
+    if path_before.st_size > _MAX_STORE_BYTES:
+        raise IncidentRiskStoreError(
+            "durable incident/model-risk store exceeds resource limit"
+        )
+
+    try:
+        descriptor = _open_read_only_descriptor(path)
+    except FileNotFoundError:
+        raise
+    except OSError as exc:
+        raise IncidentRiskStoreError(
+            "cannot open durable incident/model-risk store path safely"
+        ) from exc
+
+    try:
+        try:
+            opened_before = os.fstat(descriptor)
+            path_after_open = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise IncidentRiskStoreError(
+                "cannot validate durable incident/model-risk store descriptor"
+            ) from exc
+
+        verification_descriptor: int | None = None
+        try:
+            verification_descriptor = _open_read_only_descriptor(path)
+            same_file = os.path.sameopenfile(
+                descriptor,
+                verification_descriptor,
+            )
+        except OSError as exc:
+            raise IncidentRiskStoreError(
+                "cannot verify durable incident/model-risk store identity"
+            ) from exc
+        finally:
+            if verification_descriptor is not None:
+                try:
+                    os.close(verification_descriptor)
+                except OSError:
+                    pass
+
+        if (
+            not stat.S_ISREG(opened_before.st_mode)
+            or opened_before.st_nlink != 1
+            or opened_before.st_size > _MAX_STORE_BYTES
+            or not stat.S_ISREG(path_after_open.st_mode)
+            or path_after_open.st_nlink != 1
+            or not _stable_stat_metadata(path_before, path_after_open)
+            or not same_file
+        ):
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk store path changed while validating"
+            )
+
+        os.lseek(descriptor, 0, os.SEEK_SET)
+        chunks: list[bytes] = []
+        remaining = _MAX_STORE_BYTES + 1
+        while remaining > 0:
+            chunk = os.read(descriptor, min(1024 * 1024, remaining))
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        encoded = b"".join(chunks)
+        if len(encoded) > _MAX_STORE_BYTES:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk store exceeds resource limit"
+            )
+        opened_after = os.fstat(descriptor)
+        if (
+            not stat.S_ISREG(opened_after.st_mode)
+            or opened_after.st_nlink != 1
+            or not _stable_stat_metadata(opened_before, opened_after)
+        ):
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk store changed during read"
+            )
+
+        try:
+            path_after_read = os.stat(path, follow_symlinks=False)
+        except OSError as exc:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk store path disappeared during read"
+            ) from exc
+
+        final_verification_descriptor: int | None = None
+        try:
+            final_verification_descriptor = _open_read_only_descriptor(path)
+            final_same_file = os.path.sameopenfile(
+                descriptor,
+                final_verification_descriptor,
+            )
+        except OSError as exc:
+            raise IncidentRiskStoreError(
+                "cannot verify durable incident/model-risk store identity after read"
+            ) from exc
+        finally:
+            if final_verification_descriptor is not None:
+                try:
+                    os.close(final_verification_descriptor)
+                except OSError:
+                    pass
+
+        if (
+            not stat.S_ISREG(path_after_read.st_mode)
+            or path_after_read.st_nlink != 1
+            or not _stable_stat_metadata(path_before, path_after_read)
+            or not final_same_file
+        ):
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk store path changed during read"
+            )
+        try:
+            return encoded.decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise IncidentRiskStoreError(
+                "durable incident/model-risk store is not valid UTF-8"
+            ) from exc
+    finally:
+        try:
+            os.close(descriptor)
+        except OSError as close_error:
+            raise IncidentRiskStoreError(
+                "cannot close durable incident/model-risk store descriptor"
+            ) from close_error
+
+def _authority_tx_id(state_sha256: str) -> str:
+    return f"incident-risk-store:{_sha256_text('state_sha256', state_sha256)}"
+
+
+@dataclass(frozen=True, slots=True)
+class IncidentRiskStoreSnapshot:
+    """One verified durable history image.
+
+    content_sha256 is deterministic local identity only. Rollback/deletion
+    resistance is supplied independently by MonotonicWorkspaceAuthority.
+    """
+
+    histories: tuple[tuple[IncidentRiskEntry, ...], ...]
+    availability: tuple[tuple[str, int, str], ...]
+    content_sha256: str
+
+    def __post_init__(self) -> None:
+        normalized = _validate_histories(self.histories)
+        if normalized != self.histories:
+            raise IncidentRiskStoreError("histories are not canonical")
+        normalized_availability = _validate_availability(
+            normalized, self.availability
+        )
+        if normalized_availability != self.availability:
+            raise IncidentRiskStoreError("availability is not canonical")
+        digest = _sha256_text("content_sha256", self.content_sha256)
+        if not hmac.compare_digest(
+            digest,
+            _core_sha256(normalized, normalized_availability),
+        ):
+            raise IncidentRiskStoreError(
+                "incident/model-risk store content hash mismatch"
+            )
+
+    @property
+    def current_entries(self) -> tuple[IncidentRiskEntry, ...]:
+        return tuple(history[-1] for history in self.histories)
+
+    def current_entries_as_of(
+        self,
+        as_of: str,
+    ) -> tuple[IncidentRiskEntry, ...]:
+        """Resolve the latest revision causally available by an exact UTC cutoff."""
+
+        cutoff = _canonical_as_of(as_of)
+        available_at = {
+            (entry_id, revision): _canonical_utc_timestamp(
+                timestamp, "available_at"
+            )
+            for entry_id, revision, timestamp in self.availability
+        }
+        visible: list[IncidentRiskEntry] = []
+        for history in self.histories:
+            latest_visible: IncidentRiskEntry | None = None
+            for entry in history:
+                if available_at[(entry.entry_id, entry.revision)] <= cutoff:
+                    latest_visible = entry
+                    continue
+                break
+            if latest_visible is not None:
+                visible.append(latest_visible)
+        return tuple(visible)
+
+    def history(self, entry_id: str) -> tuple[IncidentRiskEntry, ...]:
+        if type(entry_id) is not str or not entry_id:
+            raise IncidentRiskStoreError("entry_id must be a non-empty string")
+        for history in self.histories:
+            if history[0].entry_id == entry_id:
+                return history
+        return ()
+
+
+def _snapshot(
+    histories: tuple[tuple[IncidentRiskEntry, ...], ...],
+    availability: tuple[tuple[str, int, str], ...],
+) -> IncidentRiskStoreSnapshot:
+    normalized = _validate_histories(histories)
+    normalized_availability = _validate_availability(
+        normalized, availability
+    )
+    return IncidentRiskStoreSnapshot(
+        histories=normalized,
+        availability=normalized_availability,
+        content_sha256=_core_sha256(
+            normalized, normalized_availability
+        ),
+    )
+
+
+def _payload(snapshot: IncidentRiskStoreSnapshot) -> dict[str, object]:
+    if type(snapshot) is not IncidentRiskStoreSnapshot:
+        raise IncidentRiskStoreError(
+            "persistence requires an exact IncidentRiskStoreSnapshot"
+        )
+    return {
+        **_core_payload(snapshot.histories, snapshot.availability),
+        "content_sha256": snapshot.content_sha256,
+    }
+
+
+def _serialized_payload_size(snapshot: IncidentRiskStoreSnapshot) -> int:
+    """Return the exact UTF-8 byte size atomic_write_json will publish."""
+    payload = _payload(snapshot)
+    rendered = json.dumps(
+        payload,
+        ensure_ascii=False,
+        indent=2,
+        sort_keys=True,
+        allow_nan=False,
+    )
+    return len(rendered.encode("utf-8")) + 1
+
+
+def _decode_snapshot(text: str) -> IncidentRiskStoreSnapshot:
+    if type(text) is not str:
+        raise IncidentRiskStoreError(
+            "incident/model-risk store JSON must be text"
+        )
+    try:
+        raw = _STORE_STRICT_JSON_LOADS(text)
+    except (TypeError, ValueError) as exc:
+        raise IncidentRiskStoreError(
+            "invalid incident/model-risk store JSON"
+        ) from exc
+
+    if type(raw) is not dict or set(raw) != _ROOT_KEYS:
+        raise IncidentRiskStoreError(
+            "incident/model-risk store must contain exactly canonical root fields"
+        )
+    if type(raw["schema"]) is not str or raw["schema"] != STORE_SCHEMA:
+        raise IncidentRiskStoreError(
+            "unsupported incident/model-risk store schema"
+        )
+    if (
+        type(raw["schema_version"]) is not int
+        or raw["schema_version"] != STORE_SCHEMA_VERSION
+    ):
+        raise IncidentRiskStoreError(
+            "unsupported incident/model-risk store schema_version"
+        )
+
+    stored_digest = _sha256_text(
+        "content_sha256", raw["content_sha256"]
+    )
+    raw_histories = raw["histories"]
+    if type(raw_histories) is not list:
+        raise IncidentRiskStoreError("histories must be a JSON array")
+    raw_availability = raw["availability"]
+    if type(raw_availability) is not list:
+        raise IncidentRiskStoreError("availability must be a JSON array")
+
+    decoded: list[tuple[IncidentRiskEntry, ...]] = []
+    for raw_history in raw_histories:
+        if (
+            type(raw_history) is not dict
+            or set(raw_history) != _HISTORY_KEYS
+        ):
+            raise IncidentRiskStoreError(
+                "history must contain exactly entry_id and revisions"
+            )
+        entry_id = raw_history["entry_id"]
+        if type(entry_id) is not str or not entry_id:
+            raise IncidentRiskStoreError(
+                "history entry_id must be a non-empty string"
+            )
+        raw_revisions = raw_history["revisions"]
+        if type(raw_revisions) is not list or not raw_revisions:
+            raise IncidentRiskStoreError(
+                "history revisions must be a non-empty JSON array"
+            )
+        entries: list[IncidentRiskEntry] = []
+        for raw_entry in raw_revisions:
+            try:
+                entry = _STORE_ENTRY_FROM_DICT(raw_entry)
+            except (
+                IncidentRiskRegisterError,
+                TypeError,
+                ValueError,
+            ) as exc:
+                raise IncidentRiskStoreError(
+                    "durable history contains an invalid incident/model-risk entry"
+                ) from exc
+            if type(entry) is not IncidentRiskEntry:
+                raise IncidentRiskStoreError(
+                    "decoded durable history entry must be exact IncidentRiskEntry"
+                )
+            entries.append(entry)
+        if entries[0].entry_id != entry_id:
+            raise IncidentRiskStoreError(
+                "history wrapper entry_id must match its canonical revisions"
+            )
+        decoded.append(tuple(entries))
+
+    decoded_availability: list[tuple[str, int, str]] = []
+    for raw_record in raw_availability:
+        if (
+            type(raw_record) is not dict
+            or set(raw_record) != _AVAILABILITY_KEYS
+        ):
+            raise IncidentRiskStoreError(
+                "availability record must contain exactly canonical fields"
+            )
+        entry_id = raw_record["entry_id"]
+        revision = raw_record["revision"]
+        available_at = raw_record["available_at"]
+        if type(entry_id) is not str or not entry_id:
+            raise IncidentRiskStoreError(
+                "availability entry_id must be a non-empty string"
+            )
+        if type(revision) is not int or revision <= 0:
+            raise IncidentRiskStoreError(
+                "availability revision must be a positive exact integer"
+            )
+        _canonical_utc_timestamp(available_at, "available_at")
+        decoded_availability.append((entry_id, revision, available_at))
+
+    snapshot = _snapshot(
+        tuple(decoded), tuple(decoded_availability)
+    )
+    if not hmac.compare_digest(
+        stored_digest, snapshot.content_sha256
+    ):
+        raise IncidentRiskStoreError(
+            "incident/model-risk store content hash mismatch"
+        )
+    return snapshot
+
+
+def _detached_persistence_entry(entry: IncidentRiskEntry) -> IncidentRiskEntry:
+    """Snapshot caller-owned frozen state before durable validation/publication.
+
+    A frozen dataclass can still be mutated with object.__setattr__. Persist only
+    a newly constructed canonical value, revalidate credential safety on that
+    detached value, and reject a caller object that changes while it is sampled.
+    """
+    if type(entry) is not IncidentRiskEntry:
+        raise IncidentRiskStoreError(
+            "persistence accepts exact IncidentRiskEntry values only"
+        )
+    try:
+        raw = _STORE_ENTRY_TO_DICT(entry)
+        detached = _STORE_ENTRY_FROM_DICT(raw)
+        _STORE_VALIDATE_PERSISTENCE_SAFE(detached)
+        if _STORE_ENTRY_TO_DICT(entry) != raw:
+            raise IncidentRiskStoreError(
+                "incident/model-risk entry changed while taking persistence snapshot"
+            )
+    except IncidentRiskStoreError:
+        raise
+    except (IncidentRiskRegisterError, AttributeError, TypeError, ValueError) as exc:
+        raise IncidentRiskStoreError(
+            "persistence rejects an invalid or credential-bearing IncidentRiskEntry snapshot"
+        ) from exc
+    return detached
+
+
+class IncidentRiskStore:
+    """Atomic restart-safe persistence for canonical incident/model-risk history."""
+
+    FILE_NAME: Final = "incident_model_risk_store.json"
+
+    def __init__(
+        self,
+        workspace: str | Path,
+        *,
+        authority_root: str | Path | None = None,
+    ) -> None:
+        workspace_path = Path(workspace).expanduser()
+        if not workspace_path.is_absolute():
+            raise IncidentRiskStoreError(
+                "incident/model-risk workspace must be absolute"
+            )
+        self.workspace = workspace_path
+        self.path = self.workspace / self.FILE_NAME
+        try:
+            self._authority = MonotonicWorkspaceAuthority(
+                workspace=self.workspace,
+                domain=_AUTHORITY_DOMAIN,
+                key=_AUTHORITY_KEY,
+                authority_root=authority_root,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise IncidentRiskStoreError(
+                "cannot initialize independent incident/model-risk continuity authority"
+            ) from exc
+
+    @staticmethod
+    def empty_snapshot() -> IncidentRiskStoreSnapshot:
+        return _snapshot((), ())
+
+    def _read_unlocked(
+        self,
+    ) -> tuple[IncidentRiskStoreSnapshot, str | None]:
+        try:
+            text = _read_stable_store_text(self.path)
+        except FileNotFoundError:
+            return self.empty_snapshot(), None
+        snapshot = _decode_snapshot(text)
+        return snapshot, snapshot.content_sha256
+
+    def _recover_authority_unlocked(
+        self,
+        *,
+        observed_state_sha256: str | None,
+    ) -> None:
+        try:
+            self._authority.recover(
+                observed_state_sha256=observed_state_sha256,
+                tx_id=(
+                    None
+                    if observed_state_sha256 is None
+                    else _authority_tx_id(observed_state_sha256)
+                ),
+                semantic_binding_sha256=_AUTHORITY_BINDING_SHA256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            raise IncidentRiskStoreError(
+                "incident/model-risk continuity authority rejects missing, stale, or unproven store state"
+            ) from exc
+
+    def _load_unlocked(self) -> IncidentRiskStoreSnapshot:
+        snapshot, observed = self._read_unlocked()
+        self._recover_authority_unlocked(observed_state_sha256=observed)
+        return snapshot
+
+    def load(self) -> IncidentRiskStoreSnapshot:
+        with durable_path_lock(self.path):
+            return self._load_unlocked()
+
+    def load_as_of(self, as_of: str) -> tuple[IncidentRiskEntry, ...]:
+        """Load verified durable truth and project only revisions known by cutoff."""
+
+        return self.load().current_entries_as_of(as_of)
+
+    def append(
+        self, entry: IncidentRiskEntry
+    ) -> IncidentRiskStoreSnapshot:
+        """Atomically append one first revision or exact contiguous successor."""
+
+        entry = _detached_persistence_entry(entry)
+
+        with durable_path_lock(self.path):
+            before, observed_before = self._read_unlocked()
+            self._recover_authority_unlocked(
+                observed_state_sha256=observed_before
+            )
+            histories = list(before.histories)
+            index = next(
+                (
+                    position
+                    for position, history in enumerate(histories)
+                    if history[0].entry_id == entry.entry_id
+                ),
+                None,
+            )
+
+            if index is None:
+                if entry.revision != 1:
+                    raise IncidentRiskStoreError(
+                        "a new durable entry must begin at revision 1"
+                    )
+                histories.append((entry,))
+            else:
+                history = histories[index]
+                latest = history[-1]
+                if entry.revision <= latest.revision:
+                    existing = history[entry.revision - 1]
+                    if (
+                        existing.revision == entry.revision
+                        and _STORE_ENTRY_TO_DICT(entry)
+                        == _STORE_ENTRY_TO_DICT(existing)
+                    ):
+                        return before
+                    raise IncidentRiskStoreError(
+                        "same durable revision cannot be rebound to different content"
+                    )
+                try:
+                    _STORE_VALIDATE_SUCCESSOR(latest, entry)
+                except (
+                    IncidentRiskRegisterError,
+                    TypeError,
+                    ValueError,
+                ) as exc:
+                    raise IncidentRiskStoreError(
+                        "durable append must be the exact contiguous successor"
+                    ) from exc
+                histories[index] = history + (entry,)
+
+            histories.sort(key=lambda history: history[0].entry_id)
+
+            available_at = _availability_now()
+            available_time = _canonical_utc_timestamp(
+                available_at, "available_at"
+            )
+            entry_updated_at = _canonical_utc_timestamp(
+                entry.updated_at, "entry.updated_at"
+            )
+            if available_time < entry_updated_at:
+                raise IncidentRiskStoreError(
+                    "durable revision availability cannot precede entry.updated_at"
+                )
+            if before.availability:
+                latest_available = max(
+                    _canonical_utc_timestamp(
+                        timestamp, "available_at"
+                    )
+                    for _, _, timestamp in before.availability
+                )
+                if available_time < latest_available:
+                    raise IncidentRiskStoreError(
+                        "durable revision availability clock moved backwards"
+                    )
+            availability = list(before.availability)
+            availability.append(
+                (entry.entry_id, entry.revision, available_at)
+            )
+            availability.sort(key=lambda item: (item[0], item[1]))
+
+            intended = _snapshot(
+                tuple(histories), tuple(availability)
+            )
+            if _serialized_payload_size(intended) > _MAX_STORE_BYTES:
+                raise IncidentRiskStoreError(
+                    "durable incident/model-risk store exceeds resource limit"
+                )
+            tx_id = _authority_tx_id(intended.content_sha256)
+            try:
+                self._authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed_before,
+                    intended_state_sha256=intended.content_sha256,
+                    semantic_binding_sha256=_AUTHORITY_BINDING_SHA256,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise IncidentRiskStoreError(
+                    "incident/model-risk continuity authority rejected publication prepare"
+                ) from exc
+
+            atomic_write_json(self.path, _payload(intended))
+            published, observed_published = self._read_unlocked()
+            if (
+                observed_published is None
+                or not hmac.compare_digest(
+                    published.content_sha256,
+                    intended.content_sha256,
+                )
+            ):
+                raise IncidentRiskStoreError(
+                    "published incident/model-risk store does not match intended history"
+                )
+            try:
+                self._authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=observed_published,
+                    semantic_binding_sha256=_AUTHORITY_BINDING_SHA256,
+                )
+            except MonotonicWorkspaceAuthorityError as exc:
+                raise IncidentRiskStoreError(
+                    "incident/model-risk continuity authority rejected publication commit"
+                ) from exc
+            return published

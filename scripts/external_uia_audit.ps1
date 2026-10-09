@@ -15,7 +15,12 @@ Add-Type -AssemblyName System.Windows.Forms
 
 $uiaReferences = @(
     [System.Windows.Automation.Automation].Assembly.Location,
-    [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location
+    [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location,
+    # Explicit Add-Type references replace implicit framework references on pwsh.
+    # The LiveRegion probe uses Interlocked/Volatile, which may live in a
+    # separate System.Threading assembly on hosted Windows runners.
+    [System.Threading.Interlocked].Assembly.Location,
+    [System.Threading.Volatile].Assembly.Location
 ) | Select-Object -Unique
 Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'
 using System;

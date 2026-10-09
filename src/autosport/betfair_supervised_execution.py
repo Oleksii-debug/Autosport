@@ -846,12 +846,14 @@ def _parse_place_orders_response(
         echoed.get("limitOrder"),
         "echoed limitOrder",
     )
-    try:
-        echoed_selection = int(echoed.get("selectionId"))
-    except (TypeError, ValueError) as exc:
+    # Reject fractional, float, string and boolean echoes rather than
+    # coercing them with int(), which can silently truncate or reinterpret
+    # an untrusted provider selection identity.
+    echoed_selection = echoed.get("selectionId")
+    if type(echoed_selection) is not int or echoed_selection < 1:
         raise BetfairPlaceOrdersAmbiguous(
             "placeOrders echoed selection is malformed"
-        ) from exc
+        )
     try:
         exact_echo = (
             str(echoed_selection) == action.selection_id

@@ -41,10 +41,30 @@ def test_webview_emergency_stop_path_graph_has_no_residual_test_mutation():
             ):
                 drift.append(f"{path_type.__module__}.{path_type.__name__}.{name}: callable/identity drift")
 
+    if drift:
+        # Show descriptor identity and bounded code origin without mutating trust state.
+        path_class = stop_authority._CANONICAL_ADMISSION_MONOTONIC_PATH_CLASS
+        originals = dict(
+            (name, value) for cls, members in snapshot
+            if cls is path_class for name, value, _state in members
+        )
+        def provenance(value):
+            function = value.__func__ if isinstance(value, staticmethod) else value
+            code = getattr(function, "__code__", None)
+            path = getattr(code, "co_filename", "")
+            filename = path.replace("\\", "/").rsplit("/", 1)[-1]
+            return (
+                f"type={type(value).__name__}, "
+                f"module={getattr(function, '__module__', None)}, "
+                f"source={filename}, "
+                f"line={getattr(code, 'co_firstlineno', None)}"
+            )
+        drift.append("Path.__new__ canonical: " + provenance(originals.get("__new__")))
+        drift.append("Path.__new__ current: " + provenance(vars(path_class).get("__new__")))
     assert not drift, (
         "Prior tests changed import-bound monotonic filesystem dispatch; "
         "STOP must stay fail-closed until the responsible mutation is repaired: "
-        + "; ".join(drift[:12])
+        + "; ".join(drift[:14])
     )
 
 

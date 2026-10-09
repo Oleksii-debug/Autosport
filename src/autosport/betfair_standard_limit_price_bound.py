@@ -388,7 +388,7 @@ def _canonical_instruction_projection(action: ExecutionAction) -> dict[str, Any]
         raise BetfairStandardLimitPriceBoundError(
             "only the canonical Betfair BACK standard-LIMIT path is supported"
         )
-    if not callable(_CANONICAL_PLACE_ACTION):
+    if not callable(_CANONICAL_REQUEST_BODY):
         raise BetfairStandardLimitPriceBoundError(
             "canonical Betfair placeOrders implementation is unavailable"
         )

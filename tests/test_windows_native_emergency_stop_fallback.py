@@ -130,3 +130,82 @@ def test_unavailable_webview_environment_invokes_native_fallback_before_return(
     storage = tmp_path / "webview-storage"
     assert windows_entry._run_owned_interactive_gui(tmp_path, storage) == 3
     assert seen == [(tmp_path, windows_entry._WEBVIEW2_STARTUP_ERROR)]
+
+
+@pytest.mark.parametrize(
+    "fault_stage",
+    ("controller-import", "shell-import", "controller", "bridge", "renderer"),
+)
+def test_broken_packaged_shell_keeps_native_stop_choice_without_secret_leak(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, fault_stage: str
+) -> None:
+    """Missing modules and unexpected UI exceptions must never remove native STOP."""
+    import sys
+    import types
+
+    from autosport import webview2_release_environment, webview2_runtime_deployment
+
+    secret = "API_KEY=SECRET123456789"
+    monkeypatch.setattr(
+        webview2_release_environment,
+        "active_webview2_environment_overrides",
+        lambda: (),
+    )
+    monkeypatch.setattr(
+        webview2_runtime_deployment,
+        "ensure_webview2_runtime",
+        lambda: SimpleNamespace(available=True),
+    )
+    offered: list[tuple[Path, str]] = []
+    monkeypatch.setattr(
+        windows_entry,
+        "_offer_native_emergency_stop",
+        lambda workspace, message: offered.append((workspace, message)),
+    )
+
+    class Controller:
+        def __init__(self, workspace: Path) -> None:
+            if fault_stage == "controller":
+                raise RuntimeError(secret)
+            self.workspace = workspace
+
+    class Bridge:
+        def __init__(self, controller: Controller) -> None:
+            if fault_stage == "bridge":
+                raise RuntimeError(secret)
+            self.controller = controller
+
+    class WebViewUnavailable(RuntimeError):
+        pass
+
+    def launch(_bridge: Bridge, *, storage_path: Path) -> int:
+        assert storage_path == tmp_path / "webview-storage"
+        if fault_stage == "renderer":
+            raise RuntimeError(secret)
+        raise AssertionError("a fault is required for this test")
+
+    controller_module = types.ModuleType("autosport.windows_webview_emergency_stop")
+    controller_module.EmergencyStopWebController = Controller
+    shell_module = types.ModuleType("autosport.windows_webview_shell")
+    shell_module.AutosportWebBridge = Bridge
+    shell_module.WindowsWebViewUnavailable = WebViewUnavailable
+    shell_module.launch_windows_shell = launch
+
+    monkeypatch.setitem(
+        sys.modules,
+        "autosport.windows_webview_emergency_stop",
+        None if fault_stage == "controller-import" else controller_module,
+    )
+    monkeypatch.setitem(
+        sys.modules,
+        "autosport.windows_webview_shell",
+        None if fault_stage == "shell-import" else shell_module,
+    )
+    assert (
+        windows_entry._run_owned_interactive_gui(
+            tmp_path, tmp_path / "webview-storage"
+        )
+        == 3
+    )
+    assert offered == [(tmp_path, windows_entry._WEBVIEW2_STARTUP_ERROR)]
+    assert secret not in offered[0][1]

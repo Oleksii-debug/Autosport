@@ -147,7 +147,7 @@ def _offer_native_emergency_stop(workspace: Path, failure_message: str) -> None:
             result.message_uk
             if confirmed
             else "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
-            "Нові виконання мають залишатися заблокованими; "
+            "Не вважайте нові виконання заблокованими без підтвердження; "
             "перевірте стійкий журнал STOP."
         )
     except Exception:

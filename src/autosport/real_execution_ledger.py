@@ -13,7 +13,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
-from .workspace_lock import WorkspaceEconomicLock
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
 
 
 SCHEMA_VERSION = 1

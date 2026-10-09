@@ -159,7 +159,7 @@ def test_time_causality_replay_freshness_and_negative_ingress():
     with pytest.raises(PublicWebLabError):
         _evaluate((landing, market), max_age_seconds=True)
     with pytest.raises(PublicWebLabError):
-        _evaluate((landing, market), pages=[landing, market])
+        _evaluate([landing, market])
     with pytest.raises(PublicWebLabError):
         _evaluate((landing, replace(market, source_payload_sha256="not-a-hash")))
     with pytest.raises(PublicWebLabError):

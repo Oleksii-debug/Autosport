@@ -13,6 +13,8 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
 
+from .workspace_lock import WorkspaceEconomicLock
+
 
 SCHEMA_VERSION = 1
 _MAX_EXECUTION_DECIMAL_TEXT_LENGTH = 8192
@@ -1780,7 +1782,13 @@ class RealExecutionLedger:
                 payload,
             )
 
-        self._mutate(operation)
+        # Revocation and the product-owned Betfair final-send path must share
+        # one cross-process, crash-releasing authority fence.  Otherwise a
+        # revocation can commit after the sender's approval read and before
+        # the irreversible provider POST.  A concurrent revocation fails
+        # closed while a send owns the economic writer lock.
+        with WorkspaceEconomicLock(self.path.parent.resolve()):
+            self._mutate(operation)
 
     def supervised_approval_is_active(
         self,

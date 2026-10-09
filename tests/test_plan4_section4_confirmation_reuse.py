@@ -171,9 +171,13 @@ def test_wrong_receipt_digest_and_invalid_request_fail_closed(tmp_path: Path) ->
 
 
 def test_final_send_admission_failure_never_calls_provider_or_changes_ledger(
-    tmp_path: Path,
+    tmp_path: Path, monkeypatch,
 ) -> None:
     """A failed exact-request admission is a pre-I/O denial, not UNKNOWN."""
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
     profile, bound, _approval, ledger, action, store = (
         existing_fixtures._prepared(str(tmp_path))
     )
@@ -209,8 +213,12 @@ def test_final_send_admission_failure_never_calls_provider_or_changes_ledger(
     assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
 
 
-def test_final_send_admission_sees_exact_request_body_digest(tmp_path: Path) -> None:
+def test_final_send_admission_sees_exact_request_body_digest(tmp_path: Path, monkeypatch) -> None:
     """Admission and report bind identical bytes, not a mutable quote summary."""
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
     profile, bound, _approval, ledger, action, store = (
         existing_fixtures._prepared(str(tmp_path))
     )

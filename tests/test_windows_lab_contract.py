@@ -222,3 +222,19 @@ def test_duplicate_json_receipt_key_rejected_without_echoing_data():
     with pytest.raises(WindowsLabContractError) as e:
         WindowsLabCampaign.from_json(attack)
     assert "CANARY" not in str(e.value)
+
+
+@pytest.mark.parametrize("field,value", [
+    ("schema_version", True),
+    ("execution_authority", 0),
+    ("human_tested", 0),
+    ("nvda_verified", 0),
+    ("target_machine_acceptance", 0),
+])
+def test_canonical_json_scalar_types_cannot_forge_campaign_authority(field, value):
+    canonical = WindowsLabCampaign(ticket()).to_json()
+    raw = json.loads(canonical)
+    raw[field] = value
+    with pytest.raises(WindowsLabContractError):
+        WindowsLabCampaign.from_json(json.dumps(raw))
+

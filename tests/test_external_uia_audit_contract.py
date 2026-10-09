@@ -23,7 +23,7 @@ def test_external_uia_audit_loads_required_automation_assemblies() -> None:
 
 
 def test_external_uia_live_region_probe_references_monitor_core_assembly() -> None:
-    """A C# lock needs the assembly defining Monitor.Exit with explicit Add-Type refs."""
+    """Explicit Monitor calls avoid the compiler's CS0656 lock-lowering dependency."""
 
     audit = _audit()
     references = audit.split("$uiaReferences = @(", 1)[1].split(") | Select-Object -Unique", 1)[0]
@@ -36,8 +36,11 @@ def test_external_uia_live_region_probe_references_monitor_core_assembly() -> No
     assert "Volatile" not in audit
     assert "using System.Windows.Automation;" in audit
     assert "private readonly object _sync = new object();" in audit
-    assert "lock (_sync)" in audit
-    assert audit.count("lock (_sync)") == 4
+    assert "lock (_sync)" not in audit
+    assert audit.count("System.Threading.Monitor.Enter(_sync)") == 4
+    assert audit.count("System.Threading.Monitor.Exit(_sync)") == 4
+    assert "finally { System.Threading.Monitor.Exit(_sync); }" in audit
+    assert "System.Threading.Monitor.Enter(_sync);\n            try" in audit
     assert "var automationId = element.Current.AutomationId ?? \"\";" in audit
     assert "var name = element.Current.Name ?? \"\";" in audit
     assert "_lastAutomationId = automationId;" in audit

@@ -602,3 +602,81 @@ def test_half_supplied_confirmation_fails_before_ledger_mutation(
         )
     assert transport.calls == []
     assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_process_crash_after_receipt_consumption_requires_readback_not_retry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A BaseException after one-shot admission must never duplicate an order.
+
+    SystemExit represents process death after the durable confirmation is
+    consumed, at the mocked provider boundary. No real I/O is performed.
+    """
+    from autosport.betfair_supervised_execution import (
+        execute_betfair_supervised_action,
+    )
+    from autosport.real_execution_ledger import AttemptState, RealExecutionLedger
+
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
+    profile, bound, approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    attempt_id = "crash-after-confirmation"
+    authority, review, receipt = _operator_receipt_for_bound(
+        tmp_path, bound, approval, action, attempt_id=attempt_id,
+    )
+
+    def simulated_crash(_request: object) -> bytes:
+        raise SystemExit("fixture process termination")
+
+    transport = existing_fixtures._Transport(simulated_crash)
+    client = existing_fixtures._enabled_client(profile, transport, store=store)
+
+    with pytest.raises(SystemExit, match="fixture process termination"):
+        execute_betfair_supervised_action(
+            ledger, bound, approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+    assert len(transport.calls) == 1
+
+    # The operator receipt is already durably spent, even though no response
+    # was observed and no successful provider acknowledgement can be inferred.
+    reopened_confirmation = SupervisedConfirmationAuthority(
+        tmp_path / CONFIRMATION_FILENAME,
+        clock=lambda: datetime.fromisoformat(SUBMITTED_AT),
+    )
+    binding = reopened_confirmation.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        require_unconsumed=False,
+    )
+    assert binding.receipt.consumed_at is not None
+
+    # A fresh process must reconcile this submitted-but-unacknowledged effect.
+    # It cannot safely claim absence or try placeOrders a second time.
+    reopened_ledger = RealExecutionLedger(ledger.path)
+    assert attempt_id in reopened_ledger.recover_uncertain()
+    assert reopened_ledger.attempt_state(attempt_id) is AttemptState.UNKNOWN
+    assert not reopened_ledger.can_retry_action(
+        plan_id=bound.execution_plan.plan_id,
+        action_id=action.action_id,
+    )
+    with pytest.raises(Exception):
+        execute_betfair_supervised_action(
+            reopened_ledger, bound, approval,
+            action_id=action.action_id,
+            attempt_id=attempt_id,
+            profile=profile,
+            client=client,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+    assert len(transport.calls) == 1

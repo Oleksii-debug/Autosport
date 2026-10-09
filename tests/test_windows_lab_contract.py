@@ -25,7 +25,7 @@ def ticket():
 
 
 def observed(scenario="desktop_start_stop", status="PASS", evidence=EVIDENCE):
-    return WindowsLabObservation(scenario, status, evidence)
+    return WindowsLabObservation(ticket().ticket_id, scenario, status, evidence)
 
 
 def test_fixed_source_package_and_exact_dispatch_round_trip():
@@ -151,7 +151,7 @@ def test_crash_restart_rehydrates_exact_campaign_without_duplicate():
         "import sys;"
         "from autosport.windows_lab_contract import WindowsLabCampaign,WindowsLabObservation;"
         "s=WindowsLabCampaign.from_json(sys.stdin.read());"
-        "r=s.admit(WindowsLabObservation('desktop_start_stop','PASS','c'*64));"
+        "r=s.admit(WindowsLabObservation(s.ticket.ticket_id,'desktop_start_stop','PASS','c'*64));"
         "sys.stdout.write(r.to_json())"
     )
     ran = subprocess.run(
@@ -240,4 +240,18 @@ def test_canonical_json_scalar_types_cannot_forge_campaign_authority(field, valu
     raw[field] = value
     with pytest.raises(WindowsLabContractError):
         WindowsLabCampaign.from_json(json.dumps(raw))
+
+
+def test_cross_ticket_observation_cannot_be_laundered_into_new_source_or_package():
+    active = WindowsLabCampaign(ticket())
+    different = WindowsLabTicket("e" * 40, PACKAGE, ticket().scenarios)
+    alien = WindowsLabObservation(different.ticket_id, "desktop_start_stop", "PASS", EVIDENCE)
+    with pytest.raises(WindowsLabContractError, match="another ticket"):
+        active.admit(alien)
+    assert active.observations == ()
+    # A manually altered dataclass must also be rejected by restart readback.
+    accepted = WindowsLabCampaign(ticket()).admit(observed())
+    spoof = dataclasses.replace(accepted.observations[0], ticket_id=different.ticket_id)
+    with pytest.raises(WindowsLabContractError):
+        WindowsLabCampaign(accepted.ticket, (spoof,))
 

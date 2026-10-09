@@ -1037,6 +1037,10 @@ class SQLiteMarketStore:
         # Serialize threads of one store before attempting its nonblocking
         # cross-process append lease; never substitute this for the OS lock.
         self._append_thread_lock = RLock()
+        # Only a same-connection, same-database, unchanged-history proof can
+        # be reused across ingestion batches. External SQL writes invalidate
+        # PRAGMA data_version; same-connection SQL writes change total_changes.
+        self._trusted_positive_append_cache: tuple[int, str, tuple[int, int, int]] | None = None
 
         # Ensure even a brand-new database has an inode that can be witnessed both
         # before and after sqlite3.connect(). Without this pre/post witness, a
@@ -2325,6 +2329,17 @@ class SQLiteMarketStore:
             raise ValueError("positive market event append generations are not contiguous")
         return row[1]
 
+    def _positive_append_storage_stamp(self) -> tuple[int, int, int]:
+        """Witness changes by this connection, other connections, and DDL."""
+        data_version = self.connection.execute("PRAGMA data_version").fetchone()
+        schema_version = self.connection.execute("PRAGMA schema_version").fetchone()
+        if (
+            data_version is None or type(data_version[0]) is not int
+            or schema_version is None or type(schema_version[0]) is not int
+        ):
+            raise ValueError("cannot witness market append SQLite version")
+        return (data_version[0], schema_version[0], self.connection.total_changes)
+
     def _validated_positive_append_entries(
         self,
         *,
@@ -2399,6 +2414,16 @@ class SQLiteMarketStore:
         authority: MonotonicWorkspaceAuthority,
     ) -> tuple[int, str]:
         history = authority.read_history()
+        # The journal is read and authenticated on every call. Skip the costly
+        # full SQLite row-decoding/chain proof only when the *same* connection
+        # has observed no intervening SQL write (including out-of-band writes).
+        # The issuance lock and SQLite transaction are already held by callers.
+        if history and history[-1].phase is AuthorityPhase.COMMIT:
+            tip_head, tip_sha256 = self._append_authority_committed_tip(history)
+            if self._trusted_positive_append_cache == (
+                tip_head, tip_sha256, self._positive_append_storage_stamp()
+            ):
+                return tip_head, tip_sha256
         if history and history[-1].phase is AuthorityPhase.PREPARE:
             pending = history[-1]
             entries = self._validated_positive_append_entries()
@@ -2461,6 +2486,10 @@ class SQLiteMarketStore:
             raise MonotonicAuthorityRollbackError(
                 "positive market append chronology is missing, forged, or unproven"
             )
+        self._trusted_positive_append_cache = (
+            committed_head, committed_state_sha256,
+            self._positive_append_storage_stamp(),
+        )
         return committed_head, committed_state_sha256
 
     def _require_product_issued_positive_history(
@@ -3096,9 +3125,17 @@ class SQLiteMarketStore:
                             accepted.append(event)
 
                     if not accepted:
+                        # Capture data_version while BEGIN IMMEDIATE still
+                        # excludes external writers. A write after COMMIT but
+                        # before cache publication must invalidate the witness.
+                        proof_version = self._positive_append_storage_stamp()[:2]
                         self._commit_stable_database_path()
                         self._ensure_market_append_availability_authority(
                             authority
+                        )
+                        self._trusted_positive_append_cache = (
+                            committed_head, committed_state_sha256,
+                            (*proof_version, self.connection.total_changes),
                         )
                         return accepted
 
@@ -3209,6 +3246,7 @@ class SQLiteMarketStore:
                         ),
                     )
                     prepared = (tx_id, binding_sha256)
+                    proof_version = self._positive_append_storage_stamp()[:2]
                     self._commit_stable_database_path()
                 except BaseException:
                     # Once PREPARE exists, do not guess whether SQLite publication
@@ -3230,6 +3268,15 @@ class SQLiteMarketStore:
                 )
                 self._ensure_market_append_availability_authority(
                     authority
+                )
+                # Inductive proof: the old exact prefix was validated under
+                # BEGIN IMMEDIATE; all new rows and transition digests were
+                # checked before COMMIT, and independent authority recovery
+                # authenticated that exact successor. Never reuse this after
+                # any SQLite mutation by another connection or this one.
+                self._trusted_positive_append_cache = (
+                    end_generation, intended_state_sha256,
+                    (*proof_version, self.connection.total_changes),
                 )
                 return accepted
 

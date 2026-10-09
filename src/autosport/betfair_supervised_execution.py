@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from hashlib import sha256
 import json
+import sys
 from pathlib import Path
 from typing import Callable, Mapping, Sequence
 
@@ -618,6 +619,11 @@ class BetfairSupervisedPlaceOrdersClient:
         if (
             _before_transport is None
             or _FINAL_SEND_ADMISSION.get() is not _before_transport
+            # ContextVar.set() is public Python API: a caller can forge a
+            # matching callback without ever entering the durable executor.
+            # Require the exact canonical call-site code object as a second
+            # local guard. The durable receipt/ledger checks remain primary.
+            or sys._getframe(1).f_code is not _CANONICAL_BETFAIR_EXECUTOR_CODE
         ):
             raise BetfairSupervisedExecutionError(
                 "direct placeOrders dispatch requires canonical confirmed executor"
@@ -1215,3 +1221,8 @@ def execute_betfair_supervised_action(
         evidence_id,
         receipt,
     )
+
+
+# Snapshot the canonical final-send code object after definition. The
+# low-level place_action method must not accept caller-minted ContextVars.
+_CANONICAL_BETFAIR_EXECUTOR_CODE = execute_betfair_supervised_action.__code__

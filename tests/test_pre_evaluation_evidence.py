@@ -1,7 +1,11 @@
 import json
+import os
 from pathlib import Path
+import threading
 
 import pytest
+
+import autosport.pre_evaluation_evidence as pre_evaluation_evidence
 
 from autosport.pre_evaluation_evidence import (
     CanonicalCandidateFacts,
@@ -9,6 +13,7 @@ from autosport.pre_evaluation_evidence import (
     PreEvaluationEvidenceAuthority,
     PreEvaluationEvidenceStore,
     PreEvaluationPolicy,
+    PreEvaluationSessionEvidence,
 )
 
 
@@ -178,6 +183,170 @@ def test_shard_composition_is_additive_and_empty_is_neutral() -> None:
         left.combine(left)
 
 
+def test_store_concurrent_writers_do_not_share_fixed_temporary_path(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence_a = authority.evaluate_session(
+        session_id="s-a",
+        candidate_ids=["a"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    evidence_b = authority.evaluate_session(
+        session_id="s-b",
+        candidate_ids=["b"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    fixed_temporary = store.path.with_name(f".{store.path.name}.tmp")
+    barrier = threading.Barrier(2)
+    original_open = Path.open
+
+    class BarrierHandle:
+        def __init__(self, handle) -> None:
+            self._handle = handle
+
+        def __enter__(self):
+            entered = self._handle.__enter__()
+            try:
+                barrier.wait(timeout=5)
+            except BaseException:
+                self._handle.close()
+                raise
+            return entered
+
+        def __exit__(self, exc_type, exc_value, traceback):
+            return self._handle.__exit__(exc_type, exc_value, traceback)
+
+    def controlled_open(path: Path, *args, **kwargs):
+        handle = original_open(path, *args, **kwargs)
+        mode = args[0] if args else kwargs.get("mode", "r")
+        if path == fixed_temporary and mode == "wb":
+            return BarrierHandle(handle)
+        return handle
+
+    monkeypatch.setattr(Path, "open", controlled_open)
+    errors: list[BaseException] = []
+    errors_lock = threading.Lock()
+
+    def save(evidence) -> None:
+        try:
+            store.save(evidence)
+        except BaseException as exc:
+            with errors_lock:
+                errors.append(exc)
+
+    threads = [
+        threading.Thread(target=save, args=(evidence_a,), daemon=True),
+        threading.Thread(target=save, args=(evidence_b,), daemon=True),
+    ]
+    for thread in threads:
+        thread.start()
+    for thread in threads:
+        thread.join(timeout=5)
+
+    assert all(not thread.is_alive() for thread in threads)
+    assert errors == []
+    assert store.load() in (evidence_a, evidence_b)
+    assert not fixed_temporary.exists()
+    assert list(tmp_path.glob(f".{store.path.name}.*.tmp")) == []
+
+
+def test_store_cleans_unique_temporary_when_replace_fails(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+
+    def fail_replace(source, destination) -> None:
+        raise OSError("replace blocked")
+
+    monkeypatch.setattr(pre_evaluation_evidence.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="replace blocked"):
+        store.save(evidence)
+
+    assert not store.path.exists()
+    assert list(tmp_path.glob(f".{store.path.name}.*.tmp")) == []
+
+
+def test_store_cleanup_failure_does_not_mask_publication_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    original_unlink = Path.unlink
+
+    def fail_replace(source, destination) -> None:
+        raise OSError("replace blocked")
+
+    def fail_temp_unlink(path: Path, *args, **kwargs):
+        if path.name.startswith(f".{store.path.name}.") and path.name.endswith(".tmp"):
+            raise OSError("unlink blocked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pre_evaluation_evidence.os, "replace", fail_replace)
+    monkeypatch.setattr(Path, "unlink", fail_temp_unlink)
+
+    with pytest.raises(OSError, match="replace blocked") as exc_info:
+        store.save(evidence)
+
+    notes = getattr(exc_info.value, "__notes__", ())
+    assert any("temporary cleanup failed" in note for note in notes)
+    assert not store.path.exists()
+
+
+def test_store_cleanup_error_does_not_replace_process_control(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    original_unlink = Path.unlink
+    interrupt = KeyboardInterrupt("operator stop")
+
+    def interrupt_replace(source, destination) -> None:
+        raise interrupt
+
+    def fail_temp_unlink(path: Path, *args, **kwargs):
+        if path.name.startswith(f".{store.path.name}.") and path.name.endswith(".tmp"):
+            raise OSError("unlink blocked")
+        return original_unlink(path, *args, **kwargs)
+
+    monkeypatch.setattr(pre_evaluation_evidence.os, "replace", interrupt_replace)
+    monkeypatch.setattr(Path, "unlink", fail_temp_unlink)
+
+    with pytest.raises(KeyboardInterrupt) as exc_info:
+        store.save(evidence)
+
+    assert exc_info.value is interrupt
+    notes = getattr(exc_info.value, "__notes__", ())
+    assert any("temporary cleanup failed" in note for note in notes)
+    assert not store.path.exists()
+
+
 def test_durable_restart_replays_exact_authority_and_rejects_semantic_tamper(
     tmp_path: Path,
 ) -> None:
@@ -221,3 +390,155 @@ def test_resolver_identity_mismatch_and_duplicate_request_fail_closed() -> None:
             resolver=lambda _: facts("a"),
             evaluated_at_ns=1000,
         )
+
+@pytest.mark.parametrize(
+    ("location", "replacement"),
+    (
+        (("schema_version",), True),
+        (("payload", "schema_version"), True),
+        (("payload", "slots", 0, "eligible_for_evaluation"), 1),
+        (("payload", "summary", "candidate_count"), True),
+    ),
+)
+def test_store_rejects_bool_int_semantic_replay_aliases(
+    tmp_path: Path,
+    location: tuple[object, ...],
+    replacement: object,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(evidence)
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+
+    target = raw
+    for key in location[:-1]:
+        target = target[key]
+    target[location[-1]] = replacement
+    store.path.write_text(json.dumps(raw), encoding="utf-8")
+
+    with pytest.raises(ValueError):
+        store.load()
+
+def test_store_rejects_duplicate_json_keys_at_any_depth(tmp_path: Path) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(evidence)
+    canonical = store.path.read_text(encoding="utf-8")
+
+    top_level = '{"schema_version":1,' + canonical[1:]
+    store.path.write_text(top_level, encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid pre-evaluation evidence file"):
+        store.load()
+
+    store.save(evidence)
+    canonical = store.path.read_text(encoding="utf-8")
+    marker = '"candidate_id":"c1"'
+    assert marker in canonical
+    nested = canonical.replace(
+        marker,
+        '"candidate_id":"c1","candidate_id":"c1"',
+        1,
+    )
+    store.path.write_text(nested, encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid pre-evaluation evidence file"):
+        store.load()
+
+class _DerivedSessionEvidence(PreEvaluationSessionEvidence):
+    pass
+
+
+def test_store_rejects_session_subclass_before_publication(tmp_path: Path) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    canonical = authority.evaluate_session(
+        session_id="s1",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    derived = _DerivedSessionEvidence(
+        session_id=canonical.session_id,
+        evaluated_at_ns=canonical.evaluated_at_ns,
+        policy_max_age_ns=canonical.policy_max_age_ns,
+        policy_digest=canonical.policy_digest,
+        slots=canonical.slots,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+
+    with pytest.raises(TypeError, match="exact PreEvaluationSessionEvidence"):
+        store.save(derived)
+
+    assert not store.path.exists()
+
+
+def test_mutated_session_fails_before_replacing_last_good_evidence(
+    tmp_path: Path,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    last_good = authority.evaluate_session(
+        session_id="good",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    candidate = authority.evaluate_session(
+        session_id="candidate",
+        candidate_ids=["c2"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(last_good)
+    object.__setattr__(candidate, "session_id", "mutated-after-validation")
+
+    with pytest.raises(ValueError, match="slot session_id mismatch"):
+        store.save(candidate)
+
+    assert store.load() == last_good
+
+
+def test_save_uses_detached_replayed_snapshot_after_validation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    candidate = authority.evaluate_session(
+        session_id="canonical",
+        candidate_ids=["c1"],
+        resolver=lambda candidate_id: facts(candidate_id),
+        evaluated_at_ns=1000,
+    )
+    expected_authority_id = candidate.authority_id
+    expected_authority_digest = candidate.authority_digest
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    canonical_named_temporary = pre_evaluation_evidence.tempfile.NamedTemporaryFile
+
+    def mutate_caller_then_open(*args, **kwargs):
+        object.__setattr__(candidate, "session_id", "mutated-after-replay")
+        return canonical_named_temporary(*args, **kwargs)
+
+    monkeypatch.setattr(
+        pre_evaluation_evidence.tempfile,
+        "NamedTemporaryFile",
+        mutate_caller_then_open,
+    )
+    store.save(candidate)
+
+    loaded = store.load()
+    assert candidate.session_id == "mutated-after-replay"
+    assert loaded.session_id == "canonical"
+    assert loaded.authority_id == expected_authority_id
+    assert loaded.authority_digest == expected_authority_digest
+    assert loaded != candidate
+

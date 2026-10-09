@@ -78,7 +78,6 @@ def _crash_after_submitted_with_live_writer_lock(workspace: str) -> None:
     ledger.mark_submitted(
         "try-hard-crash",
         submitted_at=SUBMITTED_AT,
-        request_sha256="a" * 64,
     )
     ledger._mutate(lambda: os._exit(91))
     os._exit(92)
@@ -117,7 +116,11 @@ class RealExecutionLedgerTests(unittest.TestCase):
                     current.fingerprint,
                 )
 
-            self.assertEqual(calls, ["file", "directory"])
+            # The crash-releasing OS writer lock may fsync its lock file
+            # before the ledger publish barrier. The ledger file must still
+            # be synced immediately before the parent directory.
+            self.assertEqual(calls[-2:], ["file", "directory"])
+            self.assertEqual(calls.count("directory"), 1)
 
     def test_failed_first_create_publish_barrier_never_returns_reservation_authority(self):
         with tempfile.TemporaryDirectory() as tmp:

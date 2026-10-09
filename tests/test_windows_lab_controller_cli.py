@@ -49,7 +49,7 @@ def test_cli_never_launders_campaign_as_machine_or_human_pass():
     )
     ticket = source_level_lab_ticket("a" * 40, "b" * 64)
     report = WindowsLabCampaign(ticket).admit(
-        WindowsLabObservation("desktop_start_stop", "PASS", "c" * 64)
+        WindowsLabObservation(ticket.ticket_id, "desktop_start_stop", "PASS", "c" * 64)
     )
     verified = _run("verify-campaign", input_text=report.to_json())
     assert verified.returncode == 0

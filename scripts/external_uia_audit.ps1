@@ -14,10 +14,11 @@ Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 
 # PowerShell 7 Add-Type replaces default .NET references with explicit ones.
-# The live-region probe uses explicit Monitor.Enter/Exit in try/finally:
-# C# lock lowering otherwise emits CS0656 on the Windows runner.
-# PowerShell Core exposes implementation assemblies through the runtime, while
-# Roslyn needs the System.Runtime/System.Threading reference facades as well.
+# The live-region probe resolves runtime Monitor Enter/Exit once via delegates:
+# both C# lock lowering and direct Monitor calls require compiler references
+# that the Windows PowerShell 7 Roslyn runtime has not consistently resolved.
+# The same paired try/finally critical sections remain mandatory; missing runtime
+# monitor operations fail closed instead of skipping the UIA gate.
 # Do not weaken the UIA gate by ignoring compilation failure.
 $runtimeFacades = @()
 if ($PSVersionTable.PSEdition -eq 'Core') {
@@ -48,6 +49,24 @@ public sealed class AutosportExternalLiveRegionProbe : IDisposable
     private readonly AutomationElement _element;
     private readonly AutomationEventHandler _handler;
     private readonly object _sync = new object();
+    // PowerShell 7 may compile C# against a reduced reference set: resolving
+    // Monitor by static C# name fails with CS1069 even when the UIA assembly is
+    // valid. Resolve only the runtime's own Monitor Enter/Exit once, fail closed
+    // if either method is missing, then retain the same try/finally critical
+    // sections and concurrency guarantees as direct Monitor calls.
+    private static readonly Action<object> EnterSync = ResolveMonitor("Enter");
+    private static readonly Action<object> ExitSync = ResolveMonitor("Exit");
+
+    private static Action<object> ResolveMonitor(string name)
+    {
+        var monitor = typeof(object).Assembly.GetType(
+            "System.Threading.Monitor", throwOnError: true
+        );
+        var method = monitor.GetMethod(name, new[] { typeof(object) });
+        if (method == null) throw new InvalidOperationException("Monitor operation unavailable");
+        return (Action<object>)Delegate.CreateDelegate(typeof(Action<object>), method);
+    }
+
     private int _count;
     private string _lastAutomationId = "";
     private string _lastName = "";
@@ -80,7 +99,7 @@ public sealed class AutosportExternalLiveRegionProbe : IDisposable
             }
             var automationId = element.Current.AutomationId ?? "";
             var name = element.Current.Name ?? "";
-            System.Threading.Monitor.Enter(_sync);
+            EnterSync(_sync);
             try
             {
                 _lastAutomationId = automationId;
@@ -89,7 +108,7 @@ public sealed class AutosportExternalLiveRegionProbe : IDisposable
             }
             finally
             {
-                System.Threading.Monitor.Exit(_sync);
+                ExitSync(_sync);
             }
         }
         catch (ElementNotAvailableException)
@@ -101,27 +120,27 @@ public sealed class AutosportExternalLiveRegionProbe : IDisposable
     {
         get
         {
-            System.Threading.Monitor.Enter(_sync);
+            EnterSync(_sync);
             try { return _count; }
-            finally { System.Threading.Monitor.Exit(_sync); }
+            finally { ExitSync(_sync); }
         }
     }
     public string LastAutomationId
     {
         get
         {
-            System.Threading.Monitor.Enter(_sync);
+            EnterSync(_sync);
             try { return _lastAutomationId; }
-            finally { System.Threading.Monitor.Exit(_sync); }
+            finally { ExitSync(_sync); }
         }
     }
     public string LastName
     {
         get
         {
-            System.Threading.Monitor.Enter(_sync);
+            EnterSync(_sync);
             try { return _lastName; }
-            finally { System.Threading.Monitor.Exit(_sync); }
+            finally { ExitSync(_sync); }
         }
     }
 

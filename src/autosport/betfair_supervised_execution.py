@@ -946,6 +946,11 @@ def _report_outcome(
     return PlaceOrdersOutcome.UNKNOWN
 
 
+# Capture the class-owned dispatch function before any caller can shadow a
+# client instance. Approval/receipt/ledger authorities remain independent.
+_CANONICAL_BETFAIR_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
+
+
 def read_betfair_supervised_action_readback(
     client: BetfairReadOnlyClient,
     ledger: RealExecutionLedger,
@@ -1000,12 +1005,9 @@ def execute_betfair_supervised_action(
 
     if not isinstance(ledger, RealExecutionLedger):
         raise TypeError("ledger must be RealExecutionLedger")
-    if not isinstance(
-        client,
-        BetfairSupervisedPlaceOrdersClient,
-    ):
+    if type(client) is not BetfairSupervisedPlaceOrdersClient:
         raise TypeError(
-            "client must be BetfairSupervisedPlaceOrdersClient"
+            "client must be exact BetfairSupervisedPlaceOrdersClient"
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
@@ -1103,7 +1105,10 @@ def execute_betfair_supervised_action(
             # callback while the existing economic writer fence is held.
             admission_token = _FINAL_SEND_ADMISSION.set(confirmation_admission)
             try:
-                report = client.place_action(
+                # Dispatch via the sealed class-defined implementation, not
+                # a caller-shadowed instance attribute.
+                report = _CANONICAL_BETFAIR_PLACE_ACTION(
+                    client,
                     action,
                     profile=profile,
                     bound=bound,

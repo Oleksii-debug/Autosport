@@ -427,7 +427,9 @@ def test_injected_builder_cannot_become_profiled_after_alias_rebind(
     terminal = worker.poll()
     assert terminal is not None
     assert terminal.kind == "ERROR"
-    assert terminal.error_type == "ProductEntrypointError"
+    # Presentation exposes only exact built-in exception categories;
+    # custom class names must not become an operator-controlled leak.
+    assert terminal.error_type == "RuntimeError"
 
 
 def test_profiled_worker_root_captures_transitive_dependencies_once(
@@ -484,9 +486,10 @@ def test_profiled_builder_uses_exact_captured_factory_result(
     )
     factory_calls = 0
 
-    def canonical_factory() -> object:
+    def canonical_factory(*, workspace: Path) -> object:
         nonlocal factory_calls
         factory_calls += 1
+        assert workspace == tmp_path
         return source
 
     class _Runtime:
@@ -575,7 +578,7 @@ def test_profiled_builder_rejects_runtime_that_drops_exact_source_identity(
     binding = worker_module._ProfiledSourceBinding(
         factory_spec=_FACTORY_SPEC,
         provider_source_id=_PROVIDER_SOURCE_ID,
-        factory=lambda: source,
+        factory=lambda *, workspace: source,
     )
     builder = worker_module._capture_profiled_runtime_builder(
         source_bindings=(binding,),

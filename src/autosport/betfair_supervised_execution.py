@@ -7,6 +7,7 @@ RealExecutionLedger remains the sole execution-effect authority.
 """
 from __future__ import annotations
 
+from contextvars import ContextVar
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -51,6 +52,12 @@ PLACE_ORDERS_METHOD = "SportsAPING/v1.0/placeOrders"
 WRITE_ADAPTER_ID = "betfair-exchange-jsonrpc-supervised-placeorders"
 WRITE_ADAPTER_VERSION = "1"
 _MAX_BETFAIR_SELECTION_ID = "9223372036854775807"
+
+# Process-local dispatch-context check is a secondary guard, not execution
+# authority. The durable receipt remains the required pre-POST authority.
+_FINAL_SEND_ADMISSION: ContextVar[object | None] = ContextVar(
+    "autosport_betfair_final_send_admission", default=None
+)
 
 
 class BetfairSupervisedExecutionError(RuntimeError):
@@ -607,6 +614,13 @@ class BetfairSupervisedPlaceOrdersClient:
             bound=bound,
             execution_workspace=execution_workspace,
         )
+        if (
+            _before_transport is None
+            or _FINAL_SEND_ADMISSION.get() is not _before_transport
+        ):
+            raise BetfairSupervisedExecutionError(
+                "direct placeOrders dispatch requires canonical confirmed executor"
+            )
         provider_ref = _text(provider_order_ref, "provider_order_ref")
         if len(provider_ref) > 32 or any(
             character not in "0123456789abcdef"
@@ -997,16 +1011,14 @@ def execute_betfair_supervised_action(
     _validate_betfair_place_action(action)
     now = clock or _now
     execution_workspace = ledger.path.parent.resolve()
-    # An optional confirmation-bearing admission is available for the
-    # offline Section-4 integration lane. Its use is not yet mandatory
-    # for the legacy unconfirmed sender; do not claim Section DONE.
-    if (confirmation_receipt_id is None) != (confirmation_review_sha256 is None):
+    # No legacy path may produce placeOrders without an exact, durable and
+    # single-use operator receipt. Reject before any durable attempt mutation.
+    if confirmation_receipt_id is None or confirmation_review_sha256 is None:
         raise BetfairSupervisedExecutionError(
-            "confirmation receipt and review identity must be supplied together"
+            "durable confirmation receipt and review identity are required"
         )
-    if confirmation_receipt_id is not None:
-        _sha(confirmation_receipt_id, "confirmation_receipt_id")
-        _sha(confirmation_review_sha256, "confirmation_review_sha256")
+    _sha(confirmation_receipt_id, "confirmation_receipt_id")
+    _sha(confirmation_review_sha256, "confirmation_review_sha256")
 
     # Serialize the current owner authority through the actual provider-write
     # boundary, not just through local ledger preparation. EconomicGoalStore
@@ -1039,63 +1051,68 @@ def execute_betfair_supervised_action(
             attempt_id,
             submitted_at=now(),
         )
-        confirmation_admission: Callable[[str], None] | None = None
-        if confirmation_receipt_id is not None:
-            def confirmation_admission(request_sha256: str) -> None:
-                # The submitted instant is recovered from the verified
-                # execution ledger, never minted by the callback.
-                from .betfair_execution_confirmation import (
-                    consume_betfair_execution_confirmation,
-                )
-                view = ledger.verified_execution_view(
-                    bound.execution_plan.plan_id
-                )
-                attempts = [
-                    entry for entry in view.attempts
-                    if entry.attempt.attempt_id == attempt_id
-                ]
-                if (
-                    view.plan_fingerprint != bound.execution_plan.fingerprint
-                    or len(attempts) != 1
-                    or attempts[0].action.action_id != action.action_id
-                    or attempts[0].state is not AttemptState.SUBMITTED
-                    or attempts[0].provider_order_ref != provider_order_ref
-                    or attempts[0].submitted_at is None
-                    or not ledger.supervised_approval_is_active(
-                        plan_id=bound.execution_plan.plan_id,
-                        approval_id=approval.ledger_identity,
-                        approval_fingerprint=approval.fingerprint,
-                    )
-                ):
-                    raise BetfairSupervisedExecutionError(
-                        "durable attempt/approval changed before final send"
-                    )
-                if _time(now(), "final send time") >= _time(
-                    action.expires_at, "quote expires_at"
-                ):
-                    raise BetfairSupervisedExecutionError(
-                        "quote expired before final send"
-                    )
-                consume_betfair_execution_confirmation(
-                    execution_workspace,
-                    bound,
-                    approval,
-                    action_id=action_id,
-                    attempt_id=attempt_id,
-                    receipt_id=confirmation_receipt_id,
-                    expected_review_sha256=confirmation_review_sha256,
-                    request_sha256=request_sha256,
-                    submitted_at=attempts[0].submitted_at,
-                )
-        try:
-            report = client.place_action(
-                action,
-                profile=profile,
-                bound=bound,
-                provider_order_ref=provider_order_ref,
-                execution_workspace=execution_workspace,
-                _before_transport=confirmation_admission,
+        def confirmation_admission(request_sha256: str) -> None:
+            # The submitted instant is recovered from the verified
+            # execution ledger, never minted by the callback.
+            from .betfair_execution_confirmation import (
+                consume_betfair_execution_confirmation,
             )
+            view = ledger.verified_execution_view(
+                bound.execution_plan.plan_id
+            )
+            attempts = [
+                entry for entry in view.attempts
+                if entry.attempt.attempt_id == attempt_id
+            ]
+            if (
+                view.plan_fingerprint != bound.execution_plan.fingerprint
+                or len(attempts) != 1
+                or attempts[0].action.action_id != action.action_id
+                or attempts[0].state is not AttemptState.SUBMITTED
+                or attempts[0].provider_order_ref != provider_order_ref
+                or attempts[0].submitted_at is None
+                or not ledger.supervised_approval_is_active(
+                    plan_id=bound.execution_plan.plan_id,
+                    approval_id=approval.ledger_identity,
+                    approval_fingerprint=approval.fingerprint,
+                )
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "durable attempt/approval changed before final send"
+                )
+            if _time(now(), "final send time") >= _time(
+                action.expires_at, "quote expires_at"
+            ):
+                raise BetfairSupervisedExecutionError(
+                    "quote expired before final send"
+                )
+            consume_betfair_execution_confirmation(
+                execution_workspace,
+                bound,
+                approval,
+                action_id=action_id,
+                attempt_id=attempt_id,
+                receipt_id=confirmation_receipt_id,
+                expected_review_sha256=confirmation_review_sha256,
+                request_sha256=request_sha256,
+                submitted_at=attempts[0].submitted_at,
+            )
+        try:
+            # A direct caller cannot opt into an unguarded POST by supplying
+            # a no-op callback. Only this canonical executor owns the scoped
+            # callback while the existing economic writer fence is held.
+            admission_token = _FINAL_SEND_ADMISSION.set(confirmation_admission)
+            try:
+                report = client.place_action(
+                    action,
+                    profile=profile,
+                    bound=bound,
+                    provider_order_ref=provider_order_ref,
+                    execution_workspace=execution_workspace,
+                    _before_transport=confirmation_admission,
+                )
+            finally:
+                _FINAL_SEND_ADMISSION.reset(admission_token)
         except (
             BetfairPlaceOrdersAmbiguous,
             BetfairSupervisedExecutionError,

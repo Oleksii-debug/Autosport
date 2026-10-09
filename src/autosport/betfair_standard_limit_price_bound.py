@@ -49,6 +49,10 @@ _PROVIDER_CONTRACT_REF = (
 _WRITE_ADAPTER_ID = WRITE_ADAPTER_ID
 _WRITE_ADAPTER_VERSION = WRITE_ADAPTER_VERSION
 _CANONICAL_CLIENT_TYPE = BetfairSupervisedPlaceOrdersClient
+# Compatibility authority for the independent product verifier. The offline
+# resolver still uses the shared exact production request serializer and never
+# dispatches through this callable or touches provider transport.
+_CANONICAL_PLACE_ACTION = BetfairSupervisedPlaceOrdersClient.place_action
 _CANONICAL_REQUEST_BODY = _canonical_place_orders_request_body
 _CAPTURE_PROVIDER_ORDER_REF = "0" * 32
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")

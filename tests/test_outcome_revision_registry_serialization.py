@@ -228,13 +228,25 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 thread_a = threading.Thread(target=writer_a, name="writer-a")
                 thread_b = threading.Thread(target=writer_b, name="writer-b")
                 thread_a.start()
-                self.assertTrue(first_read_captured.wait(timeout=5))
-                thread_b.start()
-                self.assertTrue(second_started.wait(timeout=5))
-                self.assertFalse(second_reached_read.wait(timeout=0.25))
-                release_first_read.set()
-                thread_a.join(timeout=5)
-                thread_b.join(timeout=5)
+                try:
+                    # The full matrix is CPU/IO intensive: scheduler delay before
+                    # first lock acquisition is not evidence of a broken CAS.
+                    self.assertTrue(
+                        first_read_captured.wait(timeout=30),
+                        f"writer-a failed before entering locked read: {outcomes.get('a')!r}",
+                    )
+                    thread_b.start()
+                    self.assertTrue(second_started.wait(timeout=30))
+                    # This assertion remains bounded and must prove writer-b
+                    # cannot observe stale state while writer-a holds the lock.
+                    self.assertFalse(second_reached_read.wait(timeout=0.25))
+                finally:
+                    # Also unblock/join on assertion failure: no escaped writer
+                    # may mutate a deleted temporary registry after the test.
+                    release_first_read.set()
+                    thread_a.join(timeout=30)
+                    if thread_b.ident is not None:
+                        thread_b.join(timeout=30)
 
             self.assertFalse(thread_a.is_alive())
             self.assertFalse(thread_b.is_alive())

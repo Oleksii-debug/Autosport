@@ -413,6 +413,46 @@ class PaperCampaignTests(unittest.TestCase):
             run_registry=self.run_registry,
         )
 
+    def test_prospective_session_rejects_midwindow_snapshot_cutoff(self):
+        self.scientific_registry.append(
+            DatasetSnapshot(
+                dataset_snapshot_id="dataset-midwindow",
+                manifest_sha256="33" * 32,
+                source_identity="fixture-source",
+                license_identity="fixture-license",
+                causal_cutoff="2026-09-02T00:00:00Z",
+                available_at_utc="2026-09-02T00:00:00Z",
+                outcome_reveal_after="2026-09-04T00:00:00Z",
+            )
+        )
+        with self.assertRaisesRegex(
+            CampaignIntegrityError, "straddles DatasetSnapshot causal cutoff"
+        ):
+            self.add_session(
+                self.campaign(),
+                self.session(dataset_snapshot_id="dataset-midwindow"),
+            )
+
+    def test_prospective_session_rejects_late_training_snapshot(self):
+        self.scientific_registry.append(
+            DatasetSnapshot(
+                dataset_snapshot_id="dataset-late-training",
+                manifest_sha256="33" * 32,
+                source_identity="fixture-source",
+                license_identity="fixture-license",
+                causal_cutoff="2026-08-03T00:00:00Z",
+                available_at_utc="2026-09-02T00:00:00Z",
+                outcome_reveal_after="2026-09-04T00:00:00Z",
+            )
+        )
+        with self.assertRaisesRegex(
+            CampaignIntegrityError, "unavailable at evaluation start"
+        ):
+            self.add_session(
+                self.campaign(),
+                self.session(dataset_snapshot_id="dataset-late-training"),
+            )
+
     def test_session_evidence_hash_binds_window_and_metrics(self):
         session = self.session()
         self.assertEqual(session.evidence_sha256, session.computed_evidence_sha256)

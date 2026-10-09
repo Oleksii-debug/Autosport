@@ -22,6 +22,18 @@ def test_external_uia_audit_loads_required_automation_assemblies() -> None:
     assert "Add-Type -AssemblyName System.Windows.Forms" in audit
 
 
+def test_external_uia_live_region_probe_references_threading_assembly() -> None:
+    """Hosted PowerShell Add-Type needs explicit System.Threading metadata."""
+
+    audit = _audit()
+    references = audit.split("$uiaReferences = @(", 1)[1].split(") | Select-Object -Unique", 1)[0]
+    assert "[System.Threading.Interlocked].Assembly.Location" in references
+    assert "[System.Threading.Volatile].Assembly.Location" in references
+    assert "using System.Threading;" in audit
+    assert "Interlocked.Increment(ref _count);" in audit
+    assert "Volatile.Read(ref _count)" in audit
+
+
 def test_external_uia_audit_uses_runner_safe_legacy_action_pattern_lookup() -> None:
     audit = _audit()
 

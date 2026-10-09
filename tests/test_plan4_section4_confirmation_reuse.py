@@ -240,3 +240,186 @@ def test_final_send_admission_sees_exact_request_body_digest(tmp_path: Path) -> 
     assert observed == [exact_digest]
     assert report.request_sha256 == exact_digest
     assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def _operator_receipt_for_bound(
+    tmp_path: Path,
+    bound,
+    approval,
+    action,
+    *,
+    attempt_id: str,
+):
+    spec = betfair_execution_confirmation_spec(
+        bound,
+        approval,
+        action_id=action.action_id,
+        attempt_id=attempt_id,
+        review_id=f"final-review-{attempt_id}",
+        risk_evidence_sha256="f" * 64,
+    )
+    authority = SupervisedConfirmationAuthority(
+        tmp_path / CONFIRMATION_FILENAME,
+        clock=lambda: CONFIRMED_AT,
+    )
+    review = authority.prepare_review(
+        review_id=spec.review_id,
+        decision_id=spec.decision_id,
+        bookmaker_id=spec.bookmaker_id,
+        account_id=spec.account_id,
+        decision_sha256=spec.decision_sha256,
+        approval_evidence_sha256=spec.approval_evidence_sha256,
+        risk_evidence_sha256=spec.risk_evidence_sha256,
+        review_payload=spec.review_payload,
+        ttl_seconds=30,
+    )
+    receipt = authority.confirm_review(
+        review_id=review.review_id,
+        expected_review_sha256=review.review_sha256,
+    )
+    return authority, review, receipt
+
+
+def test_confirmed_send_consumes_exact_receipt_and_preserves_matched_truth(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from autosport.betfair_supervised_execution import (
+        execute_betfair_supervised_action,
+        PlaceOrdersOutcome,
+    )
+    from autosport.real_execution_ledger import AttemptState
+
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
+    profile, bound, approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    authority, review, receipt = _operator_receipt_for_bound(
+        tmp_path, bound, approval, action, attempt_id="confirmed-attempt",
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(
+            request, matched=action.requested_stake,
+            average=action.requested_odds,
+        )
+    )
+    client = existing_fixtures._enabled_client(profile, transport, store=store)
+    result = execute_betfair_supervised_action(
+        ledger, bound, approval,
+        action_id=action.action_id,
+        attempt_id="confirmed-attempt",
+        profile=profile,
+        client=client,
+        clock=lambda: SUBMITTED_AT,
+        confirmation_receipt_id=receipt.receipt_id,
+        confirmation_review_sha256=review.review_sha256,
+    )
+    assert len(transport.calls) == 1
+    assert result.outcome is PlaceOrdersOutcome.ACCEPTED
+    assert result.attempt_state is AttemptState.ACCEPTED
+    verified = ledger.verified_execution_view(bound.execution_plan.plan_id)
+    attempt = next(
+        entry for entry in verified.attempts
+        if entry.attempt.attempt_id == "confirmed-attempt"
+    )
+    assert attempt.state is AttemptState.ACCEPTED
+    assert attempt.submitted_at == SUBMITTED_AT
+    assert attempt.acknowledgement is not None
+    assert attempt.acknowledgement.accepted_stake == action.requested_stake
+    binding = authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+        require_unconsumed=False,
+    )
+    assert binding.receipt.consumed_at == SUBMITTED_AT
+    assert binding.receipt.consumed_by.startswith("betfair-final-send:v1:")
+    with pytest.raises(Exception):
+        execute_betfair_supervised_action(
+            ledger, bound, approval,
+            action_id=action.action_id,
+            attempt_id="confirmed-attempt",
+            profile=profile, client=client,
+            clock=lambda: SUBMITTED_AT,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+    assert len(transport.calls) == 1
+
+
+def test_foreign_confirmation_denies_transport_and_stays_unknown_after_restart(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from autosport.betfair_supervised_execution import (
+        execute_betfair_supervised_action, PlaceOrdersOutcome,
+    )
+    from autosport.real_execution_ledger import RealExecutionLedger, AttemptState
+
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
+    profile, bound, approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    authority, review, receipt = _operator_receipt_for_bound(
+        tmp_path, bound, approval, action, attempt_id="other-attempt",
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(request)
+    )
+    client = existing_fixtures._enabled_client(profile, transport, store=store)
+    result = execute_betfair_supervised_action(
+        ledger, bound, approval,
+        action_id=action.action_id,
+        attempt_id="denied-attempt",
+        profile=profile,
+        client=client,
+        clock=lambda: SUBMITTED_AT,
+        confirmation_receipt_id=receipt.receipt_id,
+        confirmation_review_sha256=review.review_sha256,
+    )
+    assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+    assert result.attempt_state is AttemptState.UNKNOWN
+    assert transport.calls == []
+    assert authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+    ).receipt.consumed_at is None
+    restarted = RealExecutionLedger(ledger.path)
+    assert restarted.attempt_state("denied-attempt") is AttemptState.UNKNOWN
+    assert not restarted.can_retry_action(
+        plan_id=bound.execution_plan.plan_id,
+        action_id=action.action_id,
+    )
+
+
+def test_half_supplied_confirmation_fails_before_ledger_mutation(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    from autosport.betfair_supervised_execution import (
+        execute_betfair_supervised_action,
+    )
+
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
+    profile, bound, approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(request)
+    )
+    client = existing_fixtures._enabled_client(profile, transport, store=store)
+    with pytest.raises(BetfairSupervisedExecutionError, match="supplied together"):
+        execute_betfair_supervised_action(
+            ledger, bound, approval,
+            action_id=action.action_id, attempt_id="partial-confirm",
+            profile=profile, client=client,
+            clock=lambda: SUBMITTED_AT,
+            confirmation_receipt_id="d" * 64,
+        )
+    assert transport.calls == []
+    assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

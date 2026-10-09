@@ -397,6 +397,33 @@ def test_external_uia_audit_binds_packaged_session_to_actual_runtime_witness() -
     assert "$report.runtime_witness_status = 'PASS'" in audit
 
 
+def test_external_uia_runtime_witness_wait_is_bounded_and_never_fabricates_evidence() -> None:
+    """DOM UIA readiness may precede the native before_load witness write."""
+
+    audit = _audit()
+    start = audit.index("$runtimeWitnessPath = Join-Path $workspacePath")
+    end = audit.index("$report.runtime_witness_status = 'PASS'", start)
+    binding = audit[start:end]
+
+    # Wait only for the actual product-emitted file, within the launch deadline.
+    assert "while (" in binding
+    assert "-not (Test-Path -LiteralPath $runtimeWitnessPath -PathType Leaf) -and" in binding
+    assert "[DateTime]::UtcNow -lt $deadline" in binding
+    assert "Start-Sleep -Milliseconds 100" in binding
+    assert binding.count("Test-Path -LiteralPath $runtimeWitnessPath -PathType Leaf") == 2
+    assert 'throw "Packaged WebView2 session did not publish the actual runtime witness"' in binding
+
+    # Preserve the exact witness-read and fail-closed schema/truth verification.
+    assert "Get-Content -LiteralPath $runtimeWitnessPath -Raw | ConvertFrom-Json" in binding
+    assert "$runtimeWitness.schema_version -ne 1" in binding
+    assert "$runtimeWitness.observation_source" in binding
+    assert "native_core_webview2_environment" in binding
+    assert "$runtimeWitness.real_money_execution -ne $false" in binding
+    assert "$runtimeWitness.nvda_verified -ne $false" in binding
+    assert "Set-Content" not in binding
+    assert "New-Item" not in binding
+
+
 def test_windows_candidate_requires_packaged_runtime_witness_binding() -> None:
     workflow = _windows_workflow()
     step_start = workflow.index("- name: External UIA fresh-extraction gate")

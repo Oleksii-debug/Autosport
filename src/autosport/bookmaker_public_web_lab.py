@@ -62,9 +62,9 @@ def _url(value: object) -> tuple[str, str]:
     if (parsed.scheme != "https" or not host or port is not None
             or parsed.username is not None or parsed.password is not None
             or parsed.query or parsed.fragment or parsed.netloc != host
-            or not re.fullmatch(r"[a-z0-9-]+(?:\\.[a-z0-9-]+)+", host)
+            or not re.fullmatch(r"[a-z0-9-]+(?:\.[a-z0-9-]+)+", host)
             or not parsed.path.startswith("/") or "//" in parsed.path
-            or "\\\\" in parsed.path):
+            or "\\" in parsed.path):
         raise PublicWebLabError("unsafe or non-public navigation URL")
     return host, raw
 

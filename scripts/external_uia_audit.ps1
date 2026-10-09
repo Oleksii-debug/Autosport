@@ -682,7 +682,22 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($null -eq $duplicateRoot) {
-        throw "Second packaged launch did not expose the bounded duplicate-instance dialog"
+        # Preserve FAIL: a missing externally observed dialog is never evidence
+        # that the interactive lock or native keyboard fallback worked. Record
+        # only bounded process metadata, not workspace paths or exception text.
+        $duplicateExitState = 'unavailable'
+        try {
+            $duplicateProcess.Refresh()
+            if ($duplicateProcess.HasExited) {
+                $duplicateExitState = "exited:$([int]$duplicateProcess.ExitCode)"
+            } else {
+                $duplicateExitState = 'running'
+            }
+        } catch {
+            $duplicateExitState = 'unavailable'
+        }
+        $duplicateObservedFamilyCount = @($duplicateFamilyIds).Count
+        throw "Second packaged launch did not expose the bounded duplicate-instance dialog (process=$duplicateExitState; family_count=$duplicateObservedFamilyCount)"
     }
 
     $duplicateTitle = [string]$duplicateRoot.Current.Name

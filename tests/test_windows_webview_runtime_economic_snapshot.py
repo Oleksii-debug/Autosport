@@ -448,13 +448,13 @@ def test_unprofiled_exact_runtime_tick_cannot_mint_economic_snapshot(
     monkeypatch.setattr(
         AutonomousProductRuntime,
         "start",
-        lambda _self: started_status,
+        lambda _self: status,
     )
     monkeypatch.setattr(AutonomousProductRuntime, "tick", tick)
     monkeypatch.setattr(
         AutonomousProductRuntime,
         "stop",
-        lambda _self, _reason: stopped_status,
+        lambda _self, _reason: status,
     )
     monkeypatch.setattr(AutonomousProductRuntime, "close", lambda _self: None)
 
@@ -533,7 +533,7 @@ def test_profile_revocation_during_tick_preserves_stop_not_error(
         "require_authoritative_trusted_runtime_code_profile",
         lambda _profile, **_kwargs: _profile,
     )
-    monkeypatch.setattr(AutonomousProductRuntime, "start", lambda _self: status)
+    monkeypatch.setattr(AutonomousProductRuntime, "start", lambda _self: started_status)
 
     def tick(_self):
         worker._stop_event.set()
@@ -541,7 +541,7 @@ def test_profile_revocation_during_tick_preserves_stop_not_error(
         return _tick(cycle_index=1)
 
     monkeypatch.setattr(AutonomousProductRuntime, "tick", tick)
-    monkeypatch.setattr(AutonomousProductRuntime, "stop", lambda _self, _reason: status)
+    monkeypatch.setattr(AutonomousProductRuntime, "stop", lambda _self, _reason: stopped_status)
     monkeypatch.setattr(AutonomousProductRuntime, "close", lambda _self: None)
 
     worker._run(

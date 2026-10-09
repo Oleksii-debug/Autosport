@@ -275,7 +275,7 @@ def test_bridge_rejects_canonical_controller_class_method_rebind(tmp_path) -> No
         }
         with pytest.raises(
             WindowsWebBridgeTrustError,
-            match="rebound canonical controller method",
+            match="canonical base controller method authority changed",
         ):
             bridge.dispatch(
                 {"request_id": "r-class-rebind", "action_id": "noop", "payload": {}}
@@ -488,7 +488,7 @@ def test_bridge_rejects_canonical_controller_workspace_rebind(tmp_path) -> None:
             bridge.get_state()
         with pytest.raises(
             WindowsWebBridgeTrustError,
-            match="controller workspace authority changed",
+            match="controller authority changed before runtime witness binding",
         ):
             bridge._runtime_witness_path()
     finally:

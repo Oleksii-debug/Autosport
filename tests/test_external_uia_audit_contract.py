@@ -270,6 +270,24 @@ def test_external_uia_audit_rejects_second_real_packaged_launch() -> None:
     assert "Economic і live state не змінено" in audit
 
 
+def test_missing_duplicate_dialog_exposes_bounded_process_state_without_qualifying() -> None:
+    audit = _audit()
+    start = audit.index("if ($null -eq $duplicateRoot) {")
+    end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
+    refusal = audit[start:end]
+
+    assert "$duplicateProcess.Refresh()" in refusal
+    assert "$duplicateProcess.HasExited" in refusal
+    assert '$duplicateExitState = "exited:$([int]$duplicateProcess.ExitCode)"' in refusal
+    assert "$duplicateExitState = 'running'" in refusal
+    assert "$duplicateExitState = 'unavailable'" in refusal
+    assert "$duplicateObservedFamilyCount = @($duplicateFamilyIds).Count" in refusal
+    assert "process=$duplicateExitState; family_count=$duplicateObservedFamilyCount" in refusal
+    assert "throw \"Second packaged launch did not expose" in refusal
+    assert "$report.duplicate_launch_status = 'PASS'" not in refusal
+    assert "workspacePath" not in refusal
+
+
 def test_windows_candidate_requires_duplicate_launch_evidence() -> None:
     workflow = _windows_workflow()
     step_start = workflow.index("- name: External UIA fresh-extraction gate")

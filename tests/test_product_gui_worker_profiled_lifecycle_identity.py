@@ -280,7 +280,9 @@ def test_profiled_worker_run_rejects_wrong_started_source_before_profile_issue(
     terminal = worker.poll()
     assert terminal is not None
     assert terminal.kind == "ERROR"
-    assert terminal.error_type == "ProductEntrypointError"
+    # Presentation exposes only exact built-in exception categories;
+    # custom class names must not become an operator-controlled leak.
+    assert terminal.error_type == "RuntimeError"
     assert runtime.stop_reasons == ["runtime_error"]
     assert runtime.closed is True
     assert worker.busy is False

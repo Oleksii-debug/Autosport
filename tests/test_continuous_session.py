@@ -407,21 +407,26 @@ def _build_coordinator(
         ),
         lookup_application_receipt=lambda delta: None,
     )
-    coordinator = ContinuousSessionCoordinator(
-        workspace=root,
-        collector=collector,
-        lifecycle=lifecycle,
-        market_store=market_store,
-        desktop_consumer=desktop,
-        invalidation_buffer=invalidations,
-        dependency_index=dependencies,
-        outcome_authority=outcome_authority,
-        settlement_learning_handoff=settlement_learning_handoff,
-        session_id="session-1",
-        clock=clock,
-        initial_bankroll="100",
-        required_history=required_history,
-    )
+    try:
+        coordinator = ContinuousSessionCoordinator(
+            workspace=root,
+            collector=collector,
+            lifecycle=lifecycle,
+            market_store=market_store,
+            desktop_consumer=desktop,
+            invalidation_buffer=invalidations,
+            dependency_index=dependencies,
+            outcome_authority=outcome_authority,
+            settlement_learning_handoff=settlement_learning_handoff,
+            session_id="session-1",
+            clock=clock,
+            initial_bankroll="100",
+            required_history=required_history,
+        )
+    except BaseException:
+        # A rejected constructor must not leak the helper-owned SQLite handle.
+        market_store.close()
+        raise
     return coordinator, market_store, lifecycle, mirror, invalidations, dependencies
 
 

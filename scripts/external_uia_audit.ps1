@@ -630,6 +630,16 @@ try {
         }
         $runtimeWitnessPath = Join-Path $workspacePath 'webview2-runtime-witness.json'
         $report.runtime_witness_path = $runtimeWitnessPath
+        # WebView2 can expose the loaded DOM to UI Automation shortly before
+        # pywebview's blocking before_load callback publishes the native runtime
+        # witness. Use only the existing launch deadline: never fabricate a file,
+        # accept a missing witness, or bypass its strict content validation.
+        while (
+            -not (Test-Path -LiteralPath $runtimeWitnessPath -PathType Leaf) -and
+            [DateTime]::UtcNow -lt $deadline
+        ) {
+            Start-Sleep -Milliseconds 100
+        }
         if (-not (Test-Path -LiteralPath $runtimeWitnessPath -PathType Leaf)) {
             throw "Packaged WebView2 session did not publish the actual runtime witness"
         }

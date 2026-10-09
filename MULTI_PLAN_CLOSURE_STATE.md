@@ -80,6 +80,9 @@ Section 9: OPEN plan qualification.
 |7|OPEN|Plan-wide source engineering qualification.|
 
 
+<!-- Plan 6 Section 2 ongoing checkpoint (nonterminal; does not supersede table status) -->
+|2|IN_PROGRESS_NOT_DONE|2026-10-09 same canonical #1598 continued to source/test head `82805343e3536fb1adf0bb12baab7c89859aee86`: fixed native-close synchronous fallback `UnboundLocalError` (commit b0fc60b9), preserved fail-closed trust-negative tests (7848eae3), corrected state-poll epoch-fence semantic test (0a561fa2), assertive pending/final emergency-STOP focus/readback semantics test (82805343). GitHub source/test readback PASS; full machine pytest/CI and Windows package/restart NOT_PASS/NOT_RUN. Prior Ubuntu CI 37888837052 FAILED 40 tests; exact-head CI 37893385900, Windows 37893385945, Endurance 37893385947 initially QUEUED, not PASS. No main merge / postmerge readback / terminal DONE. Section 3 not activated. Evidence [PR comment](https://github.com/Oleksii-debug/Autosport/pull/1598#issuecomment-6075611699). HUMAN_TESTED=false; NVDA_VERIFIED=false.|
+
 ### Plan 7 — Provider-free PAPER/SHADOW convergence
 Sections 1–7: WAITING_UPSTREAM until terminal Plans 1,2,3,5,6 plus terminal Plan 4 Sections 1,2,7 (capability registry, read-only/provider path, public web-lab). Other Plan-4 execution Sections are not M1 blockers.
 

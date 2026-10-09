@@ -3188,7 +3188,7 @@ def launch_windows_shell(
     def close_trusted_window_safely() -> bool:
         """Veto native close until canonical teardown completes off the UI thread."""
 
-        nonlocal close_teardown_thread
+        nonlocal close_teardown_thread, close_teardown_succeeded
         if not canonical_bridge:
             return True
         thread_start_failed = False

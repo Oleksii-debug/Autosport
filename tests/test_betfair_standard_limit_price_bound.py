@@ -179,29 +179,36 @@ def test_instruction_projection_identity_survives_decimal_scale_round_trip() -> 
     assert before_evidence.evidence_id == after_evidence.evidence_id
 
 
-def _replace_captured_request(
-    monkeypatch,
-    mutate,
-) -> None:
+def test_offline_capture_requires_no_provider_dispatch(monkeypatch) -> None:
     import autosport.betfair_standard_limit_price_bound as module
 
-    original = module._CANONICAL_PLACE_ACTION
+    _bound_plan, action, _ = _evidence()
 
-    def drifted(self, action, **kwargs):
-        try:
-            return original(self, action, **kwargs)
-        except module._CapturedPlaceOrdersRequest as captured:
-            envelope = json.loads(captured.body.decode("utf-8"))
-            mutate(envelope["params"]["instructions"][0])
-            raise module._CapturedPlaceOrdersRequest(
-                json.dumps(
-                    envelope,
-                    sort_keys=True,
-                    separators=(",", ":"),
-                ).encode("utf-8")
-            ) from None
+    def prohibited(*args, **kwargs):
+        raise AssertionError("offline price evidence must never dispatch placeOrders")
 
-    monkeypatch.setattr(module, "_CANONICAL_PLACE_ACTION", drifted)
+    monkeypatch.setattr(
+        module.BetfairSupervisedPlaceOrdersClient, "place_action", prohibited
+    )
+    projection = module._canonical_instruction_projection(action)
+    assert projection["orderType"] == "LIMIT"
+    assert projection["limitOrder"]["price"] == ExecutionAction.to_dict(action)["requested_odds"]
+
+
+def _replace_captured_request(monkeypatch, mutate) -> None:
+    import autosport.betfair_standard_limit_price_bound as module
+
+    original = module._CANONICAL_REQUEST_BODY
+
+    def drifted(action, **kwargs):
+        body = original(action, **kwargs)
+        envelope = json.loads(body.decode("utf-8"))
+        mutate(envelope["params"]["instructions"][0])
+        return json.dumps(
+            envelope, sort_keys=True, separators=(",", ":")
+        ).encode("utf-8")
+
+    monkeypatch.setattr(module, "_CANONICAL_REQUEST_BODY", drifted)
 
 
 def test_same_version_time_in_force_write_drift_fails_closed(monkeypatch) -> None:

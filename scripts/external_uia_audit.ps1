@@ -13,9 +13,9 @@ Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
 
-# PowerShell 7 Add-Type replaces the default .NET references when -ReferencedAssemblies
-# is supplied. Include the core assembly that actually implements Monitor.Exit;
-# otherwise the C# lock statements fail with CS0656 during the Windows package gate.
+# PowerShell 7 Add-Type replaces default .NET references with explicit ones.
+# The live-region probe uses explicit Monitor.Enter/Exit in try/finally:
+# C# lock lowering otherwise emits CS0656 on the Windows runner.
 $uiaReferences = @(
     [System.Threading.Monitor].Assembly.Location,
     [System.Windows.Automation.Automation].Assembly.Location,
@@ -62,11 +62,16 @@ public sealed class AutosportExternalLiveRegionProbe : IDisposable
             }
             var automationId = element.Current.AutomationId ?? "";
             var name = element.Current.Name ?? "";
-            lock (_sync)
+            System.Threading.Monitor.Enter(_sync);
+            try
             {
                 _lastAutomationId = automationId;
                 _lastName = name;
                 _count++;
+            }
+            finally
+            {
+                System.Threading.Monitor.Exit(_sync);
             }
         }
         catch (ElementNotAvailableException)
@@ -74,9 +79,33 @@ public sealed class AutosportExternalLiveRegionProbe : IDisposable
         }
     }
 
-    public int Count { get { lock (_sync) { return _count; } } }
-    public string LastAutomationId { get { lock (_sync) { return _lastAutomationId; } } }
-    public string LastName { get { lock (_sync) { return _lastName; } } }
+    public int Count
+    {
+        get
+        {
+            System.Threading.Monitor.Enter(_sync);
+            try { return _count; }
+            finally { System.Threading.Monitor.Exit(_sync); }
+        }
+    }
+    public string LastAutomationId
+    {
+        get
+        {
+            System.Threading.Monitor.Enter(_sync);
+            try { return _lastAutomationId; }
+            finally { System.Threading.Monitor.Exit(_sync); }
+        }
+    }
+    public string LastName
+    {
+        get
+        {
+            System.Threading.Monitor.Enter(_sync);
+            try { return _lastName; }
+            finally { System.Threading.Monitor.Exit(_sync); }
+        }
+    }
 
     public void Dispose()
     {

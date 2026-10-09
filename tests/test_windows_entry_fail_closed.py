@@ -210,7 +210,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             workspace_patch,
             instance_patch,
             patch.dict("os.environ", environment, clear=False),
-            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.object(windows_entry, "_offer_native_emergency_stop") as offer_stop,
             patch.dict(
                 sys.modules,
                 {
@@ -232,7 +232,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
                 "instance_unlock",
             ],
         )
-        show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
+        offer_stop.assert_called_once_with(Path.cwd().resolve() / ".autosport-entry-test-workspace", windows_entry._WEBVIEW2_STARTUP_ERROR)
 
     def test_second_interactive_instance_fails_before_runtime_or_controller(self) -> None:
         from autosport.workspace_lock import WorkspaceEconomicLockBusyError
@@ -302,7 +302,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             path_patch,
             workspace_patch as workspace_probe,
             instance_patch,
-            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.object(windows_entry, "_offer_native_emergency_stop") as offer_stop,
             patch.dict(
                 sys.modules,
                 {
@@ -317,7 +317,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
 
         self.assertEqual(calls, [])
         workspace_probe.assert_called_once()
-        show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
+        offer_stop.assert_called_once_with(Path.cwd().resolve() / ".autosport-entry-test-workspace", windows_entry._WEBVIEW2_STARTUP_ERROR)
 
     def test_preflight_exception_fails_closed_without_detail_leak(self) -> None:
         path_patch, workspace_patch, instance_patch = self._interactive_patches()
@@ -326,7 +326,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             path_patch,
             workspace_patch as workspace_probe,
             instance_patch,
-            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.object(windows_entry, "_offer_native_emergency_stop") as offer_stop,
             patch.dict(
                 sys.modules,
                 {
@@ -340,7 +340,7 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
             self.assertEqual(main([]), 3)
 
         workspace_probe.assert_called_once()
-        shown = show_error.call_args.args[0]
+        shown = offer_stop.call_args.args[1]
         self.assertEqual(shown, windows_entry._WEBVIEW2_STARTUP_ERROR)
         self.assertNotIn(secret, shown)
 

@@ -153,7 +153,19 @@ def test_mutating_dispatch_invalidates_pre_and_mid_action_state_snapshots() -> N
     assert render > epoch_check
     assert refresh_body.count("requestEpoch === stateProjectionEpoch") >= 2
     assert refresh_body.count("refreshPending = true;") >= 2
-    assert "Do not overwrite a newer action result with an obsolete error." in refresh_body
+    # Verify the actual stale-error fence, not a historical source comment.
+    catch_start = refresh_body.index("} catch (_error) {")
+    stale_error_fence = refresh_body.index(
+        "if (requestEpoch === stateProjectionEpoch)", catch_start
+    )
+    error_announcement = refresh_body.index(
+        'announce("Не вдалося оновити стан застосунку.", true);',
+        catch_start,
+    )
+    retry_stale_error = refresh_body.index(
+        "refreshPending = true;", error_announcement
+    )
+    assert catch_start < stale_error_fence < error_announcement < retry_stale_error
 
     assert "globalThis.autosportDispatch = dispatch;" in javascript
 

@@ -42,6 +42,7 @@ from .real_execution_ledger import (
     ExternalAcknowledgement,
     RealExecutionLedger,
 )
+from . import supervised_execution as _supervised_execution_runtime
 from .supervised_execution import (
     BoundSupervisedExecutionPlan,
     SupervisedApproval,
@@ -1011,7 +1012,10 @@ def execute_betfair_supervised_action(
         )
     action = bound.action_for(action_id)
     _validate_betfair_place_action(action)
-    now = clock or _now
+    # Caller clocks are observation/test conveniences, never final-send
+    # authority: a backdated clock could otherwise bypass quote/review expiry.
+    _ = clock
+    now = _supervised_execution_runtime._trusted_now
     execution_workspace = ledger.path.parent.resolve()
     # No legacy path may produce placeOrders without an exact, durable and
     # single-use operator receipt. Reject before any durable attempt mutation.

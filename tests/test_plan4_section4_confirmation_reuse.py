@@ -102,7 +102,7 @@ def test_durable_confirmation_one_shot_survives_restart(tmp_path: Path) -> None:
         submitted_at=SUBMITTED_AT,
     )
     assert witness.request_sha256 == REQUEST_DIGEST
-    assert witness.consumed_at == SUBMITTED_AT
+    assert datetime.fromisoformat(witness.consumed_at) == datetime.fromisoformat(SUBMITTED_AT)
     restarted = SupervisedConfirmationAuthority(
         tmp_path / CONFIRMATION_FILENAME,
         clock=lambda: datetime.fromisoformat(SUBMITTED_AT),

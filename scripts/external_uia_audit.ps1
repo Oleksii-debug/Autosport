@@ -15,26 +15,17 @@ Add-Type -AssemblyName System.Windows.Forms
 
 $uiaReferences = @(
     [System.Windows.Automation.Automation].Assembly.Location,
-    [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location,
-    # Explicit Add-Type references replace implicit framework references on pwsh.
-    # The LiveRegion probe uses Interlocked/Volatile, which may live in a
-    # separate System.Threading assembly on hosted Windows runners.
-    # Interlocked/Volatile are implemented in System.Private.CoreLib on modern
-    # .NET, but Roslyn also needs the System.Threading reference facade to
-    # resolve their forwarded public type names under -ReferencedAssemblies.
-    [System.Reflection.Assembly]::Load('System.Threading').Location,
-    [System.Threading.Interlocked].Assembly.Location,
-    [System.Threading.Volatile].Assembly.Location
+    [System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location
 ) | Select-Object -Unique
 Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'
 using System;
-using System.Threading;
 using System.Windows.Automation;
 
 public sealed class AutosportExternalLiveRegionProbe : IDisposable
 {
     private readonly AutomationElement _element;
     private readonly AutomationEventHandler _handler;
+    private readonly object _sync = new object();
     private int _count;
     private string _lastAutomationId = "";
     private string _lastName = "";
@@ -65,18 +56,23 @@ public sealed class AutosportExternalLiveRegionProbe : IDisposable
             {
                 return;
             }
-            _lastAutomationId = element.Current.AutomationId ?? "";
-            _lastName = element.Current.Name ?? "";
-            Interlocked.Increment(ref _count);
+            var automationId = element.Current.AutomationId ?? "";
+            var name = element.Current.Name ?? "";
+            lock (_sync)
+            {
+                _lastAutomationId = automationId;
+                _lastName = name;
+                _count++;
+            }
         }
         catch (ElementNotAvailableException)
         {
         }
     }
 
-    public int Count => Volatile.Read(ref _count);
-    public string LastAutomationId => _lastAutomationId;
-    public string LastName => _lastName;
+    public int Count { get { lock (_sync) { return _count; } } }
+    public string LastAutomationId { get { lock (_sync) { return _lastAutomationId; } } }
+    public string LastName { get { lock (_sync) { return _lastName; } } }
 
     public void Dispose()
     {

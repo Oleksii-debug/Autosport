@@ -19,6 +19,10 @@ $uiaReferences = @(
     # Explicit Add-Type references replace implicit framework references on pwsh.
     # The LiveRegion probe uses Interlocked/Volatile, which may live in a
     # separate System.Threading assembly on hosted Windows runners.
+    # Interlocked/Volatile are implemented in System.Private.CoreLib on modern
+    # .NET, but Roslyn also needs the System.Threading reference facade to
+    # resolve their forwarded public type names under -ReferencedAssemblies.
+    [System.Reflection.Assembly]::Load('System.Threading').Location,
     [System.Threading.Interlocked].Assembly.Location,
     [System.Threading.Volatile].Assembly.Location
 ) | Select-Object -Unique

@@ -425,9 +425,13 @@ def consume_betfair_execution_confirmation(
     trust root.
     """
 
-    if type(execution_workspace) is not Path:
+    # pathlib.Path() constructs the platform-specific concrete Path type
+    # (PosixPath on CI, WindowsPath on Windows).  Comparing with Path itself
+    # rejects legitimate paths on both platforms and always denies admission.
+    # Keep an exact-type check to reject hostile Path subclasses.
+    if type(execution_workspace) is not type(Path()):
         raise BetfairExecutionConfirmationError(
-            "execution_workspace must be exact Path"
+            "execution_workspace must be exact concrete Path"
         )
     workspace = execution_workspace.resolve()
     action = _require_bound_action(bound, approval, action_id=action_id)

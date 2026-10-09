@@ -97,6 +97,7 @@ def test_unknown_or_failed_stop_never_claims_success(
     windows_entry._offer_native_emergency_stop(tmp_path, "Збій WebView2.")
     assert len(native.calls) == 2
     assert "НЕ ПІДТВЕРДЖЕНО" in native.calls[1][0]
+    assert "Не вважайте нові виконання заблокованими" in native.calls[1][0]
     assert "secret filesystem detail" not in native.calls[1][0]
     assert native.calls[1][2] == 0x00000010
 

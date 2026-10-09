@@ -47,7 +47,7 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                self.assertEqual(default_workspace(), override)
+                self.assertEqual(default_workspace(), override.resolve(strict=False))
 
     def test_relative_override_fails_closed_instead_of_following_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -95,7 +95,7 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     default_workspace(),
-                    local_app_data / "Autosport" / "workspace",
+                    (local_app_data / "Autosport" / "workspace").resolve(strict=False),
                 )
 
     def test_relative_local_app_data_fails_closed_instead_of_following_cwd(self) -> None:
@@ -155,7 +155,7 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     default_workspace(),
-                    home / ".autosport" / "workspace",
+                    (home / ".autosport" / "workspace").resolve(strict=False),
                 )
 
 

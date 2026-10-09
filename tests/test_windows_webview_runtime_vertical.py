@@ -160,7 +160,8 @@ def test_webview_runtime_start_stop_delegates_to_canonical_worker(
 
     repeated = controller._action_product_runtime_stop({})
     assert repeated["status"] == "rejected"
-    assert "вже прийнято" in repeated["message"]
+    assert "прийнято" in repeated["message"].casefold()
+    assert "STOP" in repeated["message"]
     assert worker.stop_reasons == ["operator_stop"]
 
 

@@ -255,3 +255,33 @@ def test_cross_ticket_observation_cannot_be_laundered_into_new_source_or_package
     with pytest.raises(WindowsLabContractError):
         WindowsLabCampaign(accepted.ticket, (spoof,))
 
+
+
+def test_caller_held_ticket_and_receipt_mutation_cannot_rewrite_campaign_snapshot():
+    owned_ticket = ticket()
+    external = observed()
+    campaign = WindowsLabCampaign(owned_ticket).admit(external)
+    before = campaign.to_json()
+    object.__setattr__(owned_ticket, "source_sha", "d" * 40)
+    object.__setattr__(external, "status", "FAIL")
+    object.__setattr__(external, "ticket_id", "e" * 64)
+    assert campaign.to_json() == before
+    assert WindowsLabCampaign.from_json(before) == campaign
+
+
+def test_low_level_mutated_observation_is_revalidated_before_admission():
+    external = observed()
+    object.__setattr__(external, "evidence_sha256", "PRIVATE_CANARY")
+    with pytest.raises(WindowsLabContractError) as captured:
+        WindowsLabCampaign(ticket()).admit(external)
+    assert "PRIVATE_CANARY" not in str(captured.value)
+
+
+def test_hostile_string_subclass_cannot_execute_equality_during_validation():
+    class HostileString(str):
+        def __eq__(self, other):
+            raise RuntimeError("PRIVATE_CANARY must not execute")
+    with pytest.raises(WindowsLabContractError) as captured:
+        dataclasses.replace(ticket(), scenarios=(HostileString("desktop_start_stop"),))
+    assert "CANARY" not in str(captured.value)
+

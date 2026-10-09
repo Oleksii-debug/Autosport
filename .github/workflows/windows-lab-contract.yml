@@ -1,6 +1,6 @@
 name: Windows lab contract (nonexecuting)
 
-# Only a trusted owner-dispatched controller on default branch may mint a lab
+# Only the repository owner's original dispatch AND rerun may mint a lab
 # ticket. This workflow NEVER launches a GUI/NVDA agent or user-supplied code.
 # The non-admin isolated Windows agent is a separately controlled execution
 # boundary, and independently authenticated evidence remains a later gate.
@@ -25,7 +25,7 @@ permissions:
 
 jobs:
   issue_bounded_contract:
-    if: github.repository == 'Oleksii-debug/Autosport' && github.ref == 'refs/heads/main'
+    if: github.repository == 'Oleksii-debug/Autosport' && github.ref == 'refs/heads/main' && github.actor == 'Oleksii-debug' && github.triggering_actor == 'Oleksii-debug'
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:

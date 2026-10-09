@@ -64,7 +64,9 @@ def test_workflow_runs_only_owner_dispatched_exact_main_without_agent_or_fork_co
     assert "workflow_dispatch:" in text
     assert "pull_request:" not in text
     assert "pull_request_target:" not in text
-    assert "if: github.repository == 'Oleksii-debug/Autosport' && github.ref == 'refs/heads/main'" in text
+    assert "if: github.repository == 'Oleksii-debug/Autosport' && github.ref == 'refs/heads/main' && github.actor == 'Oleksii-debug' && github.triggering_actor == 'Oleksii-debug'" in text
+    assert "github.actor == 'Oleksii-debug'" in text
+    assert "github.triggering_actor == 'Oleksii-debug'" in text
     assert "persist-credentials: false" in text
     assert "ref: ${{ github.sha }}" in text
     assert 'test "$AUTOSPORT_SOURCE_SHA" = "$GITHUB_SHA"' in text

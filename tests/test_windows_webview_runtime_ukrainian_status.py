@@ -529,7 +529,9 @@ def test_economic_projection_does_not_open_quarantined_workspace(
         forbidden_session,
     )
 
-    controller._refresh_economic_projection()
+    # The lightweight controller fixture stubs the refresh method; invoke the
+    # production implementation explicitly to test the quarantined path.
+    AutosportWebController._refresh_economic_projection(controller)
 
     assert controller._active_workspace == tmp_path
     assert "віднов" in controller.status.casefold()

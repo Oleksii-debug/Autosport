@@ -17,6 +17,9 @@ from autosport.betfair_execution_confirmation import (
     betfair_execution_confirmation_spec,
     consume_betfair_execution_confirmation,
 )
+from autosport.betfair_supervised_execution import (
+    BetfairSupervisedExecutionError,
+)
 from autosport.supervised_confirmation import (
     SupervisedConfirmationAuthority,
     SupervisedConfirmationConflictError,
@@ -163,3 +166,42 @@ def test_wrong_receipt_digest_and_invalid_request_fail_closed(tmp_path: Path) ->
         receipt_id=receipt.receipt_id,
         expected_review_sha256=review.review_sha256,
     ).receipt.consumed_at is None
+
+
+def test_final_send_admission_failure_never_calls_provider_or_changes_ledger(
+    tmp_path: Path,
+) -> None:
+    """A failed exact-request admission is a pre-I/O denial, not UNKNOWN."""
+    profile, bound, _approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(request)
+    )
+    client = existing_fixtures._enabled_client(
+        profile, transport, store=store
+    )
+    request_digests: list[str] = []
+
+    def reject_final_send(request_sha256: str) -> None:
+        request_digests.append(request_sha256)
+        raise RuntimeError("sensitive-transport-secret")
+
+    with pytest.raises(
+        BetfairSupervisedExecutionError,
+        match="final-send admission failed before provider transport",
+    ) as denied:
+        client.place_action(
+            action,
+            profile=profile,
+            bound=bound,
+            provider_order_ref="a1b2c3",
+            execution_workspace=tmp_path.resolve(),
+            _before_transport=reject_final_send,
+        )
+    assert len(request_digests) == 1
+    assert len(request_digests[0]) == 64
+    assert all(character in "0123456789abcdef" for character in request_digests[0])
+    assert "sensitive-transport-secret" not in str(denied.value)
+    assert transport.calls == []
+    assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

@@ -11,7 +11,11 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _validate_decimal_text_resource_bound,
+)
 
 
 _SCHEMA_VERSION = 2
@@ -77,19 +81,48 @@ def _timestamp_text(value: datetime) -> str:
 
 
 def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
-    try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError) as exc:
-        raise ValueError(f"{name} must be a finite Decimal") from exc
+    if type(value) is Decimal:
+        parsed = value
+    elif type(value) is str:
+        try:
+            parsed = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite Decimal") from exc
+    elif type(value) is int:
+        parsed = Decimal(value)
+    else:
+        raise ValueError(f"{name} must be an exact Decimal, string or integer")
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{name} must be finite and {comparator}")
+    _validate_decimal_text_resource_bound(parsed)
     return parsed
 
 
+def _serialized_decimal(
+    value: object,
+    name: str,
+    *,
+    allow_zero: bool = False,
+) -> Decimal:
+    if type(value) is not str:
+        raise PaperExecutionIntegrityError(
+            f"{name} must be a canonical serialized decimal string"
+        )
+    try:
+        return _decimal(value, name, allow_zero=allow_zero)
+    except ValueError as exc:
+        raise PaperExecutionIntegrityError(
+            f"{name} is not a valid canonical serialized decimal"
+        ) from exc
+
+
 def _decimal_text(value: Decimal) -> str:
+    if type(value) is not Decimal:
+        raise ValueError("Decimal must be an exact canonical Decimal")
     if not value.is_finite():
         raise ValueError("Decimal must be finite")
+    _validate_decimal_text_resource_bound(value)
     return format(value, "f")
 
 
@@ -369,8 +402,22 @@ class PaperExecutionEvidenceRecord:
                 observed_at=raw["observed_at"],
                 evidence_grade=EvidenceGrade(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
-                accepted_odds=raw["accepted_odds"],
-                accepted_stake=raw["accepted_stake"],
+                accepted_odds=(
+                    None
+                    if raw["accepted_odds"] is None
+                    else _serialized_decimal(
+                        raw["accepted_odds"],
+                        "evidence accepted_odds",
+                    )
+                ),
+                accepted_stake=(
+                    None
+                    if raw["accepted_stake"] is None
+                    else _serialized_decimal(
+                        raw["accepted_stake"],
+                        "evidence accepted_stake",
+                    )
+                ),
                 suspended=raw["suspended"],
                 reason=raw["reason"],
             )
@@ -585,15 +632,35 @@ class PaperLegAttempt:
                 selection_id=raw["selection_id"],
                 side=raw["side"],
                 decision_quote_id=raw["decision_quote_id"],
-                decision_odds=Decimal(raw["decision_odds"]),
-                requested_stake=Decimal(raw["requested_stake"]),
+                decision_odds=_serialized_decimal(
+                    raw["decision_odds"],
+                    "attempt decision_odds",
+                ),
+                requested_stake=_serialized_decimal(
+                    raw["requested_stake"],
+                    "attempt requested_stake",
+                ),
                 decision_observed_at=raw["decision_observed_at"],
                 execution_observed_at=raw["execution_observed_at"],
                 delay_ms=raw["delay_ms"],
                 quote_age_ms=raw["quote_age_ms"],
                 outcome=PaperAttemptOutcome(raw["outcome"]),
-                execution_odds=None if raw["execution_odds"] is None else Decimal(raw["execution_odds"]),
-                execution_stake=None if raw["execution_stake"] is None else Decimal(raw["execution_stake"]),
+                execution_odds=(
+                    None
+                    if raw["execution_odds"] is None
+                    else _serialized_decimal(
+                        raw["execution_odds"],
+                        "attempt execution_odds",
+                    )
+                ),
+                execution_stake=(
+                    None
+                    if raw["execution_stake"] is None
+                    else _serialized_decimal(
+                        raw["execution_stake"],
+                        "attempt execution_stake",
+                    )
+                ),
                 suspended=raw["suspended"],
                 evidence_grade=EvidenceGrade(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
@@ -899,8 +966,7 @@ class PaperExecutionLedger:
     def register_observation_evidence(
         self, record: PaperExecutionEvidenceRecord
     ) -> None:
-        if not isinstance(record, PaperExecutionEvidenceRecord):
-            raise TypeError("record must be PaperExecutionEvidenceRecord")
+        _require_canonical_evidence_record_surface(record)
         payload = {
             "evidence_id": record.evidence_id,
             "evidence_sha256": record.evidence_sha256,
@@ -964,6 +1030,7 @@ class PaperExecutionLedger:
         )
 
     def record_attempt(self, attempt: PaperLegAttempt) -> None:
+        _require_canonical_attempt_surface(attempt)
         self._append_event(
             event_type="ATTEMPT_RECORDED",
             run_id=attempt.run_id,
@@ -1081,6 +1148,115 @@ class PaperExecutionLedger:
             worst_case_exposure=worst_case,
             completed=False,
         )
+
+
+def _require_canonical_evidence_record_surface(
+    record: PaperExecutionEvidenceRecord,
+) -> None:
+    if type(record) is not PaperExecutionEvidenceRecord:
+        raise TypeError("record must be exact PaperExecutionEvidenceRecord")
+    for name in (
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "quote_id",
+        "observed_at",
+        "evidence_source",
+        "reason",
+    ):
+        if type(getattr(record, name)) is not str:
+            raise PaperExecutionIntegrityError(
+                f"evidence {name} must retain exact canonical text authority"
+            )
+    if type(record.outcome) is not PaperAttemptOutcome:
+        raise PaperExecutionIntegrityError(
+            "evidence outcome must retain canonical outcome authority"
+        )
+    if type(record.evidence_grade) is not EvidenceGrade:
+        raise PaperExecutionIntegrityError(
+            "evidence grade must retain canonical evidence authority"
+        )
+    if type(record.suspended) is not bool:
+        raise PaperExecutionIntegrityError(
+            "evidence suspended must retain canonical bool authority"
+        )
+    for name in ("accepted_odds", "accepted_stake"):
+        value = getattr(record, name)
+        if value is not None:
+            if type(value) is not Decimal:
+                raise PaperExecutionIntegrityError(
+                    f"evidence {name} must retain exact Decimal authority"
+                )
+            try:
+                _validate_decimal_text_resource_bound(value)
+            except ValueError as exc:
+                raise PaperExecutionIntegrityError(
+                    f"evidence {name} exceeds canonical decimal resource bounds"
+                ) from exc
+
+
+def _require_canonical_attempt_surface(attempt: PaperLegAttempt) -> None:
+    if type(attempt) is not PaperLegAttempt:
+        raise TypeError("attempt must be exact PaperLegAttempt")
+    for name in (
+        "attempt_id",
+        "run_id",
+        "plan_id",
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "decision_quote_id",
+        "decision_observed_at",
+        "execution_observed_at",
+        "evidence_source",
+        "model_fingerprint",
+        "reason",
+    ):
+        if type(getattr(attempt, name)) is not str:
+            raise PaperExecutionIntegrityError(
+                f"attempt {name} must retain exact canonical text authority"
+            )
+    if type(attempt.sequence) is not int:
+        raise PaperExecutionIntegrityError(
+            "attempt sequence must retain canonical integer authority"
+        )
+    if type(attempt.delay_ms) is not int or type(attempt.quote_age_ms) is not int:
+        raise PaperExecutionIntegrityError(
+            "attempt timing must retain canonical integer authority"
+        )
+    if type(attempt.outcome) is not PaperAttemptOutcome:
+        raise PaperExecutionIntegrityError(
+            "attempt outcome must retain canonical outcome authority"
+        )
+    if type(attempt.suspended) is not bool:
+        raise PaperExecutionIntegrityError(
+            "attempt suspended must retain canonical bool authority"
+        )
+    if type(attempt.evidence_grade) is not EvidenceGrade:
+        raise PaperExecutionIntegrityError(
+            "attempt evidence_grade must retain canonical evidence authority"
+        )
+    for name in ("decision_odds", "requested_stake", "execution_odds", "execution_stake"):
+        value = getattr(attempt, name)
+        if value is not None:
+            if type(value) is not Decimal:
+                raise PaperExecutionIntegrityError(
+                    f"attempt {name} must retain exact Decimal authority"
+                )
+            try:
+                _validate_decimal_text_resource_bound(value)
+            except ValueError as exc:
+                raise PaperExecutionIntegrityError(
+                    f"attempt {name} exceeds canonical decimal resource bounds"
+                ) from exc
 
 
 class PaperExecutionEvidenceRegistry:
@@ -1238,14 +1414,102 @@ def _synthetic_attempt(
     )
 
 
+def _require_canonical_observation_surface(
+    observation: ObservedPaperExecution,
+) -> None:
+    if type(observation) is not ObservedPaperExecution:
+        raise TypeError("observation values must be exact ObservedPaperExecution")
+    for name in (
+        "action_id",
+        "observed_at",
+        "evidence_source",
+        "evidence_id",
+        "evidence_sha256",
+        "reason",
+    ):
+        if type(getattr(observation, name)) is not str:
+            raise PaperExecutionStateError(
+                f"observation {name} must retain exact canonical text authority"
+            )
+    if type(observation.outcome) is not PaperAttemptOutcome:
+        raise PaperExecutionStateError(
+            "observation outcome must retain canonical outcome authority"
+        )
+    if type(observation.evidence_grade) is not EvidenceGrade:
+        raise PaperExecutionStateError(
+            "observation evidence_grade must retain canonical evidence authority"
+        )
+    if type(observation.suspended) is not bool:
+        raise PaperExecutionStateError(
+            "observation suspended must retain canonical bool authority"
+        )
+    for name in ("accepted_odds", "accepted_stake"):
+        value = getattr(observation, name)
+        if value is not None and type(value) is not Decimal:
+            raise PaperExecutionStateError(
+                f"observation {name} must retain exact Decimal authority"
+            )
+
+
+def _require_canonical_action_surface(action: ExecutionAction) -> None:
+    if type(action) is not ExecutionAction:
+        raise TypeError("action must be exact ExecutionAction")
+    for name in (
+        "action_id",
+        "bookmaker_id",
+        "account_id",
+        "event_id",
+        "market_id",
+        "selection_id",
+        "side",
+        "quote_id",
+        "quote_observed_at",
+        "expires_at",
+    ):
+        if type(getattr(action, name)) is not str:
+            raise PaperExecutionStateError(
+                f"execution action {name} must retain exact canonical text authority"
+            )
+    for name in ("requested_odds", "requested_stake"):
+        if type(getattr(action, name)) is not Decimal:
+            raise PaperExecutionStateError(
+                f"execution action {name} must retain exact Decimal authority"
+            )
+
+
+    try:
+        canonical = ExecutionAction(
+            action_id=action.action_id,
+            bookmaker_id=action.bookmaker_id,
+            account_id=action.account_id,
+            event_id=action.event_id,
+            market_id=action.market_id,
+            selection_id=action.selection_id,
+            side=action.side,
+            requested_odds=action.requested_odds,
+            requested_stake=action.requested_stake,
+            quote_id=action.quote_id,
+            quote_observed_at=action.quote_observed_at,
+            expires_at=action.expires_at,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperExecutionStateError(
+            "execution action no longer satisfies canonical value invariants"
+        ) from exc
+    if canonical != action:
+        raise PaperExecutionStateError(
+            "execution action changed outside canonical construction authority"
+        )
+
+
 def _verify_observation_authority(
     *,
     action: ExecutionAction,
     observation: ObservedPaperExecution,
     registry: PaperExecutionEvidenceRegistry,
 ) -> PaperExecutionEvidenceRecord:
-    if not isinstance(observation, ObservedPaperExecution):
-        raise TypeError("observation values must be ObservedPaperExecution")
+    _require_canonical_action_surface(action)
+    _require_canonical_observation_surface(observation)
     record = registry.resolve(observation.evidence_id)
     if observation.evidence_sha256 != record.evidence_sha256:
         raise PaperExecutionStateError("observation evidence digest mismatch")

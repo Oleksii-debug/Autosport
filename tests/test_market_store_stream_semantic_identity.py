@@ -4,6 +4,7 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
 from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
@@ -483,7 +484,7 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             try:
                 first = self._event(sequence=73)
                 self.assertTrue(store.append(first))
-                with sqlite3.connect(db_path) as other:
+                with closing(sqlite3.connect(db_path)) as other, other:
                     original = other.execute(
                         "SELECT decimal_odds FROM market_events WHERE dedupe_key=?",
                         (first.dedupe_key,),
@@ -496,7 +497,7 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
                     ValueError, "market event history row identity mismatch"
                 ):
                     store.append_batch_accepted((first,))
-                with sqlite3.connect(db_path) as other:
+                with closing(sqlite3.connect(db_path)) as other, other:
                     other.execute(
                         "UPDATE market_events SET decimal_odds=? WHERE dedupe_key=?",
                         (original, first.dedupe_key),

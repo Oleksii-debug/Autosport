@@ -6,6 +6,8 @@ The final send adapter must not treat these descriptive witnesses as authority.
 from __future__ import annotations
 
 from datetime import datetime
+import hashlib
+import json
 from pathlib import Path
 
 import pytest
@@ -204,4 +206,37 @@ def test_final_send_admission_failure_never_calls_provider_or_changes_ledger(
     assert all(character in "0123456789abcdef" for character in request_digests[0])
     assert "sensitive-transport-secret" not in str(denied.value)
     assert transport.calls == []
+    assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_final_send_admission_sees_exact_request_body_digest(tmp_path: Path) -> None:
+    """Admission and report bind identical bytes, not a mutable quote summary."""
+    profile, bound, _approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(request)
+    )
+    client = existing_fixtures._enabled_client(profile, transport, store=store)
+    observed: list[str] = []
+    report = client.place_action(
+        action,
+        profile=profile,
+        bound=bound,
+        provider_order_ref="a1b2c3",
+        execution_workspace=tmp_path.resolve(),
+        _before_transport=observed.append,
+    )
+    assert len(transport.calls) == 1
+    sent_request = transport.calls[0]["request"]
+    encoded = json.dumps(
+        sent_request,
+        ensure_ascii=True,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    exact_digest = hashlib.sha256(encoded).hexdigest()
+    assert observed == [exact_digest]
+    assert report.request_sha256 == exact_digest
     assert ledger.saga(bound.execution_plan.plan_id).attempts == {}

@@ -175,13 +175,15 @@ class WindowsLabTicket:
 
 @dataclass(frozen=True, slots=True)
 class WindowsLabObservation:
+    ticket_id: str
     scenario: str
     status: str
     evidence_sha256: str
 
     def __post_init__(self) -> None:
         if (
-            type(self.scenario) is not str or self.scenario not in _SCENARIOS
+            not _hex(self.ticket_id, 64)
+            or type(self.scenario) is not str or self.scenario not in _SCENARIOS
             or type(self.status) is not str or self.status not in _STATUSES
             or not _hex(self.evidence_sha256, 64)
         ):
@@ -189,6 +191,7 @@ class WindowsLabObservation:
 
     def to_dict(self) -> dict[str, str]:
         return {
+            "ticket_id": self.ticket_id,
             "scenario": self.scenario,
             "status": self.status,
             "evidence_sha256": self.evidence_sha256,
@@ -205,7 +208,7 @@ class WindowsLabCampaign:
             raise WindowsLabContractError("invalid lab campaign")
         observed: set[str] = set()
         for item in self.observations:
-            if type(item) is not WindowsLabObservation or item.scenario not in self.ticket.scenarios:
+            if type(item) is not WindowsLabObservation or item.ticket_id != self.ticket.ticket_id or item.scenario not in self.ticket.scenarios:
                 raise WindowsLabContractError("observation outside ticket scope")
             if item.scenario in observed:
                 raise WindowsLabContractError("duplicate scenario effect")
@@ -218,6 +221,8 @@ class WindowsLabCampaign:
     def admit(self, observation: WindowsLabObservation) -> "WindowsLabCampaign":
         if type(observation) is not WindowsLabObservation:
             raise WindowsLabContractError("invalid agent observation")
+        if observation.ticket_id != self.ticket.ticket_id:
+            raise WindowsLabContractError("agent observation is bound to another ticket")
         for old in self.observations:
             if old.scenario == observation.scenario:
                 if old == observation:
@@ -269,7 +274,7 @@ class WindowsLabCampaign:
                 raise WindowsLabContractError("unbounded lab observations")
             values = []
             for row in rows:
-                if type(row) is not dict or set(row) != {"scenario", "status", "evidence_sha256"}:
+                if type(row) is not dict or set(row) != {"ticket_id", "scenario", "status", "evidence_sha256"}:
                     raise WindowsLabContractError("malformed lab observation")
                 values.append(WindowsLabObservation(**row))
             campaign = cls(ticket, tuple(values))

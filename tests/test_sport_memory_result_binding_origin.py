@@ -14,6 +14,7 @@ from autosport.event_lifecycle import (
     ContinuousEventLifecycle,
     EventLifecycleRecord,
     EventPhase,
+    canonical_event_identity,
 )
 from autosport.opponent_intelligence import OpponentIntelligenceStore
 from autosport.product_runtime import build_autonomous_product_runtime
@@ -311,7 +312,11 @@ def test_recomputed_digest_cannot_backdate_post_reveal_provider_choice(tmp_path:
         ),
     )
     settlement = SettlementResolution(
-        event_identity=EVENT_ID,
+        event_identity=canonical_event_identity(
+            source_id="provider-a",
+            sport="tennis",
+            event_id="event-1",
+        ),
         settlement_ref="settlement-1",
         quote_outcomes={
             forged.subject_quote_key: "win",
@@ -358,7 +363,11 @@ def test_provider_binding_cutoff_at_or_after_settlement_reveal_fails_closed(tmp_
     )
     forged = replace(binding, provider_binding_as_of=T2)
     settlement = SettlementResolution(
-        event_identity=EVENT_ID,
+        event_identity=canonical_event_identity(
+            source_id="provider-a",
+            sport="tennis",
+            event_id="event-1",
+        ),
         settlement_ref="settlement-1",
         quote_outcomes={
             forged.subject_quote_key: "win",

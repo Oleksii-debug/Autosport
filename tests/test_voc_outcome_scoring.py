@@ -19,6 +19,7 @@ from autosport.model_compute_router import (
     DataClassification,
     ModelComputeRouterStore,
 )
+from autosport.integrity import atomic_write_json
 from autosport.market_outcomes import (
     OutcomeAuthorityStatus,
     assess_betfair_historical_market_definition_authority,
@@ -26,6 +27,7 @@ from autosport.market_outcomes import (
 from autosport.scientific_registry import ScientificRegistry
 from autosport.voc_evaluation import (
     PairedVOCEvaluation,
+    VOCCohort,
     VOCEvaluationError,
     VOCEvaluationProvenance,
     VOCEvaluationStore,
@@ -69,6 +71,8 @@ def digest(value: object) -> str:
 
 @dataclass(frozen=True)
 class RawScientificRecord:
+    """Test-only durable-state fixture; never exercise the production writer."""
+
     record_type: str
     record_id: str
     available_at: str
@@ -76,6 +80,25 @@ class RawScientificRecord:
 
     def to_payload(self) -> dict[str, Any]:
         return self.payload
+
+
+def _persist_raw_scientific_fixture(
+    registry: ScientificRegistry,
+    record: RawScientificRecord,
+) -> None:
+    """Seed historical state without weakening exact production append authority."""
+
+    state = registry._read()
+    envelope = {
+        "record_type": record.record_type,
+        "record_id": record.record_id,
+        "available_at": record.available_at,
+        "payload": record.to_payload(),
+    }
+    envelope["record_sha256"] = digest(envelope)
+    state["records"].append(envelope)
+    atomic_write_json(registry.path, state)
+    registry._read()
 
 
 class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
@@ -361,7 +384,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             "dataset_manifest_sha256": SHA_E,
         }
         if self.registry.get("ResearchProtocol", "voc-protocol-derived") is None:
-            self.registry.append(
+            _persist_raw_scientific_fixture(
+                self.registry,
                 RawScientificRecord(
                     record_type="ResearchProtocol",
                     record_id="voc-protocol-derived",
@@ -370,7 +394,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 )
             )
         if self.registry.get("DatasetSnapshot", dataset_id) is None:
-            self.registry.append(
+            _persist_raw_scientific_fixture(
+                self.registry,
                 RawScientificRecord(
                     record_type="DatasetSnapshot",
                     record_id=dataset_id,
@@ -476,57 +501,13 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         return paired
 
     def _append_cohort(self, *members: PairedVOCEvaluation) -> None:
-        ordered = sorted(members, key=lambda item: item.evaluation_id)
+        ordered = tuple(sorted(members, key=lambda item: item.evaluation_id))
         self.registry.append(
-            RawScientificRecord(
-                record_type="VOCCohort",
-                record_id="voc-cohort-derived",
-                available_at=max(item.evaluated_at for item in ordered),
-                payload={
-                    "cohort_id": "voc-cohort-derived",
-                    "denominator": len(ordered),
-                    "research_protocol_id": ordered[0].research_protocol_id,
-                    "research_protocol_sha256": ordered[0].research_protocol_sha256,
-                    "scoring_rule_sha256": ordered[0].scoring_rule_sha256,
-                    "holdout_access_id": ordered[0].holdout_access_id,
-                    "multiple_comparison_control_sha256": (
-                        ordered[0].multiple_comparison_control_sha256
-                    ),
-                    "task_class": ordered[0].task_class,
-                    "scope": {
-                        "sport_id": ordered[0].sport_id,
-                        "league_id": ordered[0].league_id,
-                        "regime_id": ordered[0].regime_id,
-                        "urgency_id": ordered[0].urgency_id,
-                        "contradiction_state": ordered[0].contradiction_state,
-                    },
-                    "baseline_compute_identity": {
-                        "candidate_id": ordered[0].baseline_candidate_id,
-                        "backend_id": ordered[0].baseline_backend_id,
-                        "model_id": ordered[0].baseline_model_id,
-                        "config_sha256": ordered[0].baseline_config_sha256,
-                    },
-                    "challenger_compute_identity": {
-                        "candidate_id": ordered[0].challenger_candidate_id,
-                        "backend_id": ordered[0].challenger_backend_id,
-                        "model_id": ordered[0].challenger_model_id,
-                        "config_sha256": ordered[0].challenger_config_sha256,
-                    },
-                    "eligibility": {
-                        "kind": "decision-ledger-window-v1",
-                        "decision_recorded_from": T_DECISION,
-                        "decision_recorded_through": T_BINDING,
-                    },
-                    "members": [
-                        {
-                            "evaluation_id": item.evaluation_id,
-                            "evaluation_sha256": item.evaluation_sha256,
-                            "decision_context_sha256": item.decision_context_sha256,
-                            "decision_evidence_sha256": item.decision_evidence_sha256,
-                        }
-                        for item in ordered
-                    ],
-                },
+            VOCCohort(
+                cohort_id="voc-cohort-derived",
+                members=ordered,
+                decision_recorded_from=T_DECISION,
+                decision_recorded_through=T_BINDING,
             )
         )
 
@@ -726,7 +707,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
         bundle_id = "voc-bundle-derived"
         experiment_id = "voc-experiment-derived"
         bundle_sha = SHA_B
-        self.registry.append(
+        _persist_raw_scientific_fixture(
+            self.registry,
             RawScientificRecord(
                 record_type="EvaluationBundle",
                 record_id=bundle_id,
@@ -745,23 +727,27 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                 },
             )
         )
-        self.registry.append(
+        _persist_raw_scientific_fixture(
+            self.registry,
             RawScientificRecord(
                 record_type="Experiment",
                 record_id=experiment_id,
                 available_at=T_EVALUATED,
                 payload={
+                    "experiment_id": experiment_id,
                     "fingerprint": SHA_A,
                     "evaluation_bundle_id": bundle_id,
                 },
             )
         )
-        self.registry.append(
+        _persist_raw_scientific_fixture(
+            self.registry,
             RawScientificRecord(
                 record_type="PromotionEvidence",
                 record_id="voc-promotion-evidence-derived",
                 available_at=T_EVALUATED,
                 payload={
+                    "promotion_evidence_id": "voc-promotion-evidence-derived",
                     "research_protocol_id": paired.research_protocol_id,
                     "holdout_access_id": paired.holdout_access_id,
                     "multiple_comparison_control_sha256": (
@@ -1055,7 +1041,8 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
             register_cohort=False,
         )
         self.registry.append(first)
-        self.registry.append(
+        _persist_raw_scientific_fixture(
+            self.registry,
             RawScientificRecord(
                 record_type="PairedVOCEvaluation",
                 record_id=second.evaluation_id,

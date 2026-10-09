@@ -79,7 +79,7 @@ def test_from_dict_missing_observed_timestamp_fails_closed() -> None:
     payload = _serialized_event()
     del payload["observed_ts"]
 
-    with pytest.raises(ValueError, match="observed_ts must be"):
+    with pytest.raises(ValueError, match="serialized market event fields mismatch"):
         MarketEvent.from_dict(payload)
 
 

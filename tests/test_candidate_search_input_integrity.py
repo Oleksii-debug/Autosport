@@ -78,18 +78,19 @@ class CandidateSearchInputIntegrityTests(unittest.TestCase):
 
     def test_identity_must_be_canonical_and_event_bound_without_delimiter_grammar(self) -> None:
         invalid = (
-            self._leg(quote_key=""),
-            self._leg(quote_key=" event-1|winner|alice"),
-            self._leg(quote_key="event-1|winner"),
-            self._leg(quote_key="event-1||alice"),
-            self._leg(quote_key="event-1|winner|"),
-            self._leg(event_id="event-2"),
-            self._leg(event_id=""),
-            self._leg(event_id=" event-1"),
+            {"quote_key": ""},
+            {"quote_key": " event-1|winner|alice"},
+            {"quote_key": "event-1|winner"},
+            {"quote_key": "event-1||alice"},
+            {"quote_key": "event-1|winner|"},
+            {"event_id": "event-2"},
+            {"event_id": ""},
+            {"event_id": " event-1"},
         )
-        for leg in invalid:
-            with self.subTest(quote_key=leg.quote_key, event_id=leg.event_id):
+        for overrides in invalid:
+            with self.subTest(**overrides):
                 with self.assertRaises(ValueError):
+                    leg = self._leg(**overrides)
                     self.search.search([leg], minimum_legs=1)
 
     def test_delimiter_bearing_structured_event_identity_is_supported(self) -> None:

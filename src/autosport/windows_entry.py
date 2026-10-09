@@ -24,13 +24,12 @@ def _show_workspace_configuration_error(detail: str) -> None:
 
     import ctypes
 
-    title = "Автоспорт — помилка конфігурації workspace"
-    message = (
-        "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
-        f"{detail}\n\n"
-        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
-        "потім перезапустіть Автоспорт. Economic і live state не змінено."
-    )
+    from autosport.localization import text
+
+    title = text("ui.windows.workspace_configuration.title")
+    from autosport.secret_redaction import redact_operator_text
+
+    message = text("ui.windows.workspace_configuration.message", detail=redact_operator_text(detail))
     # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
     # through standard Windows accessibility rather than a custom visual surface.
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
@@ -135,14 +134,19 @@ def _probe_workspace_writable(workspace: Path) -> None:
 
 
 def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:
-    detail = " ".join(str(exc).splitlines()).strip() or "невідома помилка файлової системи"
-    return (
-        "Автоспорт не може підготувати workspace для запису.\n\n"
-        f"Workspace: {workspace}\n"
-        f"Помилка: {type(exc).__name__}: {detail}\n\n"
-        "Вкажіть AUTOSPORT_WORKSPACE як абсолютний шлях до папки вашого користувача, "
-        "доступної для запису, і перезапустіть Автоспорт. "
-        "Права адміністратора не потрібні. Economic і live state не змінено."
+    from autosport.localization import text
+    from autosport.secret_redaction import redact_operator_text, safe_exception_detail
+
+    detail = " ".join(safe_exception_detail(
+        exc, unavailable_detail=text("ui.windows.workspace_access.unknown_error")
+    ).splitlines()).strip() or text(
+        "ui.windows.workspace_access.unknown_error"
+    )
+    return text(
+        "ui.windows.workspace_access.message",
+        workspace=redact_operator_text(str(workspace)),
+        error_type=OSError.__name__,
+        error_detail=detail,
     )
 
 
@@ -151,7 +155,9 @@ def _show_workspace_access_error(workspace: Path, exc: OSError) -> None:
 
     import ctypes
 
-    title = "Автоспорт — workspace недоступний для запису"
+    from autosport.localization import text
+
+    title = text("ui.windows.workspace_access.title")
     ctypes.windll.user32.MessageBoxW(
         None,
         _workspace_access_error_message(workspace, exc),

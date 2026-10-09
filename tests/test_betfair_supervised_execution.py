@@ -15,6 +15,7 @@ from autosport.betfair_account_readonly import (
     BetfairSessionCredentials,
 )
 from autosport.betfair_supervised_execution import (
+    BetfairPlaceOrdersAmbiguous,
     BetfairSupervisedExecutionError,
     BetfairSupervisedExecutionGate,
     BetfairSupervisedPlaceOrdersClient,
@@ -1338,3 +1339,99 @@ def test_client_repr_never_exposes_session_credentials() -> None:
     assert "super-secret-app" not in rendered
     assert "super-secret-session" not in rendered
     assert "enabled=False" in rendered
+
+
+@pytest.mark.parametrize("transport_error", (RuntimeError, OSError, BetfairReadOnlyError))
+def test_write_transport_failure_drops_secret_exception_context(transport_error) -> None:
+    # Synthetic values only; the actual provider-writing gate is exercised with
+    # a fake transport and never reaches a bookmaker or real account.
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def hostile_response(_request):
+            raise transport_error(
+                "X-Application=app-key X-Authentication=session-token"
+            )
+
+        transport = _Transport(hostile_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+        with pytest.raises(
+            BetfairPlaceOrdersAmbiguous,
+            match="authoritative readback required",
+        ) as raised:
+            client.place_action(
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref="a" * 32,
+                execution_workspace=Path(tmp),
+            )
+
+        assert len(transport.calls) == 1
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert "app-key" not in str(raised.value)
+        assert "session-token" not in str(raised.value)
+        assert "app-key" not in repr(raised.value)
+        assert "session-token" not in repr(raised.value)
+
+
+@pytest.mark.parametrize("transport_error", (RuntimeError, OSError, BetfairReadOnlyError))
+def test_write_transport_unexpected_exception_is_restart_durable_unknown(
+    transport_error,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def hostile_response(_request):
+            raise transport_error(
+                "X-Application=app-key X-Authentication=session-token"
+            )
+
+        transport = _Transport(hostile_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-unexpected-transport-error",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert len(transport.calls) == 1
+        assert "app-key" not in repr(result)
+        assert "session-token" not in repr(result)
+
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert (
+            restarted.attempt_state("attempt-unexpected-transport-error")
+            is AttemptState.UNKNOWN
+        )
+        assert not restarted.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+        ref = restarted.provider_order_reference(
+            attempt_id="attempt-unexpected-transport-error",
+            provider_id="betfair",
+        )
+        assert ref is not None
+        assert len(ref) == 32
+
+        with pytest.raises(ExecutionStateError):
+            execute_betfair_supervised_action(
+                restarted,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-unexpected-transport-error",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+        assert len(transport.calls) == 1

@@ -558,6 +558,60 @@ def _validate_betfair_place_action(action: ExecutionAction) -> int:
     return int(raw_selection_id)
 
 
+def _canonical_place_orders_request_body(
+    action: ExecutionAction,
+    *,
+    provider_order_ref: str,
+    request_id: int,
+) -> bytes:
+    """Build exact canonical request bytes without transport or send admission.
+
+    Both provider dispatch and OFFLINE standard-LIMIT verification use this
+    builder; there is no second independent request serializer.
+    """
+    selection_id = _validate_betfair_place_action(action)
+    provider_ref = _text(provider_order_ref, "provider_order_ref")
+    if len(provider_ref) > 32 or any(
+        character not in "0123456789abcdef"
+        for character in provider_ref
+    ):
+        raise BetfairSupervisedExecutionError(
+            "provider_order_ref must be <=32 lowercase hex characters"
+        )
+    if type(request_id) is not int or request_id < 1:
+        raise BetfairSupervisedExecutionError("request_id must be positive int")
+    customer_ref = sha256(
+        f"placeOrders:{provider_ref}".encode("utf-8")
+    ).hexdigest()[:32]
+    action_payload = ExecutionAction.to_dict(action)
+    instruction = {
+        "selectionId": selection_id,
+        "handicap": 0,
+        "side": action.side,
+        "orderType": "LIMIT",
+        "limitOrder": {
+            "size": action_payload["requested_stake"],
+            "price": action_payload["requested_odds"],
+            "persistenceType": "LAPSE",
+        },
+        "customerOrderRef": provider_ref,
+    }
+    params = {
+        "marketId": action.market_id,
+        "instructions": [instruction],
+        "customerRef": customer_ref,
+        "async": False,
+    }
+    envelope = {
+        "jsonrpc": "2.0",
+        "method": PLACE_ORDERS_METHOD,
+        "params": params,
+        "id": request_id,
+    }
+    return _canonical_bytes(envelope)
+
+
+
 class BetfairSupervisedPlaceOrdersClient:
     """Action-specific placeOrders client; no arbitrary write RPC is exposed."""
 
@@ -628,45 +682,13 @@ class BetfairSupervisedPlaceOrdersClient:
             raise BetfairSupervisedExecutionError(
                 "direct placeOrders dispatch requires canonical confirmed executor"
             )
-        provider_ref = _text(provider_order_ref, "provider_order_ref")
-        if len(provider_ref) > 32 or any(
-            character not in "0123456789abcdef"
-            for character in provider_ref
-        ):
-            raise BetfairSupervisedExecutionError(
-                "provider_order_ref must be <=32 lowercase hex characters"
-            )
-
         request_id = self._next_request_id()
-        customer_ref = sha256(
-            f"placeOrders:{provider_ref}".encode("utf-8")
-        ).hexdigest()[:32]
-        action_payload = ExecutionAction.to_dict(action)
-        instruction = {
-            "selectionId": selection_id,
-            "handicap": 0,
-            "side": action.side,
-            "orderType": "LIMIT",
-            "limitOrder": {
-                "size": action_payload["requested_stake"],
-                "price": action_payload["requested_odds"],
-                "persistenceType": "LAPSE",
-            },
-            "customerOrderRef": provider_ref,
-        }
-        params = {
-            "marketId": action.market_id,
-            "instructions": [instruction],
-            "customerRef": customer_ref,
-            "async": False,
-        }
-        envelope = {
-            "jsonrpc": "2.0",
-            "method": PLACE_ORDERS_METHOD,
-            "params": params,
-            "id": request_id,
-        }
-        body = _canonical_bytes(envelope)
+        provider_ref = _text(provider_order_ref, "provider_order_ref")
+        body = _canonical_place_orders_request_body(
+            action,
+            provider_order_ref=provider_ref,
+            request_id=request_id,
+        )
         request_sha256 = sha256(body).hexdigest()
         headers = {
             "Accept": "application/json",

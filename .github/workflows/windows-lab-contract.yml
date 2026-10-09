@@ -16,6 +16,10 @@ on:
         required: true
         type: string
 
+concurrency:
+  group: autosport-windows-lab-contract-single-authority
+  cancel-in-progress: false
+
 permissions:
   contents: read
 

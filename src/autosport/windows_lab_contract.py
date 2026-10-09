@@ -275,7 +275,7 @@ class WindowsLabCampaign:
             campaign = cls(ticket, tuple(values))
         except (KeyError, TypeError, ValueError):
             raise WindowsLabContractError("invalid lab campaign fields") from None
-        if raw != _decode(campaign.to_json()):
+        if _canonical(raw) != campaign.to_json():
             raise WindowsLabContractError("campaign source, state or authority mismatch")
         return campaign
 

@@ -215,3 +215,7 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# BETDAQ economic evidence may claim request identity only while the exact canonical
+# SOAP request builder remains the executable that can produce the network body.
+from . import _betdaq_economic_request_body_authority_guard as _betdaq_economic_request_body_authority_guard  # noqa: F401,E402

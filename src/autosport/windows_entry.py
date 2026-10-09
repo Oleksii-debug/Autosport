@@ -68,9 +68,11 @@ def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:
     # They may contain account names, host paths, locale-dependent OS text or other
     # implementation detail that should not be announced by the native dialog/NVDA.
     del exc
+    from autosport.secret_redaction import redact_operator_text
+
     return (
         "Автоспорт не може підготувати workspace для запису.\n\n"
-        f"Workspace: {workspace}\n\n"
+        f"Workspace: {redact_operator_text(str(workspace))}\n\n"
         "Вкажіть AUTOSPORT_WORKSPACE як абсолютний шлях до папки вашого користувача, "
         "доступної для запису, і перезапустіть Автоспорт. "
         "Права адміністратора не потрібні. Economic і live state не змінено."

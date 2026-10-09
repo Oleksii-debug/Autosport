@@ -136,3 +136,20 @@ def test_webview_storage_failure_has_distinct_actionable_native_copy(
     assert "Права адміністратора не потрібні" in shown
     assert "Runtime" not in shown
     assert secret not in shown
+
+
+def test_workspace_access_message_redacts_secret_in_workspace_path(tmp_path: Path, monkeypatch) -> None:
+    from autosport.secret_redaction import REDACTED
+
+    canary = "synthetic-access-token-for-test-12345"
+    monkeypatch.setenv("AUTOSPORT_API_KEY", canary)
+    workspace = tmp_path / f"folder-{canary}" / "workspace"
+
+    message = windows_entry._workspace_access_error_message(
+        workspace, PermissionError("synthetic-filesystem-error"),
+    )
+
+    assert canary not in message
+    assert REDACTED in message
+    assert "AUTOSPORT_WORKSPACE" in message
+    assert "synthetic-filesystem-error" not in message

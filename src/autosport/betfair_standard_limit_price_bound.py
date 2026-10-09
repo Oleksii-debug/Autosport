@@ -26,6 +26,7 @@ import re
 from typing import Any, Mapping
 
 from .betfair_supervised_execution import (
+    _FINAL_SEND_ADMISSION,
     PLACE_ORDERS_METHOD,
     BetfairSupervisedPlaceOrdersClient,
     WRITE_ADAPTER_ID,
@@ -359,25 +360,39 @@ def _capture_canonical_instruction(action: ExecutionAction) -> dict[str, Any]:
     client._clock = lambda: "1970-01-01T00:00:00+00:00"
     client._request_id = 0
 
+    # The production client now requires its private final-send admission at
+    # the last pre-POST boundary. Reuse that exact serializer in a strictly
+    # in-memory, fail-before-I/O capture instead of weakening the live gate.
+    def capture_admission(_request_sha256: str) -> None:
+        if type(client._transport) is not _CaptureTransport:
+            raise BetfairStandardLimitPriceBoundError(
+                "capture transport changed before canonical request capture"
+            )
+
+    token = _FINAL_SEND_ADMISSION.set(capture_admission)
     try:
-        _CANONICAL_PLACE_ACTION(
-            client,
-            action,
-            profile=None,
-            bound=None,
-            provider_order_ref=_CAPTURE_PROVIDER_ORDER_REF,
-            execution_workspace=Path("."),
-        )
-    except _CapturedPlaceOrdersRequest as captured:
-        body = captured.body
-    except Exception as exc:
-        raise BetfairStandardLimitPriceBoundError(
-            "canonical Betfair placeOrders request could not be captured"
-        ) from exc
-    else:
-        raise BetfairStandardLimitPriceBoundError(
-            "canonical Betfair placeOrders path did not reach the sealed capture transport"
-        )
+        try:
+            _CANONICAL_PLACE_ACTION(
+                client,
+                action,
+                profile=None,
+                bound=None,
+                provider_order_ref=_CAPTURE_PROVIDER_ORDER_REF,
+                execution_workspace=Path("."),
+                _before_transport=capture_admission,
+            )
+        except _CapturedPlaceOrdersRequest as captured:
+            body = captured.body
+        except Exception as exc:
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair placeOrders request could not be captured"
+            ) from exc
+        else:
+            raise BetfairStandardLimitPriceBoundError(
+                "canonical Betfair placeOrders path did not reach the sealed capture transport"
+            )
+    finally:
+        _FINAL_SEND_ADMISSION.reset(token)
 
     try:
         envelope = json.loads(body.decode("utf-8"))

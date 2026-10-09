@@ -449,7 +449,10 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
         groups = [
             ScenarioGroup(
                 "sport-winner",
-                (ScenarioOutcome(quote.quote_key, Decimal("1")),),
+                (
+                    ScenarioOutcome(replace(quote, selection_id="A").quote_key, Decimal("0.40")),
+                    ScenarioOutcome(quote.quote_key, probability),
+                ),
             )
         ]
         evidence = [
@@ -537,7 +540,10 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
         groups = [
             ScenarioGroup(
                 "sport-blocked-winner",
-                (ScenarioOutcome(quote.quote_key, Decimal("1")),),
+                (
+                    ScenarioOutcome(replace(quote, selection_id="A").quote_key, Decimal("0.40")),
+                    ScenarioOutcome(quote.quote_key, probability),
+                ),
             )
         ]
         evidence = [

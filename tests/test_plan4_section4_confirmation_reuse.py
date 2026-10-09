@@ -351,6 +351,10 @@ def test_caller_backdated_clock_cannot_override_trusted_quote_expiry(
         AttemptState, ExecutionStateError, RealExecutionLedger,
     )
 
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
     profile, bound, approval, ledger, action, store = (
         existing_fixtures._prepared(str(tmp_path))
     )

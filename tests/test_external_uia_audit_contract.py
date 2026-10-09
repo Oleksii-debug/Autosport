@@ -53,6 +53,18 @@ def test_external_uia_live_region_probe_references_monitor_core_assembly() -> No
 
 
 
+def test_external_uia_core_compilation_includes_facades_without_skipping_gate() -> None:
+    """PowerShell 7 Roslyn must resolve Monitor through the runtime facades."""
+    audit = _audit()
+    assert "$PSVersionTable.PSEdition -eq 'Core'" in audit
+    assert "(Join-Path $PSHOME 'System.Runtime.dll')" in audit
+    assert "(Join-Path $PSHOME 'System.Threading.dll')" in audit
+    assert "Test-Path -LiteralPath $reference -PathType Leaf" in audit
+    assert "$uiaReferences = @($uiaReferences + $runtimeFacades | Select-Object -Unique)" in audit
+    assert "Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition" in audit
+    assert "throw 'Required .NET reference facade for external UIA audit is unavailable'" in audit
+
+
 def test_external_uia_audit_uses_runner_safe_legacy_action_pattern_lookup() -> None:
     audit = _audit()
 

@@ -307,7 +307,8 @@ def test_controller_applies_exact_runtime_snapshot_to_visible_economics(
     assert "ticket-1" not in controller.tickets[0]
     assert "OPEN" in controller.tickets[0]
     assert any("циклу 1" in line for line in controller.evaluation)
-    assert any("не створює нового висновку" in line for line in controller.evaluation)
+    assert any("Висновок політики ризику не вигадується" in line for line in controller.evaluation)
+    assert any("не надає реального грошового дозволу" in line for line in controller.evaluation)
 
 
 def test_missing_runtime_economic_snapshot_quarantines_instead_of_showing_stale_money(

@@ -82,3 +82,37 @@ def test_repeated_emergency_stop_activation_reuses_one_inflight_command() -> Non
     # ordering fence only, not a new permission gate or a disabled safety control.
     assert "button.disabled" not in script
     assert "disabled =" not in script
+
+
+def test_uncertain_emergency_stop_copy_never_promises_execution_block() -> None:
+    """Null/exceptional command results cannot certify a durable STOP journal."""
+    script = _asset("emergency_stop.js")
+    assert script.count(
+        "Не вважайте нові виконання заблокованими без підтвердження"
+    ) == 2
+    null_outcome = script.split("if (result === null) {", 1)[1].split(
+        "} else {", 1
+    )[0]
+    exception_outcome = script.split("} catch (_error) {", 1)[1].split(
+        "} finally {", 1
+    )[0]
+    for outcome in (null_outcome, exception_outcome):
+        assert "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО" in outcome
+        assert "Не вважайте нові виконання заблокованими без підтвердження" in outcome
+        assert "Нові виконання мають залишатися заблокованими" not in outcome
+        assert "перевірте стійкий журнал STOP" in outcome
+
+
+def test_uncertain_stop_copy_regression_falsifier() -> None:
+    """A former unsafe success implication must fail the safety-copy predicate."""
+    source = _asset("emergency_stop.js")
+    unsafe = source.replace(
+        "Не вважайте нові виконання заблокованими без підтвердження",
+        "Нові виконання мають залишатися заблокованими",
+        1,
+    )
+    null_outcome = unsafe.split("if (result === null) {", 1)[1].split(
+        "} else {", 1
+    )[0]
+    assert "Нові виконання мають залишатися заблокованими" in null_outcome
+    assert "Нові виконання мають залишатися заблокованими" not in source

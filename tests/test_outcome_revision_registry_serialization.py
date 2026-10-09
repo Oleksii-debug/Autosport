@@ -182,12 +182,12 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
             release_first_read = threading.Event()
             second_started = threading.Event()
             second_reached_read = threading.Event()
-            original_read = RunRegistry._read
+            original_read_bytes = RunRegistry._read_existing_bytes
             read_once = {"writer-a": False}
 
-            def fenced_read(registry: RunRegistry):
+            def fenced_read_bytes(registry: RunRegistry):
                 name = threading.current_thread().name
-                state = original_read(registry)
+                state = original_read_bytes(registry)
                 if name == "writer-a" and not read_once["writer-a"]:
                     read_once["writer-a"] = True
                     first_read_captured.set()
@@ -224,7 +224,9 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 except BaseException as exc:
                     outcomes["b"] = exc
 
-            with patch.object(RunRegistry, "_read", new=fenced_read):
+            # Keep the guarded RunRegistry._read dispatch unchanged: the
+            # concurrency handshake instruments only the lower-level byte read.
+            with patch.object(RunRegistry, "_read_existing_bytes", new=fenced_read_bytes):
                 thread_a = threading.Thread(target=writer_a, name="writer-a")
                 thread_b = threading.Thread(target=writer_b, name="writer-b")
                 thread_a.start()

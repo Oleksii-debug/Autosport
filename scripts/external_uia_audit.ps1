@@ -672,14 +672,24 @@ try {
     # fail at the product-owned interactive lock boundary rather than opening a
     # second WebView2/operator instance against either shared mutable root.
     $duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru
-    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(10, $TimeoutSeconds))
+    # The packaged second process must be given the caller's actual bounded
+    # startup allowance. Ten seconds proved insufficient on the Windows candidate
+    # while the launcher was still running; the UIA gate remains fail-closed.
+    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     $duplicateRoot = $null
-    $duplicateFamilyIds = @()
+    $duplicateFamilyIds = @([int]$duplicateProcess.Id)
+    $nextDuplicateFamilyProbe = [DateTime]::MinValue
     while ([DateTime]::UtcNow -lt $duplicateDeadline) {
-        $duplicateFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id)
-        $duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds
-        if ($null -ne $duplicateRoot) { break }
-        Start-Sleep -Milliseconds 100
+        # Avoid repeating expensive CIM process-tree and desktop UIA scans every
+        # 100ms on a busy Windows runner. Never infer lock success from process
+        # state: require the same externally observed native dialog as before.
+        if ([DateTime]::UtcNow -ge $nextDuplicateFamilyProbe) {
+            $duplicateFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id)
+            $duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds
+            if ($null -ne $duplicateRoot) { break }
+            $nextDuplicateFamilyProbe = [DateTime]::UtcNow.AddMilliseconds(1000)
+        }
+        Start-Sleep -Milliseconds 250
     }
     if ($null -eq $duplicateRoot) {
         # Preserve FAIL: a missing externally observed dialog is never evidence

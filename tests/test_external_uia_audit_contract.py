@@ -288,6 +288,27 @@ def test_missing_duplicate_dialog_exposes_bounded_process_state_without_qualifyi
     assert "workspacePath" not in refusal
 
 
+def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening_gate() -> None:
+    audit = _audit()
+    start = audit.index("$duplicateProcess = Start-Process")
+    end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
+    duplicate = audit[start:end]
+    # A slow frozen application on the runner must not be incorrectly qualified.
+    assert "$duplicateDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)" in duplicate
+    assert "[Math]::Min(10, $TimeoutSeconds)" not in duplicate
+    # Expensive cross-process enumeration is rate limited, and polling is bounded.
+    assert "$nextDuplicateFamilyProbe = [DateTime]::MinValue" in duplicate
+    assert "$nextDuplicateFamilyProbe = [DateTime]::UtcNow.AddMilliseconds(1000)" in duplicate
+    assert "Start-Sleep -Milliseconds 250" in duplicate
+    assert "while ([DateTime]::UtcNow -lt $duplicateDeadline)" in duplicate
+    # Neither a running process nor a missing dialog may be mistaken for PASS.
+    assert "if ($null -eq $duplicateRoot) {" in duplicate
+    assert "throw \"Second packaged launch did not expose" in duplicate
+    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "Автоспорт — помилка запуску" in duplicate
+    assert "$duplicateProcess.ExitCode -ne 2" in duplicate
+
+
 def test_windows_candidate_requires_duplicate_launch_evidence() -> None:
     workflow = _windows_workflow()
     step_start = workflow.index("- name: External UIA fresh-extraction gate")

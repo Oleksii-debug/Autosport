@@ -455,5 +455,74 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+    def test_reuses_only_same_connection_unchanged_positive_append_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=71)
+                second = self._event(sequence=72, odds="2.71")
+                self.assertTrue(store.append(first))
+                with patch.object(
+                    store,
+                    "_validated_positive_append_entries",
+                    wraps=store._validated_positive_append_entries,
+                ) as full_validation:
+                    self.assertEqual(store.append_batch_accepted((first,)), [])
+                    self.assertEqual(store.append_batch_accepted((second,)), [second])
+                    self.assertEqual(store.append_batch_accepted((second,)), [])
+                    self.assertEqual(full_validation.call_count, 0)
+                self.assertEqual(len(store.events()), 2)
+            finally:
+                store.close()
+
+    def test_external_sql_tamper_invalidates_cached_append_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "market.db"
+            store = SQLiteMarketStore(db_path)
+            try:
+                first = self._event(sequence=73)
+                self.assertTrue(store.append(first))
+                with sqlite3.connect(db_path) as other:
+                    original = other.execute(
+                        "SELECT decimal_odds FROM market_events WHERE dedupe_key=?",
+                        (first.dedupe_key,),
+                    ).fetchone()[0]
+                    other.execute(
+                        "UPDATE market_events SET decimal_odds=? WHERE dedupe_key=?",
+                        ("999.1", first.dedupe_key),
+                    )
+                with self.assertRaisesRegex(
+                    ValueError, "market event history row identity mismatch"
+                ):
+                    store.append_batch_accepted((first,))
+                with sqlite3.connect(db_path) as other:
+                    other.execute(
+                        "UPDATE market_events SET decimal_odds=? WHERE dedupe_key=?",
+                        (original, first.dedupe_key),
+                    )
+                self.assertEqual(store.append_batch_accepted((first,)), [])
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
+    def test_same_connection_sql_tamper_invalidates_cached_append_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=74)
+                self.assertTrue(store.append(first))
+                store.connection.execute(
+                    "UPDATE market_events SET decimal_odds=? WHERE dedupe_key=?",
+                    ("777.1", first.dedupe_key),
+                )
+                store.connection.commit()
+                with self.assertRaisesRegex(
+                    ValueError, "market event history row identity mismatch"
+                ):
+                    store.append_batch_accepted((first,))
+            finally:
+                store.close()
+
 if __name__ == "__main__":
     unittest.main()

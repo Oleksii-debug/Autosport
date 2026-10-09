@@ -18,6 +18,7 @@ from autosport.market_bus import MarketEventBus
 from autosport.product_runtime import (
     ProductCompositionError,
     build_autonomous_product_runtime,
+    read_product_composition_manifest,
 )
 
 
@@ -115,6 +116,27 @@ def _delta(event: MarketEvent) -> CollectorDelta:
 
 
 class AutonomousProductCompositionTests(unittest.TestCase):
+    def test_read_product_composition_manifest_is_noncreating_and_validated(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            self.assertIsNone(read_product_composition_manifest(root))
+            self.assertFalse((root / "product_composition.json").exists())
+
+            (root / "product_composition.json").write_text(
+                (
+                    '{"schema":"autosport.autonomous_product_composition",'
+                    '"schema_version":2,"source_id":"provider-a",'
+                    '"initial_bankroll":"not-a-number",'
+                    '"settlement_authority_identity":null}'
+                ),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                ProductCompositionError,
+                "valid PaperBook",
+            ):
+                read_product_composition_manifest(root)
+
     def test_clean_workspace_builds_and_restart_restores_same_session(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -151,6 +173,10 @@ class AutonomousProductCompositionTests(unittest.TestCase):
                 self.assertEqual(restored_status.cycles_completed, 1)
                 self.assertEqual(restored.manifest.source_id, "provider-a")
                 self.assertEqual(restored.manifest.initial_bankroll, "100")
+                self.assertEqual(
+                    read_product_composition_manifest(root),
+                    restored.manifest,
+                )
             finally:
                 restored.close()
 

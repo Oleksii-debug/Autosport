@@ -119,6 +119,24 @@ def _canonical_restrictions(name: str, value: object) -> frozenset[str]:
     return value
 
 
+def _canonical_sport_restrictions(value: object) -> frozenset[str]:
+    sports = _canonical_restrictions("blocked_sports", value)
+    for sport in sports:
+        if (
+            sport != sport.lower()
+            or "|" in sport
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+                for character in sport
+            )
+            or sport in {"unknown", "mixed"}
+        ):
+            raise EconomicGoalContractError(
+                "blocked_sports members must be canonical sport identities"
+            )
+    return sports
+
+
 @dataclass(frozen=True, slots=True)
 class EconomicGoalContract:
     """Immutable owner-level economic objective and authority ceiling.
@@ -226,7 +244,7 @@ class EconomicGoalContract:
         if type(self.emergency_stop) is not bool:
             raise EconomicGoalContractError("emergency_stop must be a bool")
 
-        _canonical_restrictions("blocked_sports", self.blocked_sports)
+        _canonical_sport_restrictions(self.blocked_sports)
         _canonical_restrictions("blocked_providers", self.blocked_providers)
         _canonical_restrictions("blocked_markets", self.blocked_markets)
 

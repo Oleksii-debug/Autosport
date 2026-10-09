@@ -648,6 +648,13 @@ foreach ($requiredBuildSource in @('pyproject.toml', 'src/autosport/windows_entr
 $trustedBuildSrc = Join-Path $trustedBuildRoot 'src'
 $trustedGuiEntry = Join-Path $trustedBuildRoot 'src/autosport/windows_entry.py'
 $trustedDataEntry = Join-Path $trustedBuildRoot 'src/autosport/data_tools_entry.py'
+$trustedWebAssets = Join-Path $trustedBuildRoot 'src/autosport/windows_web'
+if (-not (Test-Path -LiteralPath (Join-Path $trustedWebAssets 'index.html') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $trustedWebAssets 'app.js') -PathType Leaf) -or
+    -not (Test-Path -LiteralPath (Join-Path $trustedWebAssets 'styles.css') -PathType Leaf)) {
+  throw 'Exact build source snapshot is missing semantic WebView2 shell assets'
+}
+$trustedWebAssetsSpec = "$trustedWebAssets;autosport/windows_web"
 $pyInstallerOutputRoot = Join-Path $boundArtifactRoot 'pyinstaller-output'
 $pyInstallerDist = Join-Path $pyInstallerOutputRoot 'dist'
 $pyInstallerWork = Join-Path $pyInstallerOutputRoot 'build'
@@ -800,7 +807,7 @@ try {
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
-  & $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry
+  & $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry
   if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
   $builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'
   python $sourceVerifier --bind-artifact $builtAutosportExe --bound-output $boundAutosportExe --digest-output $autosportDigestPath
@@ -1119,6 +1126,83 @@ if ($freshWalkForwardEvidence.source_sha256 -ne $walkForwardEvidence.source_sha2
 if ($freshWalkForwardEvidence.profitability_claim -ne $false) { throw 'Fresh-extracted walk-forward smoke must not claim profitability' }
 if ($freshWalkForwardEvidence.real_money_execution -ne $false) { throw 'Fresh-extracted walk-forward smoke must preserve REAL_MONEY_EXECUTION=false' }
 
+# Prove the actual fresh-extracted GUI executable resolves one per-user storage
+# identity independently of Explorer/shortcut/terminal working directory. Remove
+# both storage overrides so this exercises the Windows Known Folder fallback used
+# on a packaged first run instead of inheriting CI runner environment values.
+$freshFirstRunStorageA = Join-Path $PWD 'dist/fresh-extraction-first-run-storage-a.json'
+$freshFirstRunStorageB = Join-Path $PWD 'dist/fresh-extraction-first-run-storage-b.json'
+if (Test-Path $freshFirstRunStorageA) { Remove-Item -Force $freshFirstRunStorageA }
+if (Test-Path $freshFirstRunStorageB) { Remove-Item -Force $freshFirstRunStorageB }
+$firstRunCwdA = Join-Path $env:TEMP 'Autosport first run cwd українська'
+$firstRunCwdB = Join-Path $env:SystemRoot 'System32'
+New-Item -ItemType Directory -Path $firstRunCwdA -Force | Out-Null
+if (-not (Test-Path $firstRunCwdB -PathType Container)) { throw 'System32 working-directory oracle is unavailable' }
+$originalLocalAppData = $env:LOCALAPPDATA
+$hadLocalAppData = Test-Path Env:LOCALAPPDATA
+$originalAutosportWorkspace = $env:AUTOSPORT_WORKSPACE
+$hadAutosportWorkspace = Test-Path Env:AUTOSPORT_WORKSPACE
+try {
+  Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+  Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue
+  $firstRunProcessA = Start-Process -FilePath $extractedExe -ArgumentList '--first-run-storage-audit-output', $freshFirstRunStorageA -WorkingDirectory $firstRunCwdA -Wait -PassThru
+  if ($firstRunProcessA.ExitCode -ne 0) { throw "Fresh-extracted first-run storage audit A exited $($firstRunProcessA.ExitCode)" }
+  $firstRunProcessB = Start-Process -FilePath $extractedExe -ArgumentList '--first-run-storage-audit-output', $freshFirstRunStorageB -WorkingDirectory $firstRunCwdB -Wait -PassThru
+  if ($firstRunProcessB.ExitCode -ne 0) { throw "Fresh-extracted first-run storage audit B exited $($firstRunProcessB.ExitCode)" }
+} finally {
+  if ($hadLocalAppData) {
+    $env:LOCALAPPDATA = $originalLocalAppData
+  } else {
+    Remove-Item Env:LOCALAPPDATA -ErrorAction SilentlyContinue
+  }
+  if ($hadAutosportWorkspace) {
+    $env:AUTOSPORT_WORKSPACE = $originalAutosportWorkspace
+  } else {
+    Remove-Item Env:AUTOSPORT_WORKSPACE -ErrorAction SilentlyContinue
+  }
+}
+$freshFirstRunEvidenceA = Get-Content $freshFirstRunStorageA -Raw | ConvertFrom-Json
+$freshFirstRunEvidenceB = Get-Content $freshFirstRunStorageB -Raw | ConvertFrom-Json
+if ($freshFirstRunEvidenceA.status -ne 'PASS' -or $freshFirstRunEvidenceB.status -ne 'PASS') {
+  throw 'Fresh-extracted first-run storage audit did not PASS from both working directories'
+}
+if ([string]::IsNullOrWhiteSpace([string]$freshFirstRunEvidenceA.workspace) -or -not [System.IO.Path]::IsPathRooted([string]$freshFirstRunEvidenceA.workspace)) {
+  throw 'Fresh-extracted first-run workspace identity is not absolute'
+}
+if ([string]::IsNullOrWhiteSpace([string]$freshFirstRunEvidenceA.webview_storage) -or -not [System.IO.Path]::IsPathRooted([string]$freshFirstRunEvidenceA.webview_storage)) {
+  throw 'Fresh-extracted first-run WebView storage identity is not absolute'
+}
+if (-not [StringComparer]::OrdinalIgnoreCase.Equals([string]$freshFirstRunEvidenceA.workspace, [string]$freshFirstRunEvidenceB.workspace)) {
+  throw 'Fresh-extracted workspace identity changed with process working directory'
+}
+if (-not [StringComparer]::OrdinalIgnoreCase.Equals([string]$freshFirstRunEvidenceA.webview_storage, [string]$freshFirstRunEvidenceB.webview_storage)) {
+  throw 'Fresh-extracted WebView storage identity changed with process working directory'
+}
+if ([StringComparer]::OrdinalIgnoreCase.Equals([string]$freshFirstRunEvidenceA.workspace, [string]$freshFirstRunEvidenceA.webview_storage)) {
+  throw 'Fresh-extracted workspace and WebView storage identities collided'
+}
+if ([StringComparer]::OrdinalIgnoreCase.Equals([string]$freshFirstRunEvidenceA.launch_cwd, [string]$freshFirstRunEvidenceB.launch_cwd)) {
+  throw 'Fresh-extracted first-run audit did not execute from distinct working directories'
+}
+if ($freshFirstRunEvidenceA.webview_environment_overrides_clear -ne $true -or $freshFirstRunEvidenceB.webview_environment_overrides_clear -ne $true) {
+  throw 'Fresh-extracted first-run storage audit did not prove a clean WebView2 release environment'
+}
+if ($freshFirstRunEvidenceA.workspace_canonical_atomic_publication_proven -ne $true -or $freshFirstRunEvidenceB.workspace_canonical_atomic_publication_proven -ne $true) {
+  throw 'Fresh-extracted first-run storage audit did not prove canonical workspace atomic publication'
+}
+if ($freshFirstRunEvidenceA.webview_host_writability_proven -ne $true -or $freshFirstRunEvidenceB.webview_host_writability_proven -ne $true) {
+  throw 'Fresh-extracted first-run storage audit did not prove WebView host-profile writability'
+}
+if ($freshFirstRunEvidenceA.webview_child_profile_access_proven -ne $false -or $freshFirstRunEvidenceB.webview_child_profile_access_proven -ne $false) {
+  throw 'Fresh-extracted first-run storage audit overclaimed WebView child profile access'
+}
+if ($freshFirstRunEvidenceA.real_money_execution -ne $false -or $freshFirstRunEvidenceA.human_tested -ne $false -or $freshFirstRunEvidenceA.nvda_verified -ne $false) {
+  throw 'Fresh-extracted first-run storage audit violated release truth labels'
+}
+if ($freshFirstRunEvidenceB.real_money_execution -ne $false -or $freshFirstRunEvidenceB.human_tested -ne $false -or $freshFirstRunEvidenceB.nvda_verified -ne $false) {
+  throw 'Fresh-extracted first-run storage audit B violated release truth labels'
+}
+
 $freshDiag = Join-Path $PWD 'dist/fresh-extraction-diagnostic.json'
 if (Test-Path $freshDiag) { Remove-Item -Force $freshDiag }
 $freshDiagProcess = Start-Process -FilePath $extractedExe -ArgumentList '--diagnostic-output', $freshDiag -Wait -PassThru
@@ -1180,6 +1264,12 @@ $freshEvidence = [ordered]@{
   extracted_data_tool_build_corpus_help_status = 'PASS'
   extracted_data_tool_bundle_corpus_help_status = 'PASS'
   extracted_data_tool_verify_dataset_status = 'PASS'
+  extracted_first_run_storage_status = $freshFirstRunEvidenceA.status
+  extracted_first_run_storage_known_folder_status = 'PASS'
+  extracted_first_run_storage_cwd_consistency_status = 'PASS'
+  extracted_first_run_workspace_atomic_publication_status = 'PASS'
+  extracted_first_run_webview_host_writability_status = 'PASS'
+  extracted_first_run_webview_child_profile_access_proven = $false
   extracted_diagnostic_status = $freshDiagnostic.status
   extracted_accessibility_status = $freshAccessibility.status
   extracted_keyboard_status = $freshKeyboardEvidence.status

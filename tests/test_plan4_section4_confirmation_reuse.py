@@ -340,6 +340,60 @@ def test_instance_shadow_cannot_redirect_confirmed_send(
     assert len(transport.calls) == 1
 
 
+def test_caller_backdated_clock_cannot_override_trusted_quote_expiry(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """Expiry between reservation and final send must never reach provider."""
+    from autosport.betfair_supervised_execution import (
+        execute_betfair_supervised_action,
+    )
+    from autosport.real_execution_ledger import (
+        AttemptState, ExecutionStateError, RealExecutionLedger,
+    )
+
+    profile, bound, approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    authority, review, receipt = _operator_receipt_for_bound(
+        tmp_path, bound, approval, action, attempt_id="expired-mid-flight",
+    )
+    instants = iter((
+        existing_fixtures.RESERVED_AT,
+        existing_fixtures.QUOTE_EXPIRES_AT,
+    ))
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: next(instants),
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(request)
+    )
+    client = existing_fixtures._enabled_client(profile, transport, store=store)
+    with pytest.raises(ExecutionStateError, match="quote expiry"):
+        execute_betfair_supervised_action(
+            ledger, bound, approval,
+            action_id=action.action_id,
+            attempt_id="expired-mid-flight",
+            profile=profile, client=client,
+            clock=lambda: existing_fixtures.RESERVED_AT,
+            confirmation_receipt_id=receipt.receipt_id,
+            confirmation_review_sha256=review.review_sha256,
+        )
+    assert transport.calls == []
+    assert ledger.attempt_state("expired-mid-flight") is AttemptState.RESERVED
+    assert authority.resolve_receipt_binding(
+        receipt_id=receipt.receipt_id,
+        expected_review_sha256=review.review_sha256,
+    ).receipt.consumed_at is None
+    restarted = RealExecutionLedger(ledger.path)
+    assert "expired-mid-flight" in restarted.recover_uncertain()
+    assert restarted.attempt_state("expired-mid-flight") is AttemptState.UNKNOWN
+    assert not restarted.can_retry_action(
+        plan_id=bound.execution_plan.plan_id,
+        action_id=action.action_id,
+    )
+
+
 def _operator_receipt_for_bound(
     tmp_path: Path,
     bound,
@@ -423,7 +477,7 @@ def test_confirmed_send_consumes_exact_receipt_and_preserves_matched_truth(
         if entry.attempt.attempt_id == "confirmed-attempt"
     )
     assert attempt.state is AttemptState.ACCEPTED
-    assert attempt.submitted_at == SUBMITTED_AT
+    assert attempt.submitted_at == existing_fixtures.RESERVED_AT
     assert attempt.acknowledgement is not None
     assert attempt.acknowledgement.accepted_stake == action.requested_stake
     binding = authority.resolve_receipt_binding(
@@ -431,7 +485,7 @@ def test_confirmed_send_consumes_exact_receipt_and_preserves_matched_truth(
         expected_review_sha256=review.review_sha256,
         require_unconsumed=False,
     )
-    assert datetime.fromisoformat(binding.receipt.consumed_at) == datetime.fromisoformat(SUBMITTED_AT)
+    assert datetime.fromisoformat(binding.receipt.consumed_at) == datetime.fromisoformat(existing_fixtures.RESERVED_AT)
     assert binding.receipt.consumed_by.startswith("betfair-final-send:v1:")
     with pytest.raises(Exception):
         execute_betfair_supervised_action(

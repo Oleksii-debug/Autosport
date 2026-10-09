@@ -44,9 +44,9 @@ def _show_workspace_configuration_error(detail: str) -> None:
     from autosport.localization import text
 
     title = text("ui.windows.workspace_configuration.title")
-    from autosport.secret_redaction import redact_operator_text
-
-    message = text("ui.windows.workspace_configuration.message", detail=redact_operator_text(detail))
+    # Untrusted configuration details can carry credentials or arbitrary paths.
+    # Announce only the canonical localized recovery instructions.
+    message = text("ui.windows.workspace_configuration.message")
     # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
     # through standard Windows accessibility rather than a custom visual surface.
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
@@ -62,19 +62,9 @@ def _probe_workspace_writable(workspace: Path) -> None:
 
 def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:
     from autosport.localization import text
-    from autosport.secret_redaction import redact_operator_text, safe_exception_detail
-
-    detail = " ".join(safe_exception_detail(
-        exc, unavailable_detail=text("ui.windows.workspace_access.unknown_error")
-    ).splitlines()).strip() or text(
-        "ui.windows.workspace_access.unknown_error"
-    )
-    return text(
-        "ui.windows.workspace_access.message",
-        workspace=redact_operator_text(str(workspace)),
-        error_type=OSError.__name__,
-        error_detail=detail,
-    )
+    # Arbitrary filesystem errors and workspace paths can embed secrets unknown
+    # to redaction. Never interpolate untrusted bytes into a native announcement.
+    return text("ui.windows.workspace_access.message")
 
 
 def _show_workspace_access_error(workspace: Path, exc: OSError) -> None:

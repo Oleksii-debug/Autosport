@@ -113,9 +113,10 @@ def test_workspace_access_error_is_actionable_and_single_line(tmp_path: Path) ->
 
     message = windows_entry._workspace_access_error_message(workspace, error)
 
-    assert str(workspace) in message
-    assert "OSError: access denied secondary detail" in message
-    assert "PermissionError:" not in message
+    assert str(workspace) not in message
+    assert "шлях приховано" in message
+    assert "access denied" not in message
+    assert "OSError:" not in message
     assert "AUTOSPORT_WORKSPACE" in message
     assert "абсолютний шлях" in message
     assert "доступної для запису" in message

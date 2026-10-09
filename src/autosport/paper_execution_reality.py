@@ -22,47 +22,192 @@ PaperLegAttempt = _impl.PaperLegAttempt
 PaperExecutionRun = _impl.PaperExecutionRun
 PaperExecutionEvidenceRegistry = _impl.PaperExecutionEvidenceRegistry
 
+_CANONICAL_EVIDENCE_GRADE_TYPE = EvidenceGrade
+_CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE = PaperAttemptOutcome
+_CANONICAL_RECOVERY_DECISION_TYPE = RecoveryDecision
+_CANONICAL_EXECUTION_PLAN_TYPE = ExecutionPlan
+_CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE = PaperExecutionModelConfig
+_CANONICAL_PAPER_EXECUTION_EVIDENCE_REGISTRY_TYPE = PaperExecutionEvidenceRegistry
+_CANONICAL_MAPPING_TYPE = Mapping
+_EVIDENCE_SYNTHETIC = EvidenceGrade.SYNTHETIC
+_OUTCOME_ACCEPTED = PaperAttemptOutcome.ACCEPTED
+_OUTCOME_PARTIAL = PaperAttemptOutcome.PARTIAL
+_OUTCOME_REJECTED = PaperAttemptOutcome.REJECTED
+_OUTCOME_UNKNOWN = PaperAttemptOutcome.UNKNOWN
+_RECOVERY_NONE = RecoveryDecision.NONE
+_RECOVERY_NO_EXPOSURE = RecoveryDecision.NO_EXPOSURE
+_RECOVERY_HEDGE_REVIEW_REQUIRED = RecoveryDecision.HEDGE_REVIEW_REQUIRED
+_CANONICAL_DECIMAL_TYPE = Decimal
+_CANONICAL_DECIMAL_TYPE_IDENTITY = _CANONICAL_DECIMAL_TYPE
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR = _impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR.__code__
+_CANONICAL_TEXT_VALIDATOR = _impl._CANONICAL_TEXT_VALIDATOR
+_CANONICAL_DECIMAL_PARSER = _impl._CANONICAL_DECIMAL_PARSER
+_CANONICAL_DECIMAL_PARSER_IDENTITY = _CANONICAL_DECIMAL_PARSER
+_CANONICAL_DECIMAL_PARSER_CODE = _CANONICAL_DECIMAL_PARSER.__code__
+_CANONICAL_DECIMAL_TEXT_FORMATTER = _impl._CANONICAL_DECIMAL_TEXT_FORMATTER
+_CANONICAL_DECIMAL_TEXT_FORMATTER_IDENTITY = _CANONICAL_DECIMAL_TEXT_FORMATTER
+_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE = _CANONICAL_DECIMAL_TEXT_FORMATTER.__code__
+_CANONICAL_CANONICALIZER = _impl._CANONICAL_CANONICALIZER
+_CANONICAL_TIMESTAMP_PARSER = _impl._CANONICAL_TIMESTAMP_PARSER
+_CANONICAL_TIMESTAMP_FORMATTER = _impl._CANONICAL_TIMESTAMP_FORMATTER
+_CANONICAL_DETERMINISTIC_INT = _impl._CANONICAL_DETERMINISTIC_INT
+_CANONICAL_MILLISECONDS = _impl._milliseconds
+_CANONICAL_TIMEDELTA = _impl.timedelta
+_CANONICAL_ATTEMPT_ID = _impl._attempt_id
+_CANONICAL_VERIFY_OBSERVATION_AUTHORITY = _impl._verify_observation_authority
+_CANONICAL_RUN_ID = _impl._run_id
+_CANONICAL_OBSERVED_ATTEMPT = _impl._observed_attempt
+_CANONICAL_OS_FSYNC = os.fsync
+_MAX_DURABLE_EVENT_LINE_CHARS = _impl._MAX_DURABLE_EVENT_LINE_CHARS
 
-def _decimal_coefficient(value: Decimal) -> tuple[int, int]:
-    if not value.is_finite():
-        raise ValueError("Decimal must be finite")
-    parts = value.as_tuple()
-    coefficient = 0
-    for digit in parts.digits:
-        coefficient = coefficient * 10 + digit
-    if parts.sign:
-        coefficient = -coefficient
-    return coefficient, int(parts.exponent)
+
+def _build_decimal_coefficient():
+    decimal_type = Decimal
+    resource_validator = _impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+    resource_validator_code = resource_validator.__code__
+
+    def decimal_coefficient(value: Decimal) -> tuple[int, int]:
+        if type(value) is not decimal_type:
+            raise ValueError("exact Decimal required")
+        if not value.is_finite():
+            raise ValueError("Decimal must be finite")
+        if getattr(resource_validator, "__code__", None) is not resource_validator_code:
+            raise ValueError("PAPER Decimal resource authority changed")
+        resource_validator(value)
+        parts = value.as_tuple()
+        coefficient = 0
+        for digit in parts.digits:
+            coefficient = coefficient * 10 + digit
+        if parts.sign:
+            coefficient = -coefficient
+        return coefficient, int(parts.exponent)
+
+    return decimal_coefficient
 
 
-def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
-    sign = 1 if coefficient < 0 else 0
-    digits = tuple(int(ch) for ch in str(abs(coefficient)))
-    return Decimal((sign, digits, exponent))
+_decimal_coefficient = _build_decimal_coefficient()
+del _build_decimal_coefficient
 
 
-def _decimal_add_exact(left: Decimal, right: Decimal) -> Decimal:
-    left_coefficient, left_exponent = _decimal_coefficient(left)
-    right_coefficient, right_exponent = _decimal_coefficient(right)
-    exponent = min(left_exponent, right_exponent)
-    left_scaled = left_coefficient * (10 ** (left_exponent - exponent))
-    right_scaled = right_coefficient * (10 ** (right_exponent - exponent))
-    return _decimal_from_coefficient(left_scaled + right_scaled, exponent)
+def _build_decimal_from_coefficient():
+    decimal_type = Decimal
+    resource_validator = _impl._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+    resource_validator_code = resource_validator.__code__
+    input_int_max_bits = _impl._CANONICAL_DECIMAL_INPUT_INT_MAX_BITS
+    input_exponent_abs_limit = _impl._CANONICAL_DECIMAL_INPUT_TEXT_LIMIT
+
+    def decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
+        if getattr(resource_validator, "__code__", None) is not resource_validator_code:
+            raise ValueError("PAPER Decimal resource authority changed")
+        if type(coefficient) is not int or type(exponent) is not int:
+            raise ValueError("decimal coefficient and exponent must be exact ints")
+        if coefficient.bit_length() > input_int_max_bits:
+            raise ValueError("decimal coefficient exceeds resource limit")
+        if abs(exponent) > input_exponent_abs_limit:
+            raise ValueError("decimal exponent exceeds resource limit")
+        sign = 1 if coefficient < 0 else 0
+        magnitude = decimal_type(abs(coefficient))
+        digits = magnitude.as_tuple().digits
+        result = decimal_type((sign, digits, exponent))
+        resource_validator(result)
+        return result
+
+    return decimal_from_coefficient
 
 
-def _decimal_subtract_exact(left: Decimal, right: Decimal) -> Decimal:
-    right_coefficient, right_exponent = _decimal_coefficient(right)
-    return _decimal_add_exact(
-        left,
-        _decimal_from_coefficient(-right_coefficient, right_exponent),
-    )
+_decimal_from_coefficient = _build_decimal_from_coefficient()
+del _build_decimal_from_coefficient
+
+_CANONICAL_DECIMAL_COEFFICIENT = _decimal_coefficient
+_CANONICAL_DECIMAL_COEFFICIENT_CODE = _decimal_coefficient.__code__
+_CANONICAL_DECIMAL_FROM_COEFFICIENT = _decimal_from_coefficient
+_CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE = _decimal_from_coefficient.__code__
 
 
-def _decimal_scale_bps_exact(value: Decimal, basis_points: int) -> Decimal:
-    if type(basis_points) is not int or not 0 <= basis_points <= 10_000:
-        raise ValueError("basis_points must be an int in 0..10000")
-    coefficient, exponent = _decimal_coefficient(value)
-    return _decimal_from_coefficient(coefficient * basis_points, exponent - 4)
+def _build_decimal_add_exact():
+    coefficient_fn = _decimal_coefficient
+    coefficient_code = coefficient_fn.__code__
+    from_coefficient = _decimal_from_coefficient
+    from_coefficient_code = from_coefficient.__code__
+
+    def decimal_add_exact(left: Decimal, right: Decimal) -> Decimal:
+        if (
+            getattr(coefficient_fn, "__code__", None) is not coefficient_code
+            or getattr(from_coefficient, "__code__", None) is not from_coefficient_code
+        ):
+            raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+        left_coefficient, left_exponent = coefficient_fn(left)
+        right_coefficient, right_exponent = coefficient_fn(right)
+        exponent = min(left_exponent, right_exponent)
+        left_scaled = left_coefficient * (10 ** (left_exponent - exponent))
+        right_scaled = right_coefficient * (10 ** (right_exponent - exponent))
+        return from_coefficient(left_scaled + right_scaled, exponent)
+
+    return decimal_add_exact
+
+
+_decimal_add_exact = _build_decimal_add_exact()
+del _build_decimal_add_exact
+_CANONICAL_DECIMAL_ADD_EXACT = _decimal_add_exact
+_CANONICAL_DECIMAL_ADD_EXACT_CODE = _decimal_add_exact.__code__
+
+
+def _build_decimal_subtract_exact():
+    coefficient_fn = _decimal_coefficient
+    coefficient_code = coefficient_fn.__code__
+    from_coefficient = _decimal_from_coefficient
+    from_coefficient_code = from_coefficient.__code__
+    add_exact = _decimal_add_exact
+    add_exact_code = add_exact.__code__
+
+    def decimal_subtract_exact(left: Decimal, right: Decimal) -> Decimal:
+        if (
+            getattr(coefficient_fn, "__code__", None) is not coefficient_code
+            or getattr(from_coefficient, "__code__", None) is not from_coefficient_code
+            or getattr(add_exact, "__code__", None) is not add_exact_code
+        ):
+            raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+        right_coefficient, right_exponent = coefficient_fn(right)
+        return add_exact(
+            left,
+            from_coefficient(-right_coefficient, right_exponent),
+        )
+
+    return decimal_subtract_exact
+
+
+_decimal_subtract_exact = _build_decimal_subtract_exact()
+del _build_decimal_subtract_exact
+_CANONICAL_DECIMAL_SUBTRACT_EXACT = _decimal_subtract_exact
+_CANONICAL_DECIMAL_SUBTRACT_EXACT_CODE = _decimal_subtract_exact.__code__
+
+
+def _build_decimal_scale_bps_exact():
+    coefficient_fn = _decimal_coefficient
+    coefficient_code = coefficient_fn.__code__
+    from_coefficient = _decimal_from_coefficient
+    from_coefficient_code = from_coefficient.__code__
+
+    def decimal_scale_bps_exact(value: Decimal, basis_points: int) -> Decimal:
+        if type(basis_points) is not int or not 0 <= basis_points <= 10_000:
+            raise ValueError("basis_points must be an int in 0..10000")
+        if (
+            getattr(coefficient_fn, "__code__", None) is not coefficient_code
+            or getattr(from_coefficient, "__code__", None) is not from_coefficient_code
+        ):
+            raise ValueError("PAPER exact Decimal arithmetic dependency changed")
+        coefficient, exponent = coefficient_fn(value)
+        return from_coefficient(coefficient * basis_points, exponent - 4)
+
+    return decimal_scale_bps_exact
+
+
+_decimal_scale_bps_exact = _build_decimal_scale_bps_exact()
+del _build_decimal_scale_bps_exact
+_CANONICAL_DECIMAL_SCALE_BPS_EXACT = _decimal_scale_bps_exact
+_CANONICAL_DECIMAL_SCALE_BPS_EXACT_CODE = _decimal_scale_bps_exact.__code__
 
 
 @dataclass(frozen=True, slots=True)
@@ -77,11 +222,22 @@ def _derive_run_economics(
     action_ids: tuple[str, ...],
     attempts: tuple[PaperLegAttempt, ...],
 ) -> _DerivedRunEconomics:
+    decimal_add = _decimal_add_exact
+    from_coefficient = _decimal_from_coefficient
+    if (
+        decimal_add is not _CANONICAL_DECIMAL_ADD_EXACT
+        or decimal_add.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
+    ):
+        raise PaperExecutionIntegrityError(
+            "PAPER exact Decimal arithmetic authority changed"
+        )
     if len(attempts) > len(action_ids):
         raise PaperExecutionIntegrityError("durable attempts exceed reserved action list")
 
-    known_exposure = Decimal("0")
-    worst_case = Decimal("0")
+    known_exposure = from_coefficient(0, 0)
+    worst_case = from_coefficient(0, 0)
     terminal_seen = False
     for index, attempt in enumerate(attempts):
         if attempt.sequence != index or attempt.action_id != action_ids[index]:
@@ -92,44 +248,44 @@ def _derive_run_economics(
             )
 
         if attempt.outcome in {
-            PaperAttemptOutcome.ACCEPTED,
-            PaperAttemptOutcome.PARTIAL,
+            _OUTCOME_ACCEPTED,
+            _OUTCOME_PARTIAL,
         }:
             assert attempt.execution_stake is not None
-            known_exposure = _decimal_add_exact(known_exposure, attempt.execution_stake)
+            known_exposure = decimal_add(known_exposure, attempt.execution_stake)
             worst_case = max(worst_case, known_exposure)
-        elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+        elif attempt.outcome is _OUTCOME_UNKNOWN:
             worst_case = max(
                 worst_case,
-                _decimal_add_exact(known_exposure, attempt.requested_stake),
+                decimal_add(known_exposure, attempt.requested_stake),
             )
 
-        if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
+        if attempt.outcome is not _OUTCOME_ACCEPTED:
             terminal_seen = True
 
     pending = action_ids[len(attempts) :]
     all_accepted_complete = (
         bool(attempts)
         and len(attempts) == len(action_ids)
-        and all(item.outcome is PaperAttemptOutcome.ACCEPTED for item in attempts)
+        and all(item.outcome is _OUTCOME_ACCEPTED for item in attempts)
     )
     can_complete = all_accepted_complete or (
         bool(attempts)
-        and attempts[-1].outcome is not PaperAttemptOutcome.ACCEPTED
+        and attempts[-1].outcome is not _OUTCOME_ACCEPTED
     )
     if all_accepted_complete:
-        recovery = RecoveryDecision.NONE
+        recovery = _RECOVERY_NONE
     elif can_complete:
         recovery = (
-            RecoveryDecision.HEDGE_REVIEW_REQUIRED
+            _RECOVERY_HEDGE_REVIEW_REQUIRED
             if worst_case > 0
-            else RecoveryDecision.NO_EXPOSURE
+            else _RECOVERY_NO_EXPOSURE
         )
     else:
         recovery = (
-            RecoveryDecision.HEDGE_REVIEW_REQUIRED
+            _RECOVERY_HEDGE_REVIEW_REQUIRED
             if worst_case > 0
-            else RecoveryDecision.NONE
+            else _RECOVERY_NONE
         )
     return _DerivedRunEconomics(
         pending_action_ids=pending,
@@ -137,6 +293,10 @@ def _derive_run_economics(
         worst_case_exposure=worst_case,
         can_complete=can_complete,
     )
+
+
+_CANONICAL_DERIVE_RUN_ECONOMICS = _derive_run_economics
+_CANONICAL_DERIVE_RUN_ECONOMICS_CODE = _derive_run_economics.__code__
 
 
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
@@ -177,13 +337,17 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 )
             return
 
-        encoded = _impl._canonical(event) + "\n"
+        encoded = _CANONICAL_CANONICALIZER(event) + "\n"
+        if len(encoded) > _MAX_DURABLE_EVENT_LINE_CHARS + 1:
+            raise PaperExecutionIntegrityError(
+                "PAPER execution ledger event exceeds resource limit"
+            )
         path_existed_before = self.path.exists()
         try:
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.write(encoded)
                 handle.flush()
-                os.fsync(handle.fileno())
+                _CANONICAL_OS_FSYNC(handle.fileno())
             if not path_existed_before or not self._path_durable:
                 self._sync_parent_directory()
             self._write_anchor_unlocked(events + [event])
@@ -202,10 +366,36 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         recovery_decision: RecoveryDecision,
         worst_case_exposure: Decimal,
     ) -> None:
-        run_id = _impl._text(run_id, "run_id")
-        if not isinstance(recovery_decision, RecoveryDecision):
-            raise TypeError("recovery_decision must be RecoveryDecision")
-        supplied_exposure = _impl._decimal(
+        run_id = _CANONICAL_TEXT_VALIDATOR(run_id, "run_id")
+        if type(recovery_decision) is not _CANONICAL_RECOVERY_DECISION_TYPE:
+            raise TypeError("recovery_decision must be exact RecoveryDecision")
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+        derive_run_economics = _derive_run_economics
+        if (
+            decimal_parser is not _CANONICAL_DECIMAL_PARSER_IDENTITY
+            or decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER Decimal parser authority changed"
+            )
+        if (
+            decimal_formatter is not _CANONICAL_DECIMAL_TEXT_FORMATTER_IDENTITY
+            or decimal_formatter.__code__
+            is not _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER Decimal formatter authority changed"
+            )
+        if (
+            derive_run_economics is not _CANONICAL_DERIVE_RUN_ECONOMICS
+            or derive_run_economics.__code__
+            is not _CANONICAL_DERIVE_RUN_ECONOMICS_CODE
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER run economics authority changed"
+            )
+        supplied_exposure = decimal_parser(
             worst_case_exposure,
             "worst_case_exposure",
             allow_zero=True,
@@ -240,7 +430,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     key=lambda item: item.sequence,
                 )
             )
-            derived = _derive_run_economics(tuple(action_ids_raw), attempts)
+            derived = derive_run_economics(tuple(action_ids_raw), attempts)
             if not derived.can_complete:
                 raise PaperExecutionStateError(
                     "run cannot complete before a terminal outcome or all actions ACCEPTED"
@@ -260,7 +450,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             payload = {
                 "pending_action_ids": list(derived.pending_action_ids),
                 "recovery_decision": derived.recovery_decision.value,
-                "worst_case_exposure": _impl._decimal_text(
+                "worst_case_exposure": decimal_formatter(
                     derived.worst_case_exposure
                 ),
             }
@@ -282,6 +472,23 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         started_at: str,
         observation_evidence_ids: Mapping[str, str],
     ) -> PaperExecutionRun | None:
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        derive_run_economics = _derive_run_economics
+        if (
+            decimal_parser is not _CANONICAL_DECIMAL_PARSER_IDENTITY
+            or decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER Decimal parser authority changed"
+            )
+        if (
+            derive_run_economics is not _CANONICAL_DERIVE_RUN_ECONOMICS
+            or derive_run_economics.__code__
+            is not _CANONICAL_DERIVE_RUN_ECONOMICS_CODE
+        ):
+            raise PaperExecutionIntegrityError(
+                "PAPER run economics authority changed"
+            )
         events = self.events(run_id)
         if not events:
             return None
@@ -309,7 +516,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 key=lambda item: item.sequence,
             )
         )
-        derived = _derive_run_economics(
+        derived = derive_run_economics(
             tuple(action.action_id for action in plan.actions),
             attempts,
         )
@@ -330,7 +537,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     "RUN_COMPLETED exists before durable state is terminal"
                 )
             payload = completion["payload"]
-            if set(payload) != {
+            if type(payload) is not dict or set(payload) != {
                 "pending_action_ids",
                 "recovery_decision",
                 "worst_case_exposure",
@@ -338,11 +545,27 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionIntegrityError(
                     "completion payload schema is invalid"
                 )
+            pending_raw = payload["pending_action_ids"]
+            exposure_raw = payload["worst_case_exposure"]
+            if (
+                type(pending_raw) is not list
+                or any(type(item) is not str or not item for item in pending_raw)
+                or type(exposure_raw) is not str
+            ):
+                raise PaperExecutionIntegrityError(
+                    "completion payload schema is invalid"
+                )
             try:
-                recovery = RecoveryDecision(payload["recovery_decision"])
-                pending = tuple(payload["pending_action_ids"])
-                exposure = Decimal(payload["worst_case_exposure"])
-            except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
+                recovery = _CANONICAL_RECOVERY_DECISION_TYPE(
+                    payload["recovery_decision"]
+                )
+                pending = tuple(pending_raw)
+                exposure = decimal_parser(
+                    exposure_raw,
+                    "worst_case_exposure",
+                    allow_zero=True,
+                )
+            except (ValueError, TypeError) as exc:
                 raise PaperExecutionIntegrityError("invalid completion payload") from exc
             if (
                 pending != derived.pending_action_ids
@@ -381,6 +604,9 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         )
 
 
+_CANONICAL_PUBLIC_PAPER_EXECUTION_LEDGER_TYPE = PaperExecutionLedger
+
+
 def _synthetic_attempt(
     *,
     run_id: str,
@@ -391,85 +617,102 @@ def _synthetic_attempt(
     started_at: str,
     suspended: bool,
 ) -> PaperLegAttempt:
+    decimal_add = _decimal_add_exact
+    decimal_subtract = _decimal_subtract_exact
+    decimal_scale = _decimal_scale_bps_exact
+    from_coefficient = _decimal_from_coefficient
+    if (
+        decimal_add is not _CANONICAL_DECIMAL_ADD_EXACT
+        or decimal_add.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
+        or decimal_subtract is not _CANONICAL_DECIMAL_SUBTRACT_EXACT
+        or decimal_subtract.__code__ is not _CANONICAL_DECIMAL_SUBTRACT_EXACT_CODE
+        or decimal_scale is not _CANONICAL_DECIMAL_SCALE_BPS_EXACT
+        or decimal_scale.__code__ is not _CANONICAL_DECIMAL_SCALE_BPS_EXACT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
+    ):
+        raise PaperExecutionIntegrityError(
+            "PAPER synthetic Decimal arithmetic authority changed"
+        )
     if action.side != "BACK":
         raise PaperExecutionStateError(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
             "explicit empirical/configured execution evidence"
         )
-    start = _impl._timestamp(started_at, "started_at")
+    start = _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
     delay_ms = config.min_delay_ms
     if delay_span:
-        delay_ms += _impl._deterministic_int(
+        delay_ms += _CANONICAL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "delay",
             delay_span + 1,
         )
-    execution_time = start + _impl.timedelta(milliseconds=delay_ms)
-    decision_time = _impl._timestamp(action.quote_observed_at, "quote_observed_at")
-    quote_age_ms = _impl._milliseconds(execution_time - decision_time, "quote age")
-    expires = _impl._timestamp(action.expires_at, "expires_at")
+    execution_time = start + _CANONICAL_TIMEDELTA(milliseconds=delay_ms)
+    decision_time = _CANONICAL_TIMESTAMP_PARSER(action.quote_observed_at, "quote_observed_at")
+    quote_age_ms = _CANONICAL_MILLISECONDS(execution_time - decision_time, "quote age")
+    expires = _CANONICAL_TIMESTAMP_PARSER(action.expires_at, "expires_at")
     execution_odds: Decimal | None = None
     execution_stake: Decimal | None = None
 
     if suspended:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "configured/synthetic suspension at execution time"
     elif execution_time >= expires:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "decision quote expired before PAPER-equivalent execution"
     elif quote_age_ms > config.max_quote_age_ms:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "decision quote exceeded configured PAPER freshness bound"
     else:
-        bucket = _impl._deterministic_int(
+        bucket = _CANONICAL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "outcome",
             10_000,
         )
         if bucket < config.unknown_bps:
-            outcome = PaperAttemptOutcome.UNKNOWN
+            outcome = _OUTCOME_UNKNOWN
             reason = "deterministic execution model produced UNKNOWN"
         elif bucket < config.unknown_bps + config.rejected_bps:
-            outcome = PaperAttemptOutcome.REJECTED
+            outcome = _OUTCOME_REJECTED
             reason = "deterministic execution model produced REJECTED"
         elif bucket < config.unknown_bps + config.rejected_bps + config.partial_bps:
-            outcome = PaperAttemptOutcome.PARTIAL
+            outcome = _OUTCOME_PARTIAL
             reason = "deterministic execution model produced PARTIAL"
         else:
-            outcome = PaperAttemptOutcome.ACCEPTED
+            outcome = _OUTCOME_ACCEPTED
             reason = "deterministic execution model produced ACCEPTED"
 
-        if outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             slippage_bps = (
                 0
                 if config.max_slippage_bps == 0
-                else _impl._deterministic_int(
+                else _CANONICAL_DETERMINISTIC_INT(
                     f"{config.seed}:{run_id}:{action.action_id}",
                     "slippage",
                     config.max_slippage_bps + 1,
                 )
             )
-            odds_margin = _decimal_subtract_exact(
+            odds_margin = decimal_subtract(
                 action.requested_odds,
-                Decimal("1"),
+                from_coefficient(1, 0),
             )
-            execution_odds = _decimal_add_exact(
-                Decimal("1"),
-                _decimal_scale_bps_exact(
+            execution_odds = decimal_add(
+                from_coefficient(1, 0),
+                decimal_scale(
                     odds_margin,
                     10_000 - slippage_bps,
                 ),
             )
             execution_stake = action.requested_stake
-            if outcome is PaperAttemptOutcome.PARTIAL:
-                execution_stake = _decimal_scale_bps_exact(
+            if outcome is _OUTCOME_PARTIAL:
+                execution_stake = decimal_scale(
                     action.requested_stake,
                     config.partial_fill_bps,
                 )
 
     return PaperLegAttempt(
-        attempt_id=_impl._attempt_id(run_id, action, sequence),
+        attempt_id=_CANONICAL_ATTEMPT_ID(run_id, action, sequence),
         run_id=run_id,
         plan_id=plan.plan_id,
         action_id=action.action_id,
@@ -484,20 +727,24 @@ def _synthetic_attempt(
         decision_odds=action.requested_odds,
         requested_stake=action.requested_stake,
         decision_observed_at=action.quote_observed_at,
-        execution_observed_at=_impl._timestamp_text(execution_time),
+        execution_observed_at=_CANONICAL_TIMESTAMP_FORMATTER(execution_time),
         delay_ms=delay_ms,
         quote_age_ms=quote_age_ms,
         outcome=outcome,
         execution_odds=execution_odds,
         execution_stake=execution_stake,
         suspended=suspended,
-        evidence_grade=EvidenceGrade.SYNTHETIC,
+        evidence_grade=_EVIDENCE_SYNTHETIC,
         evidence_source=config.evidence_source,
         evidence_id=None,
         evidence_sha256=None,
         model_fingerprint=config.fingerprint,
         reason=reason,
     )
+
+
+_CANONICAL_SYNTHETIC_ATTEMPT = _synthetic_attempt
+_CANONICAL_SYNTHETIC_ATTEMPT_CODE = _synthetic_attempt.__code__
 
 
 def execute_paper_plan(
@@ -512,17 +759,31 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
-    if not isinstance(plan, ExecutionPlan):
+    decimal_add = _decimal_add_exact
+    from_coefficient = _decimal_from_coefficient
+    synthetic_attempt = _synthetic_attempt
+    if (
+        decimal_add is not _CANONICAL_DECIMAL_ADD_EXACT
+        or decimal_add.__code__ is not _CANONICAL_DECIMAL_ADD_EXACT_CODE
+        or from_coefficient is not _CANONICAL_DECIMAL_FROM_COEFFICIENT
+        or from_coefficient.__code__ is not _CANONICAL_DECIMAL_FROM_COEFFICIENT_CODE
+        or synthetic_attempt is not _CANONICAL_SYNTHETIC_ATTEMPT
+        or synthetic_attempt.__code__ is not _CANONICAL_SYNTHETIC_ATTEMPT_CODE
+    ):
+        raise PaperExecutionIntegrityError(
+            "PAPER execution Decimal authority changed"
+        )
+    if not isinstance(plan, _CANONICAL_EXECUTION_PLAN_TYPE):
         raise TypeError("plan must be ExecutionPlan")
-    if not isinstance(config, PaperExecutionModelConfig):
+    if not isinstance(config, _CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE):
         raise TypeError("config must be PaperExecutionModelConfig")
-    if not isinstance(ledger, PaperExecutionLedger):
+    if not isinstance(ledger, _CANONICAL_PUBLIC_PAPER_EXECUTION_LEDGER_TYPE):
         raise TypeError("ledger must be PaperExecutionLedger")
-    trigger_id = _impl._text(trigger_id, "trigger_id")
-    _impl._timestamp(started_at, "started_at")
+    trigger_id = _CANONICAL_TEXT_VALIDATOR(trigger_id, "trigger_id")
+    _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     if observations is None:
         observations = {}
-    if not isinstance(observations, Mapping):
+    if not isinstance(observations, _CANONICAL_MAPPING_TYPE):
         raise TypeError("observations must be a mapping")
     action_by_id = {action.action_id: action for action in plan.actions}
     if set(observations) - set(action_by_id):
@@ -533,7 +794,7 @@ def execute_paper_plan(
         )
     if observations and not isinstance(
         evidence_registry,
-        PaperExecutionEvidenceRegistry,
+        _CANONICAL_PAPER_EXECUTION_EVIDENCE_REGISTRY_TYPE,
     ):
         raise PaperExecutionStateError(
             "configured/empirical observations require a durable evidence registry"
@@ -542,14 +803,14 @@ def execute_paper_plan(
     observation_evidence_ids: dict[str, str] = {}
     for action_id, observation in observations.items():
         assert evidence_registry is not None
-        _impl._verify_observation_authority(
+        _CANONICAL_VERIFY_OBSERVATION_AUTHORITY(
             action=action_by_id[action_id],
             observation=observation,
             registry=evidence_registry,
         )
         observation_evidence_ids[action_id] = observation.evidence_id
 
-    run_id = _impl._run_id(plan, trigger_id, config)
+    run_id = _CANONICAL_RUN_ID(plan, trigger_id, config)
     ledger.reserve_run(
         run_id=run_id,
         trigger_id=trigger_id,
@@ -571,14 +832,14 @@ def execute_paper_plan(
         return existing
 
     attempts = list(existing.attempts)
-    if attempts and attempts[-1].outcome is not PaperAttemptOutcome.ACCEPTED:
+    if attempts and attempts[-1].outcome is not _OUTCOME_ACCEPTED:
         ledger.complete_run(
             run_id=run_id,
             pending_action_ids=existing.pending_action_ids,
             recovery_decision=(
-                RecoveryDecision.HEDGE_REVIEW_REQUIRED
+                _RECOVERY_HEDGE_REVIEW_REQUIRED
                 if existing.worst_case_exposure > 0
-                else RecoveryDecision.NO_EXPOSURE
+                else _RECOVERY_NO_EXPOSURE
             ),
             worst_case_exposure=existing.worst_case_exposure,
         )
@@ -593,12 +854,12 @@ def execute_paper_plan(
         assert result is not None
         return result
 
-    known_exposure = Decimal("0")
-    worst_case_exposure = Decimal("0")
+    known_exposure = from_coefficient(0, 0)
+    worst_case_exposure = from_coefficient(0, 0)
     for prior in attempts:
-        assert prior.outcome is PaperAttemptOutcome.ACCEPTED
+        assert prior.outcome is _OUTCOME_ACCEPTED
         assert prior.execution_stake is not None
-        known_exposure = _decimal_add_exact(
+        known_exposure = decimal_add(
             known_exposure,
             prior.execution_stake,
         )
@@ -613,7 +874,7 @@ def execute_paper_plan(
             )
         observation = observations.get(action.action_id)
         if observation is not None:
-            attempt = _impl._observed_attempt(
+            attempt = _CANONICAL_OBSERVED_ATTEMPT(
                 run_id=run_id,
                 plan=plan,
                 action=action,
@@ -623,7 +884,7 @@ def execute_paper_plan(
                 started_at=started_at,
             )
         else:
-            attempt = _synthetic_attempt(
+            attempt = synthetic_attempt(
                 run_id=run_id,
                 plan=plan,
                 action=action,
@@ -636,32 +897,32 @@ def execute_paper_plan(
         attempts.append(attempt)
 
         if attempt.outcome in {
-            PaperAttemptOutcome.ACCEPTED,
-            PaperAttemptOutcome.PARTIAL,
+            _OUTCOME_ACCEPTED,
+            _OUTCOME_PARTIAL,
         }:
             assert attempt.execution_stake is not None
-            known_exposure = _decimal_add_exact(
+            known_exposure = decimal_add(
                 known_exposure,
                 attempt.execution_stake,
             )
             worst_case_exposure = max(worst_case_exposure, known_exposure)
-        elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+        elif attempt.outcome is _OUTCOME_UNKNOWN:
             worst_case_exposure = max(
                 worst_case_exposure,
-                _decimal_add_exact(
+                decimal_add(
                     known_exposure,
                     attempt.requested_stake,
                 ),
             )
 
-        if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
+        if attempt.outcome is not _OUTCOME_ACCEPTED:
             pending = tuple(
                 item.action_id for item in plan.actions[sequence + 1 :]
             )
             recovery = (
-                RecoveryDecision.HEDGE_REVIEW_REQUIRED
+                _RECOVERY_HEDGE_REVIEW_REQUIRED
                 if worst_case_exposure > 0
-                else RecoveryDecision.NO_EXPOSURE
+                else _RECOVERY_NO_EXPOSURE
             )
             ledger.complete_run(
                 run_id=run_id,
@@ -683,7 +944,7 @@ def execute_paper_plan(
     ledger.complete_run(
         run_id=run_id,
         pending_action_ids=(),
-        recovery_decision=RecoveryDecision.NONE,
+        recovery_decision=_RECOVERY_NONE,
         worst_case_exposure=worst_case_exposure,
     )
     result = ledger.load_run(

@@ -1,0 +1,1629 @@
+from __future__ import annotations
+
+import tempfile
+import unittest
+from decimal import Decimal, localcontext
+from pathlib import Path
+
+from autosport import _paper_execution_reality_legacy as legacy
+from autosport import paper_execution_reality as public_paper
+from autosport.paper_execution_reality import (
+    EvidenceGrade,
+    PaperAttemptOutcome,
+    PaperExecutionEvidenceRecord,
+    PaperExecutionIntegrityError,
+    PaperExecutionLedger,
+    PaperExecutionModelConfig,
+    PaperExecutionRun,
+    PaperLegAttempt,
+    RecoveryDecision,
+    execute_paper_plan,
+)
+from autosport.real_execution_ledger import ExecutionAction, ExecutionPlan
+
+_MAX_FIXED_POINT_CHARS = 8192
+
+
+def evidence(*, odds: str = "2.50", stake: str = "10.00") -> PaperExecutionEvidenceRecord:
+    return PaperExecutionEvidenceRecord(
+        action_id="resource-action",
+        bookmaker_id="paper-venue",
+        account_id="paper-account",
+        event_id="event-1",
+        market_id="market-1",
+        selection_id="selection-1",
+        side="BACK",
+        quote_id="quote-1",
+        outcome=PaperAttemptOutcome.ACCEPTED,
+        observed_at="2026-10-05T00:00:00.250000+00:00",
+        evidence_grade=EvidenceGrade.EMPIRICAL,
+        evidence_source="captured-paper-observation-v1",
+        accepted_odds=odds,
+        accepted_stake=stake,
+        reason="resource-bound regression",
+    )
+
+
+class PaperExecutionDecimalResourceBoundTests(unittest.TestCase):
+    def test_oversized_empirical_odds_is_rejected_at_construction(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            evidence(odds="1E+8192")
+
+    def test_oversized_empirical_stake_is_rejected_at_construction(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            evidence(stake="1E-8192")
+
+    def test_extreme_positive_exponent_fails_before_materialization(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            evidence(odds="1E+100000000")
+
+    def test_extreme_negative_exponent_fails_before_materialization(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            evidence(stake="1E-100000000")
+
+    def test_oversized_decimal_input_text_is_rejected_before_decimal_parse(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal input text exceeds resource limit",
+        ):
+            evidence(odds="1" * 8193)
+
+    def test_public_decimal_arithmetic_ignores_rebound_module_decimal(self) -> None:
+        previous = public_paper.Decimal
+
+        def forged_decimal(*args, **kwargs):
+            raise AssertionError("rebound public Decimal executed")
+
+        public_paper.Decimal = forged_decimal
+        try:
+            result = public_paper._decimal_add_exact(
+                Decimal("1.20"),
+                Decimal("2.30"),
+            )
+        finally:
+            public_paper.Decimal = previous
+
+        self.assertEqual(result, Decimal("3.50"))
+
+    def test_public_decimal_reconstruction_rejects_composite_type_alias_laundering(self) -> None:
+        previous_type = public_paper._CANONICAL_DECIMAL_TYPE
+        previous_identity = public_paper._CANONICAL_DECIMAL_TYPE_IDENTITY
+
+        def forged_decimal(*args, **kwargs):
+            raise AssertionError("composite-rebound Decimal authority executed")
+
+        public_paper._CANONICAL_DECIMAL_TYPE = forged_decimal
+        public_paper._CANONICAL_DECIMAL_TYPE_IDENTITY = forged_decimal
+        try:
+            result = public_paper._decimal_from_coefficient(125, -2)
+        finally:
+            public_paper._CANONICAL_DECIMAL_TYPE = previous_type
+            public_paper._CANONICAL_DECIMAL_TYPE_IDENTITY = previous_identity
+
+        self.assertEqual(result, Decimal("1.25"))
+
+    def test_public_decimal_reconstruction_rejects_composite_validator_alias_laundering(self) -> None:
+        previous_validator = public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+        previous_identity = public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY
+
+        def forged_validator(_value):
+            raise AssertionError("composite-rebound resource validator executed")
+
+        public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = forged_validator
+        public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY = forged_validator
+        try:
+            result = public_paper._decimal_from_coefficient(250, -2)
+        finally:
+            public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = previous_validator
+            public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR_IDENTITY = previous_identity
+
+        self.assertEqual(result, Decimal("2.50"))
+
+    def test_public_decimal_add_rejects_composite_helper_alias_laundering(self) -> None:
+        previous_coefficient = public_paper._decimal_coefficient
+        previous_canonical_coefficient = public_paper._CANONICAL_DECIMAL_COEFFICIENT
+        previous_from_coefficient = public_paper._decimal_from_coefficient
+        previous_canonical_from_coefficient = (
+            public_paper._CANONICAL_DECIMAL_FROM_COEFFICIENT
+        )
+
+        def forged_helper(*args, **kwargs):
+            raise AssertionError("composite-rebound arithmetic helper executed")
+
+        public_paper._decimal_coefficient = forged_helper
+        public_paper._CANONICAL_DECIMAL_COEFFICIENT = forged_helper
+        public_paper._decimal_from_coefficient = forged_helper
+        public_paper._CANONICAL_DECIMAL_FROM_COEFFICIENT = forged_helper
+        try:
+            result = public_paper._decimal_add_exact(
+                Decimal("1.20"),
+                Decimal("2.30"),
+            )
+        finally:
+            public_paper._decimal_coefficient = previous_coefficient
+            public_paper._CANONICAL_DECIMAL_COEFFICIENT = previous_canonical_coefficient
+            public_paper._decimal_from_coefficient = previous_from_coefficient
+            public_paper._CANONICAL_DECIMAL_FROM_COEFFICIENT = (
+                previous_canonical_from_coefficient
+            )
+
+        self.assertEqual(result, Decimal("3.50"))
+
+    def test_public_decimal_arithmetic_tcb_exposes_no_mutable_defaults(self) -> None:
+        for operation in (
+            public_paper._decimal_coefficient,
+            public_paper._decimal_from_coefficient,
+            public_paper._decimal_add_exact,
+            public_paper._decimal_subtract_exact,
+            public_paper._decimal_scale_bps_exact,
+        ):
+            self.assertIsNone(operation.__defaults__)
+            self.assertIsNone(operation.__kwdefaults__)
+
+    def test_public_decimal_coefficient_boundary_avoids_int_string_limit(self) -> None:
+        coefficient = 10 ** 8191
+
+        result = public_paper._decimal_from_coefficient(coefficient, 0)
+
+        self.assertEqual(len(format(result, "f")), 8192)
+        self.assertEqual(result, Decimal(coefficient))
+
+    def test_huge_integer_ingress_is_rejected_before_decimal_construction(self) -> None:
+        huge = 1 << 1_000_000
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal integer input exceeds resource limit",
+        ):
+            legacy._decimal(huge, "value")
+
+    def test_boundary_sized_integer_ingress_remains_accepted(self) -> None:
+        value = 10 ** 8191
+
+        parsed = legacy._decimal(value, "value")
+
+        self.assertEqual(parsed, Decimal(value))
+        self.assertEqual(len(format(parsed, "f")), 8192)
+
+    def test_decimal_ingress_rejects_float_and_custom_string_coercion(self) -> None:
+        class DecimalLike:
+            def __str__(self) -> str:
+                raise AssertionError("caller-defined string coercion executed")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "must be a Decimal, decimal string, or int",
+        ):
+            legacy._decimal(1.25, "value")
+        with self.assertRaisesRegex(
+            ValueError,
+            "must be a Decimal, decimal string, or int",
+        ):
+            legacy._decimal(DecimalLike(), "value")
+
+
+    def test_evidence_hash_and_id_fail_closed_for_mutated_oversized_decimal(self) -> None:
+        record = evidence()
+        object.__setattr__(record, "accepted_odds", Decimal("1E+100000000"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            _ = record.evidence_sha256
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            _ = record.evidence_id
+
+    def test_mutated_evidence_fails_before_fixed_point_formatting(self) -> None:
+        record = evidence()
+        object.__setattr__(record, "accepted_odds", Decimal("1E+8192"))
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            record.to_dict()
+
+    def test_all_evidence_decimal_siblings_preflight_before_any_formatting(self) -> None:
+        record = evidence()
+        object.__setattr__(record, "accepted_stake", Decimal("1E+8192"))
+        formatted: list[Decimal] = []
+
+        def tracking_format(value: Decimal, spec: str) -> str:
+            formatted.append(value)
+            return value.__format__(spec)
+
+        sentinel = object()
+        previous = legacy.__dict__.get("format", sentinel)
+        legacy.format = tracking_format
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                record.to_dict()
+        finally:
+            if previous is sentinel:
+                del legacy.format
+            else:
+                legacy.format = previous
+
+        self.assertEqual(formatted, [])
+
+    def test_all_attempt_decimal_siblings_preflight_before_any_formatting(self) -> None:
+        attempt = PaperLegAttempt(
+            attempt_id="attempt-resource",
+            run_id="run-resource",
+            plan_id="plan-resource",
+            action_id="resource-action",
+            sequence=0,
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side="BACK",
+            decision_quote_id="quote-1",
+            decision_odds=Decimal("2.50"),
+            requested_stake=Decimal("10.00"),
+            decision_observed_at="2026-10-05T00:00:00.100000+00:00",
+            execution_observed_at="2026-10-05T00:00:00.200000+00:00",
+            delay_ms=100,
+            quote_age_ms=100,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            execution_odds=Decimal("2.40"),
+            execution_stake=Decimal("10.00"),
+            suspended=False,
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            evidence_id="paper-evidence-1",
+            evidence_sha256="a" * 64,
+            model_fingerprint="b" * 64,
+            reason="attempt resource-bound regression",
+        )
+        object.__setattr__(attempt, "execution_stake", Decimal("1E+8192"))
+        formatted: list[Decimal] = []
+
+        def tracking_format(value: Decimal, spec: str) -> str:
+            formatted.append(value)
+            return value.__format__(spec)
+
+        sentinel = object()
+        previous = legacy.__dict__.get("format", sentinel)
+        legacy.format = tracking_format
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                attempt.to_dict()
+        finally:
+            if previous is sentinel:
+                del legacy.format
+            else:
+                legacy.format = previous
+
+        self.assertEqual(formatted, [])
+
+    def _attempt_payload(self) -> dict[str, object]:
+        return {
+            "attempt_id": "attempt-durable",
+            "run_id": "run-durable",
+            "plan_id": "plan-durable",
+            "action_id": "resource-action",
+            "sequence": 0,
+            "bookmaker_id": "paper-venue",
+            "account_id": "paper-account",
+            "event_id": "event-1",
+            "market_id": "market-1",
+            "selection_id": "selection-1",
+            "side": "BACK",
+            "decision_quote_id": "quote-1",
+            "decision_odds": "2.50",
+            "requested_stake": "10.00",
+            "decision_observed_at": "2026-10-05T00:00:00.100000+00:00",
+            "execution_observed_at": "2026-10-05T00:00:00.200000+00:00",
+            "delay_ms": 100,
+            "quote_age_ms": 100,
+            "outcome": "ACCEPTED",
+            "execution_odds": "2.40",
+            "execution_stake": "10.00",
+            "suspended": False,
+            "evidence_grade": "EMPIRICAL",
+            "evidence_source": "captured-paper-observation-v1",
+            "evidence_id": "paper-evidence-1",
+            "evidence_sha256": "a" * 64,
+            "model_fingerprint": "b" * 64,
+            "reason": "durable Decimal parser authority regression",
+        }
+
+    def test_attempt_reload_ignores_rebound_module_decimal_constructor(self) -> None:
+        payload = self._attempt_payload()
+        sentinel = object()
+        previous = legacy.__dict__.get("Decimal", sentinel)
+        calls: list[object] = []
+
+        def forged_decimal(value: object) -> Decimal:
+            calls.append(value)
+            raise AssertionError("rebound module Decimal executed")
+
+        legacy.Decimal = forged_decimal
+        try:
+            attempt = PaperLegAttempt.from_dict(payload)
+        finally:
+            if previous is sentinel:
+                del legacy.Decimal
+            else:
+                legacy.Decimal = previous
+
+        self.assertEqual(calls, [])
+        self.assertEqual(attempt.decision_odds, Decimal("2.50"))
+        self.assertEqual(attempt.requested_stake, Decimal("10.00"))
+        self.assertEqual(attempt.execution_odds, Decimal("2.40"))
+        self.assertEqual(attempt.execution_stake, Decimal("10.00"))
+
+    def test_public_completion_writer_enforces_event_size_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(ledger_path)
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger event exceeds resource limit",
+            ):
+                ledger._append_completion_unlocked(
+                    events=[],
+                    run_id="resource-run",
+                    payload={
+                        "oversized": "x" * legacy._MAX_DURABLE_EVENT_LINE_CHARS,
+                    },
+                )
+
+            self.assertFalse(ledger_path.exists())
+
+    def test_oversized_event_is_rejected_before_durable_publication(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            anchor_path = ledger_path.with_name(ledger_path.name + ".anchor.json")
+            ledger = PaperExecutionLedger(ledger_path)
+            ledger.register_observation_evidence(evidence())
+            before_ledger = ledger_path.read_bytes()
+            before_anchor = anchor_path.read_bytes()
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger event exceeds resource limit",
+            ):
+                ledger._append_event(
+                    event_type="RESOURCE_TEST",
+                    run_id="resource-run",
+                    key="resource-key",
+                    payload={
+                        "oversized": "x" * legacy._MAX_DURABLE_EVENT_LINE_CHARS,
+                    },
+                )
+
+            self.assertEqual(ledger_path.read_bytes(), before_ledger)
+            self.assertEqual(anchor_path.read_bytes(), before_anchor)
+            self.assertEqual(len(ledger.events()), 1)
+
+    def test_oversized_anchor_fails_before_json_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(ledger_path)
+            anchor_path = ledger_path.with_name(ledger_path.name + ".anchor.json")
+            anchor_path.write_text(
+                "x" * (legacy._MAX_DURABLE_ANCHOR_CHARS + 1),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "anchor exceeds resource limit",
+            ):
+                ledger.events()
+
+    def test_pathological_json_nesting_is_normalized_to_integrity_error(self) -> None:
+        raw = '{"value":' + ("[" * 2_000) + "0" + ("]" * 2_000) + "}"
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "invalid test JSON",
+        ):
+            legacy._parse_json_object(raw, what="test")
+
+    def test_oversized_event_line_fails_before_json_parse(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(ledger_path)
+            ledger_path.write_text(
+                "x" * (legacy._MAX_DURABLE_EVENT_LINE_CHARS + 2),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "ledger event exceeds resource limit",
+            ):
+                ledger.events()
+
+    def test_ledger_reload_ignores_rebound_json_object_parser(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            ledger.register_observation_evidence(evidence())
+
+            previous = legacy._parse_json_object
+
+            def forged_parser(*args, **kwargs):
+                raise AssertionError("rebound JSON object parser executed")
+
+            legacy._parse_json_object = forged_parser
+            try:
+                events = ledger.events()
+            finally:
+                legacy._parse_json_object = previous
+
+            self.assertEqual(len(events), 1)
+
+    def test_decimal_helpers_ignore_rebound_canonical_decimal_bindings(self) -> None:
+        names = (
+            "_CANONICAL_DECIMAL_TYPE",
+            "_CANONICAL_INVALID_OPERATION",
+            "_CANONICAL_DECIMAL_INPUT_TEXT_LIMIT",
+            "_CANONICAL_DECIMAL_INPUT_INT_MAX_BITS",
+            "_CANONICAL_DECIMAL_FORMATTER",
+        )
+        sentinel = object()
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+        calls: list[str] = []
+
+        def forged(*args, **kwargs):
+            calls.append("forged")
+            raise AssertionError("rebound canonical Decimal authority executed")
+
+        try:
+            legacy._CANONICAL_DECIMAL_TYPE = forged
+            legacy._CANONICAL_INVALID_OPERATION = RuntimeError
+            legacy._CANONICAL_DECIMAL_INPUT_TEXT_LIMIT = 0
+            legacy._CANONICAL_DECIMAL_INPUT_INT_MAX_BITS = 0
+            legacy._CANONICAL_DECIMAL_FORMATTER = forged
+
+            self.assertEqual(legacy._decimal("2.50", "value"), Decimal("2.50"))
+            self.assertEqual(legacy._decimal(10, "value"), Decimal("10"))
+            legacy._preflight_decimal_text_fields(Decimal("2.50"))
+            self.assertEqual(legacy._decimal_text(Decimal("12.3400")), "12.3400")
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal input text exceeds resource limit",
+            ):
+                legacy._decimal("1" * 8193, "value")
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
+        self.assertEqual(calls, [])
+
+    def test_synthetic_execution_ignores_rebound_canonical_decimal_type(self) -> None:
+        current_action = ExecutionAction(
+            action_id="resource-action",
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side="BACK",
+            requested_odds="2.50",
+            requested_stake="10.00",
+            quote_id="quote-1",
+            quote_observed_at="2026-10-05T00:00:00+00:00",
+            expires_at="2026-10-05T00:01:00+00:00",
+        )
+        current_plan = ExecutionPlan(
+            plan_id="plan-decimal-type-authority",
+            bookmaker_profile_version="paper-profile-v1",
+            decision_id="decision-1",
+            approval_id="paper-only",
+            created_at="2026-10-05T00:00:00+00:00",
+            actions=(current_action,),
+        )
+        model = PaperExecutionModelConfig(
+            model_id="paper-reality",
+            model_version="2",
+            evidence_grade=EvidenceGrade.SYNTHETIC,
+            evidence_source="test-seeded-model",
+            seed="fixed-seed",
+            max_quote_age_ms=5_000,
+            min_delay_ms=100,
+            max_delay_ms=250,
+            rejected_bps=0,
+            partial_bps=10_000,
+            unknown_bps=0,
+            partial_fill_bps=5_000,
+            max_slippage_bps=100,
+        )
+
+        sentinel = object()
+        previous = legacy.__dict__.get("_CANONICAL_DECIMAL_TYPE", sentinel)
+        calls: list[object] = []
+
+        def forged_decimal(value: object):
+            calls.append(value)
+            raise AssertionError("rebound canonical Decimal type executed")
+
+        legacy._CANONICAL_DECIMAL_TYPE = forged_decimal
+        try:
+            with tempfile.TemporaryDirectory() as tmp:
+                result = execute_paper_plan(
+                    plan=current_plan,
+                    trigger_id="trigger-decimal-type-authority",
+                    config=model,
+                    ledger=PaperExecutionLedger(Path(tmp) / "paper.jsonl"),
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                )
+        finally:
+            if previous is sentinel:
+                legacy.__dict__.pop("_CANONICAL_DECIMAL_TYPE", None)
+            else:
+                legacy._CANONICAL_DECIMAL_TYPE = previous
+
+        self.assertEqual(calls, [])
+        self.assertTrue(result.completed)
+        self.assertEqual(result.worst_case_exposure, Decimal("5.00"))
+
+
+    def test_public_execution_ignores_rebound_enum_and_type_globals(self) -> None:
+        current_action = ExecutionAction(
+            action_id="authority-action",
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-authority",
+            selection_id="selection-authority",
+            side="BACK",
+            requested_odds="2.50",
+            requested_stake="10.00",
+            quote_id="quote-authority",
+            quote_observed_at="2026-10-05T00:00:00+00:00",
+            expires_at="2026-10-05T00:01:00+00:00",
+        )
+        current_plan = ExecutionPlan(
+            plan_id="plan-public-authority",
+            bookmaker_profile_version="paper-profile-v1",
+            decision_id="decision-public-authority",
+            approval_id="paper-only",
+            created_at="2026-10-05T00:00:00+00:00",
+            actions=(current_action,),
+        )
+        model = PaperExecutionModelConfig(
+            model_id="paper-reality",
+            model_version="2",
+            evidence_grade=EvidenceGrade.SYNTHETIC,
+            evidence_source="test-seeded-model",
+            seed="fixed-seed",
+            max_quote_age_ms=5_000,
+            min_delay_ms=100,
+            max_delay_ms=100,
+            rejected_bps=0,
+            partial_bps=0,
+            unknown_bps=0,
+            partial_fill_bps=5_000,
+            max_slippage_bps=0,
+        )
+
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper.jsonl")
+            names = (
+                "EvidenceGrade",
+                "PaperAttemptOutcome",
+                "RecoveryDecision",
+                "ExecutionPlan",
+                "PaperExecutionModelConfig",
+                "PaperExecutionLedger",
+                "Mapping",
+                "PaperExecutionEvidenceRegistry",
+            )
+            sentinel = object()
+            previous = {
+                name: public_paper.__dict__.get(name, sentinel)
+                for name in names
+            }
+
+            class ForbiddenAuthority:
+                def __getattr__(self, name: str):
+                    raise AssertionError(f"rebound public authority executed: {name}")
+
+                def __call__(self, *args, **kwargs):
+                    raise AssertionError("rebound public authority constructor executed")
+
+            try:
+                forbidden = ForbiddenAuthority()
+                for name in names:
+                    public_paper.__dict__[name] = forbidden
+
+                result = execute_paper_plan(
+                    plan=current_plan,
+                    trigger_id="trigger-public-authority",
+                    config=model,
+                    ledger=ledger,
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                )
+            finally:
+                for name, value in previous.items():
+                    if value is sentinel:
+                        public_paper.__dict__.pop(name, None)
+                    else:
+                        public_paper.__dict__[name] = value
+
+            self.assertTrue(result.completed)
+            self.assertTrue(result.all_actions_accepted)
+            self.assertEqual(len(result.attempts), 1)
+
+    def test_synthetic_execution_ignores_rebound_deterministic_helper(self) -> None:
+        current_action = ExecutionAction(
+            action_id="resource-action",
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side="BACK",
+            requested_odds="2.50",
+            requested_stake="10.00",
+            quote_id="quote-1",
+            quote_observed_at="2026-10-05T00:00:00+00:00",
+            expires_at="2026-10-05T00:01:00+00:00",
+        )
+        current_plan = ExecutionPlan(
+            plan_id="plan-deterministic-authority",
+            bookmaker_profile_version="paper-profile-v1",
+            decision_id="decision-1",
+            approval_id="paper-only",
+            created_at="2026-10-05T00:00:00+00:00",
+            actions=(current_action,),
+        )
+        model = PaperExecutionModelConfig(
+            model_id="paper-reality",
+            model_version="2",
+            evidence_grade=EvidenceGrade.SYNTHETIC,
+            evidence_source="test-seeded-model",
+            seed="fixed-seed",
+            max_quote_age_ms=5_000,
+            min_delay_ms=100,
+            max_delay_ms=250,
+            rejected_bps=100,
+            partial_bps=100,
+            unknown_bps=100,
+            partial_fill_bps=5_000,
+            max_slippage_bps=100,
+        )
+
+        with tempfile.TemporaryDirectory() as first_tmp:
+            first = execute_paper_plan(
+                plan=current_plan,
+                trigger_id="trigger-deterministic-authority",
+                config=model,
+                ledger=PaperExecutionLedger(Path(first_tmp) / "paper.jsonl"),
+                started_at="2026-10-05T00:00:00.100000+00:00",
+            )
+
+        previous = legacy._deterministic_int
+
+        def forged_deterministic(*args, **kwargs):
+            raise AssertionError("rebound deterministic helper executed")
+
+        legacy._deterministic_int = forged_deterministic
+        try:
+            with tempfile.TemporaryDirectory() as second_tmp:
+                second = execute_paper_plan(
+                    plan=current_plan,
+                    trigger_id="trigger-deterministic-authority",
+                    config=model,
+                    ledger=PaperExecutionLedger(Path(second_tmp) / "paper.jsonl"),
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                )
+        finally:
+            legacy._deterministic_int = previous
+
+        self.assertEqual(second, first)
+
+    def test_ledger_durability_ignores_rebound_filesystem_module_globals(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            names = ("os", "threading", "Path")
+            sentinel = object()
+            previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+
+            class ForbiddenRuntime:
+                def __getattr__(self, name: str):
+                    raise AssertionError(f"rebound filesystem global executed: {name}")
+
+                def __call__(self, *args, **kwargs):
+                    raise AssertionError("rebound Path global executed")
+
+            try:
+                forbidden = ForbiddenRuntime()
+                for name in names:
+                    legacy.__dict__[name] = forbidden
+
+                ledger = PaperExecutionLedger(str(ledger_path))
+                record = evidence()
+                ledger.register_observation_evidence(record)
+                events = ledger.events()
+            finally:
+                for name, value in previous.items():
+                    if value is sentinel:
+                        legacy.__dict__.pop(name, None)
+                    else:
+                        legacy.__dict__[name] = value
+
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["event_type"],
+                "OBSERVATION_EVIDENCE_REGISTERED",
+            )
+            self.assertTrue(ledger_path.exists())
+
+    def test_identity_helpers_ignore_rebound_module_runtime_globals(self) -> None:
+        expected_record = evidence()
+        expected_digest = expected_record.evidence_sha256
+        expected_bucket = legacy._deterministic_int("seed", "label", 97)
+        names = (
+            "_text",
+            "_timestamp",
+            "_timestamp_text",
+            "_digest",
+            "_canonical",
+            "json",
+            "hashlib",
+            "datetime",
+            "timezone",
+        )
+        sentinel = object()
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+
+        def forged(*args, **kwargs):
+            raise AssertionError("rebound identity helper executed")
+
+        try:
+            for name in names:
+                legacy.__dict__[name] = forged
+
+            record = evidence()
+            self.assertEqual(record.evidence_sha256, expected_digest)
+            self.assertEqual(
+                legacy._deterministic_int("seed", "label", 97),
+                expected_bucket,
+            )
+            self.assertEqual(
+                legacy._parse_json_object('{"value":1}', what="test"),
+                {"value": 1},
+            )
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
+    def test_authority_dataclasses_ignore_rebound_module_enum_globals(self) -> None:
+        names = ("EvidenceGrade", "PaperAttemptOutcome", "RecoveryDecision")
+        sentinel = object()
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+
+        class ForgedEnum:
+            def __getattr__(self, name: str):
+                raise AssertionError(f"rebound enum global executed: {name}")
+
+        try:
+            forged = ForgedEnum()
+            for name in names:
+                legacy.__dict__[name] = forged
+
+            record = evidence()
+            self.assertIs(record.outcome, PaperAttemptOutcome.ACCEPTED)
+            self.assertIs(record.evidence_grade, EvidenceGrade.EMPIRICAL)
+
+            run = PaperExecutionRun(
+                run_id="run-enum-authority",
+                trigger_id="trigger-enum-authority",
+                plan_id="plan-enum-authority",
+                plan_fingerprint="a" * 64,
+                model_fingerprint="b" * 64,
+                started_at="2026-10-05T00:00:00.100000+00:00",
+                attempts=(),
+                pending_action_ids=(),
+                recovery_decision=RecoveryDecision.NONE,
+                worst_case_exposure=Decimal("0"),
+                completed=True,
+            )
+            self.assertIs(run.recovery_decision, RecoveryDecision.NONE)
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
+    def test_attempt_reload_ignores_rebound_module_enum_constructors(self) -> None:
+        payload = self._attempt_payload()
+        names = ("PaperAttemptOutcome", "EvidenceGrade")
+        sentinel = object()
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+        calls: list[str] = []
+
+        def forged_enum(value: object):
+            calls.append(str(value))
+            raise AssertionError("rebound module enum constructor executed")
+
+        try:
+            for name in names:
+                legacy.__dict__[name] = forged_enum
+            attempt = PaperLegAttempt.from_dict(payload)
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
+        self.assertEqual(calls, [])
+        self.assertIs(attempt.outcome, PaperAttemptOutcome.ACCEPTED)
+        self.assertIs(attempt.evidence_grade, EvidenceGrade.EMPIRICAL)
+
+    def test_attempt_reload_bounds_decimal_before_module_constructor_dispatch(self) -> None:
+        payload = self._attempt_payload()
+        payload["decision_odds"] = "1E+8192"
+        sentinel = object()
+        previous = legacy.__dict__.get("Decimal", sentinel)
+        calls: list[object] = []
+
+        def forged_decimal(value: object) -> Decimal:
+            calls.append(value)
+            raise AssertionError("rebound module Decimal executed")
+
+        legacy.Decimal = forged_decimal
+        try:
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "invalid attempt payload",
+            ):
+                PaperLegAttempt.from_dict(payload)
+        finally:
+            if previous is sentinel:
+                del legacy.Decimal
+            else:
+                legacy.Decimal = previous
+
+        self.assertEqual(calls, [])
+
+    def test_durable_evidence_rejects_numeric_decimal_representation(self) -> None:
+        payload = evidence().to_dict()
+        payload["accepted_odds"] = 2
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "evidence decimal fields must use canonical text",
+        ):
+            PaperExecutionEvidenceRecord.from_dict(payload)
+
+    def test_durable_attempt_rejects_numeric_decimal_representation(self) -> None:
+        payload = self._attempt_payload()
+        payload["decision_odds"] = 2
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "attempt decimal fields must use canonical text",
+        ):
+            PaperLegAttempt.from_dict(payload)
+
+    def test_reload_rejects_oversized_evidence_under_same_resource_law(self) -> None:
+        payload = evidence().to_dict()
+        payload["accepted_stake"] = "1E+8192"
+
+        with self.assertRaisesRegex(
+            PaperExecutionIntegrityError,
+            "invalid evidence record",
+        ):
+            PaperExecutionEvidenceRecord.from_dict(payload)
+
+    def test_mutated_oversized_evidence_cannot_append_durable_authority(
+        self,
+    ) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            record = evidence()
+            object.__setattr__(record, "accepted_odds", Decimal("1E+8192"))
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                ledger.register_observation_evidence(record)
+
+            self.assertEqual(ledger.events(), ())
+            self.assertFalse((Path(tmp) / "paper-execution.jsonl").exists())
+
+    def test_derived_exposure_is_bound_before_durable_serialization(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            PaperExecutionRun(
+                run_id="run-resource",
+                trigger_id="trigger-resource",
+                plan_id="plan-resource",
+                plan_fingerprint="a" * 64,
+                model_fingerprint="b" * 64,
+                started_at="2026-10-05T00:00:00.100000+00:00",
+                attempts=(),
+                pending_action_ids=(),
+                recovery_decision=RecoveryDecision.NONE,
+                worst_case_exposure=Decimal("1E+8192"),
+                completed=True,
+            )
+
+    def test_boundary_size_is_accepted_and_formatting_is_exact(self) -> None:
+        record = evidence(odds="1E+8191", stake="1.00")
+
+        payload = record.to_dict()
+
+        self.assertEqual(len(payload["accepted_odds"]), _MAX_FIXED_POINT_CHARS)
+        self.assertEqual(payload["accepted_odds"], "1" + ("0" * 8191))
+
+    def test_digest_is_ambient_context_independent_inside_bound(self) -> None:
+        record = evidence(odds="123.4500", stake="7.500")
+        with localcontext() as context:
+            context.prec = 5
+            first = record.evidence_sha256
+        with localcontext() as context:
+            context.prec = 80
+            second = record.evidence_sha256
+
+        self.assertEqual(first, second)
+        self.assertEqual(record.to_dict()["accepted_odds"], "123.4500")
+        self.assertEqual(record.to_dict()["accepted_stake"], "7.500")
+
+    def test_legacy_decimal_formatter_now_uses_the_canonical_resource_policy(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            legacy._decimal_text(Decimal("1E+8192"))
+
+        self.assertEqual(legacy._decimal_text(Decimal("12.3400")), "12.3400")
+
+
+    def test_decimal_authorities_keep_noninjectable_call_shapes(self) -> None:
+        self.assertEqual(legacy._decimal.__kwdefaults__, {"allow_zero": False})
+        self.assertIsNone(legacy._decimal.__defaults__)
+        self.assertIsNone(legacy._decimal_text.__defaults__)
+        self.assertIsNone(legacy._decimal_text.__kwdefaults__)
+        self.assertIsNone(PaperExecutionEvidenceRecord.to_dict.__defaults__)
+        self.assertIsNone(PaperExecutionEvidenceRecord.to_dict.__kwdefaults__)
+
+        with self.assertRaises(TypeError):
+            legacy._decimal(
+                Decimal("2"),
+                "value",
+                _resource_validator=lambda _value: None,
+            )
+        with self.assertRaises(TypeError):
+            legacy._decimal_text(
+                Decimal("2"),
+                _preflight=lambda *_values: None,
+            )
+        with self.assertRaises(TypeError):
+            evidence().to_dict(lambda *_values: None)
+
+    def test_complete_run_rejects_formatter_injection_before_durable_write(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger_path = Path(tmp) / "paper-execution.jsonl"
+            ledger = PaperExecutionLedger(ledger_path)
+            with self.assertRaises(TypeError):
+                ledger.complete_run(
+                    run_id="run-injection",
+                    pending_action_ids=(),
+                    recovery_decision=RecoveryDecision.NONE,
+                    worst_case_exposure=Decimal("1E+100000000"),
+                    _decimal_formatter=lambda _value: "0",
+                )
+            self.assertFalse(ledger_path.exists())
+
+    def test_in_place_resource_validator_code_mutation_fails_closed(self) -> None:
+        validator = legacy._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+        original_code = validator.__code__
+
+        def forged_validator(value):
+            raise AssertionError("mutated resource validator executed")
+
+        validator.__code__ = forged_validator.__code__
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal resource validator authority changed",
+            ):
+                evidence(odds="2.50", stake="10.00")
+
+            record = object.__new__(PaperExecutionEvidenceRecord)
+            object.__setattr__(record, "accepted_odds", Decimal("2.50"))
+            object.__setattr__(record, "accepted_stake", Decimal("10.00"))
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal resource validator authority changed",
+            ):
+                legacy._preflight_decimal_text_fields(
+                    record.accepted_odds,
+                    record.accepted_stake,
+                )
+        finally:
+            validator.__code__ = original_code
+
+    def test_in_place_decimal_parser_code_mutation_fails_closed(self) -> None:
+        parser = legacy._CANONICAL_DECIMAL_PARSER
+        original_code = parser.__code__
+
+        def forged_parser(value, name, *, allow_zero=False):
+            raise AssertionError("mutated Decimal parser executed")
+
+        parser.__code__ = forged_parser.__code__
+        try:
+            with self.assertRaisesRegex(ValueError, "decimal parser authority changed"):
+                evidence()
+            with self.assertRaisesRegex(ValueError, "decimal parser authority changed"):
+                PaperExecutionRun(
+                    run_id="run-parser-mutation",
+                    trigger_id="trigger-parser-mutation",
+                    plan_id="plan-parser-mutation",
+                    plan_fingerprint="a" * 64,
+                    model_fingerprint="b" * 64,
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                    attempts=(),
+                    pending_action_ids=(),
+                    recovery_decision=RecoveryDecision.NONE,
+                    worst_case_exposure=Decimal("0"),
+                    completed=True,
+                )
+        finally:
+            parser.__code__ = original_code
+
+    def test_in_place_decimal_preflight_code_mutation_fails_closed(self) -> None:
+        record = evidence()
+        preflight = legacy._CANONICAL_DECIMAL_PREFLIGHT
+        original_code = preflight.__code__
+
+        def forged_preflight(*values):
+            raise AssertionError("mutated Decimal preflight executed")
+
+        preflight.__code__ = forged_preflight.__code__
+        try:
+            with self.assertRaisesRegex(ValueError, "decimal preflight authority changed"):
+                record.to_dict()
+        finally:
+            preflight.__code__ = original_code
+
+    def test_in_place_decimal_formatter_code_mutation_fails_closed(self) -> None:
+        record = evidence()
+        formatter = legacy._CANONICAL_DECIMAL_TEXT_FORMATTER
+        original_code = formatter.__code__
+
+        def forged_formatter(value):
+            raise AssertionError("mutated Decimal formatter executed")
+
+        formatter.__code__ = forged_formatter.__code__
+        try:
+            with self.assertRaisesRegex(ValueError, "decimal formatter authority changed"):
+                record.to_dict()
+            with tempfile.TemporaryDirectory() as tmp:
+                ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "decimal formatter authority changed",
+                ):
+                    ledger.complete_run(
+                        run_id="run-formatter-mutation",
+                        pending_action_ids=(),
+                        recovery_decision=RecoveryDecision.NONE,
+                        worst_case_exposure=Decimal("1.00"),
+                    )
+                self.assertFalse((Path(tmp) / "paper-execution.jsonl").exists())
+        finally:
+            formatter.__code__ = original_code
+
+    def test_durable_decimal_serializers_ignore_rebound_module_helpers(self) -> None:
+        record = evidence()
+        attempt = PaperLegAttempt(
+            attempt_id="attempt-rebound",
+            run_id="run-rebound",
+            plan_id="plan-rebound",
+            action_id="resource-action",
+            sequence=0,
+            bookmaker_id="paper-venue",
+            account_id="paper-account",
+            event_id="event-1",
+            market_id="market-1",
+            selection_id="selection-1",
+            side="BACK",
+            decision_quote_id="quote-1",
+            decision_odds=Decimal("2.50"),
+            requested_stake=Decimal("10.00"),
+            decision_observed_at="2026-10-05T00:00:00.100000+00:00",
+            execution_observed_at="2026-10-05T00:00:00.200000+00:00",
+            delay_ms=100,
+            quote_age_ms=100,
+            outcome=PaperAttemptOutcome.ACCEPTED,
+            execution_odds=Decimal("2.40"),
+            execution_stake=Decimal("10.00"),
+            suspended=False,
+            evidence_grade=EvidenceGrade.EMPIRICAL,
+            evidence_source="captured-paper-observation-v1",
+            evidence_id="paper-evidence-rebound",
+            evidence_sha256="a" * 64,
+            model_fingerprint="b" * 64,
+            reason="serializer rebound regression",
+        )
+        expected_record = record.to_dict()
+        expected_attempt = attempt.to_dict()
+
+        sentinel = object()
+        names = (
+            "_validate_decimal_text_resource_bound",
+            "_preflight_decimal_text_fields",
+            "_decimal_text",
+            "format",
+            "Decimal",
+        )
+        previous = {name: legacy.__dict__.get(name, sentinel) for name in names}
+
+        def forged(*args, **kwargs):
+            raise AssertionError("rebound Decimal serializer helper executed")
+
+        try:
+            for name in names:
+                legacy.__dict__[name] = forged
+
+            self.assertEqual(record.to_dict(), expected_record)
+            self.assertEqual(attempt.to_dict(), expected_attempt)
+        finally:
+            for name, value in previous.items():
+                if value is sentinel:
+                    legacy.__dict__.pop(name, None)
+                else:
+                    legacy.__dict__[name] = value
+
+    def test_complete_run_ignores_rebound_decimal_formatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+
+            sentinel = object()
+            previous = legacy.__dict__.get("_decimal_text", sentinel)
+
+            def forged(*args, **kwargs):
+                raise AssertionError("rebound completion Decimal formatter executed")
+
+            legacy._decimal_text = forged
+            try:
+                ledger.complete_run(
+                    run_id="run-complete-rebound",
+                    pending_action_ids=(),
+                    recovery_decision=RecoveryDecision.NONE,
+                    worst_case_exposure=Decimal("12.3400"),
+                )
+            finally:
+                if previous is sentinel:
+                    del legacy._decimal_text
+                else:
+                    legacy._decimal_text = previous
+
+            events = ledger.events("run-complete-rebound")
+            self.assertEqual(len(events), 1)
+            self.assertEqual(
+                events[0]["payload"]["worst_case_exposure"],
+                "12.3400",
+            )
+
+
+    def test_authority_dataclasses_ignore_rebound_decimal_ingress_parser(self) -> None:
+        sentinel = object()
+        previous = legacy.__dict__.get("_decimal", sentinel)
+
+        def forged_decimal(value, name, *, allow_zero=False):
+            return Decimal("2")
+
+        legacy._decimal = forged_decimal
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                evidence(odds="1E+8192")
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                legacy.ObservedPaperExecution(
+                    action_id="resource-action",
+                    outcome=PaperAttemptOutcome.ACCEPTED,
+                    observed_at="2026-10-05T00:00:00.250000+00:00",
+                    evidence_grade=EvidenceGrade.EMPIRICAL,
+                    evidence_source="captured-paper-observation-v1",
+                    evidence_id="paper-evidence-ingress",
+                    evidence_sha256="a" * 64,
+                    accepted_odds=Decimal("1E+8192"),
+                    accepted_stake=Decimal("10.00"),
+                    suspended=False,
+                    reason="ingress parser rebound regression",
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                PaperLegAttempt(
+                    attempt_id="attempt-ingress",
+                    run_id="run-ingress",
+                    plan_id="plan-ingress",
+                    action_id="resource-action",
+                    sequence=0,
+                    bookmaker_id="paper-venue",
+                    account_id="paper-account",
+                    event_id="event-1",
+                    market_id="market-1",
+                    selection_id="selection-1",
+                    side="BACK",
+                    decision_quote_id="quote-1",
+                    decision_odds=Decimal("1E+8192"),
+                    requested_stake=Decimal("10.00"),
+                    decision_observed_at="2026-10-05T00:00:00.100000+00:00",
+                    execution_observed_at="2026-10-05T00:00:00.200000+00:00",
+                    delay_ms=100,
+                    quote_age_ms=100,
+                    outcome=PaperAttemptOutcome.ACCEPTED,
+                    execution_odds=Decimal("2.40"),
+                    execution_stake=Decimal("10.00"),
+                    suspended=False,
+                    evidence_grade=EvidenceGrade.EMPIRICAL,
+                    evidence_source="captured-paper-observation-v1",
+                    evidence_id="paper-evidence-ingress",
+                    evidence_sha256="a" * 64,
+                    model_fingerprint="b" * 64,
+                    reason="ingress parser rebound regression",
+                )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal fixed-point representation exceeds resource limit",
+            ):
+                PaperExecutionRun(
+                    run_id="run-ingress",
+                    trigger_id="trigger-ingress",
+                    plan_id="plan-ingress",
+                    plan_fingerprint="a" * 64,
+                    model_fingerprint="b" * 64,
+                    started_at="2026-10-05T00:00:00.100000+00:00",
+                    attempts=(),
+                    pending_action_ids=(),
+                    recovery_decision=RecoveryDecision.NONE,
+                    worst_case_exposure=Decimal("1E+8192"),
+                    completed=True,
+                )
+        finally:
+            if previous is sentinel:
+                del legacy._decimal
+            else:
+                legacy._decimal = previous
+
+    def test_public_ledger_complete_run_rejects_rebound_decimal_parser(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            original = public_paper._CANONICAL_DECIMAL_PARSER
+            called = False
+
+            def forged(*args, **kwargs):
+                nonlocal called
+                called = True
+                return Decimal("0")
+
+            public_paper._CANONICAL_DECIMAL_PARSER = forged
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "PAPER Decimal parser authority changed",
+                ):
+                    ledger.complete_run(
+                        run_id="run-facade-parser-rebind",
+                        pending_action_ids=(),
+                        recovery_decision=RecoveryDecision.NONE,
+                        worst_case_exposure=Decimal("0"),
+                    )
+                self.assertFalse(called)
+                self.assertEqual(ledger.events("run-facade-parser-rebind"), [])
+            finally:
+                public_paper._CANONICAL_DECIMAL_PARSER = original
+
+    def test_public_ledger_complete_run_rejects_rebound_decimal_formatter(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            original = public_paper._CANONICAL_DECIMAL_TEXT_FORMATTER
+            called = False
+
+            def forged(*args, **kwargs):
+                nonlocal called
+                called = True
+                return "0"
+
+            public_paper._CANONICAL_DECIMAL_TEXT_FORMATTER = forged
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "PAPER Decimal formatter authority changed",
+                ):
+                    ledger.complete_run(
+                        run_id="run-facade-formatter-rebind",
+                        pending_action_ids=(),
+                        recovery_decision=RecoveryDecision.NONE,
+                        worst_case_exposure=Decimal("0"),
+                    )
+                self.assertFalse(called)
+                self.assertEqual(ledger.events("run-facade-formatter-rebind"), [])
+            finally:
+                public_paper._CANONICAL_DECIMAL_TEXT_FORMATTER = original
+
+    def test_public_ledger_load_rejects_rebound_decimal_parser_before_empty_return(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            original = public_paper._CANONICAL_DECIMAL_PARSER
+            called = False
+
+            def forged(*args, **kwargs):
+                nonlocal called
+                called = True
+                return Decimal("0")
+
+            public_paper._CANONICAL_DECIMAL_PARSER = forged
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "PAPER Decimal parser authority changed",
+                ):
+                    ledger.load_run(
+                        run_id="run-facade-load-rebind",
+                        trigger_id="trigger",
+                        plan=None,  # type: ignore[arg-type]
+                        config=None,  # type: ignore[arg-type]
+                        started_at="2026-10-05T00:00:00+00:00",
+                        observation_evidence_ids={},
+                    )
+                self.assertFalse(called)
+            finally:
+                public_paper._CANONICAL_DECIMAL_PARSER = original
+
+
+    def test_public_exact_decimal_arithmetic_rejects_rebound_decimal_type(self) -> None:
+        original = public_paper._CANONICAL_DECIMAL_TYPE
+        called = False
+
+        class ForgedDecimal:
+            def __new__(cls, *args, **kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError("rebound facade Decimal type executed")
+
+        public_paper._CANONICAL_DECIMAL_TYPE = ForgedDecimal
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "PAPER Decimal type authority changed",
+            ):
+                public_paper._decimal_from_coefficient(1, 0)
+            self.assertFalse(called)
+        finally:
+            public_paper._CANONICAL_DECIMAL_TYPE = original
+
+    def test_public_exact_decimal_arithmetic_rejects_decimal_subclass(self) -> None:
+        class DecimalSubclass(Decimal):
+            pass
+
+        with self.assertRaisesRegex(ValueError, "exact Decimal required"):
+            public_paper._decimal_coefficient(DecimalSubclass("1.25"))
+
+
+    def test_public_exact_addition_rejects_rebound_transitive_dependency(self) -> None:
+        original = public_paper._decimal_coefficient
+        called = False
+
+        def forged(*args, **kwargs):
+            nonlocal called
+            called = True
+            return (0, 0)
+
+        public_paper._decimal_coefficient = forged
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "PAPER exact Decimal arithmetic dependency changed",
+            ):
+                public_paper._decimal_add_exact(
+                    Decimal("1.20"),
+                    Decimal("2.30"),
+                )
+            self.assertFalse(called)
+        finally:
+            public_paper._decimal_coefficient = original
+
+    def test_public_run_economics_rejects_rebound_exact_addition(self) -> None:
+        original = public_paper._decimal_add_exact
+        called = False
+
+        def forged(*args, **kwargs):
+            nonlocal called
+            called = True
+            return Decimal("0")
+
+        public_paper._decimal_add_exact = forged
+        try:
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "PAPER exact Decimal arithmetic authority changed",
+            ):
+                public_paper._derive_run_economics((), ())
+            self.assertFalse(called)
+        finally:
+            public_paper._decimal_add_exact = original
+
+    def test_public_ledger_complete_run_rejects_rebound_economics_deriver(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            ledger = PaperExecutionLedger(Path(tmp) / "paper-execution.jsonl")
+            original = public_paper._derive_run_economics
+            called = False
+
+            def forged(*args, **kwargs):
+                nonlocal called
+                called = True
+                raise AssertionError("rebound run economics executed")
+
+            public_paper._derive_run_economics = forged
+            try:
+                with self.assertRaisesRegex(
+                    PaperExecutionIntegrityError,
+                    "PAPER run economics authority changed",
+                ):
+                    ledger.complete_run(
+                        run_id="run-economics-rebind",
+                        pending_action_ids=(),
+                        recovery_decision=RecoveryDecision.NONE,
+                        worst_case_exposure=Decimal("0"),
+                    )
+                self.assertFalse(called)
+                self.assertEqual(ledger.events("run-economics-rebind"), [])
+            finally:
+                public_paper._derive_run_economics = original
+
+    def test_execute_paper_plan_rejects_rebound_synthetic_decimal_authority(self) -> None:
+        original = public_paper._synthetic_attempt
+        called = False
+
+        def forged(*args, **kwargs):
+            nonlocal called
+            called = True
+            raise AssertionError("rebound synthetic execution executed")
+
+        public_paper._synthetic_attempt = forged
+        try:
+            with self.assertRaisesRegex(
+                PaperExecutionIntegrityError,
+                "PAPER execution Decimal authority changed",
+            ):
+                execute_paper_plan(
+                    plan=None,  # type: ignore[arg-type]
+                    trigger_id="trigger",
+                    config=None,  # type: ignore[arg-type]
+                    ledger=None,  # type: ignore[arg-type]
+                    started_at="2026-10-05T00:00:00+00:00",
+                )
+            self.assertFalse(called)
+        finally:
+            public_paper._synthetic_attempt = original
+
+
+    def test_public_exact_addition_rejects_unbounded_operand_before_alignment(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            public_paper._decimal_add_exact(
+                Decimal("1E+100000000"),
+                Decimal("1"),
+            )
+
+    def test_public_decimal_coefficient_rejects_unbounded_operand(self) -> None:
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            public_paper._decimal_coefficient(Decimal("1E-100000000"))
+
+    def test_public_exact_addition_rejects_derived_resource_overflow(self) -> None:
+        left = Decimal("9" * _MAX_FIXED_POINT_CHARS)
+        right = Decimal("1")
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal fixed-point representation exceeds resource limit",
+        ):
+            public_paper._decimal_add_exact(left, right)
+
+    def test_public_exact_result_rejects_rebound_resource_validator(self) -> None:
+        original = public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+        called = False
+
+        def forged(*args, **kwargs):
+            nonlocal called
+            called = True
+
+        public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = forged
+        try:
+            with self.assertRaisesRegex(
+                ValueError,
+                "PAPER Decimal resource authority changed",
+            ):
+                public_paper._decimal_from_coefficient(1, 0)
+            self.assertFalse(called)
+        finally:
+            public_paper._CANONICAL_DECIMAL_RESOURCE_VALIDATOR = original
+
+    def test_public_decimal_reconstruction_rejects_huge_coefficient_before_decimal_materialization(self) -> None:
+        huge_coefficient = 1 << 1_000_000
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal coefficient exceeds resource limit",
+        ):
+            public_paper._decimal_from_coefficient(huge_coefficient, 0)
+
+    def test_public_decimal_reconstruction_rejects_huge_exponent_before_decimal_tuple_conversion(self) -> None:
+        huge_exponent = 10 ** 100
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "decimal exponent exceeds resource limit",
+        ):
+            public_paper._decimal_from_coefficient(1, huge_exponent)
+
+    def test_public_decimal_reconstruction_rejects_nonexact_integer_inputs(self) -> None:
+        class IntSubclass(int):
+            pass
+
+        for coefficient, exponent in (
+            (True, 0),
+            (1, False),
+            (IntSubclass(1), 0),
+            (1, IntSubclass(0)),
+        ):
+            with self.assertRaisesRegex(
+                ValueError,
+                "decimal coefficient and exponent must be exact ints",
+            ):
+                public_paper._decimal_from_coefficient(coefficient, exponent)
+
+
+if __name__ == "__main__":
+    unittest.main()

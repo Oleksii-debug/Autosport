@@ -427,7 +427,9 @@ def test_injected_builder_cannot_become_profiled_after_alias_rebind(
     terminal = worker.poll()
     assert terminal is not None
     assert terminal.kind == "ERROR"
-    assert terminal.error_type == "ProductEntrypointError"
+    # Presentation exposes only exact built-in exception categories;
+    # custom class names must not become an operator-controlled leak.
+    assert terminal.error_type == "RuntimeError"
 
 
 def test_profiled_worker_root_captures_transitive_dependencies_once(

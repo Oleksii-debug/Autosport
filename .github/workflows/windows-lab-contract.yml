@@ -1,0 +1,61 @@
+name: Windows lab contract (nonexecuting)
+
+# Only a trusted owner-dispatched controller on default branch may mint a lab
+# ticket. This workflow NEVER launches a GUI/NVDA agent or user-supplied code.
+# The non-admin isolated Windows agent is a separately controlled execution
+# boundary, and independently authenticated evidence remains a later gate.
+on:
+  workflow_dispatch:
+    inputs:
+      source_sha:
+        description: Exact trusted main revision, 40 lowercase hex
+        required: true
+        type: string
+      package_sha256:
+        description: Exact previously qualified package SHA-256, 64 lowercase hex
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  issue_bounded_contract:
+    if: github.repository == 'Oleksii-debug/Autosport' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - name: Checkout the trusted main source, never a PR head
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Install Python without a mutable dependency resolver
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Verify exact source before producing the read-only ticket
+        env:
+          AUTOSPORT_SOURCE_SHA: ${{ inputs.source_sha }}
+        run: |
+          test "$AUTOSPORT_SOURCE_SHA" = "$GITHUB_SHA"
+          python scripts/verify_source_checkout.py --source-sha "$AUTOSPORT_SOURCE_SHA"
+      - name: Emit and read back the nonexecuting lab contract
+        env:
+          AUTOSPORT_SOURCE_SHA: ${{ inputs.source_sha }}
+          AUTOSPORT_PACKAGE_SHA256: ${{ inputs.package_sha256 }}
+          PYTHONPATH: src
+        run: |
+          python scripts/windows_lab_contract.py issue \
+            --source-sha "$AUTOSPORT_SOURCE_SHA" \
+            --package-sha256 "$AUTOSPORT_PACKAGE_SHA256" \
+            > windows-lab-ticket.json
+          python scripts/windows_lab_contract.py verify-ticket < windows-lab-ticket.json
+      - name: Upload unverified controller ticket, never a release approval
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-windows-lab-nonexecuting-ticket
+          path: windows-lab-ticket.json
+          if-no-files-found: error
+          retention-days: 7

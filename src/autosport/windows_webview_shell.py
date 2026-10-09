@@ -2660,17 +2660,58 @@ class AutosportWebBridge:
 
     @staticmethod
     def _current_window_url(window: object) -> str:
-        getter = getattr(window, "get_current_url", None)
-        if not callable(getter):
-            raise WindowsWebBridgeTrustError(
-                "The WebView bridge cannot verify the active document URL"
-            )
+        """Read the active native URL without waiting for pywebview's loaded event.
+
+        pywebview 6.2.1 decorates Window.get_current_url with @_loaded_call.
+        Calling that API from the blocking before_load callback waits for loaded,
+        while loaded itself cannot complete before the callback returns. Use the
+        actual CoreWebView2.Source synchronously for the packaged Windows host.
+        Small unit-test window doubles retain their synchronous test getter.
+        """
+        missing = object()
         try:
-            value = getter()
+            native = getattr(window, "native", None)
+            native_webview = getattr(native, "webview", None)
+            core_webview = getattr(native_webview, "CoreWebView2", None)
+            native_source = getattr(core_webview, "Source", missing)
         except Exception as exc:
             raise WindowsWebBridgeTrustError(
-                "The WebView bridge could not read the active document URL"
+                "The WebView bridge could not inspect the native active document URL"
             ) from exc
+
+        if native_source is not missing:
+            if native_source is None:
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge observed no native active document URL"
+                )
+            try:
+                value = str(native_source)
+            except Exception as exc:
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge could not read the native active document URL"
+                ) from exc
+        else:
+            # Never fall back to the loaded-only API for a real pywebview.Window:
+            # a missing native source fails closed, rather than deadlocking the
+            # synchronous document trust/witness publication boundary.
+            if (
+                type(window).__module__ == "webview.window"
+                and type(window).__name__ == "Window"
+            ):
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge has no native document URL authority"
+                )
+            getter = getattr(window, "get_current_url", None)
+            if not callable(getter):
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge cannot verify the active document URL"
+                )
+            try:
+                value = getter()
+            except Exception as exc:
+                raise WindowsWebBridgeTrustError(
+                    "The WebView bridge could not read the active document URL"
+                ) from exc
         if (
             type(value) is not str
             or not value

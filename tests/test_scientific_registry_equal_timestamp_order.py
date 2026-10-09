@@ -79,7 +79,7 @@ def test_same_instant_lexically_earlier_promotion_is_rejected_before_publication
     )
     protocol = ResearchProtocol(binding, SHA_C, SHA_D, SHA_A, T0)
     dataset = DatasetSnapshot(
-        "dataset-1", SHA_A, "source", "license", T1, T0, outcome_reveal_after=T1
+        "dataset-1", SHA_A, "source", "license", T1, T1, outcome_reveal_after=T1
     )
     features = FeatureSet("features-1", "v1", SHA_A, SHA_C, T0)
     model = ModelVersion(

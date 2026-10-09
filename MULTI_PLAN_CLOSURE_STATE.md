@@ -67,8 +67,13 @@ Real account/money evidence is NOT required for repository-controllable Plan 4 e
 Section 9: OPEN plan qualification.
 
 ### Plan 6 — Windows / accessibility / packaging / UI
-Sections 1–6: PARTIAL_EXISTING from legacy 12,38,43 and current Windows/WebView2/accessibility/release code.
-Section 7: OPEN plan qualification.
+| Section | State | Evidence / next gate |
+|---:|---|---|
+|1|DONE|2026-10-09 terminal Plan-6 Section-1 (Ukrainian localization and source accessibility semantics): reused existing localization/UIA catalog and canonical PR #1303 exact head `b1f0ab53c0257ca3127076636a52123c176cce6e`. Exact-head CI [37840613258](https://github.com/Oleksii-debug/Autosport/actions/runs/37840613258) SUCCESS and Windows Candidate [37840613317](https://github.com/Oleksii-debug/Autosport/actions/runs/37840613317) SUCCESS; 0 unresolved review threads. Diverged-main integration overlap audit: 40 intervening main commits changed 16 files, 0 overlap with 7 Section-1 PR files. Non-forced merge #1303 into main `8d0cca786ff5472e1ce4399084a9a67b5c781b7f`. Post-merge exact SHA readback: `localization.py` blob `4efd7b8ae097cece6760c3e2c0b237795953bbf1`, `windows_entry.py` `f6510b66c17c27358f0fbaf0c81c7832bcd9f3e9`, `test_localization_catalog.py` `2fff6eb659e88f757a37f16cbe5b86aae7029fcd`, workspace-access localization tests `7a82623c481479410401ea303338a5a239d41096`, sanitized recovery preflight test `3612ab7c0e10707c15e18643e74b41619fdf18ee`. Covers default Ukrainian critical visible/UIA/resource labels, mixed-language/English-leakage and malformed/secret-redaction/error/recovery tests, cross-platform CI. Human NVDA remains Plan 8: HUMAN_TESTED=false; NVDA_VERIFIED=false; no claim of physical acceptance. DONE terminal unless a demonstrated regression.|
+|2|PARTIAL_EXISTING|Canonical semantic Windows/WebView2 shell; reuse native GUI and existing #1598 lineage, independently qualify and integrate.|
+|3–6|PARTIAL_EXISTING|Legacy Section 38/43 and current Windows/accessibility/release implementation; sequentially qualify within Plan 6.|
+|7|OPEN|Plan-wide source engineering qualification.|
+
 
 ### Plan 7 — Provider-free PAPER/SHADOW convergence
 Sections 1–7: WAITING_UPSTREAM until terminal Plans 1,2,3,5,6 plus terminal Plan 4 Sections 1,2,7 (capability registry, read-only/provider path, public web-lab). Other Plan-4 execution Sections are not M1 blockers.

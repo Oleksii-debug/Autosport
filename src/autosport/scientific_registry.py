@@ -1387,6 +1387,9 @@ class ScientificRegistry:
                 raise DuplicateExperimentFingerprintError(
                     "experiment fingerprint already has durable history; inspect negative/null results before repeating"
                 )
+        # Reject malformed or causally impossible entries before durable publication.
+        # Post-write readback remains a separate integrity check, not ingress validation.
+        self._validate_entry(entry)
         state["records"].append(entry)
         atomic_write_json(self.path, state)
         self._read()

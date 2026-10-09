@@ -283,5 +283,11 @@ def test_product_runtime_terminal_error_quarantines_active_workspace() -> None:
     error_start = source.index('elif product_message.kind == "ERROR":')
     error_block = source[error_start:]
 
-    assert "self._recovery_required_workspaces.add(Path(self._active_workspace))" in error_block
-    assert "self._recovery_required_workspaces.add(Path(self.workspace))" not in error_block
+    assert "self._quarantine_product_runtime_truth(" in error_block
+    assert "Path(self._active_workspace)" in error_block
+    assert "Path(self.workspace)" not in error_block
+    # Quarantine was factored into a reusable fail-closed method; retain the
+    # active-workspace binding and the durable recovery-required mutation.
+    quarantine = inspect.getsource(AutosportWebController._quarantine_product_runtime_truth)
+    assert "self._recovery_required_workspaces.add(resolved_workspace)" in quarantine
+    assert "self._product_runtime_economic_snapshot = None" in quarantine

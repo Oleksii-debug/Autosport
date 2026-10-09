@@ -142,7 +142,19 @@ def test_foreign_attempt_does_not_consume_receipt(tmp_path: Path) -> None:
             request_sha256=REQUEST_DIGEST,
             submitted_at=SUBMITTED_AT,
         )
-    assert authority.resolve_receipt_binding(
+    # The attempted submission advanced the durable clock high-water to
+    # SUBMITTED_AT. A stale test clock must be denied; fresh-process readback
+    # at the current time must still prove the foreign receipt unconsumed.
+    with pytest.raises(SupervisedConfirmationConflictError, match="clock moved backwards"):
+        authority.resolve_receipt_binding(
+            receipt_id=receipt.receipt_id,
+            expected_review_sha256=review.review_sha256,
+        )
+    fresh_authority = SupervisedConfirmationAuthority(
+        tmp_path / CONFIRMATION_FILENAME,
+        clock=lambda: datetime.fromisoformat(SUBMITTED_AT),
+    )
+    assert fresh_authority.resolve_receipt_binding(
         receipt_id=receipt.receipt_id,
         expected_review_sha256=review.review_sha256,
     ).receipt.consumed_at is None
@@ -539,7 +551,18 @@ def test_foreign_confirmation_denies_transport_and_stays_unknown_after_restart(
     assert result.outcome is PlaceOrdersOutcome.UNKNOWN
     assert result.attempt_state is AttemptState.UNKNOWN
     assert transport.calls == []
-    assert authority.resolve_receipt_binding(
+    # The denied send still moved the durable confirmation clock forward.
+    # Verify both rollback denial and unconsumed receipt after restart.
+    with pytest.raises(SupervisedConfirmationConflictError, match="clock moved backwards"):
+        authority.resolve_receipt_binding(
+            receipt_id=receipt.receipt_id,
+            expected_review_sha256=review.review_sha256,
+        )
+    fresh_authority = SupervisedConfirmationAuthority(
+        tmp_path / CONFIRMATION_FILENAME,
+        clock=lambda: datetime.fromisoformat(SUBMITTED_AT),
+    )
+    assert fresh_authority.resolve_receipt_binding(
         receipt_id=receipt.receipt_id,
         expected_review_sha256=review.review_sha256,
     ).receipt.consumed_at is None

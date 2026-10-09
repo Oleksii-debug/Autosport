@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from pathlib import Path
 from urllib.parse import parse_qs, urlparse
 
@@ -228,6 +229,62 @@ class HistoricalAcquisitionBundleTests(unittest.TestCase):
                     results_date="2026-09-10",
                     output_dir=root,
                 )
+            self.assertFalse(root.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+    def test_keyboard_interrupt_removes_staging_directory(self) -> None:
+        transport = _Transport()
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch(
+                "autosport.historical_acquisition.capture_historical_snapshot",
+                side_effect=KeyboardInterrupt(),
+            ):
+                with self.assertRaises(KeyboardInterrupt):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+            self.assertFalse(root.exists())
+            self.assertEqual(list(Path(tmp).iterdir()), [])
+
+        self.assertEqual(len(transport.urls), 1)
+        self.assertTrue(urlparse(transport.urls[0]).path.endswith("/coverage"))
+
+
+
+    def test_final_bundle_hash_failure_occurs_before_publication(self) -> None:
+        transport = _Transport()
+        canonical_sha256_file = __import__(
+            "autosport.historical_acquisition",
+            fromlist=["sha256_file"],
+        ).sha256_file
+
+        def fail_final_bundle_hash(path):
+            candidate = Path(path)
+            if candidate.name == "bundle.json":
+                raise OSError("simulated final bundle verification failure")
+            return canonical_sha256_file(candidate)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp) / "acquisition"
+            with patch(
+                "autosport.historical_acquisition.sha256_file",
+                side_effect=fail_final_bundle_hash,
+            ):
+                with self.assertRaisesRegex(
+                    OSError,
+                    "final bundle verification failure",
+                ):
+                    capture_historical_acquisition_bundle(
+                        self._provider(transport),
+                        requested_at=("2026-09-12T10:03:00Z",),
+                        results_date="2026-09-10",
+                        output_dir=root,
+                    )
+
             self.assertFalse(root.exists())
             self.assertEqual(list(Path(tmp).iterdir()), [])
 

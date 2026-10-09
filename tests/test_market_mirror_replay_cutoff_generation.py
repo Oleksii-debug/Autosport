@@ -3193,7 +3193,13 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     self.assertFalse(writer.is_alive())
 
                 self.assertEqual(writer_errors, [])
-                snapshot = self.replay(second)
+                # The blocked earlier replay advances the deterministic product
+                # clock past its original cutoff. The freshly committed append
+                # cannot be retroactively visible at that older cutoff.
+                self.assertEqual(len(self.replay(second).events), 0)
+                snapshot = self.replay(
+                    second, as_of=self.CUTOFF + timedelta(seconds=1)
+                )
                 self.assertEqual(len(snapshot.events), 1)
                 self.assertFalse(foreign_recovery.is_set())
             finally:
@@ -3425,8 +3431,16 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     self.assertFalse(writer.is_alive())
 
                 self.assertEqual(writer_errors, [])
+                # The earlier failed cutoff attempt moved the product clock
+                # forward. Its availability witness cannot be backdated.
                 self.assertEqual(
                     len(self.replay(second, as_of=later_cutoff).events),
+                    0,
+                )
+                self.assertEqual(
+                    len(self.replay(
+                        second, as_of=later_cutoff + timedelta(seconds=1)
+                    ).events),
                     1,
                 )
                 self.assertFalse(foreign_recovery.is_set())
@@ -4137,15 +4151,14 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     )
                 )
                 original_recover = MonotonicWorkspaceAuthority.recover
-                calls = 0
 
                 def fail_after_sqlite_commit(authority, **kwargs):
-                    nonlocal calls
-                    calls += 1
-                    # First recover: outer preflight. Second: under SQLite BEGIN
-                    # IMMEDIATE before PREPARE. Third: SQLite row is committed and
-                    # the machine authority still has the live PREPARE.
-                    if calls == 3:
+                    # Couple fault injection to the semantic cutoff COMMIT,
+                    # not the count of unrelated preflight/recovery calls.
+                    # A transaction-bound cutoff recovery is attempted only
+                    # after its SQLite row was durably published.
+                    tx_id = kwargs.get("tx_id")
+                    if isinstance(tx_id, str) and not tx_id.startswith("append-"):
                         raise RuntimeError("simulated post-SQLite authority commit crash")
                     return original_recover(authority, **kwargs)
 
@@ -4585,6 +4598,21 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 self.assertIsInstance(append_authority, MonotonicWorkspaceAuthority)
                 state["rebuild"] = True
 
+            original_baseline = (
+                SQLiteMarketStore._ensure_market_append_baseline_authority
+            )
+            original_rebuild = SQLiteMarketStore._rebuild_current_quotes
+
+            def require_real_locked_baseline(_store, authority):
+                require_locked_baseline(_store, authority)
+                return original_baseline(_store, authority)
+
+            def require_real_locked_rebuild(_store, *, append_authority):
+                require_locked_rebuild(_store, append_authority=append_authority)
+                return original_rebuild(
+                    _store, append_authority=append_authority
+                )
+
             with patch.object(
                 SQLiteMarketStore,
                 "_market_append_issuance_lock",
@@ -4592,11 +4620,11 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             ), patch.object(
                 SQLiteMarketStore,
                 "_ensure_market_append_baseline_authority",
-                new=require_locked_baseline,
+                new=require_real_locked_baseline,
             ), patch.object(
                 SQLiteMarketStore,
                 "_rebuild_current_quotes",
-                new=require_locked_rebuild,
+                new=require_real_locked_rebuild,
             ):
                 store = SQLiteMarketStore(Path(directory) / "market.db")
                 store.close()

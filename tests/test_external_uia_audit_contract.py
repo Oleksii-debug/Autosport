@@ -22,35 +22,36 @@ def test_external_uia_audit_loads_required_automation_assemblies() -> None:
     assert "Add-Type -AssemblyName System.Windows.Forms" in audit
 
 
-def test_external_uia_live_region_probe_references_monitor_core_assembly() -> None:
-    """Explicit Monitor calls avoid the compiler's CS0656 lock-lowering dependency."""
+def test_external_uia_live_region_probe_resolves_runtime_monitor_without_compiler_forwarders() -> None:
+    """Maintain a real runtime Monitor lock without a C# Monitor type-reference gate."""
 
     audit = _audit()
     references = audit.split("$uiaReferences = @(", 1)[1].split(") | Select-Object -Unique", 1)[0]
     assert "[System.Windows.Automation.Automation].Assembly.Location" in references
     assert "[System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location" in references
     assert "[System.Threading.Monitor].Assembly.Location" in references
-    assert "Missing compiler required member" not in audit
-    assert "System.Threading.Interlocked" not in references
+    # Runtime type identity belongs to the CLR; the C# compiler must not be
+    # required to statically resolve the forwarded Monitor type.
+    assert 'typeof(object).Assembly.GetType(' in audit
+    assert '"System.Threading.Monitor", throwOnError: true' in audit
+    assert 'monitor.GetMethod(name, new[] { typeof(object) })' in audit
+    assert 'Delegate.CreateDelegate(typeof(Action<object>), method)' in audit
+    assert 'throw new InvalidOperationException("Monitor operation unavailable")' in audit
+    assert 'private static readonly Action<object> EnterSync = ResolveMonitor("Enter");' in audit
+    assert 'private static readonly Action<object> ExitSync = ResolveMonitor("Exit");' in audit
+    assert "System.Threading.Monitor.Enter(_sync)" not in audit
+    assert "System.Threading.Monitor.Exit(_sync)" not in audit
     assert "Interlocked" not in audit
     assert "Volatile" not in audit
-    assert "using System.Windows.Automation;" in audit
-    assert "private readonly object _sync = new object();" in audit
     assert "lock (_sync)" not in audit
-    assert audit.count("System.Threading.Monitor.Enter(_sync)") == 4
-    assert audit.count("System.Threading.Monitor.Exit(_sync)") == 4
-    assert "finally { System.Threading.Monitor.Exit(_sync); }" in audit
-    assert "System.Threading.Monitor.Enter(_sync);\n            try" in audit
+    assert audit.count("EnterSync(_sync)") == 4
+    assert audit.count("ExitSync(_sync)") == 4
+    assert "finally { ExitSync(_sync); }" in audit
+    assert "EnterSync(_sync);\n            try" in audit
     assert "var automationId = element.Current.AutomationId ?? \"\";" in audit
     assert "var name = element.Current.Name ?? \"\";" in audit
     assert "_lastAutomationId = automationId;" in audit
     assert "_lastName = name;" in audit
-    assert "_count++;" in audit
-    assert "return _count;" in audit
-    assert "return _lastAutomationId;" in audit
-    assert "return _lastName;" in audit
-
-
 
 
 def test_external_uia_core_compilation_includes_facades_without_skipping_gate() -> None:

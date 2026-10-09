@@ -6,14 +6,14 @@ from itertools import count
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
+
+import pytest
 
 # Temporary Plan-6 CI diagnostic: detect which preceding test first leaves
 # pathlib.Path.__new__ changed after ALL fixture teardowns. The durable STOP
 # authority must keep rejecting such drift; do not restore or whitelist it.
 _PATH_NEW_DESCRIPTOR_TEST_BASE = vars(Path).get("__new__")
-from types import SimpleNamespace
-
-import pytest
 
 # Root-selection production now correctly treats post-composition replacement of the
 # OS account-location resolver as an authority violation. Tests that need a sandbox

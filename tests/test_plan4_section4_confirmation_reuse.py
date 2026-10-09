@@ -170,51 +170,10 @@ def test_wrong_receipt_digest_and_invalid_request_fail_closed(tmp_path: Path) ->
     ).receipt.consumed_at is None
 
 
-def test_final_send_admission_failure_never_calls_provider_or_changes_ledger(
+def test_direct_client_rejects_forged_admission_without_ledger_or_provider(
     tmp_path: Path, monkeypatch,
 ) -> None:
-    """A failed exact-request admission is a pre-I/O denial, not UNKNOWN."""
-    monkeypatch.setattr(
-        "autosport.supervised_execution._trusted_now",
-        lambda: existing_fixtures.RESERVED_AT,
-    )
-    profile, bound, _approval, ledger, action, store = (
-        existing_fixtures._prepared(str(tmp_path))
-    )
-    transport = existing_fixtures._Transport(
-        lambda request: existing_fixtures._response(request)
-    )
-    client = existing_fixtures._enabled_client(
-        profile, transport, store=store
-    )
-    request_digests: list[str] = []
-
-    def reject_final_send(request_sha256: str) -> None:
-        request_digests.append(request_sha256)
-        raise RuntimeError("sensitive-transport-secret")
-
-    with pytest.raises(
-        BetfairSupervisedExecutionError,
-        match="final-send admission failed before provider transport",
-    ) as denied:
-        client.place_action(
-            action,
-            profile=profile,
-            bound=bound,
-            provider_order_ref="a1b2c3",
-            execution_workspace=tmp_path.resolve(),
-            _before_transport=reject_final_send,
-        )
-    assert len(request_digests) == 1
-    assert len(request_digests[0]) == 64
-    assert all(character in "0123456789abcdef" for character in request_digests[0])
-    assert "sensitive-transport-secret" not in str(denied.value)
-    assert transport.calls == []
-    assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
-
-
-def test_final_send_admission_sees_exact_request_body_digest(tmp_path: Path, monkeypatch) -> None:
-    """Admission and report bind identical bytes, not a mutable quote summary."""
+    """A caller-supplied digest callback is not a durable send capability."""
     monkeypatch.setattr(
         "autosport.supervised_execution._trusted_now",
         lambda: existing_fixtures.RESERVED_AT,
@@ -227,27 +186,70 @@ def test_final_send_admission_sees_exact_request_body_digest(tmp_path: Path, mon
     )
     client = existing_fixtures._enabled_client(profile, transport, store=store)
     observed: list[str] = []
-    report = client.place_action(
-        action,
-        profile=profile,
-        bound=bound,
-        provider_order_ref="a1b2c3",
-        execution_workspace=tmp_path.resolve(),
-        _before_transport=observed.append,
-    )
-    assert len(transport.calls) == 1
-    sent_request = transport.calls[0]["request"]
-    encoded = json.dumps(
-        sent_request,
-        ensure_ascii=True,
-        sort_keys=True,
-        separators=(",", ":"),
-        allow_nan=False,
-    ).encode("utf-8")
-    exact_digest = hashlib.sha256(encoded).hexdigest()
-    assert observed == [exact_digest]
-    assert report.request_sha256 == exact_digest
+
+    def forged_admission(request_digest: str) -> None:
+        observed.append(request_digest)
+        raise RuntimeError("sensitive-transport-secret")
+
+    for callback in (None, forged_admission, observed.append):
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="direct placeOrders dispatch requires canonical confirmed executor",
+        ) as denied:
+            client.place_action(
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref="a1b2c3",
+                execution_workspace=tmp_path.resolve(),
+                _before_transport=callback,
+            )
+        assert "sensitive-transport-secret" not in str(denied.value)
+    assert observed == []
+    assert transport.calls == []
     assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+
+
+def test_missing_confirmation_denies_before_durable_attempt_and_post(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """The high-level public executor cannot use the old unconfirmed path."""
+    from autosport.betfair_supervised_execution import (
+        execute_betfair_supervised_action,
+    )
+
+    monkeypatch.setattr(
+        "autosport.supervised_execution._trusted_now",
+        lambda: existing_fixtures.RESERVED_AT,
+    )
+    profile, bound, approval, ledger, action, store = (
+        existing_fixtures._prepared(str(tmp_path))
+    )
+    transport = existing_fixtures._Transport(
+        lambda request: existing_fixtures._response(request)
+    )
+    client = existing_fixtures._enabled_client(profile, transport, store=store)
+    for receipt, review in (
+        (None, None),
+        ("d" * 64, None),
+        (None, "e" * 64),
+    ):
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="durable confirmation receipt and review identity are required",
+        ):
+            execute_betfair_supervised_action(
+                ledger, bound, approval,
+                action_id=action.action_id,
+                attempt_id="missing-confirmation",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+                confirmation_receipt_id=receipt,
+                confirmation_review_sha256=review,
+            )
+    assert ledger.saga(bound.execution_plan.plan_id).attempts == {}
+    assert transport.calls == []
 
 
 def _operator_receipt_for_bound(
@@ -421,7 +423,7 @@ def test_half_supplied_confirmation_fails_before_ledger_mutation(
         lambda request: existing_fixtures._response(request)
     )
     client = existing_fixtures._enabled_client(profile, transport, store=store)
-    with pytest.raises(BetfairSupervisedExecutionError, match="supplied together"):
+    with pytest.raises(BetfairSupervisedExecutionError, match="durable confirmation receipt and review identity are required"):
         execute_betfair_supervised_action(
             ledger, bound, approval,
             action_id=action.action_id, attempt_id="partial-confirm",

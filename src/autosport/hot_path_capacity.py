@@ -88,6 +88,8 @@ def summarize_hot_path_windows(
         raise HotPathError("invalid expected capacity source revision")
 
     completed: list[HotPathReport] = []
+    # Single canonical snapshot for digest, counts and all percentiles.
+    elapsed_samples: list[int] = []
     # Include observed partial stages from WAIT windows in per-stage percentiles.
     # Counting only complete cycles hides latency spikes that caused degradation.
     stage_samples: dict[str, list[int]] = {stage: [] for stage in STAGES}
@@ -116,6 +118,7 @@ def summarize_hot_path_windows(
             stage_samples[stage].append(duration)
         max_backlog = max(max_backlog, observation.backlog)
         max_elapsed = max(max_elapsed, observation.total_elapsed_ns)
+        elapsed_samples.append(observation.total_elapsed_ns)
         canonical_windows.append((
             observation.disposition, observation.reason,
             observation.stage_latencies_ns, observation.total_elapsed_ns,
@@ -130,7 +133,7 @@ def summarize_hot_path_windows(
         wait_count=len(reports) - len(completed),
         max_backlog=max_backlog,
         max_elapsed_ns=max_elapsed,
-        p95_elapsed_ns=_p95([r.total_elapsed_ns for r in reports]),
+        p95_elapsed_ns=_p95(elapsed_samples),
         stage_p95_ns=tuple(
             (stage, _p95(stage_samples[stage]))
             for stage in STAGES if stage_samples[stage]

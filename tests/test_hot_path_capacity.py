@@ -88,3 +88,32 @@ def test_all_wait_partial_stages_preserve_bounded_prefix_percentiles():
     assert v.stage_p95_ns == (('ingest', 10_000),)
     assert v.p95_elapsed_ns == 10_001
     assert v.execution_authority is False
+
+
+def test_total_p95_uses_same_snapshot_as_capacity_evidence_digest(monkeypatch):
+    """A frozen-dataclass bypass during serialization must not change p95."""
+    import autosport.hot_path_capacity as capacity
+
+    reports = tuple(ok(1) for _ in range(19)) + (ok(200),)
+    baseline = summarize_hot_path_windows(reports, expected_source_sha=SHA)
+    assert baseline.p95_elapsed_ns == 5 and baseline.max_elapsed_ns == 1000
+
+    real_dumps = capacity.json.dumps
+    calls = []
+
+    def mutate_after_snapshot(value, **kwargs):
+        calls.append(1)
+        # Adversarial concurrent/callback mutation *after* all report snapshots
+        # and before percentile construction. Values are individually plausible,
+        # so the output constructor alone cannot detect this discrepancy.
+        object.__setattr__(reports[0], "total_elapsed_ns", 900)
+        object.__setattr__(reports[1], "total_elapsed_ns", 900)
+        return real_dumps(value, **kwargs)
+
+    monkeypatch.setattr(capacity.json, "dumps", mutate_after_snapshot)
+    result = summarize_hot_path_windows(reports, expected_source_sha=SHA)
+    assert calls == [1]
+    assert result.windows_sha256 == baseline.windows_sha256
+    assert result.max_elapsed_ns == baseline.max_elapsed_ns == 1000
+    assert result.p95_elapsed_ns == baseline.p95_elapsed_ns == 5
+    assert not result.execution_authority and not result.target_machine_acceptance

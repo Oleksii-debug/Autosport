@@ -550,6 +550,86 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             )
             loop.close()
 
+    def test_repeated_real_pipeline_capacity_observations_remain_source_bound_after_restart(self) -> None:
+        """Run real durable loop cycles, then summarize only detached, source-bound timing."""
+        from autosport.hot_path_capacity import summarize_hot_path_windows
+        from autosport.hot_path_latency import HotPathError, HotPathReport, STAGES
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            sequence=sequence,
+                            observed=self.START + timedelta(seconds=sequence),
+                        ),
+                    )
+                    for sequence in range(1, 13)
+                ],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            self._register_two(loop)
+            fixture_revision = "a" * 40
+            observations = []
+            for sequence in range(1, 13):
+                clock.value = self.START + timedelta(seconds=sequence)
+                result = loop.run_cycle()
+                self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+                samples = loop.last_cycle_stage_latencies_ns
+                self.assertEqual(tuple(name for name, _ in samples), STAGES)
+                observations.append(
+                    HotPathReport(
+                        source_sha=fixture_revision,
+                        disposition="OK",
+                        reason="WITHIN_BUDGET",
+                        stage_latencies_ns=samples,
+                        total_elapsed_ns=sum(duration for _, duration in samples),
+                        backlog=0,
+                    )
+                )
+
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            self.assertEqual(len(ledger.verified_records()), 12)
+            bound = summarize_hot_path_windows(
+                tuple(observations), expected_source_sha=fixture_revision
+            )
+            self.assertEqual(bound.window_count, 12)
+            self.assertEqual(bound.complete_count, 12)
+            self.assertEqual(bound.wait_count, 0)
+            self.assertEqual(tuple(name for name, _ in bound.stage_p95_ns), STAGES)
+            self.assertEqual(
+                bound,
+                summarize_hot_path_windows(
+                    tuple(observations), expected_source_sha=fixture_revision
+                ),
+            )
+            self.assertFalse(bound.execution_authority)
+            self.assertFalse(bound.target_machine_acceptance)
+            with self.assertRaises(HotPathError):
+                summarize_hot_path_windows(
+                    tuple(observations), expected_source_sha="b" * 40
+                )
+            loop.close()
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=13)),
+            )
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(resumed.last_cycle_stage_latencies_ns, ())
+            self.assertEqual(len(ledger.verified_records()), 12)
+            resumed.close()
+
     def test_first_cycle_rebuilds_all_then_only_affected_input_recomputes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             workspace = Path(directory)

@@ -101,7 +101,7 @@ class WindowsLabTicket:
         if (
             type(self.scenarios) is not tuple
             or not self.scenarios
-            or self.scenarios != tuple(s for s in _SCENARIOS if s in self.scenarios)
+            or self.scenarios != _SCENARIOS
         ):
             raise WindowsLabContractError("unknown, duplicate or unordered lab scenario")
         if any(type(s) is not str for s in self.scenarios):

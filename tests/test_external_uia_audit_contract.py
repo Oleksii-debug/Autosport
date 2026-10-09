@@ -22,16 +22,30 @@ def test_external_uia_audit_loads_required_automation_assemblies() -> None:
     assert "Add-Type -AssemblyName System.Windows.Forms" in audit
 
 
-def test_external_uia_live_region_probe_references_threading_assembly() -> None:
-    """Hosted PowerShell Add-Type needs explicit System.Threading metadata."""
+def test_external_uia_live_region_probe_uses_monitor_instead_of_threading_facades() -> None:
+    """Hosted PowerShell Add-Type must not depend on unresolved Threading facades."""
 
     audit = _audit()
     references = audit.split("$uiaReferences = @(", 1)[1].split(") | Select-Object -Unique", 1)[0]
-    assert "[System.Threading.Interlocked].Assembly.Location" in references
-    assert "[System.Threading.Volatile].Assembly.Location" in references
-    assert "using System.Threading;" in audit
-    assert "Interlocked.Increment(ref _count);" in audit
-    assert "Volatile.Read(ref _count)" in audit
+    assert "[System.Windows.Automation.Automation].Assembly.Location" in references
+    assert "[System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location" in references
+    assert "System.Threading" not in references
+    assert "Interlocked" not in audit
+    assert "Volatile" not in audit
+    assert "using System.Windows.Automation;" in audit
+    assert "private readonly object _sync = new object();" in audit
+    assert "lock (_sync)" in audit
+    assert audit.count("lock (_sync)") == 4
+    assert "var automationId = element.Current.AutomationId ?? \"\";" in audit
+    assert "var name = element.Current.Name ?? \"\";" in audit
+    assert "_lastAutomationId = automationId;" in audit
+    assert "_lastName = name;" in audit
+    assert "_count++;" in audit
+    assert "return _count;" in audit
+    assert "return _lastAutomationId;" in audit
+    assert "return _lastName;" in audit
+
+
 
 
 def test_external_uia_audit_uses_runner_safe_legacy_action_pattern_lookup() -> None:

@@ -206,7 +206,7 @@ def test_mutable_caller_policy_cannot_expand_backlog_threshold_midflight():
         observed_at_ns=100,
         backlog=0,
         stages=stages,
-        clock_ns=clock(100, 100, 100, 101),
+        clock_ns=clock(100, 100, 100, 101, 101),
         backlog_reader=lambda: pressure[0],
     )
     assert result.disposition == "WAIT"

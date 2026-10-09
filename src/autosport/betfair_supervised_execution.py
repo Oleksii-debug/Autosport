@@ -598,6 +598,7 @@ class BetfairSupervisedPlaceOrdersClient:
         bound: BoundSupervisedExecutionPlan,
         provider_order_ref: str,
         execution_workspace: Path,
+        _before_transport: Callable[[str], None] | None = None,
     ) -> BetfairPlaceExecutionReport:
         selection_id = _validate_betfair_place_action(action)
         self._gate.require(
@@ -652,6 +653,17 @@ class BetfairSupervisedPlaceOrdersClient:
             "X-Application": self._credentials.application_key,
             "X-Authentication": self._credentials.session_token,
         }
+        # Private final-send admission seam. A future durable executor must
+        # resolve and consume its confirmation against these exact request bytes
+        # before allowing the transport. This hook never runs inside the
+        # provider-error/UNKNOWN handler: rejection means zero network calls.
+        if _before_transport is not None:
+            try:
+                _before_transport(request_sha256)
+            except Exception:
+                raise BetfairSupervisedExecutionError(
+                    "final-send admission failed before provider transport"
+                ) from None
         try:
             payload = self._transport.post(
                 BETTING_JSON_RPC_ENDPOINT,

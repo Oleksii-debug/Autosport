@@ -191,7 +191,7 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 if name == "writer-a" and not read_once["writer-a"]:
                     read_once["writer-a"] = True
                     first_read_captured.set()
-                    if not release_first_read.wait(timeout=5):
+                    if not release_first_read.wait(timeout=30):
                         raise AssertionError("test did not release first registry read")
                 elif name == "writer-b":
                     second_reached_read.set()

@@ -40,14 +40,13 @@ def test_workspace_access_message_does_not_announce_exception_detail(tmp_path: P
     assert "OSError" not in message
 
 
-def test_webview_launch_failure_does_not_announce_exception_detail(tmp_path: Path) -> None:
+def test_webview_launch_failure_keeps_native_stop_choice_and_redacts_detail(tmp_path: Path) -> None:
     secret = "secret-bearing-webview-launch-detail"
     runtime_module = types.ModuleType("autosport.webview2_runtime_deployment")
     runtime_module.ensure_webview2_runtime = lambda: types.SimpleNamespace(available=True)
 
     stop_module = types.ModuleType("autosport.windows_webview_emergency_stop")
     stop_module.EmergencyStopWebController = lambda _workspace: object()
-
     shell_module = types.ModuleType("autosport.windows_webview_shell")
 
     class WindowsWebViewUnavailable(RuntimeError):
@@ -61,12 +60,12 @@ def test_webview_launch_failure_does_not_announce_exception_detail(tmp_path: Pat
         raise WindowsWebViewUnavailable(secret)
 
     shell_module.launch_windows_shell = fail_launch
-    show_error = MagicMock()
+    offer_stop = MagicMock()
+    workspace = tmp_path / "workspace"
 
     with (
-        patch("autosport.paths.default_workspace", return_value=tmp_path / "workspace"),
-        patch.object(windows_entry, "_probe_workspace_writable"),
-        patch.object(windows_entry, "_show_startup_error", show_error),
+        patch("autosport.webview2_release_environment.active_webview2_environment_overrides", return_value=()),
+        patch.object(windows_entry, "_offer_native_emergency_stop", offer_stop),
         patch.dict(
             sys.modules,
             {
@@ -76,10 +75,10 @@ def test_webview_launch_failure_does_not_announce_exception_detail(tmp_path: Pat
             },
         ),
     ):
-        assert windows_entry._run_interactive_gui() == 3
+        assert windows_entry._run_owned_interactive_gui(workspace, tmp_path / "webview-storage") == 3
 
-    show_error.assert_called_once_with(windows_entry._WEBVIEW2_STARTUP_ERROR)
-    shown = show_error.call_args.args[0]
+    offer_stop.assert_called_once_with(workspace, windows_entry._WEBVIEW2_STARTUP_ERROR)
+    shown = offer_stop.call_args.args[1]
     assert "Microsoft Edge WebView2 Runtime" in shown
     assert "локального сховища WebView2" in shown
     assert secret not in shown
@@ -87,8 +86,7 @@ def test_webview_launch_failure_does_not_announce_exception_detail(tmp_path: Pat
     assert "RuntimeError" not in shown
 
 
-
-def test_webview_storage_failure_has_distinct_actionable_native_copy(
+def test_webview_storage_failure_offers_distinct_native_stop_choice(
     tmp_path: Path,
 ) -> None:
     secret = "secret-bearing-webview-storage-detail"
@@ -97,7 +95,6 @@ def test_webview_storage_failure_has_distinct_actionable_native_copy(
 
     stop_module = types.ModuleType("autosport.windows_webview_emergency_stop")
     stop_module.EmergencyStopWebController = lambda _workspace: object()
-
     shell_module = types.ModuleType("autosport.windows_webview_shell")
 
     class WindowsWebViewUnavailable(RuntimeError):
@@ -113,12 +110,12 @@ def test_webview_storage_failure_has_distinct_actionable_native_copy(
         raise WindowsWebViewUnavailable(secret, reason="storage")
 
     shell_module.launch_windows_shell = fail_launch
-    show_error = MagicMock()
+    offer_stop = MagicMock()
+    workspace = tmp_path / "workspace"
 
     with (
-        patch("autosport.paths.default_workspace", return_value=tmp_path / "workspace"),
-        patch.object(windows_entry, "_probe_workspace_writable"),
-        patch.object(windows_entry, "_show_startup_error", show_error),
+        patch("autosport.webview2_release_environment.active_webview2_environment_overrides", return_value=()),
+        patch.object(windows_entry, "_offer_native_emergency_stop", offer_stop),
         patch.dict(
             sys.modules,
             {
@@ -128,10 +125,10 @@ def test_webview_storage_failure_has_distinct_actionable_native_copy(
             },
         ),
     ):
-        assert windows_entry._run_interactive_gui() == 2
+        assert windows_entry._run_owned_interactive_gui(workspace, tmp_path / "webview-storage") == 2
 
-    show_error.assert_called_once_with(windows_entry._WEBVIEW2_STORAGE_ERROR)
-    shown = show_error.call_args.args[0]
+    offer_stop.assert_called_once_with(workspace, windows_entry._WEBVIEW2_STORAGE_ERROR)
+    shown = offer_stop.call_args.args[1]
     assert "LOCALAPPDATA" in shown
     assert "Права адміністратора не потрібні" in shown
     assert "Runtime" not in shown

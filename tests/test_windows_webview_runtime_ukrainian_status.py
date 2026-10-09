@@ -381,6 +381,8 @@ def test_clean_source_snapshot_is_bounded_not_global_health_claim(
     assert projection["provider_unavailable"] is False
     assert projection["attention_required"] is False
     assert "останній канонічний цикл" in projection["status"].casefold()
+    assert "наступний цикл ще не перевірено" in projection["status"].casefold()
+    assert "недоступ" not in projection["status"].casefold()
     assert "здоров" not in projection["status"].casefold()
     assert "готов" not in projection["status"].casefold()
 

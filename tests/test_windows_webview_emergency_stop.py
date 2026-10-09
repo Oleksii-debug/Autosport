@@ -16,6 +16,38 @@ def _command(request_id: str) -> dict[str, object]:
     }
 
 
+
+def test_webview_emergency_stop_path_graph_has_no_residual_test_mutation():
+    """Pinpoint a leaked filesystem-dispatch change; never reset the trust graph."""
+    from autosport import execution_stop_authority as stop_authority
+
+    drift = []
+    snapshot = stop_authority._CANONICAL_ADMISSION_MONOTONIC_PATH_MRO_GRAPH
+    expected_types = tuple(path_type for path_type, _ in snapshot)
+    concrete = stop_authority._CANONICAL_ADMISSION_MONOTONIC_CONCRETE_PATH_CLASS
+    if tuple(cls for cls in concrete.__mro__ if cls is not object) != expected_types:
+        drift.append("path MRO differs from import-time authority")
+
+    for path_type, members in snapshot:
+        live = vars(path_type)
+        originals = {name: (value, state) for name, value, state in members}
+        for name in sorted(set(originals).symmetric_difference(live)):
+            drift.append(f"{path_type.__module__}.{path_type.__name__}.{name}: member added/removed")
+        for name in sorted(set(originals).intersection(live)):
+            original, state = originals[name]
+            if live[name] is not original or (
+                stop_authority._monotonic_dependency_callable_state(live[name])
+                != state
+            ):
+                drift.append(f"{path_type.__module__}.{path_type.__name__}.{name}: callable/identity drift")
+
+    assert not drift, (
+        "Prior tests changed import-bound monotonic filesystem dispatch; "
+        "STOP must stay fail-closed until the responsible mutation is repaired: "
+        + "; ".join(drift[:12])
+    )
+
+
 def test_webview_emergency_stop_missing_state_projects_fail_closed_without_mutation(
     tmp_path,
 ):

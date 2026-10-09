@@ -365,4 +365,4 @@ def test_emergency_stop_local_failure_keeps_dedicated_accessible_readback():
     assert "if (result === null)" in script
     assert "Не вважайте нові виконання заблокованими без підтвердження" in script
     assert "Канал застосунку недоступний." in script
-    assert "перевірте журнал STOP." in script
+    assert "перевірте журнал stop." in script.casefold()

@@ -22,14 +22,16 @@ def test_external_uia_audit_loads_required_automation_assemblies() -> None:
     assert "Add-Type -AssemblyName System.Windows.Forms" in audit
 
 
-def test_external_uia_live_region_probe_uses_monitor_instead_of_threading_facades() -> None:
-    """Hosted PowerShell Add-Type must not depend on unresolved Threading facades."""
+def test_external_uia_live_region_probe_references_monitor_core_assembly() -> None:
+    """A C# lock needs the assembly defining Monitor.Exit with explicit Add-Type refs."""
 
     audit = _audit()
     references = audit.split("$uiaReferences = @(", 1)[1].split(") | Select-Object -Unique", 1)[0]
     assert "[System.Windows.Automation.Automation].Assembly.Location" in references
     assert "[System.Windows.Automation.AutomationElementIdentifiers].Assembly.Location" in references
-    assert "System.Threading" not in references
+    assert "[System.Threading.Monitor].Assembly.Location" in references
+    assert "Missing compiler required member" not in audit
+    assert "System.Threading.Interlocked" not in references
     assert "Interlocked" not in audit
     assert "Volatile" not in audit
     assert "using System.Windows.Automation;" in audit

@@ -508,3 +508,15 @@ class WorkspaceEconomicLock:
         import fcntl
 
         fcntl.flock(handle.fileno(), fcntl.LOCK_UN)
+
+
+class WorkspaceInteractiveLock(WorkspaceEconomicLock):
+    """Crash-releasing single-owner lock for one interactive Autosport workspace.
+
+    This deliberately reuses the hardened workspace lock implementation but owns a
+    different persistent sidecar pathname. Holding the interactive lock for the UI
+    lifetime must not reserve .economic-run.lock because canonical replay, recovery,
+    PAPER and snapshot operations still need that narrower writer fence.
+    """
+
+    FILE_NAME = ".interactive-run.lock"

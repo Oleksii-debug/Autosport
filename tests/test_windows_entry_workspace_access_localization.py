@@ -96,12 +96,10 @@ def test_workspace_access_message_renders_canonical_catalog_values() -> None:
 
     message = _workspace_access_error_message(workspace, error)
 
-    assert message == text(
-        "ui.windows.workspace_access.message",
-        workspace=workspace,
-        error_type="OSError",
-        error_detail="Access denied second line",
-    )
+    assert message == text("ui.windows.workspace_access.message")
+    assert str(workspace) not in message
+    assert "Access denied" not in message
+    assert "second line" not in message
     assert "{workspace}" not in message
     assert "{error_type}" not in message
     assert "{error_detail}" not in message
@@ -116,13 +114,9 @@ def test_workspace_access_message_uses_localized_unknown_error_fallback() -> Non
 
     message = _workspace_access_error_message(workspace, OSError())
 
-    assert message == text(
-        "ui.windows.workspace_access.message",
-        workspace=workspace,
-        error_type="OSError",
-        error_detail=fallback,
-    )
-    assert fallback in message
+    assert message == text("ui.windows.workspace_access.message")
+    assert fallback not in message
+    assert "AUTOSPORT_WORKSPACE" in message
 
 
 
@@ -153,11 +147,12 @@ def test_native_workspace_configuration_dialog_uses_catalog_and_keeps_native_fal
     assert calls == [
         (
             None,
-            text("ui.windows.workspace_configuration.message", detail=detail),
+            text("ui.windows.workspace_configuration.message"),
             text("ui.windows.workspace_configuration.title"),
             0x00000010,
         )
     ]
+    assert detail not in calls[0][1]
     assert "interactive workspace" not in calls[0][1]
     assert "Economic і live state" not in calls[0][1]
 
@@ -177,7 +172,8 @@ def test_native_workspace_errors_redact_secrets_and_preserve_ukrainian_guidance(
     assert "workspace-secret-1842" not in rendered
     assert "provider-secret-1843" not in rendered
     assert "private-1844" not in rendered
-    assert REDACTED in rendered
+    assert "шлях приховано" in rendered
+    assert "деталі приховано" in rendered
     assert "Робоча тека" in rendered
     assert "Права адміністратора не потрібні" in rendered
 
@@ -191,10 +187,10 @@ def test_native_workspace_error_stringification_failure_is_localized_and_safe() 
             raise RuntimeError("token=must-not-appear")
 
     rendered = _workspace_access_error_message(Path("C:/Робоча тека"), HostileOSError())
-    assert text("ui.windows.workspace_access.unknown_error") in rendered
+    assert rendered == text("ui.windows.workspace_access.message")
     assert "must-not-appear" not in rendered
     assert "HostileOSError" not in rendered
-    assert "OSError" in rendered
+    assert "OSError" not in rendered
 
 
 def test_native_configuration_dialog_redacts_untrusted_detail(monkeypatch) -> None:
@@ -213,6 +209,6 @@ def test_native_configuration_dialog_redacts_untrusted_detail(monkeypatch) -> No
     _show_workspace_configuration_error("Невірний шлях; password=config-secret-1845")
     assert len(calls) == 1
     assert "config-secret-1845" not in calls[0][0]
-    assert "[REDACTED]" in calls[0][0]
+    assert "Деталі помилки приховано" in calls[0][0]
     assert "Автоспорт" in calls[0][1]
     assert calls[0][2] == 0x00000010

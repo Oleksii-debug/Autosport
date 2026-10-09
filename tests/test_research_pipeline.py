@@ -416,6 +416,184 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             )
             self.assertEqual(rebound, records[0])
 
+    def test_sport_qualified_economic_candidate_materializes_exact_sport_identity(self):
+        sport = "table_tennis"
+        quote = MarketEvent(
+            event_id="match-sport-1",
+            market_id="winner",
+            selection_id="B",
+            decimal_odds=Decimal("2.00"),
+            observed_ts="2026-09-13T10:00:00+00:00",
+            source_id="provider",
+            sequence=1,
+            source_ts="2026-09-13T10:00:00+00:00",
+            ingest_ts="2026-09-13T10:00:00+00:00",
+            sport=sport,
+        )
+        probability = Decimal("0.60")
+        leg = CandidateLeg(
+            quote.quote_key,
+            quote.event_id,
+            quote.decimal_odds,
+            probability,
+            market_id=quote.market_id,
+            selection_id=quote.selection_id,
+            sport=sport,
+        )
+        candidate = ParlayCandidate(
+            (leg,),
+            quote.decimal_odds,
+            probability,
+            probability * quote.decimal_odds - Decimal("1"),
+        )
+        groups = [
+            ScenarioGroup(
+                "sport-winner",
+                (ScenarioOutcome(quote.quote_key, Decimal("1")),),
+            )
+        ]
+        evidence = [
+            ResearchEvidence(
+                evidence_id="sport-evidence",
+                quote_key=quote.quote_key,
+                source_id=quote.source_id,
+                observed_at=quote.observed_ts,
+                available_at="2026-09-13T10:00:01+00:00",
+                decimal_odds=quote.decimal_odds,
+                content_sha256=EVIDENCE_HASH,
+                market_snapshot_hash=SNAPSHOT,
+            )
+        ]
+        forecast = ForecastRecord(
+            quote_key=quote.quote_key,
+            probability=probability,
+            model_id="sport-model",
+            model_version="1.0.0",
+            strategy_version="research-v1",
+            model_training_cutoff_ts="2026-09-13T09:00:00+00:00",
+            input_cutoff_ts="2026-09-13T10:00:01+00:00",
+            generated_at="2026-09-13T10:00:02+00:00",
+            uncertainty=Decimal("0.10"),
+            evidence_hashes=(EVIDENCE_HASH,),
+            market_snapshot_hash=SNAPSHOT,
+            provenance={"source": "typed-sport-test"},
+        )
+        goal = self._economic_goal(blocked_sports=frozenset({"tennis"}))
+        pipeline = self._goal_pipeline(goal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PaperBook("1000")
+            ledger = JsonlDecisionLedger(Path(tmp) / "sport-decisions.jsonl")
+            decision = pipeline.decide_and_open(
+                book=book,
+                candidate=candidate,
+                groups=groups,
+                forecasts={quote.quote_key: forecast},
+                evidence=evidence,
+                stake="NaN",
+                decision_ts="2026-09-13T10:00:03+00:00",
+                market_quotes=(quote,),
+                decision_ledger=ledger,
+                replay_run_id="sport-research-run",
+                material_action_id="sport-material-action",
+            )
+
+            self.assertTrue(decision.approved)
+            self.assertIsNotNone(decision.ticket_id)
+            ticket = book.tickets[decision.ticket_id]
+            self.assertEqual(tuple(item.sport for item in ticket.legs), (sport,))
+            self.assertEqual(ticket.legs[0].quote_key, quote.quote_key)
+
+    def test_owner_blocked_sport_rejects_research_candidate_before_ticket_creation(self):
+        sport = "table_tennis"
+        quote = MarketEvent(
+            event_id="match-sport-blocked",
+            market_id="winner",
+            selection_id="B",
+            decimal_odds=Decimal("2.00"),
+            observed_ts="2026-09-13T10:00:00+00:00",
+            source_id="provider",
+            sequence=1,
+            source_ts="2026-09-13T10:00:00+00:00",
+            ingest_ts="2026-09-13T10:00:00+00:00",
+            sport=sport,
+        )
+        probability = Decimal("0.60")
+        leg = CandidateLeg(
+            quote.quote_key,
+            quote.event_id,
+            quote.decimal_odds,
+            probability,
+            market_id=quote.market_id,
+            selection_id=quote.selection_id,
+            sport=sport,
+        )
+        candidate = ParlayCandidate(
+            (leg,),
+            quote.decimal_odds,
+            probability,
+            probability * quote.decimal_odds - Decimal("1"),
+        )
+        groups = [
+            ScenarioGroup(
+                "sport-blocked-winner",
+                (ScenarioOutcome(quote.quote_key, Decimal("1")),),
+            )
+        ]
+        evidence = [
+            ResearchEvidence(
+                evidence_id="sport-blocked-evidence",
+                quote_key=quote.quote_key,
+                source_id=quote.source_id,
+                observed_at=quote.observed_ts,
+                available_at="2026-09-13T10:00:01+00:00",
+                decimal_odds=quote.decimal_odds,
+                content_sha256=EVIDENCE_HASH,
+                market_snapshot_hash=SNAPSHOT,
+            )
+        ]
+        forecast = ForecastRecord(
+            quote_key=quote.quote_key,
+            probability=probability,
+            model_id="sport-model",
+            model_version="1.0.0",
+            strategy_version="research-v1",
+            model_training_cutoff_ts="2026-09-13T09:00:00+00:00",
+            input_cutoff_ts="2026-09-13T10:00:01+00:00",
+            generated_at="2026-09-13T10:00:02+00:00",
+            uncertainty=Decimal("0.10"),
+            evidence_hashes=(EVIDENCE_HASH,),
+            market_snapshot_hash=SNAPSHOT,
+            provenance={"source": "typed-sport-test"},
+        )
+        goal = self._economic_goal(blocked_sports=frozenset({sport}))
+        pipeline = self._goal_pipeline(goal)
+
+        with tempfile.TemporaryDirectory() as tmp:
+            book = PaperBook("1000")
+            ledger = JsonlDecisionLedger(Path(tmp) / "sport-blocked-decisions.jsonl")
+            decision = pipeline.decide_and_open(
+                book=book,
+                candidate=candidate,
+                groups=groups,
+                forecasts={quote.quote_key: forecast},
+                evidence=evidence,
+                stake="NaN",
+                decision_ts="2026-09-13T10:00:03+00:00",
+                market_quotes=(quote,),
+                decision_ledger=ledger,
+                replay_run_id="sport-blocked-run",
+                material_action_id="sport-blocked-action",
+            )
+
+            self.assertFalse(decision.approved)
+            self.assertIsNone(decision.ticket_id)
+            self.assertEqual(book.tickets, {})
+            self.assertEqual(
+                decision.risk.reason,
+                "proposed ticket contains an owner-blocked sport",
+            )
+
     def test_nontrivial_ruin_goal_without_bound_evidence_fails_closed_to_zero(self):
         goal = self._economic_goal(max_risk_of_ruin=Decimal("0.01"))
         pipeline = self._goal_pipeline(goal)

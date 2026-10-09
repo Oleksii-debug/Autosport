@@ -21,7 +21,7 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
         "ui.windows.workspace_configuration.title": "Автоспорт — помилка налаштування робочої теки",
         "ui.windows.workspace_configuration.message": (
             "Автоспорт не відкрив робочу теку через недійсні налаштування.\n\n"
-            "{detail}\n\n"
+            "Деталі помилки приховано для захисту ваших даних.\n\n"
             "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
             "потім перезапустіть Автоспорт. Економічний стан і стан спостереження не змінено."
         ),
@@ -29,8 +29,8 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
         "ui.windows.workspace_access.unknown_error": "невідома помилка файлової системи",
         "ui.windows.workspace_access.message": (
             "Автоспорт не може підготувати робочу теку для запису.\n\n"
-            "Робоча тека: {workspace}\n"
-            "Помилка: {error_type}: {error_detail}\n\n"
+            "Робоча тека: шлях приховано для захисту ваших даних.\n"
+            "Помилка: деталі приховано для захисту ваших даних.\n\n"
             "Вкажіть AUTOSPORT_WORKSPACE як абсолютний шлях до теки вашого користувача, "
             "доступної для запису, і перезапустіть Автоспорт. "
             "Права адміністратора не потрібні. "
@@ -124,6 +124,8 @@ _WINDOWS_SHELL_UK_UA = MappingProxyType(
         "ui.windows.manual_calculation.error.unknown": "Невідома ручна операція.",
         "ui.windows.manual_calculation.error.operation_empty": "Операція не вибрана.",
         "ui.windows.shell.frame.title": "Навігація продукту",
+        "ui.windows.error.internal_hidden": "Сталася внутрішня помилка. Технічні подробиці приховано.",
+        "ui.windows.product_runtime.error.recovery_required": "Тривалий імітаційний режим завершився помилкою. Спочатку відновіть робочу область.",
         "ui.windows.shell.screen.label": "Екран:",
         "ui.windows.shell.button.open": "Перейти до робочої поверхні",
         "ui.windows.shell.state.active": "Активна робоча поверхня",

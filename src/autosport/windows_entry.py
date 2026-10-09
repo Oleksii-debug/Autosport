@@ -192,12 +192,19 @@ def _run_owned_interactive_gui(workspace: Path, webview_storage: Path) -> int:
         _offer_native_emergency_stop(workspace, _WEBVIEW2_STARTUP_ERROR)
         return 3
 
-    from autosport.windows_webview_emergency_stop import EmergencyStopWebController
-    from autosport.windows_webview_shell import (
-        AutosportWebBridge,
-        WindowsWebViewUnavailable,
-        launch_windows_shell,
-    )
+    # A damaged/incomplete packaged shell must still provide the native
+    # keyboard-accessible STOP choice. Keep the imports inside their own
+    # guard: WindowsWebViewUnavailable is undefined if shell import fails.
+    try:
+        from autosport.windows_webview_emergency_stop import EmergencyStopWebController
+        from autosport.windows_webview_shell import (
+            AutosportWebBridge,
+            WindowsWebViewUnavailable,
+            launch_windows_shell,
+        )
+    except Exception:
+        _offer_native_emergency_stop(workspace, _WEBVIEW2_STARTUP_ERROR)
+        return 3
 
     try:
         controller = EmergencyStopWebController(workspace)
@@ -209,6 +216,11 @@ def _run_owned_interactive_gui(workspace: Path, webview_storage: Path) -> int:
         if getattr(exc, "reason", None) == "storage":
             _offer_native_emergency_stop(workspace, _WEBVIEW2_STORAGE_ERROR)
             return 2
+        _offer_native_emergency_stop(workspace, _WEBVIEW2_STARTUP_ERROR)
+        return 3
+    except Exception:
+        # Construction and renderer failures can contain filesystem/secret
+        # details. Do not print their text or silently bypass native STOP.
         _offer_native_emergency_stop(workspace, _WEBVIEW2_STARTUP_ERROR)
         return 3
 

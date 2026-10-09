@@ -624,23 +624,26 @@ class RealExecutionLedger:
         self._path_durable = True
 
     def _mutate(self, operation: Callable[[], _T]) -> _T:
+        """Hold a crash-releasing OS writer lock, never a stale-file existence lease.
+
+        Persistent lock-file bytes are not ownership: a killed writer must leave
+        SUBMITTED effects reconcilable without allowing duplicate provider sends.
+        """
         with self._thread_lock:
             try:
-                fd = os.open(
-                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
-            except FileExistsError as exc:
+                with WorkspaceEconomicLock(
+                    self.path.parent.resolve(),
+                    file_name=self._lock_path.name,
+                ):
+                    return operation()
+            except WorkspaceEconomicLockBusyError as exc:
                 raise ExecutionLedgerBusyError(
-                    "writer lock exists; fail closed until writer/crash ownership is resolved"
+                    "writer lock is owned by another process; fail closed"
                 ) from exc
-            try:
-                return operation()
-            finally:
-                os.close(fd)
-                try:
-                    self._lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+            except WorkspaceEconomicLockError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger crash-releasing writer lock failed"
+                ) from exc
 
     @classmethod
     def _validate_event(

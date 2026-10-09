@@ -306,7 +306,7 @@ def test_controller_applies_exact_runtime_snapshot_to_visible_economics(
     assert "90" in controller.bank
     assert "ticket-1" not in controller.tickets[0]
     assert "OPEN" in controller.tickets[0]
-    assert any("цикл 1" in line for line in controller.evaluation)
+    assert any("циклу 1" in line for line in controller.evaluation)
     assert any("не створює нового висновку" in line for line in controller.evaluation)
 
 

@@ -351,6 +351,7 @@ class AutosportApp(tk.Tk):
             messagebox.showinfo(
                 text("ui.dialog.title"),
                 text("ui.info.research_plan.not_supported", strategy_id=strategy_id),
+                parent=self,
             )
             self.status.set(
                 text("ui.status.research_plan.not_required_short", strategy_id=strategy_id)
@@ -359,6 +360,7 @@ class AutosportApp(tk.Tk):
         selected = filedialog.askopenfilename(
             title=text("ui.dialog.research_plan.choose_title"),
             filetypes=((text("ui.filetype.json"), "*.json"), (text("ui.filetype.all"), "*.*")),
+            parent=self,
         )
         if not selected:
             return
@@ -369,6 +371,7 @@ class AutosportApp(tk.Tk):
             messagebox.showerror(
                 text("ui.dialog.title"),
                 text("ui.error.research_plan.rejected", detail=_safe_exception_text(exc)),
+                parent=self,
             )
             self.status.set(text("ui.status.research_plan.validation_failed"))
             return
@@ -511,7 +514,10 @@ class AutosportApp(tk.Tk):
         if blocker is not None:
             self.status.set(blocker)
             return
-        selected = filedialog.askdirectory(title=text("ui.dialog.dataset.choose_title"))
+        selected = filedialog.askdirectory(
+            title=text("ui.dialog.dataset.choose_title"),
+            parent=self,
+        )
         if not selected:
             return
 
@@ -539,7 +545,7 @@ class AutosportApp(tk.Tk):
             message_text = text("ui.error.dataset.worker_not_started")
             self.status.set(message_text)
             self._append_log(message_text)
-            messagebox.showerror(text("ui.dialog.title"), message_text)
+            messagebox.showerror(text("ui.dialog.title"), message_text, parent=self)
             return
 
         self._set_replay_controls_busy(True)
@@ -564,7 +570,7 @@ class AutosportApp(tk.Tk):
             message_text = text("ui.error.dataset.rejected", detail=message.error)
             self.status.set(text("ui.status.dataset.validation_failed"))
             self._append_log(message_text)
-            messagebox.showerror(text("ui.dialog.title"), message_text)
+            messagebox.showerror(text("ui.dialog.title"), message_text, parent=self)
             return
 
         dataset = message.result
@@ -576,7 +582,7 @@ class AutosportApp(tk.Tk):
             message_text = text("ui.error.dataset.identity_mismatch")
             self.status.set(text("ui.status.dataset.identity_mismatch"))
             self._append_log(message_text)
-            messagebox.showerror(text("ui.dialog.title"), message_text)
+            messagebox.showerror(text("ui.dialog.title"), message_text, parent=self)
             return
 
         self.dataset_path = pending_path
@@ -723,6 +729,7 @@ class AutosportApp(tk.Tk):
             initialfile="autosport-evidence.json",
             defaultextension=".json",
             filetypes=((text("ui.filetype.json"), "*.json"), (text("ui.filetype.all"), "*.*")),
+            parent=self,
         )
         if not output:
             return
@@ -749,7 +756,7 @@ class AutosportApp(tk.Tk):
             message_text = text("ui.status.evidence_export.destination_invalid")
             self.status.set(message_text)
             self._append_log(message_text)
-            messagebox.showerror(text("ui.dialog.title"), message_text)
+            messagebox.showerror(text("ui.dialog.title"), message_text, parent=self)
             return
 
         worker = self.__dict__.get("evidence_export_worker")
@@ -785,7 +792,7 @@ class AutosportApp(tk.Tk):
             message_text = text("ui.error.evidence_export.failed", error=message.error)
             self.status.set(message_text)
             self._append_log(message_text)
-            messagebox.showerror(text("ui.dialog.title"), message_text)
+            messagebox.showerror(text("ui.dialog.title"), message_text, parent=self)
             return
 
         message_text = text("ui.status.evidence_export.complete")
@@ -814,6 +821,7 @@ class AutosportApp(tk.Tk):
             messagebox.showerror(
                 text("ui.dialog.title"),
                 text("ui.error.recovery.configuration", detail=_safe_exception_text(exc)),
+                parent=self,
             )
             self.status.set(text("ui.status.recovery.configuration_rejected"))
             return
@@ -830,7 +838,7 @@ class AutosportApp(tk.Tk):
             detail = text("ui.error.recovery.teardown_no_reopen")
             self.status.set(text("ui.status.recovery.teardown_blocked"))
             self._append_log(detail)
-            messagebox.showerror(text("ui.dialog.title"), detail)
+            messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
             return
 
         try:
@@ -841,7 +849,7 @@ class AutosportApp(tk.Tk):
             detail = text("ui.error.recovery.failure", detail=_safe_exception_text(exc))
             self.status.set(text("ui.status.recovery.failed_until_fixed"))
             self._append_log(detail)
-            messagebox.showerror(text("ui.dialog.title"), detail)
+            messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
             return
 
         summary = text(
@@ -859,6 +867,7 @@ class AutosportApp(tk.Tk):
             messagebox.showwarning(
                 text("ui.dialog.title"),
                 text("ui.warning.recovery.unresolved"),
+                parent=self,
             )
             return
 
@@ -873,7 +882,7 @@ class AutosportApp(tk.Tk):
             )
             self.status.set(text("ui.status.recovery.reopen_blocked"))
             self._append_log(detail)
-            messagebox.showerror(text("ui.dialog.title"), detail)
+            messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
             return
 
         self._startup_economic_error = None
@@ -881,14 +890,14 @@ class AutosportApp(tk.Tk):
         self._refresh_tickets()
         self._recovery_required_workspaces.discard(replay_workspace)
         self.status.set(summary + text("ui.status.recovery.ready_suffix"))
-        messagebox.showinfo(text("ui.dialog.title"), text("ui.info.recovery.complete"))
+        messagebox.showinfo(text("ui.dialog.title"), text("ui.info.recovery.complete"), parent=self)
 
     def run_dataset(self) -> None:
         if self._dataset_busy:
             self.status.set(text("ui.status.replay.dataset_busy"))
             return
         if not self.dataset_path:
-            messagebox.showinfo(text("ui.dialog.title"), text("ui.info.replay.dataset_required"))
+            messagebox.showinfo(text("ui.dialog.title"), text("ui.info.replay.dataset_required"), parent=self)
             return
         if self.replay_worker.busy:
             self.status.set(text("ui.status.replay.already_busy"))
@@ -906,6 +915,7 @@ class AutosportApp(tk.Tk):
             messagebox.showerror(
                 text("ui.dialog.title"),
                 text("ui.error.replay.configuration", detail=_safe_exception_text(exc)),
+                parent=self,
             )
             self.status.set(text("ui.status.replay.configuration_rejected"))
             return
@@ -915,7 +925,7 @@ class AutosportApp(tk.Tk):
             message_text = text("ui.status.replay.quarantined")
             self.status.set(message_text)
             self._append_log(message_text)
-            messagebox.showwarning(text("ui.dialog.title"), message_text)
+            messagebox.showwarning(text("ui.dialog.title"), message_text, parent=self)
             return
 
         dataset_path = self.dataset_path
@@ -927,7 +937,7 @@ class AutosportApp(tk.Tk):
             detail = text("ui.error.replay.teardown")
             self.status.set(text("ui.status.replay.teardown_blocked"))
             self._append_log(detail)
-            messagebox.showerror(text("ui.dialog.title"), detail)
+            messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
             return
 
         self._active_workspace = replay_workspace
@@ -993,7 +1003,7 @@ class AutosportApp(tk.Tk):
             self._append_log(message_text)
             self._set_evaluation_lines([text("ui.evaluation.replay_failed")])
             self.status.set(text("ui.status.replay.failed_recovery"))
-            messagebox.showerror(text("ui.dialog.title"), message_text)
+            messagebox.showerror(text("ui.dialog.title"), message_text, parent=self)
             return
 
         result = message.result
@@ -1021,7 +1031,7 @@ class AutosportApp(tk.Tk):
             )
             self.status.set(text("ui.status.replay.reopen_blocked"))
             self._append_log(detail)
-            messagebox.showerror(text("ui.dialog.title"), detail)
+            messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
             return
 
         self._startup_economic_error = None

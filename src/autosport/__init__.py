@@ -215,3 +215,7 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+# Prospective campaign publication must not dispatch through post-import retargeted
+# module globals. Freeze the owning positive publisher's exact composed graph.
+from . import _campaign_precommit_manifest_dispatch_guard as _campaign_precommit_manifest_dispatch_guard  # noqa: F401,E402

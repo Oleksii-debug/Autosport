@@ -77,7 +77,7 @@ class ReplayTimestampOrderTests(unittest.TestCase):
             "observed-late",
             "2026-01-01T00:10:00+00:00",
             1,
-            ingest_ts="2026-01-01T00:00:00+00:00",
+            ingest_ts="2026-01-01T00:10:00+00:00",
         )
         fully_available_earlier = self._event(
             "available-earlier",

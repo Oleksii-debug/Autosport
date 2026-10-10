@@ -264,7 +264,9 @@ class RunRegistryIdentityExactTypeTests(unittest.TestCase):
                     ),
                 ),
             )
-            with self.assertRaisesRegex(ValueError, "exact TrustedOutcomeRevision"):
+            with self.assertRaisesRegex(
+                ValueError, "exact tuple of TrustedOutcomeRevision"
+            ):
                 registry.begin(
                     "a" * 64,
                     "b" * 64,

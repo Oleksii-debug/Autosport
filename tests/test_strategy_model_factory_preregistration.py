@@ -108,7 +108,7 @@ def test_factory_rejects_retrospective_preregistration_before_any_candidate_muta
         "lawful-provider:fixture",
         "license-evidence:v1",
         T1,
-        T0,
+        T1,
         outcome_reveal_after=T1,
     )
     feature_set = FeatureSet(

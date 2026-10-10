@@ -207,7 +207,7 @@ class DatasetQuoteCalculationCliTests(unittest.TestCase):
             calculate_dataset_quote(_args())
 
     def test_future_observed_quote_is_rejected(self) -> None:
-        dataset = _FakeDataset([_event(observed_ts="2026-09-19T12:00:01+00:00")])
+        dataset = _FakeDataset([_event(observed_ts="2026-09-19T12:00:01+00:00", ingest_ts="2026-09-19T12:00:02+00:00")])
         with patch(
             "autosport.dataset_calculation_cli.load_dataset",
             return_value=dataset,
@@ -269,7 +269,7 @@ class DatasetQuoteCalculationCliTests(unittest.TestCase):
         self.assertEqual(payload["selected_quote_identity"]["market_type"], MarketType.WINNER.value)
 
     def test_run_fail_closed_returns_nonzero_without_partial_result(self) -> None:
-        dataset = _FakeDataset([_event(observed_ts="2026-09-19T12:01:00+00:00")])
+        dataset = _FakeDataset([_event(observed_ts="2026-09-19T12:01:00+00:00", ingest_ts="2026-09-19T12:01:01+00:00")])
         with patch(
             "autosport.dataset_calculation_cli.load_dataset",
             return_value=dataset,

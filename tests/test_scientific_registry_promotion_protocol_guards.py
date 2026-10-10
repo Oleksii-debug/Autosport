@@ -83,7 +83,7 @@ def _seed_foundation(registry: ScientificRegistry, *, dataset_cutoff: str = T1):
         "lawful-provider:fixture",
         "license-evidence:v1",
         dataset_cutoff,
-        T0,
+        dataset_cutoff,
         outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)

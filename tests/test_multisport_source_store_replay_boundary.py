@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
@@ -56,6 +57,16 @@ class MultiSportSourceStoreReplayBoundaryTests(unittest.TestCase):
         )
 
     def test_sport_identity_causal_cutoff_and_restart_remain_bound(self) -> None:
+        # Make persisted product availability follow this recorded fixture's
+        # acquisition chronology, rather than the CI runner's wall clock.
+        # The late correction must not become visible at the earlier cutoff.
+        product_clock = ["2026-09-22T00:00:00Z"]
+        clock_patch = patch(
+            "autosport.storage._market_product_utc_now",
+            side_effect=lambda: product_clock[0],
+        )
+        clock_patch.start()
+        self.addCleanup(clock_patch.stop)
         table_tennis = self._event(
             sport="table_tennis",
             sequence=1,
@@ -88,6 +99,7 @@ class MultiSportSourceStoreReplayBoundaryTests(unittest.TestCase):
             strategy_events: list[MarketEvent] = []
 
             def persist_raw(event: MarketEvent) -> None:
+                product_clock[0] = event.ingest_ts
                 raw_events.append(event)
                 store.append(event)
 
@@ -122,6 +134,7 @@ class MultiSportSourceStoreReplayBoundaryTests(unittest.TestCase):
                 Decimal("3.00"),
             )
 
+            product_clock[0] = "2026-09-22T00:15:00Z"
             late = MarketMirror.replay_view_from_store(
                 store,
                 as_of=self._instant("2026-09-22T00:15:00Z"),

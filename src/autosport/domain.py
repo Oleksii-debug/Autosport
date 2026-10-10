@@ -5,6 +5,7 @@ import binascii
 import copy
 import json
 import math
+import re
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
 from decimal import Decimal, InvalidOperation
@@ -67,6 +68,14 @@ def _canonical_semantic_identity(value: object, field_name: str) -> str:
 
 def _timezone_aware_iso8601_value(value: object, field_name: str) -> str:
     timestamp = _canonical_string_value(value, field_name)
+    for match in re.finditer(r"[.,]([0-9]+)", timestamp):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{field_name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(timestamp.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -74,6 +83,21 @@ def _timezone_aware_iso8601_value(value: object, field_name: str) -> str:
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{field_name} must be timezone-aware ISO-8601")
     return timestamp
+
+
+def _canonical_market_event_chronology(
+    observed_ts: object,
+    ingest_ts: object,
+) -> tuple[str, str]:
+    """Validate the product-local observation -> ingestion causal ordering."""
+
+    observed = _timezone_aware_iso8601_value(observed_ts, "observed_ts")
+    ingest = _timezone_aware_iso8601_value(ingest_ts, "ingest_ts")
+    observed_instant = datetime.fromisoformat(observed.replace("Z", "+00:00"))
+    ingest_instant = datetime.fromisoformat(ingest.replace("Z", "+00:00"))
+    if ingest_instant < observed_instant:
+        raise ValueError("ingest_ts cannot be before observed_ts")
+    return observed, ingest
 
 
 def _required_canonical_string(raw: dict[str, Any], field_name: str) -> str:
@@ -445,8 +469,7 @@ class MarketEvent:
         if type(self.market_type) is not MarketType:
             raise ValueError("market_type must be canonical MarketType")
         _canonical_sequence_value(self.sequence)
-        _timezone_aware_iso8601_value(self.observed_ts, "observed_ts")
-        _timezone_aware_iso8601_value(self.ingest_ts, "ingest_ts")
+        _canonical_market_event_chronology(self.observed_ts, self.ingest_ts)
         if self.source_ts is not None:
             _timezone_aware_iso8601_value(self.source_ts, "source_ts")
         object.__setattr__(
@@ -540,6 +563,7 @@ class MarketEvent:
     def from_dict(cls, raw: dict[str, Any]) -> "MarketEvent":
         if type(raw) is not dict:
             raise ValueError("serialized market event must be a JSON object")
+
         required_fields = {
             "event_id",
             "market_id",
@@ -660,19 +684,32 @@ class MarketEvent:
         )
         if type(self.market_type) is not MarketType:
             raise ValueError("market_type must be canonical MarketType")
+        # Chronology is authority-bearing too. Frozen dataclasses can still be
+        # tampered with through object.__setattr__, so re-prove every causal
+        # timestamp at the public serialization boundary instead of publishing
+        # unchecked post-construction values.
+        canonical_observed_ts, canonical_ingest_ts = _canonical_market_event_chronology(
+            self.observed_ts,
+            self.ingest_ts,
+        )
+        canonical_source_ts = (
+            None
+            if self.source_ts is None
+            else _timezone_aware_iso8601_value(self.source_ts, "source_ts")
+        )
 
         payload = {
             "event_id": canonical_event_id,
             "market_id": canonical_market_id,
             "selection_id": canonical_selection_id,
             "decimal_odds": str(self.decimal_odds),
-            "observed_ts": self.observed_ts,
+            "observed_ts": canonical_observed_ts,
             "source_id": canonical_source_id,
             "sequence": canonical_sequence,
             "market_type": self.market_type.value,
             "status": self.status,
-            "source_ts": self.source_ts,
-            "ingest_ts": self.ingest_ts,
+            "source_ts": canonical_source_ts,
+            "ingest_ts": canonical_ingest_ts,
             "score_state": self.score_state,
             "metadata": _serialized_metadata({"metadata": self.metadata}),
         }

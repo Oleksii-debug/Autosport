@@ -284,15 +284,29 @@ def test_dataset_snapshot_itself_must_be_available_by_decision(tmp_path) -> None
 
 
 def test_dataset_causal_cutoff_after_decision_fails_closed(tmp_path) -> None:
-    snapshot, feature_set, provenance, _, lineage = _canonical_feature_context(
-        tmp_path, causal_cutoff="2026-09-20T10:02:01Z"
-    )
-    with pytest.raises(FutureEvidenceError, match="causal cutoff"):
-        PointInTimeFeatureAuthority.bind(
-            dataset_snapshot=snapshot, feature_set=feature_set,
-            feature_provenance=provenance, lineage_authority=lineage,
-            decision_cutoff_utc="2026-09-20T10:02:00Z",
+    # A snapshot physically available by the decision cannot contain a
+    # later causal cutoff. The canonical snapshot constructor must reject
+    # that impossible chronology before registry/lineage publication.
+    with pytest.raises(
+        ValueError, match="available_at must not precede causal_cutoff"
+    ):
+        _canonical_feature_context(
+            tmp_path, causal_cutoff="2026-09-20T10:02:01Z"
         )
+    # initialize_pristine itself creates an empty, durable registry before
+    # the invalid snapshot reaches append(). Refusal means NO new records,
+    # not that the already-created registry file disappears.
+    registry_file = tmp_path / "scientific-registry.json"
+    assert json.loads(registry_file.read_text(encoding="utf-8")) == {
+        "schema_version": ScientificRegistry.SCHEMA_VERSION,
+        "records": [],
+    }
+    assert not (tmp_path / "dataset-snapshot-lineage.json").exists()
+    # The rejected append must not corrupt the durable registry on restart.
+    restarted_registry = ScientificRegistry(registry_file)
+    assert restarted_registry.causal_records(
+        "DatasetSnapshot", as_of="2026-09-21T00:00:00Z"
+    ) == ()
 
 
 def test_renamed_snapshot_cannot_mint_fresh_holdout_after_restart(tmp_path) -> None:
@@ -608,6 +622,7 @@ def test_feature_authority_rejects_lineage_authority_subclass_before_virtual_dis
             decision_cutoff_utc="2099-01-01T00:00:00Z",
         )
 
+
 def test_feature_provenance_rejects_boolean_schema_version_alias() -> None:
     snapshot = _snapshot()
     feature_set = _feature_set()
@@ -684,3 +699,11 @@ def test_holdout_ledger_rejects_boolean_schema_version_without_rewrite(tmp_path)
 
     assert path.read_bytes() == forged
 
+
+
+def test_point_in_time_parser_rejects_nonzero_submicrosecond_timestamp_precision() -> None:
+    with pytest.raises(PointInTimeEvidenceError, match="precision finer than microseconds"):
+        point_in_time_module._instant(
+            "2026-09-20T10:00:00.1234561Z",
+            "test causal timestamp",
+        )

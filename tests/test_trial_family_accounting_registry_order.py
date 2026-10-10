@@ -114,7 +114,7 @@ def _foundation(tmp_path):
         "lawful-provider:fixture",
         "license-evidence:v1",
         T1,
-        T0,
+        T1,
         outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)

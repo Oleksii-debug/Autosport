@@ -4,10 +4,13 @@ import json
 import sqlite3
 import tempfile
 import unittest
+from contextlib import closing
+from unittest.mock import patch
 from decimal import Decimal
 from pathlib import Path
 
 from autosport.domain import MarketEvent, MarketType
+from autosport.monotonic_workspace_authority import MonotonicAuthorityRollbackError
 from autosport.storage import SQLiteMarketStore
 
 
@@ -190,10 +193,13 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
                     (baseline.source_id, baseline.quote_key),
                 )
                 store.connection.commit()
-                self.assertNotIn(
-                    (baseline.source_id, baseline.quote_key),
-                    store.current_by_source(),
-                )
+                # Trusted reads reject missing derived rows rather than returning
+                # an incomplete projection that could conceal historical semantics.
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "current quote projection diverges from canonical market history",
+                ):
+                    store.current_by_source()
 
                 with self.assertRaisesRegex(
                     ValueError,
@@ -292,7 +298,7 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     ValueError,
-                    "current market quote projection conflicts with authoritative history",
+                    "market quote stream semantic identity changed",
                 ):
                     store.append(continuation)
 
@@ -333,9 +339,11 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             finally:
                 connection.close()
 
+            # The signed append-chain proof fails before per-stream validation.
+            # Neither boundary may re-accept the rewritten durable history.
             with self.assertRaisesRegex(
-                ValueError,
-                "market quote stream semantic identity changed",
+                MonotonicAuthorityRollbackError,
+                "positive market append authority semantic binding is invalid",
             ):
                 SQLiteMarketStore(db_path)
 
@@ -391,6 +399,131 @@ class MarketStoreStreamSemanticIdentityTests(unittest.TestCase):
             finally:
                 store.close()
 
+
+
+    def test_duplicate_batch_amortizes_projection_proof_without_skipping_identity(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=53)
+                second = self._event(sequence=54, odds="2.55")
+                self.assertEqual(
+                    store.append_batch_accepted((first, second)),
+                    [first, second],
+                )
+                with patch.object(
+                    store,
+                    "_repair_current_projection_for_key",
+                    wraps=store._repair_current_projection_for_key,
+                ) as repair:
+                    self.assertEqual(
+                        store.append_batch_accepted((first, second, first, second)),
+                        [],
+                    )
+                    self.assertEqual(repair.call_count, 1)
+                self.assertEqual(len(store.events()), 2)
+                self.assertEqual(
+                    store.current_by_source()[(first.source_id, first.quote_key)].dedupe_key,
+                    second.dedupe_key,
+                )
+            finally:
+                store.close()
+
+    def test_new_append_invalidates_duplicate_projection_batch_cache(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=55)
+                next_event = self._event(sequence=56, odds="2.60")
+                self.assertTrue(store.append(first))
+                with patch.object(
+                    store,
+                    "_repair_current_projection_for_key",
+                    wraps=store._repair_current_projection_for_key,
+                ) as repair:
+                    self.assertEqual(
+                        store.append_batch_accepted((first, next_event, first)),
+                        [next_event],
+                    )
+                    self.assertEqual(repair.call_count, 3)
+                store.close()
+                store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+                self.assertEqual(len(store.events()), 2)
+                self.assertEqual(
+                    store.current_by_source()[(first.source_id, first.quote_key)].dedupe_key,
+                    next_event.dedupe_key,
+                )
+            finally:
+                store.close()
+
+
+    def test_reuses_only_same_connection_unchanged_positive_append_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=71)
+                second = self._event(sequence=72, odds="2.71")
+                self.assertTrue(store.append(first))
+                with patch.object(
+                    store,
+                    "_validated_positive_append_entries",
+                    wraps=store._validated_positive_append_entries,
+                ) as full_validation:
+                    self.assertEqual(store.append_batch_accepted((first,)), [])
+                    self.assertEqual(store.append_batch_accepted((second,)), [second])
+                    self.assertEqual(store.append_batch_accepted((second,)), [])
+                    self.assertEqual(full_validation.call_count, 0)
+                self.assertEqual(len(store.events()), 2)
+            finally:
+                store.close()
+
+    def test_external_sql_tamper_invalidates_cached_append_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            db_path = Path(temp_dir) / "market.db"
+            store = SQLiteMarketStore(db_path)
+            try:
+                first = self._event(sequence=73)
+                self.assertTrue(store.append(first))
+                with closing(sqlite3.connect(db_path)) as other, other:
+                    original = other.execute(
+                        "SELECT decimal_odds FROM market_events WHERE dedupe_key=?",
+                        (first.dedupe_key,),
+                    ).fetchone()[0]
+                    other.execute(
+                        "UPDATE market_events SET decimal_odds=? WHERE dedupe_key=?",
+                        ("999.1", first.dedupe_key),
+                    )
+                with self.assertRaisesRegex(
+                    ValueError, "market event history row identity mismatch"
+                ):
+                    store.append_batch_accepted((first,))
+                with closing(sqlite3.connect(db_path)) as other, other:
+                    other.execute(
+                        "UPDATE market_events SET decimal_odds=? WHERE dedupe_key=?",
+                        (original, first.dedupe_key),
+                    )
+                self.assertEqual(store.append_batch_accepted((first,)), [])
+                self.assertEqual(len(store.events()), 1)
+            finally:
+                store.close()
+
+    def test_same_connection_sql_tamper_invalidates_cached_append_proof(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            store = SQLiteMarketStore(Path(temp_dir) / "market.db")
+            try:
+                first = self._event(sequence=74)
+                self.assertTrue(store.append(first))
+                store.connection.execute(
+                    "UPDATE market_events SET decimal_odds=? WHERE dedupe_key=?",
+                    ("777.1", first.dedupe_key),
+                )
+                store.connection.commit()
+                with self.assertRaisesRegex(
+                    ValueError, "market event history row identity mismatch"
+                ):
+                    store.append_batch_accepted((first,))
+            finally:
+                store.close()
 
 if __name__ == "__main__":
     unittest.main()

@@ -137,7 +137,7 @@ def test_pipeline_rejects_post_construction_naive_evidence_timestamp() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "research-decisions.jsonl"
-        with pytest.raises(ValueError, match="timezone-aware"):
+        with pytest.raises(ValueError, match="timestamps must include timezone"):
             ResearchDecisionPipeline().decide_and_open(
                 book=PaperBook("1000"),
                 candidate=_candidate(),

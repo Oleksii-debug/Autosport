@@ -643,6 +643,23 @@ def _event_from_current_row(row: tuple[object, ...]) -> MarketEvent:
         raise ValueError("current quote projection row has unexpected shape")
 
     source_id, quote_key, observed_ts, sequence, payload_json = row
+    # Prove redundant columns before model construction. A hostile payload can
+    # violate chronology (for example, a future observed_ts after ingest_ts)
+    # and fail decoding before the ordinary identity checks below. That must
+    # not be mistaken for a repairable derived cache entry at append time.
+    if isinstance(payload_json, str):
+        raw_identity = _load_history_payload(payload_json)
+        for field_name, persisted in (
+            ("source_id", source_id),
+            ("observed_ts", observed_ts),
+            ("sequence", sequence),
+        ):
+            if field_name in raw_identity and not _typed_equal(
+                persisted, raw_identity[field_name]
+            ):
+                raise ValueError(
+                    f"current quote projection row identity mismatch: {field_name}"
+                )
     event = _event_from_current_payload(payload_json)
 
     expected = (
@@ -1017,6 +1034,13 @@ class SQLiteMarketStore:
         # same durable database.
         self.path = Path(path).resolve(strict=False)
         self._connection_lock = RLock()
+        # Serialize threads of one store before attempting its nonblocking
+        # cross-process append lease; never substitute this for the OS lock.
+        self._append_thread_lock = RLock()
+        # Only a same-connection, same-database, unchanged-history proof can
+        # be reused across ingestion batches. External SQL writes invalidate
+        # PRAGMA data_version; same-connection SQL writes change total_changes.
+        self._trusted_positive_append_cache: tuple[int, str, tuple[int, int, int]] | None = None
 
         # Ensure even a brand-new database has an inode that can be witnessed both
         # before and after sqlite3.connect(). Without this pre/post witness, a
@@ -2305,6 +2329,17 @@ class SQLiteMarketStore:
             raise ValueError("positive market event append generations are not contiguous")
         return row[1]
 
+    def _positive_append_storage_stamp(self) -> tuple[int, int, int]:
+        """Witness changes by this connection, other connections, and DDL."""
+        data_version = self.connection.execute("PRAGMA data_version").fetchone()
+        schema_version = self.connection.execute("PRAGMA schema_version").fetchone()
+        if (
+            data_version is None or type(data_version[0]) is not int
+            or schema_version is None or type(schema_version[0]) is not int
+        ):
+            raise ValueError("cannot witness market append SQLite version")
+        return (data_version[0], schema_version[0], self.connection.total_changes)
+
     def _validated_positive_append_entries(
         self,
         *,
@@ -2379,6 +2414,16 @@ class SQLiteMarketStore:
         authority: MonotonicWorkspaceAuthority,
     ) -> tuple[int, str]:
         history = authority.read_history()
+        # The journal is read and authenticated on every call. Skip the costly
+        # full SQLite row-decoding/chain proof only when the *same* connection
+        # has observed no intervening SQL write (including out-of-band writes).
+        # The issuance lock and SQLite transaction are already held by callers.
+        if history and history[-1].phase is AuthorityPhase.COMMIT:
+            tip_head, tip_sha256 = self._append_authority_committed_tip(history)
+            if self._trusted_positive_append_cache == (
+                tip_head, tip_sha256, self._positive_append_storage_stamp()
+            ):
+                return tip_head, tip_sha256
         if history and history[-1].phase is AuthorityPhase.PREPARE:
             pending = history[-1]
             entries = self._validated_positive_append_entries()
@@ -2441,6 +2486,10 @@ class SQLiteMarketStore:
             raise MonotonicAuthorityRollbackError(
                 "positive market append chronology is missing, forged, or unproven"
             )
+        self._trusted_positive_append_cache = (
+            committed_head, committed_state_sha256,
+            self._positive_append_storage_stamp(),
+        )
         return committed_head, committed_state_sha256
 
     def _require_product_issued_positive_history(
@@ -2854,9 +2903,14 @@ class SQLiteMarketStore:
         if current_row is not None:
             try:
                 current_event = _event_from_current_row(current_row)
-            except ValueError:
-                # current_quotes is derived and repairable. Malformed projection
-                # bytes cannot override the already-proven append-only history.
+            except ValueError as exc:
+                # A redundant identity mismatch is evidence of a tampered or
+                # inconsistent projection. Do not silently acknowledge an append
+                # by repairing those bytes in the same transaction.
+                if str(exc).startswith("current quote projection row identity mismatch:"):
+                    raise
+                # Malformed derived payloads remain repairable from independently
+                # proven append-only history.
                 current_event = None
             else:
                 if _stream_semantic_identity(current_event) != _stream_semantic_identity(
@@ -2888,7 +2942,12 @@ class SQLiteMarketStore:
         )
         return event
 
-    def _insert_one(self, event: MarketEvent) -> bool:
+    def _insert_one(
+        self,
+        event: MarketEvent,
+        *,
+        validated_duplicate_projections: set[tuple[str, str]] | None = None,
+    ) -> bool:
         payload = _validate_incoming_event(event)
         cursor = self.connection.execute(
             """INSERT INTO market_events
@@ -2915,8 +2974,15 @@ class SQLiteMarketStore:
             ).fetchone()
             if existing is None:
                 raise RuntimeError("market event dedupe conflict row disappeared")
-            existing_event = _event_from_history_row(existing)
-            if _source_payload(existing_event) != _source_payload(event):
+            # The complete positive history (including the redundant identity
+            # columns) was decoded and authenticated at the start of this
+            # BEGIN IMMEDIATE batch. An uncooperating SQLite writer cannot alter
+            # it before COMMIT, so avoid decoding the same row a second time
+            # for every duplicate while retaining the exact source-payload
+            # comparison (receipt clocks are intentionally excluded).
+            if _source_payload_from_raw(
+                _load_history_payload(existing[-1])
+            ) != _source_payload(event):
                 raise ValueError(
                     "conflicting duplicate market event identity: "
                     f"{event.dedupe_key}"
@@ -2935,10 +3001,21 @@ class SQLiteMarketStore:
                 raise ValueError(
                     "duplicate market event lacks valid append-generation authority"
                 )
-            self._repair_current_projection_for_key(
-                source_id=event.source_id,
-                quote_key=event.quote_key,
-            )
+            # Only one proof of an unchanged derived projection is needed for
+            # each key inside this same BEGIN IMMEDIATE transaction. Accepted
+            # inserts invalidate the cache below. This is never reused after
+            # COMMIT, rollback, crash, or another append call.
+            projection_key = (event.source_id, event.quote_key)
+            if (
+                validated_duplicate_projections is None
+                or projection_key not in validated_duplicate_projections
+            ):
+                self._repair_current_projection_for_key(
+                    source_id=event.source_id,
+                    quote_key=event.quote_key,
+                )
+                if validated_duplicate_projections is not None:
+                    validated_duplicate_projections.add(projection_key)
             return False
 
         # The just-inserted row is not yet durable. Prove its market-rule semantics
@@ -2966,6 +3043,10 @@ class SQLiteMarketStore:
                VALUES (?, ?)""",
             (event.dedupe_key, self._next_append_generation()),
         )
+        if validated_duplicate_projections is not None:
+            validated_duplicate_projections.discard(
+                (event.source_id, event.quote_key)
+            )
         self._repair_current_projection_for_key(
             source_id=event.source_id,
             quote_key=event.quote_key,
@@ -3003,7 +3084,11 @@ class SQLiteMarketStore:
         # append issuance first, then this instance's SQLite connection lock.
         # Reversing these two locks creates an AB-BA deadlock when one thread is
         # appending while another calls events()/current_by_source().
-        with self._market_append_issuance_lock(authority):
+        # One store's provider drains may run in different threads. Acquire a
+        # store-local lock before the external issuance lease so an ordinary
+        # same-process race cannot masquerade as another economic writer.
+        # Keep the cross-process lease -> SQLite connection lock order intact.
+        with self._append_thread_lock, self._market_append_issuance_lock(authority):
             with self._connection_lock:
                 self.connection.execute("BEGIN IMMEDIATE")
                 prepared: tuple[str, str] | None = None
@@ -3027,14 +3112,30 @@ class SQLiteMarketStore:
                         if prior_availability_rows
                         else None
                     )
+                    # Cache scoped only to the one locked SQLite transaction.
+                    # Every duplicate retains its immutable source-payload
+                    # equality check; each stable key's derived projection is
+                    # verified once until an accepted event changes that key.
+                    validated_duplicate_projections: set[tuple[str, str]] = set()
                     for event in batch:
-                        if self._insert_one(event):
+                        if self._insert_one(
+                            event,
+                            validated_duplicate_projections=validated_duplicate_projections,
+                        ):
                             accepted.append(event)
 
                     if not accepted:
+                        # Capture data_version while BEGIN IMMEDIATE still
+                        # excludes external writers. A write after COMMIT but
+                        # before cache publication must invalidate the witness.
+                        proof_version = self._positive_append_storage_stamp()[:2]
                         self._commit_stable_database_path()
                         self._ensure_market_append_availability_authority(
                             authority
+                        )
+                        self._trusted_positive_append_cache = (
+                            committed_head, committed_state_sha256,
+                            (*proof_version, self.connection.total_changes),
                         )
                         return accepted
 
@@ -3145,6 +3246,7 @@ class SQLiteMarketStore:
                         ),
                     )
                     prepared = (tx_id, binding_sha256)
+                    proof_version = self._positive_append_storage_stamp()[:2]
                     self._commit_stable_database_path()
                 except BaseException:
                     # Once PREPARE exists, do not guess whether SQLite publication
@@ -3159,14 +3261,40 @@ class SQLiteMarketStore:
                 assert prepared is not None
                 tx_id, binding_sha256 = prepared
                 self._require_database_path_identity()
+                # No product SQL mutation is expected while the independent
+                # journal commits. An injected same-connection SQLite write
+                # must never be reclassified as part of the attested append.
+                commit_changes = self.connection.total_changes
                 authority.recover(
                     observed_state_sha256=intended_state_sha256,
                     tx_id=tx_id,
                     semantic_binding_sha256=binding_sha256,
                 )
-                self._ensure_market_append_availability_authority(
-                    authority
-                )
+                if self.connection.total_changes == commit_changes:
+                    self._trusted_positive_append_cache = (
+                        end_generation, intended_state_sha256,
+                        (*proof_version, commit_changes),
+                    )
+                else:
+                    self._trusted_positive_append_cache = None
+                # Availability issuance calls the same append verifier.
+                # Reuse the authenticated append tip here, before that
+                # verifier runs, while still detecting any new direct writer.
+                availability_changes = self.connection.total_changes
+                self._ensure_market_append_availability_authority(authority)
+                # A successful new append has exactly one new product-owned
+                # availability witness. Unexpected SQL effects invalidate the
+                # witness, forcing the full independent proof next time.
+                if (
+                    self._trusted_positive_append_cache is not None
+                    and self.connection.total_changes == availability_changes + 1
+                ):
+                    self._trusted_positive_append_cache = (
+                        end_generation, intended_state_sha256,
+                        (*proof_version, self.connection.total_changes),
+                    )
+                else:
+                    self._trusted_positive_append_cache = None
                 return accepted
 
     def append_many(self, events: Iterable[MarketEvent]) -> int:

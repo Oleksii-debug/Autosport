@@ -242,15 +242,19 @@ class CalculationServiceTests(unittest.TestCase):
             )
 
     def test_ingest_timestamp_before_observation_is_rejected_as_invalid_chronology(self) -> None:
+        # Construction now rejects impossible chronology. Simulate a mutated
+        # valid quote to prove the calculation-time use boundary also fails closed.
+        invalid = self._event(
+            observed_ts="2026-09-14T12:00:00+00:00",
+            ingest_ts="2026-09-14T12:00:00+00:00",
+        )
+        object.__setattr__(invalid, "ingest_ts", "2026-09-14T11:59:59+00:00")
         with self.assertRaisesRegex(
             ValueError,
             "ingest_ts is before observed_ts",
         ):
             self.service.implied_probability_for_event(
-                self._event(
-                    observed_ts="2026-09-14T12:00:00+00:00",
-                    ingest_ts="2026-09-14T11:59:59+00:00",
-                ),
+                invalid,
                 causal_cutoff_ts="2026-09-14T12:01:00+00:00",
             )
 
@@ -495,7 +499,12 @@ class CalculationServiceTests(unittest.TestCase):
                 self.assertIsNotNone(value)
                 object.__setattr__(invalid, field, TrapStr(value))
 
-                with self.assertRaisesRegex(ValueError, "quote fields are not canonical"):
+                # Exact timestamp validation precedes serialization and must
+                # reject str subclasses without dispatching TrapStr.strip().
+                with self.assertRaisesRegex(
+                    ValueError,
+                    rf"{field} must be a non-empty trimmed timezone-aware ISO timestamp",
+                ):
                     self.service.implied_probability_for_event(
                         invalid,
                         causal_cutoff_ts="2026-09-14T12:00:00+00:00",
@@ -527,19 +536,13 @@ class CalculationServiceTests(unittest.TestCase):
                 return super().__getattribute__(name)
 
         canonical = self._event()
-        hostile = HostileMarketEvent(
-            event_id=canonical.event_id,
-            market_id=canonical.market_id,
-            selection_id=canonical.selection_id,
-            decimal_odds=canonical.decimal_odds,
-            observed_ts=canonical.observed_ts,
-            source_id=canonical.source_id,
-            sequence=canonical.sequence,
-            market_type=canonical.market_type,
-            source_ts=canonical.source_ts,
-            ingest_ts=canonical.ingest_ts,
-            metadata={},
-        )
+        hostile = object.__new__(HostileMarketEvent)
+        for field_name in canonical.__dataclass_fields__:
+            object.__setattr__(
+                hostile,
+                field_name,
+                object.__getattribute__(canonical, field_name),
+            )
 
         with self.assertRaisesRegex(ValueError, "event must be an exact MarketEvent"):
             self.service.implied_probability_for_event(

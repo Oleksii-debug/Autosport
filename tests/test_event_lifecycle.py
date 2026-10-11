@@ -912,20 +912,24 @@ class ContinuousEventLifecycleTests(unittest.TestCase):
             )
             store = SQLiteMarketStore(root / "market.db")
             try:
-                impossible = MarketEvent(
-                    event_id=self._stored_event_id("event-1"),
-                    market_id="winner",
-                    selection_id="home",
-                    decimal_odds=Decimal("2.00"),
-                    observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
-                    source_id="provider-a",
-                    sequence=1,
-                    source_ts=self.START.isoformat(),
-                    ingest_ts=(self.START + timedelta(seconds=1)).isoformat(),
-                    sport="table_tennis",
-                )
+                # The domain must reject an impossible locally inverted
+                # observation/ingestion clock before it reaches durable history.
+                with self.assertRaisesRegex(
+                    ValueError, "ingest_ts cannot be before observed_ts"
+                ):
+                    MarketEvent(
+                        event_id=self._stored_event_id("event-1"),
+                        market_id="winner",
+                        selection_id="home",
+                        decimal_odds=Decimal("2.00"),
+                        observed_ts=(self.START + timedelta(seconds=2)).isoformat(),
+                        source_id="provider-a",
+                        sequence=1,
+                        source_ts=self.START.isoformat(),
+                        ingest_ts=(self.START + timedelta(seconds=1)).isoformat(),
+                        sport="table_tennis",
+                    )
                 self._product_now = self.START + timedelta(seconds=3)
-                self.assertTrue(store.append(impossible))
 
                 assessment = self._assess_evidence(
                     lifecycle,

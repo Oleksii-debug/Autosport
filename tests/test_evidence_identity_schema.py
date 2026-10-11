@@ -255,13 +255,22 @@ class EvidenceIdentitySchemaTests(unittest.TestCase):
             )
 
     def test_research_packet_rejects_duplicate_evidence_identity(self):
-        first = self._item(evidence_id="same-evidence")
+        first = EvidenceItem(
+            evidence_id="same-evidence",
+            as_of_ts="2026-10-07T00:00:00+00:00",
+            source="provider:test",
+            kind="research",
+            payload={"participant": "selection-a"},
+            source_hash="a" * 64,
+            available_at="2026-10-07T00:00:00+00:00",
+        )
         second = EvidenceItem(
             evidence_id="same-evidence",
             as_of_ts="2026-10-07T00:00:01+00:00",
             source="provider:test",
             kind="research",
             payload={"participant": "selection-b"},
+            available_at="2026-10-07T00:00:01+00:00",
         )
         with self.assertRaisesRegex(ValueError, "duplicate evidence identity"):
             ResearchPacket(

@@ -230,21 +230,28 @@ def _snapshot_quote_at_cutoff(
     cutoff_value: datetime,
 ) -> MarketQuoteEvidence:
     raw = _quote_scalar_snapshot(event)
+
+    # Preserve the service boundary's field-specific diagnostics before adapting
+    # the exact in-memory MarketEvent to the stricter serialized ingress contract.
+    # These reads are from the already captured scalar snapshot; metadata and
+    # future-only fields are never traversed.
+    _validate_quote_identity_utf8(event)
+    observed = _timestamp(raw["observed_ts"], field="observed_ts")
+    ingest = _timestamp(raw["ingest_ts"], field="ingest_ts")
+    source_raw = raw.get("source_ts")
+    source = (
+        None
+        if source_raw is None
+        else _timestamp(source_raw, field="source_ts")
+    )
+    if ingest < observed:
+        raise ValueError("selected quote ingest_ts is before observed_ts")
+
     try:
         canonical = MarketEvent.from_dict(raw)
     except (AttributeError, KeyError, TypeError, ValueError) as exc:
         raise ValueError("market event quote fields are not canonical") from exc
 
-    observed = _timestamp(canonical.observed_ts, field="observed_ts")
-    ingest = _timestamp(canonical.ingest_ts, field="ingest_ts")
-    source = (
-        None
-        if canonical.source_ts is None
-        else _timestamp(canonical.source_ts, field="source_ts")
-    )
-
-    if ingest < observed:
-        raise ValueError("selected quote ingest_ts is before observed_ts")
     if observed > cutoff_value:
         raise ValueError("selected quote observed_ts is after the calculation causal cutoff")
     if source is not None and source > cutoff_value:

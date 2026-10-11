@@ -182,16 +182,16 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
             release_first_read = threading.Event()
             second_started = threading.Event()
             second_reached_read = threading.Event()
-            original_read = RunRegistry._read
+            original_read_bytes = RunRegistry._read_existing_bytes
             read_once = {"writer-a": False}
 
-            def fenced_read(registry: RunRegistry):
+            def fenced_read_bytes(registry: RunRegistry):
                 name = threading.current_thread().name
-                state = original_read(registry)
+                state = original_read_bytes(registry)
                 if name == "writer-a" and not read_once["writer-a"]:
                     read_once["writer-a"] = True
                     first_read_captured.set()
-                    if not release_first_read.wait(timeout=5):
+                    if not release_first_read.wait(timeout=30):
                         raise AssertionError("test did not release first registry read")
                 elif name == "writer-b":
                     second_reached_read.set()
@@ -224,17 +224,31 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 except BaseException as exc:
                     outcomes["b"] = exc
 
-            with patch.object(RunRegistry, "_read", new=fenced_read):
+            # Keep the guarded RunRegistry._read dispatch unchanged: the
+            # concurrency handshake instruments only the lower-level byte read.
+            with patch.object(RunRegistry, "_read_existing_bytes", new=fenced_read_bytes):
                 thread_a = threading.Thread(target=writer_a, name="writer-a")
                 thread_b = threading.Thread(target=writer_b, name="writer-b")
                 thread_a.start()
-                self.assertTrue(first_read_captured.wait(timeout=5))
-                thread_b.start()
-                self.assertTrue(second_started.wait(timeout=5))
-                self.assertFalse(second_reached_read.wait(timeout=0.25))
-                release_first_read.set()
-                thread_a.join(timeout=5)
-                thread_b.join(timeout=5)
+                try:
+                    # The full matrix is CPU/IO intensive: scheduler delay before
+                    # first lock acquisition is not evidence of a broken CAS.
+                    self.assertTrue(
+                        first_read_captured.wait(timeout=30),
+                        f"writer-a failed before entering locked read: {outcomes.get('a')!r}",
+                    )
+                    thread_b.start()
+                    self.assertTrue(second_started.wait(timeout=30))
+                    # This assertion remains bounded and must prove writer-b
+                    # cannot observe stale state while writer-a holds the lock.
+                    self.assertFalse(second_reached_read.wait(timeout=0.25))
+                finally:
+                    # Also unblock/join on assertion failure: no escaped writer
+                    # may mutate a deleted temporary registry after the test.
+                    release_first_read.set()
+                    thread_a.join(timeout=30)
+                    if thread_b.ident is not None:
+                        thread_b.join(timeout=30)
 
             self.assertFalse(thread_a.is_alive())
             self.assertFalse(thread_b.is_alive())
@@ -312,8 +326,9 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                 rebound_clock.assert_not_called()
 
             durable = json.loads(path.read_text(encoding="utf-8"))
-            revision = durable["outcome_lineage_trust"][0]["revisions"][0]
-            self.assertNotIn("first_available_at", revision)
+            # The failed first issuance must not publish any trusted outcome
+            # lineage; pristine registries may omit this optional key.
+            self.assertFalse(durable.get("outcome_lineage_trust", []))
             self.assertEqual(durable["runs"], {})
             self.assertIsNone(self._resolve(registry, "9999-12-31T23:59:59Z"))
 
@@ -345,8 +360,9 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
                     )
 
             durable = json.loads(path.read_text(encoding="utf-8"))
-            revision = durable["outcome_lineage_trust"][0]["revisions"][0]
-            self.assertNotIn("first_available_at", revision)
+            # The failed first issuance must not publish any trusted outcome
+            # lineage; pristine registries may omit this optional key.
+            self.assertFalse(durable.get("outcome_lineage_trust", []))
             self.assertEqual(durable["runs"], {})
 
     def test_rebinding_run_registry_clock_cannot_extend_trusted_history(self) -> None:
@@ -584,7 +600,10 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
         exact = self._binding("r1")
         hostile = object.__new__(HostileBinding)
         for field in OutcomeLineageBinding.__dataclass_fields__:
-            object.__setattr__(hostile, field, getattr(exact, field))
+            # The hostile property is intentionally unreadable and has no
+            # setter; the exact-type guard must reject before accessing it.
+            if field != "source_identity":
+                object.__setattr__(hostile, field, getattr(exact, field))
 
         with tempfile.TemporaryDirectory() as tmp:
             registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
@@ -598,7 +617,7 @@ class OutcomeRevisionRegistrySerializationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             registry = RunRegistry.initialize_pristine(Path(tmp) / "run_registry.json")
             with self.assertRaisesRegex(
-                OutcomeLineageTrustError,
+                ValueError,
                 "revision_id.*canonical",
             ):
                 registry.assert_outcome_lineage_compatible(binding)

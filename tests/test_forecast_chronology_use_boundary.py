@@ -84,6 +84,6 @@ def test_forecast_ledger_rejects_mutated_naive_cutoff_before_write() -> None:
 
     with tempfile.TemporaryDirectory() as tmp:
         path = Path(tmp) / "forecasts.jsonl"
-        with pytest.raises(ValueError, match="timezone-aware"):
+        with pytest.raises(ValueError, match="timestamps must include timezone"):
             JsonlForecastLedger(path).append(record)
         assert not path.exists()

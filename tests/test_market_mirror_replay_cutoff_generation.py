@@ -480,7 +480,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             ):
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     SQLiteMarketStore(path)
             self.assertTrue(tampered)
@@ -1496,9 +1496,14 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 original_decoder = storage_module._event_from_history_row
 
                 def blocking_decoder(row):
-                    decode_entered.set()
-                    if not release_decode.wait(timeout=10):
-                        raise RuntimeError("test decoder release timeout")
+                    # Patch targets the replay worker only. The independent
+                    # writer can also decode history while proving append
+                    # authority; blocking it would make this test mistake its
+                    # own global monkeypatch for an SQLite writer transaction.
+                    if threading.current_thread() is replay_thread:
+                        decode_entered.set()
+                        if not release_decode.wait(timeout=10):
+                            raise RuntimeError("test decoder release timeout")
                     return original_decoder(row)
 
                 def resolve_existing_cutoff() -> None:
@@ -2184,11 +2189,13 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 def mutate_after_binding_check(
                     authority,
                     *,
+                    cutoff_id: str,
                     expected_binding_sha256: str,
                 ) -> None:
                     nonlocal tampered_once
                     original_require(
                         authority,
+                        cutoff_id=cutoff_id,
                         expected_binding_sha256=expected_binding_sha256,
                     )
                     if tampered_once:
@@ -2235,17 +2242,18 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
-                event = self.event(
-                    sequence=1,
-                    odds="2.00",
-                    observed_ts="2026-09-16T19:00:00.0000004+00:00",
-                    ingest_ts="2026-09-16T19:00:00.0000004+00:00",
-                )
+                # Noncanonical precision must fail at the earliest domain
+                # boundary, before storage has any side effect.
                 with self.assertRaisesRegex(
                     ValueError,
                     "observed_ts precision finer than microseconds is unsupported",
                 ):
-                    store.append(event)
+                    self.event(
+                        sequence=1,
+                        odds="2.00",
+                        observed_ts="2026-09-16T19:00:00.0000004+00:00",
+                        ingest_ts="2026-09-16T19:00:00.0000004+00:00",
+                    )
 
                 self.assertEqual(store.events(), [])
                 self.assertEqual(
@@ -2261,7 +2269,12 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             store = SQLiteMarketStore(Path(directory) / "market.db")
             try:
-                store.append(
+                # Do not turn an invalid source clock into a replay-visible
+                # row by rounding it to microseconds.
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "source_ts precision finer than microseconds is unsupported",
+                ):
                     self.event(
                         sequence=1,
                         odds="2.00",
@@ -2269,8 +2282,13 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                         ingest_ts="2026-09-16T19:00:00+00:00",
                         source_ts="2026-09-16T19:00:01.0000004+00:00",
                     )
+                self.assertEqual(store.events(), [])
+                self.assertEqual(
+                    store.connection.execute(
+                        "SELECT COUNT(*) FROM market_event_commit_order"
+                    ).fetchone(),
+                    (0,),
                 )
-
                 snapshot = self.replay(store)
                 self.assertEqual(snapshot.events, ())
             finally:
@@ -2285,20 +2303,20 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     odds="2.00",
                     observed_ts="2026-09-16T19:00:00+00:00",
                 )
-                tampered = self.event(
-                    sequence=1,
-                    odds="2.00",
-                    observed_ts="2026-09-16T19:00:00.0000004+00:00",
-                    ingest_ts="2026-09-16T19:00:00.0000004+00:00",
-                )
+                # A typed MarketEvent correctly rejects submicrosecond clocks
+                # at construction. Inject the legacy bytes directly into the
+                # stored row to exercise the replay corruption guard instead.
+                tampered = original.to_dict()
+                tampered["observed_ts"] = "2026-09-16T19:00:00.0000004+00:00"
+                tampered["ingest_ts"] = "2026-09-16T19:00:00.0000004+00:00"
                 store.append(original)
                 store.connection.execute(
                     """UPDATE market_events
                        SET observed_ts=?, payload_json=?
                        WHERE dedupe_key=?""",
                     (
-                        tampered.observed_ts,
-                        storage_module._canonical_payload(tampered),
+                        tampered["observed_ts"],
+                        storage_module._canonical_json(tampered),
                         original.dedupe_key,
                     ),
                 )
@@ -2391,6 +2409,11 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     )
                 )
                 source_ids = (source_id for source_id in ("provider-a",))
+                # The one-shot selector is the target of this test. Issue the
+                # replay at a real product decision time; the causal cutoff
+                # must not be newer than the product-owned clock.
+                with self._clock_lock:
+                    self._product_now = self.CUTOFF
 
                 snapshot = MarketMirror.replay_view_from_store(
                     store,
@@ -2478,7 +2501,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "market append authority baseline semantic binding is invalid",
                 ):
                     self.replay(store)
 
@@ -2515,7 +2538,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority does not cover durable entries",
                 ):
                     self.replay(store)
 
@@ -2534,7 +2557,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 MonotonicAuthorityRollbackError,
-                "positive market append chronology is missing, forged, or unproven",
+                "positive market append authority does not cover durable entries",
             ):
                 SQLiteMarketStore(path)
 
@@ -2562,7 +2585,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority does not cover durable entries",
                 ):
                     self.replay(store)
 
@@ -2604,7 +2627,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     self.replay(store)
 
@@ -3170,7 +3193,13 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     self.assertFalse(writer.is_alive())
 
                 self.assertEqual(writer_errors, [])
-                snapshot = self.replay(second)
+                # The blocked earlier replay advances the deterministic product
+                # clock past its original cutoff. The freshly committed append
+                # cannot be retroactively visible at that older cutoff.
+                self.assertEqual(len(self.replay(second).events), 0)
+                snapshot = self.replay(
+                    second, as_of=self.CUTOFF + timedelta(seconds=1)
+                )
                 self.assertEqual(len(snapshot.events), 1)
                 self.assertFalse(foreign_recovery.is_set())
             finally:
@@ -3402,8 +3431,16 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     self.assertFalse(writer.is_alive())
 
                 self.assertEqual(writer_errors, [])
+                # The earlier failed cutoff attempt moved the product clock
+                # forward. Its availability witness cannot be backdated.
                 self.assertEqual(
                     len(self.replay(second, as_of=later_cutoff).events),
+                    0,
+                )
+                self.assertEqual(
+                    len(self.replay(
+                        second, as_of=later_cutoff + timedelta(seconds=1)
+                    ).events),
                     1,
                 )
                 self.assertFalse(foreign_recovery.is_set())
@@ -3513,7 +3550,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     store.events()
             finally:
@@ -3616,7 +3653,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     store.events()
             finally:
@@ -3651,7 +3688,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     MarketMirror.from_store(store)
             finally:
@@ -3737,7 +3774,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "market append authority baseline semantic binding is invalid",
                 ):
                     store.events()
             finally:
@@ -3996,7 +4033,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                 before = store._market_append_authority().read_history()
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     store.append(forged)
                 after = store._market_append_authority().read_history()
@@ -4040,7 +4077,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
                 with self.assertRaisesRegex(
                     MonotonicAuthorityRollbackError,
-                    "positive market append chronology is missing, forged, or unproven",
+                    "positive market append authority semantic binding is invalid",
                 ):
                     store.append(
                         self.event(
@@ -4114,15 +4151,14 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     )
                 )
                 original_recover = MonotonicWorkspaceAuthority.recover
-                calls = 0
 
                 def fail_after_sqlite_commit(authority, **kwargs):
-                    nonlocal calls
-                    calls += 1
-                    # First recover: outer preflight. Second: under SQLite BEGIN
-                    # IMMEDIATE before PREPARE. Third: SQLite row is committed and
-                    # the machine authority still has the live PREPARE.
-                    if calls == 3:
+                    # Couple fault injection to the semantic cutoff COMMIT,
+                    # not the count of unrelated preflight/recovery calls.
+                    # A transaction-bound cutoff recovery is attempted only
+                    # after its SQLite row was durably published.
+                    tx_id = kwargs.get("tx_id")
+                    if isinstance(tx_id, str) and not tx_id.startswith("append-"):
                         raise RuntimeError("simulated post-SQLite authority commit crash")
                     return original_recover(authority, **kwargs)
 
@@ -4379,7 +4415,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     odds="9.99",
                     observed_ts="2026-09-16T18:59:59+00:00",
                     ingest_ts="2026-09-16T18:59:59+00:00",
-                    source_ts="2026-09-16T19:00:01+00:00",
+                    source_ts="2026-09-16T19:00:01.000001+00:00",
                 )
                 self.assertTrue(store.append(visible))
                 self.assertTrue(store.append(future_source))
@@ -4403,15 +4439,21 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
                     ingest_ts="2026-09-16T18:59:57+00:00",
                     source_ts="2026-09-16T18:59:57+00:00",
                 )
-                impossible = self.event(
-                    sequence=2,
-                    odds="9.99",
-                    observed_ts="2026-09-16T18:59:59+00:00",
-                    ingest_ts="2026-09-16T18:59:58+00:00",
-                    source_ts="2026-09-16T18:59:56+00:00",
-                )
+                # An inverted receipt clock is rejected at domain ingress;
+                # it cannot enter replay/history even as an audit-only row.
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "ingest_ts cannot be before observed_ts",
+                ):
+                    self.event(
+                        sequence=2,
+                        odds="9.99",
+                        observed_ts="2026-09-16T18:59:59+00:00",
+                        ingest_ts="2026-09-16T18:59:58+00:00",
+                        source_ts="2026-09-16T18:59:56+00:00",
+                    )
                 self.assertTrue(store.append(visible))
-                self.assertTrue(store.append(impossible))
+                self.assertEqual(store.events(), [visible])
 
                 snapshot = self.replay(store)
 
@@ -4434,7 +4476,7 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             sequence=2,
             odds="2.10",
             observed_ts="2026-09-16T19:00:02+00:00",
-            ingest_ts="2026-09-16T19:00:01+00:00",
+            ingest_ts="2026-09-16T19:00:03+00:00",
             source_ts="2026-09-16T18:59:59+00:00",
         )
         mirror.apply(late_ingest)
@@ -4488,42 +4530,46 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
 
     def test_live_active_view_rejects_submicrosecond_future_source_time(self) -> None:
         mirror = MarketMirror()
-        event = self.event(
-            sequence=1,
-            odds="2.00",
-            observed_ts="2026-09-16T19:00:01+00:00",
-            ingest_ts="2026-09-16T19:00:01+00:00",
-            source_ts="2026-09-16T19:00:01.0000001+00:00",
-        )
-        mirror.apply(event)
-
-        active = mirror.active_view(
+        # Invalid precision must be rejected at the domain boundary, before
+        # the event can enter either the live view or the audit snapshot.
+        with self.assertRaisesRegex(
+            ValueError,
+            "source_ts precision finer than microseconds is unsupported",
+        ):
+            self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:01+00:00",
+                ingest_ts="2026-09-16T19:00:01+00:00",
+                source_ts="2026-09-16T19:00:01.0000001+00:00",
+            )
+        self.assertEqual(mirror.snapshot(), ())
+        self.assertEqual(mirror.active_view(
             as_of=self.CUTOFF,
             max_age=timedelta(minutes=2),
-        )
-
-        self.assertEqual(active.events, ())
-        self.assertEqual(len(mirror.snapshot()), 1)
+        ).events, ())
 
     def test_live_active_view_rejects_submicrosecond_future_local_time(self) -> None:
         mirror = MarketMirror()
-        event = self.event(
-            sequence=1,
-            odds="2.00",
-            observed_ts="2026-09-16T19:00:01.0000001+00:00",
-            ingest_ts="2026-09-16T19:00:01+00:00",
-            source_ts="2026-09-16T19:00:00+00:00",
-        )
-        mirror.apply(event)
-
-        active = mirror.active_view_for_keys(
-            ((event.source_id, event.quote_key),),
+        # Observed time with submicrosecond precision is noncanonical; it
+        # cannot be accepted and silently rounded into a causal cutoff.
+        with self.assertRaisesRegex(
+            ValueError,
+            "observed_ts precision finer than microseconds is unsupported",
+        ):
+            self.event(
+                sequence=1,
+                odds="2.00",
+                observed_ts="2026-09-16T19:00:01.0000001+00:00",
+                ingest_ts="2026-09-16T19:00:01+00:00",
+                source_ts="2026-09-16T19:00:00+00:00",
+            )
+        self.assertEqual(mirror.snapshot(), ())
+        self.assertEqual(mirror.active_view_for_keys(
+            (("provider-a", "unused-quote-key"),),
             as_of=self.CUTOFF,
             max_age=timedelta(minutes=2),
-        )
-
-        self.assertEqual(active.events, ())
-        self.assertEqual(active.revision, 1)
+        ).events, ())
 
     def test_generation_zero_baseline_is_sealed_inside_append_issuance_lock(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -4542,14 +4588,30 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             def traced_lock(_authority):
                 return TracingLock()
 
-            def require_locked_baseline(_store):
+            def require_locked_baseline(_store, authority):
                 self.assertTrue(state["held"])
+                self.assertIsInstance(authority, MonotonicWorkspaceAuthority)
                 state["baseline"] = True
 
             def require_locked_rebuild(_store, *, append_authority):
                 self.assertTrue(state["held"])
                 self.assertIsInstance(append_authority, MonotonicWorkspaceAuthority)
                 state["rebuild"] = True
+
+            original_baseline = (
+                SQLiteMarketStore._ensure_market_append_baseline_authority
+            )
+            original_rebuild = SQLiteMarketStore._rebuild_current_quotes
+
+            def require_real_locked_baseline(_store, authority):
+                require_locked_baseline(_store, authority)
+                return original_baseline(_store, authority)
+
+            def require_real_locked_rebuild(_store, *, append_authority):
+                require_locked_rebuild(_store, append_authority=append_authority)
+                return original_rebuild(
+                    _store, append_authority=append_authority
+                )
 
             with patch.object(
                 SQLiteMarketStore,
@@ -4558,11 +4620,11 @@ class MarketMirrorReplayCutoffGenerationTests(unittest.TestCase):
             ), patch.object(
                 SQLiteMarketStore,
                 "_ensure_market_append_baseline_authority",
-                new=require_locked_baseline,
+                new=require_real_locked_baseline,
             ), patch.object(
                 SQLiteMarketStore,
                 "_rebuild_current_quotes",
-                new=require_locked_rebuild,
+                new=require_real_locked_rebuild,
             ):
                 store = SQLiteMarketStore(Path(directory) / "market.db")
                 store.close()

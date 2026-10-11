@@ -27,6 +27,20 @@ _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
 _PAPER_SNAPSHOT_SCHEMA_VERSION = 7
+
+
+def _exact_financial_decimal(value: Decimal | str, *, field: str) -> Decimal:
+    """Admit exact financial transport; never round-trip binary floats via str()."""
+    if type(value) is Decimal:
+        return value
+    if type(value) is str:
+        try:
+            return Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError(f"{field} must be a decimal value") from exc
+    raise ValueError(f"{field} must be a Decimal or decimal string")
+
+
 _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
 _SCHEMA_MISSING = object()
 
@@ -381,7 +395,7 @@ class PaperBook:
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
         _register_ticket_opening_authority_book(self)
         _register_paperbook_causal_history_authority_book(self)
-        initial = Decimal(str(initial_bankroll))
+        initial = _exact_financial_decimal(initial_bankroll, field="initial_bankroll")
         self._require_finite(initial, "initial_bankroll")
         if initial <= 0:
             raise ValueError("initial virtual bankroll must be positive")
@@ -436,7 +450,7 @@ class PaperBook:
         _require_ticket_opening_authority(self)
         _require_paperbook_causal_history_authority(self)
         self._validate_loaded_state(self)
-        amount = Decimal(str(stake))
+        amount = _exact_financial_decimal(stake, field="stake")
         new_balance = self._debit_balance(self.balance, amount)
 
         ticket_placed_at = self._validate_placed_at(

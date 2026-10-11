@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -406,25 +407,95 @@ def _build_coordinator(
         ),
         lookup_application_receipt=lambda delta: None,
     )
-    coordinator = ContinuousSessionCoordinator(
-        workspace=root,
-        collector=collector,
-        lifecycle=lifecycle,
-        market_store=market_store,
-        desktop_consumer=desktop,
-        invalidation_buffer=invalidations,
-        dependency_index=dependencies,
-        outcome_authority=outcome_authority,
-        settlement_learning_handoff=settlement_learning_handoff,
-        session_id="session-1",
-        clock=clock,
-        initial_bankroll="100",
-        required_history=required_history,
-    )
+    try:
+        coordinator = ContinuousSessionCoordinator(
+            workspace=root,
+            collector=collector,
+            lifecycle=lifecycle,
+            market_store=market_store,
+            desktop_consumer=desktop,
+            invalidation_buffer=invalidations,
+            dependency_index=dependencies,
+            outcome_authority=outcome_authority,
+            settlement_learning_handoff=settlement_learning_handoff,
+            session_id="session-1",
+            clock=clock,
+            initial_bankroll="100",
+            required_history=required_history,
+        )
+    except BaseException:
+        # A rejected constructor must not leak the helper-owned SQLite handle.
+        market_store.close()
+        raise
     return coordinator, market_store, lifecycle, mirror, invalidations, dependencies
 
 
 class ContinuousSessionCoordinatorTests(unittest.TestCase):
+    def test_initial_bankroll_is_exact_at_session_boundary_and_restart_safe(self) -> None:
+        class HostileText(str):
+            def __str__(self):
+                raise AssertionError("caller-owned string coercion must not run")
+
+        class HostileDecimal(Decimal):
+            def __str__(self):
+                raise AssertionError("caller-owned Decimal coercion must not run")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            clock = _Clock()
+            source = _Source(
+                CatalogPage(
+                    source_id="provider-a",
+                    stream_epoch="epoch-1",
+                    cursor="cursor-1",
+                    position=1,
+                    events=(_event(phase=EventPhase.PRE_MATCH),),
+                )
+            )
+            coordinator, store, *_ = _build_coordinator(root, source, clock)
+            try:
+                session_file = root / "continuous_session.json"
+                before = session_file.read_bytes()
+                common = dict(
+                    workspace=root,
+                    collector=coordinator.collector,
+                    lifecycle=coordinator.lifecycle,
+                    market_store=store,
+                    desktop_consumer=coordinator.desktop_consumer,
+                    invalidation_buffer=coordinator.invalidation_buffer,
+                    dependency_index=coordinator.dependency_index,
+                    session_id="session-1",
+                    clock=clock,
+                )
+                for invalid in (
+                    100,
+                    100.0,
+                    0.1,
+                    True,
+                    HostileText("100"),
+                    HostileDecimal("100"),
+                ):
+                    with self.subTest(value_type=type(invalid).__name__):
+                        with self.assertRaisesRegex(
+                            ValueError,
+                            "initial_bankroll must be an exact Decimal or decimal string",
+                        ):
+                            ContinuousSessionCoordinator(
+                                **common,
+                                initial_bankroll=invalid,
+                            )
+                        self.assertEqual(session_file.read_bytes(), before)
+                reopened = ContinuousSessionCoordinator(
+                    **common,
+                    initial_bankroll=Decimal("100"),
+                )
+                self.assertEqual(reopened.initial_bankroll, "100")
+                self.assertEqual(reopened.session_id, coordinator.session_id)
+                self.assertEqual(session_file.read_bytes(), before)
+            finally:
+                store.close()
+
+
     def test_constructor_rejects_required_history_subclass_before_dispatch(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
@@ -450,6 +521,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             page = CatalogPage(
                 source_id="provider-a",
                 stream_epoch="epoch-1",
@@ -485,6 +558,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             source = _Source(
                 CatalogPage(
                     source_id="provider-a",
@@ -1157,6 +1232,8 @@ class ContinuousSessionCoordinatorTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             clock = _Clock()
+            # Historical replay must use the fixture's acquisition clock, not runner wall time.
+            self.enterContext(patch("autosport.storage._market_product_utc_now", clock))
             detected = _collector_delta(
                 delta_id="gap-detected",
                 gap_state=GapState.DETECTED,

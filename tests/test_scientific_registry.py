@@ -374,19 +374,23 @@ def test_conflicting_identity_rejected_but_exact_replay_is_idempotent(tmp_path):
         registry.append(replace(question, statement="Changed question"))
 
 
-def test_dataset_snapshot_rejects_availability_before_causal_cutoff() -> None:
+def test_dataset_snapshot_rejects_availability_before_causal_cutoff(tmp_path) -> None:
+    registry = ScientificRegistry.initialize_pristine(
+        tmp_path / "scientific_registry.json"
+    )
+    snapshot = DatasetSnapshot(
+        "dataset-future-bearing",
+        SHA_A,
+        "source",
+        "license",
+        T1,
+        T0,
+    )
     with pytest.raises(
         ValueError,
-        match="available_at_utc must not precede causal_cutoff",
+        match="DatasetSnapshot available_at must not precede causal_cutoff",
     ):
-        DatasetSnapshot(
-            "dataset-future-bearing",
-            SHA_A,
-            "source",
-            "license",
-            T1,
-            T0,
-        )
+        registry.append(snapshot)
 
 
 def test_dataset_snapshot_restart_rejects_self_consistent_future_bearing_state(tmp_path) -> None:
@@ -513,9 +517,10 @@ def test_causal_lookup_rejects_self_consistent_malformed_outcome_reveal_after(
         encoding="utf-8",
     )
 
-    reopened = ScientificRegistry(path)
+    # Persisted records are validated at reopen, before causal lookup.
+    # Early fail-closed rejection is stronger than deferred lookup rejection.
     with pytest.raises(ValueError, match="outcome_reveal_after.*canonical string"):
-        reopened.causal_records("DatasetSnapshot", as_of=T2)
+        ScientificRegistry(path)
 
 
 def test_promotion_fails_closed_then_blocks_reused_confirmation_holdout(tmp_path):
@@ -682,9 +687,14 @@ def test_reproducibility_bundle_is_deterministic_reference_only(tmp_path):
     assert "DatasetSnapshot" in first["references"]
     assert "dataset_bytes" not in first and "raw_rows" not in first
 
+    # A deterministic in-memory bundle is not outward publication authority.
+    # Outcome-bearing file export requires the canonical holdout-consumption gate.
+    from autosport.scientific_disclosure_export import ScientificDisclosureExportError
+
     target = tmp_path / "repro.json"
-    assert registry.export_reproducibility_bundle("experiment-1", target) == first["bundle_sha256"]
-    assert json.loads(target.read_text(encoding="utf-8")) == first
+    with pytest.raises(ScientificDisclosureExportError, match="direct scientific"):
+        registry.export_reproducibility_bundle("experiment-1", target)
+    assert not target.exists()
 
 
 def test_active_workspace_writer_blocks_second_writer_without_corruption(tmp_path):

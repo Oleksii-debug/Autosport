@@ -160,8 +160,12 @@ def promotion_holdout_access_id(
 def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     text = _text(value, "binding.promotion_rule")
     try:
-        payload = json.loads(text)
-    except json.JSONDecodeError as exc:
+        payload = json.loads(
+            text,
+            object_pairs_hook=_reject_duplicate_keys,
+            parse_constant=_reject_nonfinite,
+        )
+    except (json.JSONDecodeError, ValueError) as exc:
         raise PromotionEvidenceError("frozen promotion rule is not canonical JSON") from exc
     if type(payload) is not dict or payload.get("kind") != "autosport-promotion-rule-v1":
         raise PromotionEvidenceError("frozen promotion rule kind is unsupported")
@@ -170,7 +174,17 @@ def _frozen_promotion_rule_payload(value: object) -> dict[str, Any]:
     minimum_effective_sample_size = payload.get("minimum_effective_sample_size")
     if type(primary_metric) is not str or not primary_metric:
         raise PromotionEvidenceError("frozen promotion rule lacks primary metric")
-    if isinstance(minimum_improvement, bool) or not isinstance(minimum_improvement, (int, float)) or not math.isfinite(minimum_improvement):
+    if type(minimum_improvement) not in (int, float):
+        raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
+    try:
+        finite_improvement = math.isfinite(minimum_improvement)
+    except OverflowError as exc:
+        # JSON may contain a finite integer too large to convert to float.
+        # Untrusted frozen evidence must fail closed rather than crash promotion.
+        raise PromotionEvidenceError(
+            "frozen promotion rule minimum improvement is invalid"
+        ) from exc
+    if not finite_improvement:
         raise PromotionEvidenceError("frozen promotion rule minimum improvement is invalid")
     if isinstance(minimum_effective_sample_size, bool) or not isinstance(minimum_effective_sample_size, int) or minimum_effective_sample_size <= 0:
         raise PromotionEvidenceError("frozen promotion rule minimum effective sample size is invalid")
@@ -315,12 +329,8 @@ class DatasetSnapshot:
         for name in ("dataset_snapshot_id", "source_identity", "license_identity"):
             _text(getattr(self, name), name)
         _sha256(self.manifest_sha256, "manifest_sha256")
-        causal_cutoff = _instant(self.causal_cutoff, "causal_cutoff")
-        available_at = _instant(self.available_at_utc, "available_at_utc")
-        if causal_cutoff > available_at:
-            raise ValueError(
-                "DatasetSnapshot available_at_utc must not precede causal_cutoff"
-            )
+        _iso(self.causal_cutoff, "causal_cutoff")
+        _iso(self.available_at_utc, "available_at_utc")
         if self.outcome_reveal_after is not None:
             _iso(self.outcome_reveal_after, "outcome_reveal_after")
 
@@ -1172,6 +1182,11 @@ class ScientificRegistry:
                     raise ValueError(
                         "DatasetSnapshot payload/envelope availability mismatch"
                     )
+            # The causal cutoff is part of this immutable snapshot's data
+            # identity. A snapshot may not claim observations from a time
+            # later than its own product-available timestamp, even when its
+            # payload and envelope hashes have been recomputed consistently.
+            # Apply this on read as well as append for legacy payloads.
             causal_cutoff = _instant(
                 payload.get("causal_cutoff"),
                 "DatasetSnapshot.causal_cutoff",
@@ -1372,6 +1387,9 @@ class ScientificRegistry:
                 raise DuplicateExperimentFingerprintError(
                     "experiment fingerprint already has durable history; inspect negative/null results before repeating"
                 )
+        # Reject malformed or causally impossible entries before durable publication.
+        # Post-write readback remains a separate integrity check, not ingress validation.
+        self._validate_entry(entry)
         state["records"].append(entry)
         atomic_write_json(self.path, state)
         self._read()
@@ -1669,6 +1687,10 @@ class ScientificRegistry:
                         "PROMOTE requires a frozen typed promotion rule"
                     )
                 frozen_rule_payload = _frozen_promotion_rule_payload(frozen_rule)
+                if frozen_rule_payload["primary_metric"] != hypothesis["payload"].get("primary_metric"):
+                    raise PromotionEvidenceError(
+                        "frozen promotion primary metric disagrees with the bound hypothesis"
+                    )
                 if strategy["payload"].get("predecessor_strategy_version_id") != decision.predecessor_strategy_version_id:
                     raise PromotionEvidenceError("promotion predecessor does not match candidate strategy lineage")
                 if matching_experiment.get("outcome") != ResearchOutcome.POSITIVE.value:

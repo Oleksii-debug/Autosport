@@ -525,7 +525,9 @@ def test_429_is_retryable_backpressure_not_empty_entitlement() -> None:
         def open(self, request, timeout):
             raise HTTPError(request.full_url, 429, "Too Many Requests", {}, None)
 
-    transport._opener = FakeOpener()
+    # _request uses the opener callback captured at construction, not a later
+    # replacement of the visible opener object.  Inject only for this 429 test.
+    transport._opener_open = FakeOpener().open
     with pytest.raises(BetfairHistoricalBackpressure, match="backpressure"):
         transport.post_json(
             "https://historicdata.betfair.com/api/GetMyData",

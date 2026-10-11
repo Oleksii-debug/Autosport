@@ -703,6 +703,9 @@ class BetfairHistoricalEntitlementClient:
 
     def get_entitlement_snapshot(self) -> HistoricalEntitlementSnapshot:
         payload, provider_origin = self._post("GetMyData", b"{}")
+        # Seal the acquisition timestamp immediately after receipt.  The
+        # product clock guard must reject rebinding before parsing dates.
+        observed_at = self._now()
         decoded = _strict_json(payload)
         if not isinstance(decoded, list):
             raise BetfairHistoricalEntitlementError("GetMyData response must be a JSON array")
@@ -714,7 +717,7 @@ class BetfairHistoricalEntitlementClient:
             )
         value = HistoricalEntitlementSnapshot(
             self._identity.session_context_id,
-            self._now(),
+            observed_at,
             sha256(payload).hexdigest(),
             packages,
         )

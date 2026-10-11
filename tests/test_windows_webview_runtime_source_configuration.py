@@ -226,6 +226,35 @@ def test_profiled_runtime_binds_exact_strategy_workspace_without_env_retarget(
         str((tmp_path / "monotonic-authority").resolve(strict=False)),
     )
 
+    # Synthetic, test-local rights authority: keep production entitlement mandatory.
+    rights_manifest = tmp_path / "parlay-test-source-rights.json"
+    rights_manifest.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "autosport_source_rights_manifest",
+                "source_identity": "parlayapi:table_tennis",
+                "authorized_scopes": ["provider.market_data.read"],
+                "privacy_classification": "NON_PERSONAL_DATA",
+                "evidence_class": "HUMAN_APPROVED_SOURCE_RIGHTS",
+                "terms_reference": "terms:parlayapi:v1",
+                "retention_authority_reference": "retention:parlayapi:v1",
+                "effective_at": "2026-09-01T00:00:00Z",
+                "expires_at": "2026-12-01T00:00:00Z",
+                "human_approved": True,
+                "approved_by": "release-owner",
+                "approval_reference": "entitlement-record:parlay-fixture",
+                "approved_at": "2026-08-31T12:00:00Z",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
+    monkeypatch.setenv(
+        "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST",
+        str(rights_manifest),
+    )
+
     runtime = product_gui_worker_module._PROFILED_RUNTIME_BUILDER(
         strategy_workspace,
         _FACTORY_SPEC,

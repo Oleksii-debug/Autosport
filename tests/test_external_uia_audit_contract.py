@@ -226,7 +226,7 @@ def test_external_uia_failure_preserves_bounded_launcher_lifetime_before_cleanup
     assert "$report.initial_window_observed = $true" in audit
 
     diagnostic = audit.split(
-        "} finally {\n    # Record bounded process-lifetime evidence BEFORE cleanup",
+        "} finally {\n    # Preserve a bounded count from the actual pre-cleanup UIA search.",
         1,
     )[1].split("    if ($null -ne $liveRegionProbe)", 1)[0]
 

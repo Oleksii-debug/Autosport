@@ -4,6 +4,7 @@ from contextlib import contextmanager
 import hashlib
 import json
 import os
+import stat
 import tempfile
 import threading
 from pathlib import Path
@@ -39,10 +40,9 @@ _SCIENTIFIC_REGISTRY_ENTRY_KEYS = frozenset(
 
 
 def _resolved_key(path: Path) -> str:
-    try:
-        return str(path.resolve(strict=False))
-    except OSError:
-        return str(path.absolute())
+    """Return the stable lexical identity used by the persistent sidecar lock."""
+
+    return os.path.normcase(os.path.abspath(os.fspath(path)))
 
 
 def _thread_lock_for(path: Path) -> threading.RLock:
@@ -106,9 +106,11 @@ def durable_path_lock(path: str | Path) -> Iterator[None]:
             return
 
         lock_path = destination.with_name(f".{destination.name}.lock")
-        handle = lock_path.open("a+b")
+        handle = _open_durable_lock_handle(lock_path)
         try:
+            _validate_durable_lock_handle_identity(lock_path, handle)
             _lock_handle(handle)
+            _validate_durable_lock_handle_identity(lock_path, handle)
             held[key] = [1, handle]
             try:
                 yield
@@ -117,6 +119,282 @@ def durable_path_lock(path: str | Path) -> Iterator[None]:
                 _unlock_handle(handle)
         finally:
             handle.close()
+
+
+def _open_read_only_no_follow_descriptor(path: Path) -> int:
+    """Open one final pathname component without following a symlink/reparse alias."""
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise OSError("platform lacks no-follow durable file reads")
+        return os.open(path, flags | no_follow)
+
+    import ctypes
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel_handle = create_file(
+        str(path),
+        generic_read,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    try:
+        return msvcrt.open_osfhandle(kernel_handle, flags)
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
+
+
+def _require_regular_single_link(metadata: os.stat_result) -> None:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise OSError("durable file must be a single-link regular non-symlink file")
+
+
+def _open_windows_durable_lock_descriptor(
+    path: Path,
+    *,
+    create_new: bool,
+) -> int:
+    import ctypes
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    generic_read = 0x80000000
+    generic_write = 0x40000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    create_new_disposition = 1
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel_handle = create_file(
+        str(path),
+        generic_read | generic_write,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        create_new_disposition if create_new else open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        error_code = ctypes.get_last_error()
+        if create_new and error_code in (80, 183):
+            raise FileExistsError(
+                error_code,
+                "durable lock path already exists",
+                str(path),
+            )
+        raise ctypes.WinError(error_code)
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    try:
+        return msvcrt.open_osfhandle(
+            kernel_handle,
+            os.O_RDWR | os.O_BINARY,
+        )
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
+
+
+def _open_durable_lock_handle(path: Path):
+    """Create/open one persistent lock sidecar without traversing its final alias."""
+
+    flags = os.O_RDWR | getattr(os, "O_BINARY", 0)
+    descriptor: int
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise OSError("platform lacks no-follow durable lock support")
+        try:
+            descriptor = os.open(
+                path,
+                flags | os.O_CREAT | os.O_EXCL | no_follow,
+                0o600,
+            )
+        except FileExistsError:
+            _require_regular_single_link(path.lstat())
+            descriptor = os.open(path, flags | no_follow)
+    else:
+        try:
+            descriptor = _open_windows_durable_lock_descriptor(
+                path,
+                create_new=True,
+            )
+        except FileExistsError:
+            _require_regular_single_link(path.lstat())
+            descriptor = _open_windows_durable_lock_descriptor(
+                path,
+                create_new=False,
+            )
+
+    try:
+        _require_regular_single_link(os.fstat(descriptor))
+        return os.fdopen(descriptor, "r+b", closefd=True)
+    except BaseException:
+        os.close(descriptor)
+        raise
+
+
+def _validate_durable_lock_handle_identity(path: Path, handle) -> None:
+    """Bind an opened lock handle back to the current single-link pathname."""
+
+    verification_descriptor: int | None = None
+    final_verification_descriptor: int | None = None
+    try:
+        opened_before = os.fstat(handle.fileno())
+        path_before = path.lstat()
+        _require_regular_single_link(opened_before)
+        _require_regular_single_link(path_before)
+
+        verification_descriptor = _open_read_only_no_follow_descriptor(path)
+        verification_stat = os.fstat(verification_descriptor)
+        _require_regular_single_link(verification_stat)
+        if not os.path.sameopenfile(handle.fileno(), verification_descriptor):
+            raise OSError("durable lock pathname changed during acquisition")
+
+        path_after = path.lstat()
+        _require_regular_single_link(path_after)
+        final_verification_descriptor = _open_read_only_no_follow_descriptor(path)
+        final_verification_stat = os.fstat(final_verification_descriptor)
+        opened_after = os.fstat(handle.fileno())
+        _require_regular_single_link(final_verification_stat)
+        _require_regular_single_link(opened_after)
+        if not os.path.sameopenfile(handle.fileno(), final_verification_descriptor):
+            raise OSError("durable lock pathname changed during acquisition")
+    finally:
+        for descriptor in (
+            final_verification_descriptor,
+            verification_descriptor,
+        ):
+            if descriptor is not None:
+                try:
+                    os.close(descriptor)
+                except OSError:
+                    pass
+
+
+def read_bounded_regular_file_no_follow(
+    path: str | Path,
+    *,
+    max_bytes: int,
+) -> bytes:
+    """Read a stable bounded regular-file image without following its final alias."""
+
+    if isinstance(max_bytes, bool) or not isinstance(max_bytes, int) or max_bytes < 0:
+        raise ValueError("max_bytes must be a non-negative integer")
+
+    durable_path = Path(path)
+    descriptor: int | None = None
+    verification_descriptor: int | None = None
+    final_verification_descriptor: int | None = None
+    try:
+        path_before = durable_path.lstat()
+        _require_regular_single_link(path_before)
+
+        descriptor = _open_read_only_no_follow_descriptor(durable_path)
+        opened_before = os.fstat(descriptor)
+        _require_regular_single_link(opened_before)
+
+        chunks: list[bytes] = []
+        total = 0
+        while total <= max_bytes:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, max_bytes + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > max_bytes:
+            raise OverflowError("durable file exceeds bounded byte size")
+
+        opened_after = os.fstat(descriptor)
+        _require_regular_single_link(opened_after)
+        if (
+            opened_before.st_size != opened_after.st_size
+            or opened_before.st_mtime_ns != opened_after.st_mtime_ns
+            or opened_before.st_ctime_ns != opened_after.st_ctime_ns
+        ):
+            raise OSError("durable file changed while being read")
+
+        verification_descriptor = _open_read_only_no_follow_descriptor(durable_path)
+        verification_stat = os.fstat(verification_descriptor)
+        _require_regular_single_link(verification_stat)
+        if not os.path.sameopenfile(descriptor, verification_descriptor):
+            raise OSError("durable file pathname changed while being read")
+
+        path_after = durable_path.lstat()
+        _require_regular_single_link(path_after)
+        final_verification_descriptor = _open_read_only_no_follow_descriptor(
+            durable_path
+        )
+        final_verification_stat = os.fstat(final_verification_descriptor)
+        _require_regular_single_link(final_verification_stat)
+        if not os.path.sameopenfile(descriptor, final_verification_descriptor):
+            raise OSError("durable file pathname changed while being read")
+
+        return b"".join(chunks)
+    finally:
+        for candidate in (
+            final_verification_descriptor,
+            verification_descriptor,
+            descriptor,
+        ):
+            if candidate is not None:
+                try:
+                    os.close(candidate)
+                except OSError:
+                    pass
 
 
 def sha256_file(path: str | Path) -> str:

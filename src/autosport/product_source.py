@@ -1009,15 +1009,31 @@ def _capture_parlay_product_source_factory(
 ):
     """Bind shipped source constructors once at import composition."""
 
-    def create_parlay_product_source() -> ParlayApiProductSource:
-        """Construct the supported read-only Parlay source from closed dependencies."""
+    workspace_from_environment = object()
 
+    def create_parlay_product_source(
+        *,
+        workspace: object = workspace_from_environment,
+    ) -> ParlayApiProductSource:
+        """Construct the supported read-only Parlay source from closed dependencies.
+
+        The dynamic/legacy zero-argument factory keeps its environment-owned
+        workspace contract. The trusted packaged runtime may instead supply the
+        exact already-selected product workspace through this same import-captured
+        callable; it never mutates process-global environment to retarget a run.
+        """
+
+        resolved_workspace = (
+            required_env("AUTOSPORT_PRODUCT_WORKSPACE")
+            if workspace is workspace_from_environment
+            else workspace
+        )
         provider = provider_type(
             api_key=required_env("AUTOSPORT_PARLAY_API_KEY")
         )
         return source_type(
             provider,
-            workspace=required_env("AUTOSPORT_PRODUCT_WORKSPACE"),
+            workspace=resolved_workspace,
             lawful_terms_ref=required_env("AUTOSPORT_PARLAY_LAWFUL_TERMS_REF"),
             retention_ref=required_env("AUTOSPORT_PARLAY_RETENTION_REF"),
         )

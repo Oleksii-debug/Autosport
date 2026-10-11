@@ -10,6 +10,11 @@ from types import SimpleNamespace
 
 import pytest
 
+# Temporary Plan-6 CI diagnostic: detect which preceding test first leaves
+# pathlib.Path.__new__ changed after ALL fixture teardowns. The durable STOP
+# authority must keep rejecting such drift; do not restore or whitelist it.
+_PATH_NEW_DESCRIPTOR_TEST_BASE = vars(Path).get("__new__")
+
 # Root-selection production now correctly treats post-composition replacement of the
 # OS account-location resolver as an authority violation. Tests that need a sandbox
 # must therefore install one stable process-local resolver *before* importing the
@@ -270,3 +275,12 @@ def _deterministic_betfair_mid_frame_reconnect_clock(request, monkeypatch):
         return value
 
     monkeypatch.setattr(stream.time, "monotonic", monotonic)
+# Plan-6 root-cause locator for the canonical WebView STOP fail-closed graph.
+# Runs after the normal pytest teardown hook, including monkeypatch.undo().
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    if vars(Path).get("__new__") is not _PATH_NEW_DESCRIPTOR_TEST_BASE:
+        raise AssertionError(
+            "Path.__new__ changed after completed test/fixture teardown: "
+            + item.nodeid
+        )

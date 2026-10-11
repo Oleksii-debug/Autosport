@@ -679,3 +679,17 @@ def test_windows_candidate_requires_external_live_region_event_evidence() -> Non
     assert "extracted_external_uia_live_region_event_count" in step
     assert "extracted_external_uia_live_region_event_automation_id" in step
     assert "extracted_external_uia_live_region_event_text" in step
+
+
+def test_external_uia_failure_records_only_bounded_precleanup_process_family_count() -> None:
+    """A missing semantic host must retain useful process-lifetime evidence, never PASS."""
+    audit = _audit()
+    assert "last_observed_process_family_count = 0" in audit
+    probe = "$report.last_observed_process_family_count = [int]@($lastFamilyIds).Count"
+    assert audit.count(probe) == 1
+    finalizer = audit[audit.index("} finally {\n    # Preserve a bounded count"): ]
+    assert finalizer.index(probe) < finalizer.index("$process.Refresh()")
+    assert finalizer.index(probe) < finalizer.index("Stop-Process")
+    assert "Export neither descendant PIDs nor native window names" in finalizer
+    assert "launcher_exit_state = 'NOT_OBSERVED'" in audit
+    assert "$report.status = 'PASS'" not in finalizer

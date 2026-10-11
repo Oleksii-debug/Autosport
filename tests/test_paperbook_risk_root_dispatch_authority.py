@@ -47,6 +47,73 @@ def test_owner_facing_evaluate_root_cannot_be_replaced() -> None:
             type.__setattr__(PaperRiskPolicy, "evaluate", original)
 
 
+@pytest.mark.parametrize(
+    "name",
+    ("provenance_payload", "provenance_record"),
+)
+def test_policy_provenance_roots_cannot_be_replaced_or_deleted(name: str) -> None:
+    original = vars(PaperRiskPolicy)[name]
+
+    def hostile(self):
+        del self
+        return {"spoofed": True}
+
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed"):
+        setattr(PaperRiskPolicy, name, hostile)
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed"):
+        type.__setattr__(PaperRiskPolicy, name, hostile)
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed"):
+        delattr(PaperRiskPolicy, name)
+    with pytest.raises(TypeError, match="canonical PaperRiskPolicy root is sealed"):
+        type.__delattr__(PaperRiskPolicy, name)
+
+    assert vars(PaperRiskPolicy)[name] is original
+
+
+def _hostile_provenance_code_with_matching_closure(function):
+    closure_count = len(function.__closure__ or ())
+    lines = ["def build():"]
+    for index in range(closure_count):
+        lines.append(f"    cell_{index} = object()")
+    lines.append("    def hostile(self):")
+    if closure_count:
+        names = ", ".join(f"cell_{index}" for index in range(closure_count))
+        lines.append(f"        _ = ({names},)")
+    else:
+        lines.append("        _ = None")
+    lines.append("        del self, _")
+    lines.append("        return {'spoofed': True}")
+    lines.append("    return hostile")
+    namespace: dict[str, object] = {}
+    exec("\n".join(lines), {}, namespace)
+    hostile = namespace["build"]()
+    assert callable(hostile)
+    assert len(hostile.__closure__ or ()) == closure_count
+    return hostile.__code__
+
+
+@pytest.mark.parametrize(
+    "name",
+    ("provenance_payload", "provenance_record"),
+)
+def test_retained_policy_provenance_root_rechecks_in_place_code(name: str) -> None:
+    policy = PaperRiskPolicy()
+    retained = getattr(policy, name)
+    root = vars(PaperRiskPolicy)[name]
+    original_code = root.__code__
+    hostile_code = _hostile_provenance_code_with_matching_closure(root)
+
+    try:
+        root.__code__ = hostile_code
+        with pytest.raises(
+            TypeError,
+            match=f"canonical PaperRiskPolicy executable root changed: {name}",
+        ):
+            retained()
+    finally:
+        root.__code__ = original_code
+
+
 def test_owner_facing_derive_root_cannot_be_deleted() -> None:
     """The canonical sizing entry cannot be removed after authority composition."""
 

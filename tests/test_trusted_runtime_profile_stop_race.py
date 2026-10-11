@@ -4,6 +4,7 @@ import threading
 from pathlib import Path
 
 import autosport.product_gui_worker as worker_module
+from autosport.continuous_session import ContinuousSessionStatus, SessionState
 from autosport.product_gui_worker import ProductGuiWorker
 
 
@@ -13,14 +14,33 @@ _PROVIDER_SOURCE_ID = "parlayapi:table_tennis"
 
 class _Runtime:
     def __init__(self) -> None:
-        self._status = object()
+        self._running_status = ContinuousSessionStatus(
+            session_id="test-profiled-session",
+            source_id=_PROVIDER_SOURCE_ID,
+            state=SessionState.RUNNING,
+            cycles_completed=0,
+            last_success_at=None,
+            last_error_code=None,
+            last_full_refresh_at=None,
+            settlement_evidence=(),
+        )
+        self._stopped_status = ContinuousSessionStatus(
+            session_id="test-profiled-session",
+            source_id=_PROVIDER_SOURCE_ID,
+            state=SessionState.STOPPED,
+            cycles_completed=0,
+            last_success_at=None,
+            last_error_code=None,
+            last_full_refresh_at=None,
+            settlement_evidence=(),
+        )
         self.tick_entered = threading.Event()
         self.release_tick = threading.Event()
         self.stop_reason: str | None = None
         self.closed = False
 
-    def start(self) -> object:
-        return self._status
+    def start(self) -> ContinuousSessionStatus:
+        return self._running_status
 
     def tick(self) -> object:
         self.tick_entered.set()
@@ -30,10 +50,10 @@ class _Runtime:
     def request_stop(self, _reason: str) -> None:
         self.release_tick.set()
 
-    def stop(self, reason: str) -> object:
+    def stop(self, reason: str) -> ContinuousSessionStatus:
         self.stop_reason = reason
         self.release_tick.set()
-        return self._status
+        return self._stopped_status
 
     def close(self) -> None:
         self.closed = True

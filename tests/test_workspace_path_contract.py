@@ -6,7 +6,33 @@ import unittest
 from pathlib import Path
 from unittest.mock import patch
 
-from autosport.paths import default_workspace
+from autosport.paths import default_workspace, validate_product_storage_roots
+
+
+class ProductStorageRootIsolationTests(unittest.TestCase):
+    def test_disjoint_sibling_roots_are_accepted(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            validate_product_storage_roots(
+                root / "Autosport" / "workspace",
+                root / "Autosport" / "webview2",
+            )
+
+    def test_equal_or_nested_storage_roots_fail_closed(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp).resolve()
+            cases = (
+                (root / "shared", root / "shared"),
+                (root / "shared", root / "shared" / "webview2"),
+                (root / "shared" / "workspace", root / "shared"),
+            )
+            for workspace, webview in cases:
+                with self.subTest(workspace=workspace, webview=webview):
+                    with self.assertRaisesRegex(
+                        ValueError,
+                        r"must be disjoint trees",
+                    ):
+                        validate_product_storage_roots(workspace, webview)
 
 
 class DefaultWorkspaceContractTests(unittest.TestCase):
@@ -21,7 +47,7 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
                 },
                 clear=True,
             ):
-                self.assertEqual(default_workspace(), override)
+                self.assertEqual(default_workspace(), override.resolve(strict=False))
 
     def test_relative_override_fails_closed_instead_of_following_cwd(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,7 +95,7 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
             ):
                 self.assertEqual(
                     default_workspace(),
-                    local_app_data / "Autosport" / "workspace",
+                    (local_app_data / "Autosport" / "workspace").resolve(strict=False),
                 )
 
     def test_relative_local_app_data_fails_closed_instead_of_following_cwd(self) -> None:
@@ -85,9 +111,13 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
                 default_workspace()
 
     def test_home_resolution_failure_is_actionable_value_error(self) -> None:
-        with patch.dict(os.environ, {}, clear=True), patch(
-            "autosport.paths.Path.home",
-            side_effect=RuntimeError("home directory cannot be resolved"),
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("autosport.paths.sys.platform", "linux"),
+            patch(
+                "autosport.paths.Path.home",
+                side_effect=RuntimeError("home directory cannot be resolved"),
+            ),
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -98,9 +128,13 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
         self.assertIsInstance(caught.exception.__cause__, RuntimeError)
 
     def test_relative_home_fails_closed_instead_of_following_cwd(self) -> None:
-        with patch.dict(os.environ, {}, clear=True), patch(
-            "autosport.paths.Path.home",
-            return_value=Path("relative-home"),
+        with (
+            patch.dict(os.environ, {}, clear=True),
+            patch("autosport.paths.sys.platform", "linux"),
+            patch(
+                "autosport.paths.Path.home",
+                return_value=Path("relative-home"),
+            ),
         ):
             with self.assertRaisesRegex(
                 ValueError,
@@ -111,13 +145,17 @@ class DefaultWorkspaceContractTests(unittest.TestCase):
     def test_absolute_home_fallback_remains_stable(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             home = Path(tmp)
-            with patch.dict(os.environ, {}, clear=True), patch(
-                "autosport.paths.Path.home",
-                return_value=home,
+            with (
+                patch.dict(os.environ, {}, clear=True),
+                patch("autosport.paths.sys.platform", "linux"),
+                patch(
+                    "autosport.paths.Path.home",
+                    return_value=home,
+                ),
             ):
                 self.assertEqual(
                     default_workspace(),
-                    home / ".autosport" / "workspace",
+                    (home / ".autosport" / "workspace").resolve(strict=False),
                 )
 
 

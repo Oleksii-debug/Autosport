@@ -216,6 +216,34 @@ def test_external_uia_audit_launches_with_explicit_evidence_bound_working_direct
     ) in audit
 
 
+def test_external_uia_failure_preserves_bounded_launcher_lifetime_before_cleanup() -> None:
+    """A vanished packaged GUI must not be misreported as an NVDA/UIA success."""
+    audit = _audit()
+
+    assert "launcher_exit_state = 'NOT_OBSERVED'" in audit
+    assert "launcher_exit_code = $null" in audit
+    assert "initial_window_observed = $false" in audit
+    assert "$report.initial_window_observed = $true" in audit
+
+    diagnostic = audit.split(
+        "} finally {\n    # Record bounded process-lifetime evidence BEFORE cleanup",
+        1,
+    )[1].split("    if ($null -ne $liveRegionProbe)", 1)[0]
+
+    assert "$process.Refresh()" in diagnostic
+    assert "$process.HasExited" in diagnostic
+    assert "$report.launcher_exit_state = 'EXITED'" in diagnostic
+    assert "$report.launcher_exit_state = 'RUNNING'" in diagnostic
+    assert "$report.launcher_exit_state = 'UNAVAILABLE'" in diagnostic
+    assert "$report.launcher_exit_code = [int]$process.ExitCode" in diagnostic
+    assert "command lines, workspace paths, or environment" in diagnostic
+    assert "$report.status = 'PASS'" not in diagnostic
+    assert "Stop-Process" not in diagnostic
+    assert audit.index("$report.initial_window_observed = $true") < audit.index(
+        "Timed out waiting for WebView2 semantic UIA readiness"
+    )
+
+
 def test_windows_candidate_external_uia_uses_system32_as_hostile_child_cwd() -> None:
     workflow = _windows_workflow()
     step_start = workflow.index("- name: External UIA fresh-extraction gate")

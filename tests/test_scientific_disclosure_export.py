@@ -211,7 +211,7 @@ def _system(
         "lawful-provider:fixture",
         "license-evidence:v1",
         T1,
-        T0,
+        T1,  # Fixture availability must not precede its causal cutoff.
         outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)

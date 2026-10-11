@@ -257,6 +257,14 @@ def _install_guard() -> None:
         clients[self] = {"session_token": token, "origins": set()}
 
     def guarded_get_entitlement_snapshot(self):
+        # Validate the product clock before provider data may parse date fields.
+        # A rebound public datetime must fail with the domain error, not an
+        # incidental AttributeError from parsing a provider package.
+        if (
+            _historical.datetime is not product_datetime
+            or _historical.timezone is not product_timezone
+        ):
+            raise error_type("historical product clock authority was rebound")
         payload, provider_origin = post_provider(self, "GetMyData", b"{}")
         decoded = strict_json(payload)
         if not isinstance(decoded, list):

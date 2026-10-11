@@ -1,22 +1,36 @@
 from __future__ import annotations
 
+import atexit
 from collections.abc import Mapping
 from datetime import timedelta
 from itertools import count
 import os
-import sys
 from pathlib import Path
+import shutil
+import sys
+import tempfile
 from types import SimpleNamespace
 
 import pytest
 
-# Root-selection production now correctly treats post-composition replacement of the
-# OS account-location resolver as an authority violation. Tests that need a sandbox
-# must therefore install one stable process-local resolver *before* importing the
-# product package. The resolver identity never changes after composition; scoped
-# fixtures below vary only this test-process state. When no sandbox is active the
-# shim delegates to the real OS resolver, so unrelated tests retain normal behavior.
-_ROOT_SELECTION_TEST_HOME: Path | None = None
+# Root-selection production correctly treats post-composition replacement of the OS
+# account-location resolver as an authority violation. Install one stable process-local
+# resolver before importing the product package. The resolver identity never changes;
+# tests vary only the sandbox path it returns. Supported START activation also resolves
+# its product-owned machine root directly from the OS account home, so the same stable
+# resolver supplies an isolated process root during initial product composition without
+# reviving #1869's old temporary resolver-rebinding fixture.
+_TEST_MACHINE_HOME = Path(
+    tempfile.mkdtemp(prefix="autosport-pytest-machine-home-")
+).resolve()
+atexit.register(shutil.rmtree, _TEST_MACHINE_HOME, ignore_errors=True)
+_ROOT_SELECTION_TEST_HOME: Path | None = _TEST_MACHINE_HOME
+_ROOT_SELECTION_INTERCEPT_MODULES = frozenset(
+    {
+        "autosport._monotonic_root_selection_os_resolver_guard",
+        "autosport.product_decision_activation",
+    }
+)
 
 if os.name == "nt":
     import ctypes as _root_selection_ctypes
@@ -28,7 +42,7 @@ if os.name == "nt":
         caller_module = sys._getframe(1).f_globals.get("__name__")
         if (
             _ROOT_SELECTION_TEST_HOME is None
-            or caller_module != "autosport._monotonic_root_selection_os_resolver_guard"
+            or caller_module not in _ROOT_SELECTION_INTERCEPT_MODULES
         ):
             return _real_root_selection_get_folder_path(
                 _hwnd,
@@ -50,7 +64,7 @@ else:
         caller_module = sys._getframe(1).f_globals.get("__name__")
         if (
             _ROOT_SELECTION_TEST_HOME is None
-            or caller_module != "autosport._monotonic_root_selection_os_resolver_guard"
+            or caller_module not in _ROOT_SELECTION_INTERCEPT_MODULES
         ):
             return _real_root_selection_getpwuid(uid)
         return SimpleNamespace(pw_dir=str(_ROOT_SELECTION_TEST_HOME))
@@ -102,8 +116,9 @@ def _align_legacy_monotonic_root_composition(request, tmp_path, monkeypatch):
 def _isolate_monotonic_root_selection_store(request, tmp_path_factory):
     """Isolate selector receipts per test without resolver rebinding.
 
-    The fake account home is visible only to the root-selection resolver guard.
-    Other product account-root resolvers retain the actual OS location.
+    The fake account home is visible only to the root-selection resolver guard and
+    supported START activation's product-owned machine-root resolver. Other product
+    account-root resolvers retain the actual OS location.
     """
 
     global _ROOT_SELECTION_TEST_HOME

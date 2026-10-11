@@ -515,6 +515,7 @@ $report = [ordered]@{
     launcher_exit_code = $null
     initial_window_observed = $false
     observed_window_class = 'NOT_OBSERVED'
+    last_observed_process_family_count = 0
     process_id = $null
     process_family_ids = @()
     root_name = $null
@@ -1082,6 +1083,10 @@ try {
 } catch {
     $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"
 } finally {
+    # Preserve a bounded count from the actual pre-cleanup UIA search. A vanished
+    # launcher with child processes differs from a completely empty process family.
+    # Export neither descendant PIDs nor native window names in this diagnostic.
+    $report.last_observed_process_family_count = [int]@($lastFamilyIds).Count
     # Record bounded process-lifetime evidence BEFORE cleanup can kill a live
     # window. Do not disclose command lines, workspace paths, or environment.
     # A missing semantic automation id must remain a hard FAIL regardless.

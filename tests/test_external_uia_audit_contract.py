@@ -491,6 +491,25 @@ def test_external_uia_runtime_witness_wait_is_bounded_and_never_fabricates_evide
     assert "New-Item" not in binding
 
 
+
+def test_external_uia_failure_classifies_only_known_windows_before_cleanup() -> None:
+    audit = _audit()
+    assert "observed_window_class = 'NOT_OBSERVED'" in audit
+    finalizer = audit[audit.index("} finally {"):]
+    classification = finalizer[: finalizer.index("if ($null -ne $liveRegionProbe)")]
+    assert "[string]$uiaRoot.Current.Name" in classification
+    assert "[System.StringComparison]::Ordinal" in classification
+    assert "NATIVE_EMERGENCY_STOP" in classification
+    assert "NATIVE_STARTUP_ERROR" in classification
+    assert "PRODUCT_MAIN_WINDOW" in classification
+    assert "OTHER_OR_UNAVAILABLE" in classification
+    assert "Never export an" in classification
+    assert classification.index("observed_window_class") < finalizer.index(
+        "$report | ConvertTo-Json -Depth 8"
+    )
+    assert "if ($report.status -ne 'PASS')" in audit
+
+
 def test_windows_candidate_requires_packaged_runtime_witness_binding() -> None:
     workflow = _windows_workflow()
     step_start = workflow.index("- name: External UIA fresh-extraction gate")

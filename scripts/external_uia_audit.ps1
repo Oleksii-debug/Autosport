@@ -511,6 +511,9 @@ $report = [ordered]@{
     evidence_scope = 'external System.Windows.Automation client against the fresh-extracted packaged Autosport.exe; semantic HTML collections may be legitimately empty at startup; not NVDA speech or physical-human proof'
     launch_working_directory = $null
     launcher_process_id = $null
+    launcher_exit_state = 'NOT_OBSERVED'
+    launcher_exit_code = $null
+    initial_window_observed = $false
     process_id = $null
     process_family_ids = @()
     root_name = $null
@@ -575,6 +578,7 @@ try {
     if ($null -eq $uiaRoot) {
         throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
     }
+    $report.initial_window_observed = $true
 
     # Native host visibility is not semantic readiness. The already discovered
     # top-level window is the cheapest and strongest same-window probe, so poll its
@@ -1077,6 +1081,22 @@ try {
 } catch {
     $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"
 } finally {
+    # Record bounded process-lifetime evidence BEFORE cleanup can kill a live
+    # window. Do not disclose command lines, workspace paths, or environment.
+    # A missing semantic automation id must remain a hard FAIL regardless.
+    if ($null -ne $process) {
+        try {
+            $process.Refresh()
+            if ($process.HasExited) {
+                $report.launcher_exit_state = 'EXITED'
+                $report.launcher_exit_code = [int]$process.ExitCode
+            } else {
+                $report.launcher_exit_state = 'RUNNING'
+            }
+        } catch {
+            $report.launcher_exit_state = 'UNAVAILABLE'
+        }
+    }
     if ($null -ne $liveRegionProbe) {
         try {
             $liveRegionProbe.Dispose()

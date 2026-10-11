@@ -51,6 +51,7 @@ from autosport.providers import ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
+from autosport import storage as storage_module
 
 
 class _ManualClock:
@@ -175,6 +176,22 @@ class _PositiveIntentFactory:
 
 class PersistentLiveDecisionLoopTests(unittest.TestCase):
     START = datetime(2026, 9, 18, 18, 0, 0, tzinfo=timezone.utc)
+
+    def setUp(self) -> None:
+        # Only the synthetic fixture's product clock is virtual. Production keeps
+        # the physical append-availability and cutoff admission guards unchanged.
+        # An as-of decision must not predate its durable product receipt.
+        self._fixture_product_clock = _ManualClock(self.START)
+        product_clock_patch = patch.object(
+            storage_module,
+            "_market_product_utc_now",
+            side_effect=lambda: self._fixture_product_clock().isoformat(
+                timespec="microseconds"
+            ),
+        )
+        product_clock_patch.start()
+        self.addCleanup(product_clock_patch.stop)
+
     INTENT_SOURCE_SHA256 = hashlib.sha256(
         b"tests.test_live_decision_loop:_EmptyIntentFactory:v1"
     ).hexdigest()
@@ -275,6 +292,9 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         catalog_required_history: timedelta = timedelta(0),
         paper_execution: PaperExecutionAdoptionRuntime | None = None,
     ) -> PersistentLiveDecisionLoop:
+        # Both append availability and replay issuance use the cycle's single
+        # deterministic virtual clock, including crash/restart and later polls.
+        self._fixture_product_clock = clock
         selected_strategy = strategy_version or self._strategy_version()
         registry = self._scientific_registry(workspace, selected_strategy)
         if book is None:

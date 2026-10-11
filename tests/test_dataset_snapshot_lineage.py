@@ -6,6 +6,8 @@ from pathlib import Path
 
 import pytest
 
+import autosport.dataset_snapshot_lineage as lineage_module
+
 from autosport.dataset_snapshot_lineage import (
     DatasetSnapshotLineageAuthority,
     DatasetSnapshotUnprovenError,
@@ -54,6 +56,31 @@ def test_restart_record_parser_rejects_uppercase_sha_identity_alias() -> None:
 
 
 
+
+
+def test_restart_record_parser_rejects_availability_before_causal_cutoff() -> None:
+    raw = {
+        "kind": "autosport-dataset-snapshot-lineage-proof-v1",
+        "schema_version": 1,
+        "snapshot_id": "snapshot-causal-order",
+        "dataset_record_sha256": "a" * 64,
+        "manifest_sha256": "b" * 64,
+        "source_identity": "provider:source-a",
+        "license_identity": "license:v1",
+        "causal_cutoff": "2026-09-01T00:01:00Z",
+        "available_at": "2026-09-01T00:00:59Z",
+        "member_sha256": ["c" * 64],
+        "parent_snapshot_id": None,
+        "parent_dataset_record_sha256": None,
+        "parent_proof_sha256": None,
+        "proof_sha256": "d" * 64,
+    }
+
+    with pytest.raises(
+        ValueError,
+        match="dataset snapshot lineage availability predates causal cutoff",
+    ):
+        DatasetSnapshotLineageAuthority._record_from_raw(raw)
 
 
 @pytest.mark.parametrize("schema_version", (True, 1.0, 2.0))
@@ -396,8 +423,8 @@ def test_source_or_license_identity_cannot_cross_lineages(tmp_path: Path) -> Non
             "cutoff moved backwards",
         ),
         (
-            "2026-09-02T00:00:00Z",
-            "2026-08-31T23:59:59Z",
+            "2026-09-01T00:00:00Z",
+            "2026-09-01T00:00:30Z",
             "availability moved backwards",
         ),
     ],
@@ -679,3 +706,8 @@ def test_local_publish_before_commit_is_recovered_with_exact_semantic_proof(
         ).committed_state_sha256
         == state
     )
+
+
+def test_dataset_lineage_rejects_nonzero_submicrosecond_causal_timestamp() -> None:
+    with pytest.raises(ValueError, match="precision finer than microseconds"):
+        lineage_module._instant("2026-09-01T00:00:00.1234561Z", "causal_cutoff")

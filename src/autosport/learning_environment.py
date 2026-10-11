@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -50,6 +51,14 @@ def _canonical_text(name: str, value: object) -> str:
 
 def _timestamp(name: str, value: object) -> datetime:
     text = _canonical_text(name, value)
+    for match in re.finditer(r"[.,]([0-9]+)", text):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise LearningEnvironmentError(
+                f"{name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:

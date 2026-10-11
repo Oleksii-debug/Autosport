@@ -154,7 +154,7 @@ def test_alias_mutation_does_not_flip_paper_cash_and_restart_is_idempotent(tmp_p
     handoff_copy = coordinator._detached_settlement_resolutions(selected)
     handoff_copy[0].quote_outcomes[leg.quote_key] = "win"
 
-    settled, ids = coordinator._settle(resolutions=selected)
+    settled, ids = coordinator._settle(as_of=_CUTOFF, resolutions=selected)
     assert settled == (ticket.ticket_id,)
     assert ids == ("evidence-cash-isolation",)
     persisted = PaperBook.load(book_path)
@@ -162,7 +162,7 @@ def test_alias_mutation_does_not_flip_paper_cash_and_restart_is_idempotent(tmp_p
     assert persisted.tickets[ticket.ticket_id].status is TicketStatus.LOST
 
     # A durable replay/restart of the same original evidence has no second debit.
-    settled_again, _ = coordinator._settle(resolutions=selected)
+    settled_again, _ = coordinator._settle(as_of=_CUTOFF, resolutions=selected)
     assert settled_again == ()
     reopened = PaperBook.load(book_path)
     assert reopened.balance == Decimal("90")
@@ -219,21 +219,21 @@ def test_reused_evidence_id_with_conflicting_payload_fails_before_paper_effect(t
             ContinuousSessionError,
             match="conflicting settlement payload for reused evidence_id",
         ):
-            coordinator._settle(resolutions=ordered)
+            coordinator._settle(as_of=_CUTOFF, resolutions=ordered)
         assert path.read_bytes() == before
         original = PaperBook.load(path)
         assert original.balance == Decimal("90")
         assert original.tickets[ticket.ticket_id].status is TicketStatus.OPEN
 
     # Identical duplicate delivery is idempotent, not a second settlement.
-    settled, ids = coordinator._settle(resolutions=(losing, losing))
+    settled, ids = coordinator._settle(as_of=_CUTOFF, resolutions=(losing, losing))
     assert settled == (ticket.ticket_id,)
     assert ids == ("same-evidence-id",)
     reloaded = PaperBook.load(path)
     assert reloaded.balance == Decimal("90")
     assert reloaded.tickets[ticket.ticket_id].status is TicketStatus.LOST
 
-    replayed, ids_again = coordinator._settle(resolutions=(losing, losing))
+    replayed, ids_again = coordinator._settle(as_of=_CUTOFF, resolutions=(losing, losing))
     assert replayed == ()
     assert ids_again == ids
     assert PaperBook.load(path).balance == Decimal("90")
@@ -389,14 +389,14 @@ def test_crash_after_outcome_prebind_preserves_cash_and_denies_alias_replay(tmp_
     coordinator.paper_book_path = book_path
     coordinator.initial_bankroll = "100"
     after_crash.validate_settlement_evidence(settlement_evidence=(source,))
-    settled, ids = coordinator._settle(resolutions=(source,))
+    settled, ids = coordinator._settle(as_of=_CUTOFF, resolutions=(source,))
     assert settled == (ticket.ticket_id,)
     assert ids == ("evidence-crash",)
     after_crash.record_success(
         at=_CUTOFF, full_refresh=False, settlement_evidence=(source,),
     )
     assert PaperBook.load(book_path).tickets[ticket.ticket_id].status is TicketStatus.LOST
-    replayed, _ = coordinator._settle(resolutions=(source,))
+    replayed, _ = coordinator._settle(as_of=_CUTOFF, resolutions=(source,))
     assert replayed == ()
     assert PaperBook.load(book_path).balance == Decimal("90")
     assert reopen().snapshot().settlement_evidence[0]["quote_outcomes_sha256"]

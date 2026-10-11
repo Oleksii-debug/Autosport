@@ -4,6 +4,7 @@ import hashlib
 import json
 import math
 import os
+import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass, field
@@ -23,6 +24,14 @@ _SHA256_HEX = frozenset("0123456789abcdef")
 
 
 def parse_iso_timestamp(value: str) -> datetime:
+    if type(value) is not str:
+        raise ValueError("timestamps must be exact strings")
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError("timestamp precision finer than microseconds is unsupported")
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -156,6 +165,13 @@ class ForecastRecord:
             "strategy_version",
         ):
             _canonical_identity_text(getattr(self, field_name), field_name=field_name)
+        training_cutoff = parse_iso_timestamp(self.model_training_cutoff_ts)
+        input_cutoff = parse_iso_timestamp(self.input_cutoff_ts)
+        generated = parse_iso_timestamp(self.generated_at)
+        if training_cutoff > input_cutoff:
+            raise ValueError("model training cutoff cannot be after forecast input cutoff")
+        if input_cutoff > generated:
+            raise ValueError("input cutoff cannot be after forecast generation")
         if type(self.evidence_hashes) is not tuple:
             raise ValueError(
                 "evidence_hashes must remain an exact tuple of SHA-256 digests"

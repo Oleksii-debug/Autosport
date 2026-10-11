@@ -405,6 +405,7 @@ class CanonicalOutcomeDerivedVOCScoreAuthorityTests(unittest.TestCase):
                         "manifest_sha256": SHA_E,
                         "source_identity": source_identity,
                         "license_identity": license_identity,
+                        "causal_cutoff": T_PROTOCOL,
                     },
                 )
             )

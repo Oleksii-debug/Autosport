@@ -152,8 +152,19 @@ class ObservationFlowTests(unittest.TestCase):
             seen.append(api_key)
             return self._provider("keyed-source")
 
-        with tempfile.TemporaryDirectory() as tmp, patch.dict(
-            os.environ, {"AUTOSPORT_PARLAYAPI_KEY": "super-secret"}, clear=True
+        with (
+            tempfile.TemporaryDirectory() as tmp,
+            tempfile.TemporaryDirectory() as authority_tmp,
+            patch.dict(
+                os.environ,
+                {
+                    "AUTOSPORT_PARLAYAPI_KEY": "super-secret",
+                    # The test clears profile environment variables on Windows.
+                    # Isolate the monotonic authority outside the workspace.
+                    "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": authority_tmp,
+                },
+                clear=True,
+            ),
         ):
             output = io.StringIO()
             with redirect_stdout(output):

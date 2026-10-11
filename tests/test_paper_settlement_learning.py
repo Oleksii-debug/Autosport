@@ -8,6 +8,8 @@ from decimal import Decimal
 from pathlib import Path
 from unittest.mock import patch
 
+import autosport.paper_settlement_learning as settlement_learning_module
+
 from autosport.agent_loop import AgentLoopPhase, AgentLoopRuntime, ExternalEffectState
 from autosport.decision_ledger import (
     ECONOMIC_DECISION_KIND,
@@ -1352,3 +1354,14 @@ class PaperSettlementLearningBridgeTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+def test_settlement_learning_rejects_nonzero_submicrosecond_causal_timestamp() -> None:
+    with unittest.TestCase().assertRaisesRegex(
+        PaperSettlementLearningBridgeError,
+        "precision finer than microseconds",
+    ):
+        settlement_learning_module._instant(
+            "2026-09-19T21:20:00.1234561Z",
+            "settlement available_at",
+        )

@@ -193,6 +193,10 @@ from . import _research_multiplicity_family_close_dispatch_guard as _research_mu
 from . import scientific_disclosure_export as _scientific_disclosure_export  # noqa: F401,E402
 from . import _scientific_disclosure_export_reload_guard as _scientific_disclosure_export_reload_guard  # noqa: F401,E402
 
+# Lawful-use composition depends on exact durable owner-approval semantics. Seal
+# internal store dispatch before downstream governance captures its resolver.
+from . import _provider_owner_approval_dispatch_guard as _provider_owner_approval_dispatch_guard  # noqa: F401,E402
+
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical
 # existing issuer hash and send only that detached product-owned value.
@@ -224,3 +228,7 @@ from . import _outcome_availability_registry_serialization as _outcome_availabil
 # Seal the two-phase availability clock against mutable function defaults, module
 # dispatch rebinding and direct mutation of cloned UTC-clock/begin globals.
 from . import _outcome_availability_clock_dispatch_guard as _outcome_availability_clock_dispatch_guard  # noqa: F401,E402
+
+# Positive Historical Data provenance uses the closure-hidden canonical urllib
+# dispatch snapshot; synthetic transports remain explicitly non-authoritative.
+from . import _betfair_historical_entitlement_io_snapshot_guard as _betfair_historical_entitlement_io_snapshot_guard  # noqa: F401,E402

@@ -210,3 +210,26 @@ def test_external_uia_native_pid_is_single_read_before_bounded_worker() -> None:
     assert "Find-BoundedUiaSemanticViaChildren" in native
     # The identity and semantic match still must be proven, not inferred from HWND.
     assert "[string]$nativeRoot.Current.AutomationId -ceq $AutomationId" in native
+
+
+
+def test_native_semantic_helper_never_binds_com_root_before_mta_job() -> None:
+    """A typed UIA Root parameter can enter provider COM before worker timeout."""
+    script = _audit_script_text()
+    start = script.index("function Find-BoundedUiaSemanticViaChildren")
+    end = script.index("function Find-UiaRootWithElementForProcessFamily", start)
+    helper = script[start:end]
+
+    # Native candidates supply only HWND/PID. Explicit validation preserves
+    # fail-closed behavior for the desktop-fallback genuine UIA root.
+    assert "[object]$Root," in helper
+    assert "[System.Windows.Automation.AutomationElement]$Root," not in helper
+    assert "$Root -isnot [System.Windows.Automation.AutomationElement]" in helper
+    assert "throw 'External UIA semantic root is not an AutomationElement'" in helper
+    assert "$workerRoot = if ($NativeWindowHandle -ne [IntPtr]::Zero) { $null } else { $Root }" in helper
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_START_PROBE'" in helper
+    assert "$job = Start-ThreadJob" in helper
+    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in helper
+    assert "if ($null -eq $completed)" in helper
+    assert "return $null" in helper
+    assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in helper

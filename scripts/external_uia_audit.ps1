@@ -428,6 +428,48 @@ function Get-ProcessFamilyIds {
     return @($seen | ForEach-Object { [int]$_ })
 }
 
+# Traverse one UIA children level per provider call. A single recursive Descendants
+# FindFirst on the packaged native host blocked the real Windows CI provider for
+# >120 seconds (run 38216324196); it must not be used for semantic readiness.
+# The *actual* external UIA element is still mandatory for acceptance.
+function Find-UiaSemanticViaChildren {
+    param(
+        [System.Windows.Automation.AutomationElement]$Root,
+        [string]$AutomationId,
+        [DateTime]$Deadline
+    )
+    if ($null -eq $Root) { return $null }
+    $pending = [System.Collections.Generic.Queue[System.Windows.Automation.AutomationElement]]::new()
+    $pending.Enqueue($Root)
+    $visited = 0
+    while ($pending.Count -gt 0 -and [DateTime]::UtcNow -lt $Deadline) {
+        if ($visited -ge 4096) {
+            throw 'External UIA semantic child traversal exceeded its safety bound'
+        }
+        $node = $pending.Dequeue()
+        $visited += 1
+        try {
+            if ([string]$node.Current.AutomationId -ceq $AutomationId) {
+                return $node
+            }
+            $children = $node.FindAll(
+                [System.Windows.Automation.TreeScope]::Children,
+                [System.Windows.Automation.Condition]::TrueCondition
+            )
+            for ($index = 0; $index -lt $children.Count; $index++) {
+                if ($pending.Count -ge 4096) {
+                    throw 'External UIA semantic child traversal exceeded its queue bound'
+                }
+                $pending.Enqueue($children.Item($index))
+            }
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            # A stale provider subtree cannot confer semantic readiness.
+            continue
+        }
+    }
+    return $null
+}
+
 function Find-UiaRootForProcessFamily {
     param([int[]]$ProcessIds)
 
@@ -489,7 +531,8 @@ function Find-UiaRootWithElementForProcessFamily {
     param(
         [int[]]$ProcessIds,
         [string]$AutomationId,
-        [int]$RootProcessId
+        [int]$RootProcessId,
+        [DateTime]$Deadline
     )
 
     $condition = New-Object System.Windows.Automation.PropertyCondition(
@@ -518,10 +561,7 @@ function Find-UiaRootWithElementForProcessFamily {
             } else {
                 Write-ExternalUiaProgress -Stage 'SEMANTIC_CHILD_DESCENDANT_PROBE'
             }
-            $element = $window.FindFirst(
-                [System.Windows.Automation.TreeScope]::Descendants,
-                $condition
-            )
+            $element = Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId -Deadline $Deadline
             if ($null -ne $element) {
                 return [pscustomobject]@{ Root = $window; Element = $element }
             }
@@ -708,10 +748,7 @@ try {
                 # blocking descendant provider query. The stage is fixed ASCII
                 # only and does not grant semantic UIA readiness.
                 Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_DESCENDANT_PROBE'
-                $semanticReady = $uiaRoot.FindFirst(
-                    [System.Windows.Automation.TreeScope]::Descendants,
-                    $semanticCondition
-                )
+                $semanticReady = Find-UiaSemanticViaChildren -Root $uiaRoot -AutomationId '330' -Deadline $deadline
             }
         } catch {
             $semanticReady = $null
@@ -723,7 +760,7 @@ try {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'
             $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
             Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_IDS_READY'
-            $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330' -RootProcessId $process.Id
+            $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330' -RootProcessId $process.Id -Deadline $deadline
             if ($null -ne $semanticSurface) {
                 $uiaRoot = $semanticSurface.Root
                 $semanticReady = $semanticSurface.Element

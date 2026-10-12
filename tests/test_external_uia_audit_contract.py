@@ -751,7 +751,7 @@ def test_external_uia_progress_is_fixed_stage_only_not_a_pass_or_user_data() -> 
     audit = _audit()
     assert "[string]$ProgressOutput = ''" in audit
     assert "function Write-ExternalUiaProgress" in audit
-    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
+    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE''SEMANTIC_UIA_OBSERVED'" not in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in _windows_workflow()
@@ -844,12 +844,14 @@ def test_external_uia_family_scan_reports_exact_preblocking_stage_without_false_
     positions = [fn.index(f"Write-ExternalUiaProgress -Stage '{stage}'") for stage in (
         "SEMANTIC_DESKTOP_ENUM_PROBE",
         "SEMANTIC_DESKTOP_WINDOWS_READY",
+        "SEMANTIC_DESKTOP_COUNT_PROBE",
+        "SEMANTIC_DESKTOP_ITEM_PROBE",
         "SEMANTIC_WINDOW_PROPERTY_PROBE",
         "SEMANTIC_DESCENDANT_PROBE",
     )]
     assert positions == sorted(positions)
     assert positions[0] < fn.index("$desktop.FindAll(")
-    assert fn.index("$desktop.FindAll(") < positions[1] < fn.index("foreach ($window in $windows)")
+    assert fn.index("$desktop.FindAll(") < positions[1] < fn.index("$windowCount = $windows.Count")
     assert positions[2] < fn.index("$window.Current.AutomationId")
     assert positions[3] < fn.index("$element = Find-UiaSemanticViaChildren -Root $window")
     assert "$report.status = 'PASS'" not in fn
@@ -857,6 +859,8 @@ def test_external_uia_family_scan_reports_exact_preblocking_stage_without_false_
         "SEMANTIC_FAMILY_IDS_READY",
         "SEMANTIC_DESKTOP_ENUM_PROBE",
         "SEMANTIC_DESKTOP_WINDOWS_READY",
+        "SEMANTIC_DESKTOP_COUNT_PROBE",
+        "SEMANTIC_DESKTOP_ITEM_PROBE",
         "SEMANTIC_WINDOW_PROPERTY_PROBE",
         "SEMANTIC_DESCENDANT_PROBE",
     ):
@@ -864,6 +868,34 @@ def test_external_uia_family_scan_reports_exact_preblocking_stage_without_false_
         assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
 
+
+
+def test_external_uia_scoped_collection_iteration_has_watchdog_visible_boundaries() -> None:
+    """A synchronous provider stall cannot be mistaken for semantic UIA success."""
+    audit = _audit()
+    workflow = _windows_workflow()
+    family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    scan = family.index("$windows = $desktop.FindAll(")
+    ready = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WINDOWS_READY'", scan)
+    count = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_COUNT_PROBE'", ready)
+    get_count = family.index("$windowCount = $windows.Count", count)
+    indexed = family.index("for ($windowIndex = 0; $windowIndex -lt $windowCount; $windowIndex++)", get_count)
+    item = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ITEM_PROBE'", indexed)
+    get_item = family.index("$window = $windows.Item($windowIndex)", item)
+    property_stage = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_WINDOW_PROPERTY_PROBE'", get_item)
+    property_read = family.index("$window.Current.AutomationId", property_stage)
+    children = family.index("Find-UiaSemanticViaChildren -Root $window", property_read)
+    assert scan < ready < count < get_count < indexed < item < get_item < property_stage < property_read < children
+    assert "foreach ($window in $windows)" not in family
+    assert "[System.Windows.Automation.AutomationElement]::ProcessIdProperty" in family
+    assert "$report.status = 'PASS'" not in family
+    for stage in ("SEMANTIC_DESKTOP_COUNT_PROBE", "SEMANTIC_DESKTOP_ITEM_PROBE"):
+        assert f"'{stage}'" in workflow
+        assert f"'{stage}'" in audit.split("function Write-ExternalUiaProgress", 1)[1].split("function", 1)[0]
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
 
 
 def test_external_uia_distinguishes_primary_from_child_descendant_provider_stalls() -> None:

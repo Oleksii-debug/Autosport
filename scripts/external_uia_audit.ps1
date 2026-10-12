@@ -644,6 +644,27 @@ try {
     # descendants directly. WebView2 can finish attaching under another process-
     # family top-level after the native host first appears; retain that bounded
     # rediscovery path, but rate-limit the expensive CIM + desktop enumeration.
+    # The native WinForms HWND can appear before CoreWebView2 finishes attaching.
+    # At that instant a synchronous deep UIA provider probe can block past the
+    # startup deadline. Wait for the product's per-launch native WebView2 witness
+    # first; this is readiness ordering, never a substitute for semantic UIA proof.
+    if (-not [string]::IsNullOrWhiteSpace($Workspace)) {
+        if (-not [System.IO.Path]::IsPathRooted($Workspace)) {
+            throw "External UIA workspace witness root is not absolute"
+        }
+        $preSemanticWitness = Join-Path (
+            [System.IO.Path]::GetFullPath($Workspace)
+        ) 'webview2-runtime-witness.json'
+        while (
+            -not (Test-Path -LiteralPath $preSemanticWitness -PathType Leaf) -and
+            [DateTime]::UtcNow -lt $deadline
+        ) {
+            Start-Sleep -Milliseconds 100
+        }
+        if (-not (Test-Path -LiteralPath $preSemanticWitness -PathType Leaf)) {
+            throw "Packaged WebView2 runtime witness unavailable before semantic UIA probe"
+        }
+    }
     $semanticReady = $null
     $semanticCondition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,

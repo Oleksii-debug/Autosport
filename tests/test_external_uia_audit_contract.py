@@ -1197,6 +1197,12 @@ def test_external_uia_native_treewalker_uses_same_mta_apartment_and_verified_hwn
     assert "$nativeProcessId = [int]$nativeRoot.Current.ProcessId" in native
     assert native.count("[int]$nativeRoot.Current.ProcessId") == 1
     assert "-NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in native
+    # The observed watchdog never reached the worker START stage. The native
+    # path must not bind a COM AutomationElement in the caller before its
+    # bounded MTA job is started: only the verified primitive HWND/PID cross.
+    assert "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId" in native
+    assert "Find-BoundedUiaSemanticViaChildren -Root $nativeRoot" not in native
+    assert "Find-BoundedUiaSemanticViaChildren -Root $nativeRoot" not in audit
     assert "($ProcessIds -contains $nativeProcessId)" in native
     assert "$report.status = 'PASS'" not in worker + wrapper + native
 

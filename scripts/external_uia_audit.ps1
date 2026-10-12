@@ -516,6 +516,9 @@ function Get-ProcessFamilyIds {
 # FindFirst on the packaged native host blocked the real Windows CI provider for
 # >120 seconds (run 38216324196); it must not be used for semantic readiness.
 # The *actual* external UIA element is still mandatory for acceptance.
+# Real UIA providers can block on FindAll(Children) while building a full
+# collection. Walk one raw child/sibling at a time under the existing isolated
+# ThreadJob/outer-process watchdog. A missing/blocked node never means PASS.
 function Find-UiaSemanticViaChildren {
     param(
         [System.Windows.Automation.AutomationElement]$Root,
@@ -523,6 +526,7 @@ function Find-UiaSemanticViaChildren {
         [DateTime]$Deadline
     )
     if ($null -eq $Root) { return $null }
+    $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
     $pending = [System.Collections.Generic.Queue[System.Windows.Automation.AutomationElement]]::new()
     $pending.Enqueue($Root)
     $visited = 0
@@ -536,15 +540,20 @@ function Find-UiaSemanticViaChildren {
             if ([string]$node.Current.AutomationId -ceq $AutomationId) {
                 return $node
             }
-            $children = $node.FindAll(
-                [System.Windows.Automation.TreeScope]::Children,
-                [System.Windows.Automation.Condition]::TrueCondition
-            )
-            for ($index = 0; $index -lt $children.Count; $index++) {
+            # A single provider GetFirstChild/GetNextSibling call may itself
+            # block, so only the bounded worker may execute this traversal.
+            $child = $walker.GetFirstChild($node)
+            $siblingProbes = 0
+            while ($null -ne $child -and [DateTime]::UtcNow -lt $Deadline) {
+                if ($siblingProbes -ge 4096) {
+                    throw 'External UIA semantic sibling traversal exceeded its safety bound'
+                }
                 if ($pending.Count -ge 4096) {
                     throw 'External UIA semantic child traversal exceeded its queue bound'
                 }
-                $pending.Enqueue($children.Item($index))
+                $siblingProbes += 1
+                $pending.Enqueue($child)
+                $child = $walker.GetNextSibling($child)
             }
         } catch [System.Windows.Automation.ElementNotAvailableException] {
             # A stale provider subtree cannot confer semantic readiness.

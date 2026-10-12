@@ -276,6 +276,9 @@ jobs:
         run: |
           $ErrorActionPreference = 'Stop'
           $evidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-audit.json'
+          $stageEvidence = Join-Path $PWD 'dist/fresh-extraction-external-uia-stage.txt'
+          # Never reuse an old attempt's stage as new evidence.
+          if (Test-Path -LiteralPath $stageEvidence) { Remove-Item -LiteralPath $stageEvidence -Force }
           $packageRoot = (Resolve-Path -LiteralPath (Join-Path $PWD '.build-fresh-extraction/Autosport-V1')).Path
           $hostileCwd = (Resolve-Path -LiteralPath (Join-Path $env:SystemRoot 'System32')).Path
           $checkoutCwd = (Resolve-Path -LiteralPath $PWD.Path).Path
@@ -317,23 +320,34 @@ jobs:
             # Isolate that client in a killable worker, never replacing the
             # independently observed UIA/keyboard/STOP evidence with a mock.
             $auditJob = Start-Job -ScriptBlock {
-              param($packageRoot, $evidence, $hostileCwd, $expectedWorkspace, $auditScript)
+              param($packageRoot, $evidence, $hostileCwd, $expectedWorkspace, $auditScript, $stageEvidence)
               & $auditScript `
                 -Exe (Join-Path $packageRoot 'Autosport.exe') `
                 -Output $evidence `
                 -WorkingDirectory $hostileCwd `
-                -Workspace $expectedWorkspace
+                -Workspace $expectedWorkspace `
+                -ProgressOutput $stageEvidence
             } -ArgumentList @(
               $packageRoot,
               $evidence,
               $hostileCwd,
               $expectedWorkspace,
-              (Join-Path $PWD 'scripts/external_uia_audit.ps1')
+              (Join-Path $PWD 'scripts/external_uia_audit.ps1'),
+              $stageEvidence
             )
             try {
               $completedAudit = Wait-Job -Job $auditJob -Timeout 120
               if ($null -eq $completedAudit) {
-                throw 'External UIA audit exceeded 120-second watchdog; real accessibility evidence remains unqualified'
+                # Only fixed stage tokens are logged; malformed/absent diagnostics
+                # never count as proof and never cause the gate to pass.
+                $observedStage = 'NOT_EMITTED'
+                if (Test-Path -LiteralPath $stageEvidence -PathType Leaf) {
+                  $candidateStage = [string](Get-Content -LiteralPath $stageEvidence -Raw -ErrorAction SilentlyContinue).Trim()
+                  $allowedStages = @('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')
+                  if ($allowedStages -ccontains $candidateStage) { $observedStage = $candidateStage }
+                  else { $observedStage = 'INVALID' }
+                }
+                throw "External UIA audit exceeded 120-second watchdog at stage=$observedStage; real accessibility evidence remains unqualified"
               }
               Receive-Job -Job $auditJob -ErrorAction Stop | Out-Null
               if ($auditJob.State -ne 'Completed') {
@@ -446,7 +460,9 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Autosport-external-uia-failure-evidence
-          path: dist/fresh-extraction-external-uia-audit.json
+          path: |
+            dist/fresh-extraction-external-uia-audit.json
+            dist/fresh-extraction-external-uia-stage.txt
           if-no-files-found: ignore
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:

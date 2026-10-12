@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -523,8 +523,25 @@ function Find-UiaSemanticViaChildren {
     param(
         [System.Windows.Automation.AutomationElement]$Root,
         [string]$AutomationId,
-        [DateTime]$Deadline
+        [DateTime]$Deadline,
+        [IntPtr]$NativeWindowHandle = [IntPtr]::Zero,
+        [int]$ExpectedProcessId = 0
     )
+    # UI Automation elements must be created in the MTA worker that queries
+    # their descendants. Passing the parent-runspace COM element across the
+    # ThreadJob boundary can deadlock or invalidate its COM apartment.
+    if ($NativeWindowHandle -ne [IntPtr]::Zero) {
+        if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+            throw 'External UIA semantic worker requires MTA'
+        }
+        if ($ExpectedProcessId -le 0) {
+            throw 'External UIA semantic worker requires a verified process'
+        }
+        $Root = [System.Windows.Automation.AutomationElement]::FromHandle($NativeWindowHandle)
+        if ($null -eq $Root -or [int]$Root.Current.ProcessId -ne $ExpectedProcessId) {
+            throw 'External UIA semantic worker window identity changed'
+        }
+    }
     if ($null -eq $Root) { return $null }
     $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
     $pending = [System.Collections.Generic.Queue[System.Windows.Automation.AutomationElement]]::new()
@@ -631,21 +648,30 @@ function Find-BoundedUiaSemanticViaChildren {
     param(
         [System.Windows.Automation.AutomationElement]$Root,
         [string]$AutomationId,
-        [DateTime]$Deadline
+        [DateTime]$Deadline,
+        [IntPtr]$NativeWindowHandle = [IntPtr]::Zero,
+        [int]$ExpectedProcessId = 0
     )
-    if ($null -eq $Root) { return $null }
+    if ($null -eq $Root -and $NativeWindowHandle -eq [IntPtr]::Zero) { return $null }
     $remainingSeconds = [int][Math]::Ceiling(($Deadline - [DateTime]::UtcNow).TotalSeconds)
     if ($remainingSeconds -le 0) { return $null }
     $budgetSeconds = [int][Math]::Min(4, $remainingSeconds)
+    # The native path passes only primitive HWND/PID values across runspaces;
+    # its UIA object is reacquired in the same MTA worker that performs the
+    # traversal. Desktop fallback retains the previous bounded path.
+    $workerRoot = if ($NativeWindowHandle -ne [IntPtr]::Zero) { $null } else { $Root }
+    Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_START_PROBE'
     $job = Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren} -ErrorAction Stop -ArgumentList @(
-        $Root, $AutomationId, $Deadline
+        $workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId
     )
+    Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_WAIT_PROBE'
     $completed = Wait-Job -Job $job -Timeout $budgetSeconds
     if ($null -eq $completed) {
         # No semantic acceptance: the provider call did not complete.
         # Do not synchronously stop/remove the blocked worker.
         return $null
     }
+    Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'
     try {
         if ($job.State -ne 'Completed') {
             Receive-Job -Job $job -ErrorAction Stop | Out-Null
@@ -690,7 +716,7 @@ function Find-UiaRootWithElementForProcessFamily {
                 return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeRoot }
             }
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'
-            $nativeSemantic = Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId -Deadline $Deadline
+            $nativeSemantic = Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId ([int]$nativeRoot.Current.ProcessId)
             if ($null -ne $nativeSemantic) {
                 return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }
             }

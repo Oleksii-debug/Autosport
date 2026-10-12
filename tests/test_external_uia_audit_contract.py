@@ -883,7 +883,7 @@ def test_external_uia_scoped_collection_iteration_has_watchdog_visible_boundarie
     get_count = family.index("$windowCount = $windows.Count", count)
     indexed = family.index("for ($windowIndex = 0; $windowIndex -lt $windowCount; $windowIndex++)", get_count)
     item = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ITEM_PROBE'", indexed)
-    get_item = family.index("$window = $windows.Item($windowIndex)", item)
+    get_item = family.index("$window = $windows[$windowIndex]", item)
     property_stage = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_WINDOW_PROPERTY_PROBE'", get_item)
     property_read = family.index("$window.Current.AutomationId", property_stage)
     children = family.index("Find-UiaSemanticViaChildren -Root $window", property_read)

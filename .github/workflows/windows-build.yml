@@ -312,11 +312,42 @@ jobs:
             # must not make this accessibility/product-stage gate pass or fail.
             $env:LOCALAPPDATA = $isolatedLocalAppData
             $env:AUTOSPORT_WORKSPACE = $expectedWorkspace
-            ./scripts/external_uia_audit.ps1 `
-              -Exe (Join-Path $packageRoot 'Autosport.exe') `
-              -Output $evidence `
-              -WorkingDirectory $hostileCwd `
-              -Workspace $expectedWorkspace
+            # Some third-party UIA providers block inside synchronous
+            # AutomationElement calls, beyond the audit's polling deadline.
+            # Isolate that client in a killable worker, never replacing the
+            # independently observed UIA/keyboard/STOP evidence with a mock.
+            $auditJob = Start-Job -ScriptBlock {
+              param($packageRoot, $evidence, $hostileCwd, $expectedWorkspace, $auditScript)
+              & $auditScript `
+                -Exe (Join-Path $packageRoot 'Autosport.exe') `
+                -Output $evidence `
+                -WorkingDirectory $hostileCwd `
+                -Workspace $expectedWorkspace
+            } -ArgumentList @(
+              $packageRoot,
+              $evidence,
+              $hostileCwd,
+              $expectedWorkspace,
+              (Join-Path $PWD 'scripts/external_uia_audit.ps1')
+            )
+            try {
+              $completedAudit = Wait-Job -Job $auditJob -Timeout 120
+              if ($null -eq $completedAudit) {
+                throw 'External UIA audit exceeded 120-second watchdog; real accessibility evidence remains unqualified'
+              }
+              Receive-Job -Job $auditJob -ErrorAction Stop | Out-Null
+              if ($auditJob.State -ne 'Completed') {
+                throw "External UIA audit worker did not complete; state=$($auditJob.State)"
+              }
+            } finally {
+              if ($auditJob.State -eq 'Running') {
+                Stop-Job -Job $auditJob -ErrorAction SilentlyContinue
+              }
+              Remove-Job -Job $auditJob -Force -ErrorAction SilentlyContinue
+            }
+            if (-not (Test-Path -LiteralPath $evidence -PathType Leaf)) {
+              throw 'External UIA audit worker did not publish independent evidence'
+            }
             $external = Get-Content $evidence -Raw | ConvertFrom-Json
           } finally {
             if ($hadLocalAppData) {

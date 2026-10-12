@@ -14,6 +14,27 @@ def _windows_workflow() -> str:
     return _WINDOWS_WORKFLOW.read_text(encoding="utf-8")
 
 
+def test_external_uia_process_family_snapshot_is_bounded_and_fail_closed() -> None:
+    """Avoid per-descendant CIM round trips without bypassing real UIA evidence."""
+
+    audit = _audit()
+    start = audit.index("function Get-ProcessFamilyIds {")
+    end = audit.index("function Find-UiaRootForProcessFamily {", start)
+    helper = audit[start:end]
+    assert helper.count("Get-CimInstance") == 1
+    assert "Get-CimInstance -ClassName Win32_Process" in helper
+    assert "-Property ProcessId, ParentProcessId" in helper
+    assert "-OperationTimeoutSec 5 -ErrorAction Stop" in helper
+    assert "$inventory.Count -gt 8192" in helper
+    assert "$seen.Count -gt 512" in helper
+    assert "$childrenByParent.ContainsKey($currentId)" in helper
+    assert "$pending.Enqueue($childId)" in helper
+    assert "SilentlyContinue" not in helper
+    assert "Get-ProcessFamilyIds -RootProcessId $process.Id" in audit
+    assert "SEMANTIC_FAMILY_IDS_READY" in audit
+    assert "Find-UiaRootWithElementForProcessFamily" in audit
+
+
 def test_external_uia_audit_loads_required_automation_assemblies() -> None:
     audit = _audit()
 

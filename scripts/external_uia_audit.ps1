@@ -535,38 +535,49 @@ function Find-UiaRootWithElementForProcessFamily {
         [DateTime]$Deadline
     )
 
-    $condition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
-        $AutomationId
-    )
+    if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) { return $null }
     try {
-        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ENUM_PROBE'
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-        $windows = $desktop.FindAll(
-            [System.Windows.Automation.TreeScope]::Children,
-            [System.Windows.Automation.Condition]::TrueCondition
-        )
-        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WINDOWS_READY'
-        foreach ($window in $windows) {
-            Write-ExternalUiaProgress -Stage 'SEMANTIC_WINDOW_PROPERTY_PROBE'
-            $candidateProcessId = [int]$window.Current.ProcessId
-            if (-not ($ProcessIds -contains $candidateProcessId)) { continue }
-            if ([string]$window.Current.AutomationId -eq $AutomationId) {
-                return [pscustomobject]@{ Root = $window; Element = $window }
-            }
-            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESCENDANT_PROBE'
-            # Fixed, non-identifying provenance before the potentially blocked provider call.
-            if ($candidateProcessId -eq $RootProcessId) {
-                Write-ExternalUiaProgress -Stage 'SEMANTIC_PRIMARY_DESCENDANT_PROBE'
-            } else {
-                Write-ExternalUiaProgress -Stage 'SEMANTIC_CHILD_DESCENDANT_PROBE'
-            }
-            $element = Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId -Deadline $Deadline
-            if ($null -ne $element) {
-                return [pscustomobject]@{ Root = $window; Element = $element }
+        # The unfiltered desktop child enumeration succeeded on Windows CI, but
+        # reading ProcessId on a foreign top-level UIA provider then blocked the
+        # independent watchdog (38222339505, SEMANTIC_WINDOW_PROPERTY_PROBE).
+        # Ask the real UIA provider for exact OS-process-family windows first.
+        # Never enumerate foreign window properties or treat a process match as
+        # semantic acceptance: a real automation_id=330 remains mandatory.
+        foreach ($candidateProcessId in @($ProcessIds | Sort-Object -Unique)) {
+            if ([DateTime]::UtcNow -ge $Deadline) { break }
+            if ([int]$candidateProcessId -le 0) { continue }
+            $processCondition = New-Object System.Windows.Automation.PropertyCondition(
+                [System.Windows.Automation.AutomationElement]::ProcessIdProperty,
+                [int]$candidateProcessId
+            )
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ENUM_PROBE'
+            $windows = $desktop.FindAll(
+                [System.Windows.Automation.TreeScope]::Children,
+                $processCondition
+            )
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WINDOWS_READY'
+            foreach ($window in $windows) {
+                if ([DateTime]::UtcNow -ge $Deadline) { break }
+                Write-ExternalUiaProgress -Stage 'SEMANTIC_WINDOW_PROPERTY_PROBE'
+                if ([string]$window.Current.AutomationId -eq $AutomationId) {
+                    return [pscustomobject]@{ Root = $window; Element = $window }
+                }
+                Write-ExternalUiaProgress -Stage 'SEMANTIC_DESCENDANT_PROBE'
+                if ([int]$candidateProcessId -eq $RootProcessId) {
+                    Write-ExternalUiaProgress -Stage 'SEMANTIC_PRIMARY_DESCENDANT_PROBE'
+                } else {
+                    Write-ExternalUiaProgress -Stage 'SEMANTIC_CHILD_DESCENDANT_PROBE'
+                }
+                $element = Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId -Deadline $Deadline
+                if ($null -ne $element) {
+                    return [pscustomobject]@{ Root = $window; Element = $element }
+                }
             }
         }
-    } catch {}
+    } catch [System.Windows.Automation.ElementNotAvailableException] {
+        # Stale UIA trees cannot mint readiness.
+    }
     return $null
 }
 

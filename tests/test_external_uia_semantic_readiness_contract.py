@@ -95,8 +95,18 @@ def test_external_uia_semantic_surface_returns_one_root_element_pair() -> None:
     helper = script[helper_start:report_start]
 
     assert "[System.Windows.Automation.TreeScope]::Children" in helper
-    assert "$candidateProcessId = [int]$window.Current.ProcessId" in helper
-    assert "if (-not ($ProcessIds -contains $candidateProcessId)) { continue }" in helper
+    # The live Windows candidate blocked while reading a foreign desktop
+    # UIA window's ProcessId. The process-family match must be performed by
+    # a real UIA ProcessIdProperty condition before window property reads.
+    assert "[System.Windows.Automation.AutomationElement]::ProcessIdProperty" in helper
+    assert "$processCondition = New-Object System.Windows.Automation.PropertyCondition(" in helper
+    assert "$windows = $desktop.FindAll(" in helper
+    assert "                $processCondition\n" in helper
+    assert "$candidateProcessId = [int]$window.Current.ProcessId" not in helper
+    assert "[System.Windows.Automation.Condition]::TrueCondition" not in helper
+    assert "foreach ($candidateProcessId in @($ProcessIds | Sort-Object -Unique))" in helper
+    assert "if ([DateTime]::UtcNow -ge $Deadline) { break }" in helper
+    assert "if ([int]$candidateProcessId -le 0) { continue }" in helper
     assert "return [pscustomobject]@{ Root = $window; Element = $window }" in helper
     assert "return [pscustomobject]@{ Root = $window; Element = $element }" in helper
     assert "Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId" in helper

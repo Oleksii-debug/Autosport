@@ -41,6 +41,25 @@ def test_external_uia_waits_for_webview_semantics_before_panel_activation_and_sn
     )
 
 
+
+def test_external_uia_avoids_early_unready_webview2_provider_probe() -> None:
+    script = _audit_script_text()
+
+    witness_wait = script.index("$preSemanticWitness = Join-Path")
+    semantic_poll = script.index("$semanticReady = $null")
+    semantic_provider_call = script.index("$uiaRoot.FindFirst(", semantic_poll)
+    guard = script[witness_wait:semantic_poll]
+
+    assert witness_wait < semantic_poll < semantic_provider_call
+    assert "webview2-runtime-witness.json" in guard
+    assert "Test-Path -LiteralPath $preSemanticWitness -PathType Leaf" in guard
+    assert "[DateTime]::UtcNow -lt $deadline" in guard
+    assert "Start-Sleep -Milliseconds 100" in guard
+    assert "runtime witness unavailable before semantic UIA probe" in guard
+    assert "if ($null -ne $semanticReady) { break }" in script
+    assert "Timed out waiting for WebView2 semantic UIA readiness" in script
+
+
 def test_external_uia_semantic_readiness_reuses_bounded_startup_deadline() -> None:
     script = _audit_script_text()
 

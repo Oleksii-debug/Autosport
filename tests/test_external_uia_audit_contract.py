@@ -841,3 +841,28 @@ def test_external_uia_family_scan_reports_exact_preblocking_stage_without_false_
         assert f"'{stage}'" in workflow
         assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
+
+
+
+def test_external_uia_distinguishes_primary_from_child_descendant_provider_stalls() -> None:
+    """Keep real semantic UIA mandatory while diagnosing which process owns a blocking provider."""
+    audit = _audit()
+    workflow = _windows_workflow()
+    start = audit.index("function Find-UiaRootWithElementForProcessFamily {")
+    end = audit.index("function Wait-ForUiaElement {", start)
+    helper = audit[start:end]
+    assert "[int]$RootProcessId" in helper
+    assert "$candidateProcessId = [int]$window.Current.ProcessId" in helper
+    assert "if (-not ($ProcessIds -contains $candidateProcessId)) { continue }" in helper
+    assert "if ($candidateProcessId -eq $RootProcessId)" in helper
+    assert "-AutomationId '330' -RootProcessId $process.Id" in audit
+    before_find_first = helper.split("$element = $window.FindFirst(", 1)[0]
+    for stage in ("SEMANTIC_PRIMARY_DESCENDANT_PROBE", "SEMANTIC_CHILD_DESCENDANT_PROBE"):
+        statement = f"Write-ExternalUiaProgress -Stage '{stage}'"
+        assert statement in before_find_first
+        assert f"'{stage}'" in workflow
+        assert f"'{stage}'" in audit.split("function Write-ExternalUiaProgress", 1)[1].split("function", 1)[0]
+    assert "$window.Current.Name" not in helper
+    assert "$report.status = 'PASS'" not in helper
+    assert "[System.Windows.Automation.TreeScope]::Descendants" in helper
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow

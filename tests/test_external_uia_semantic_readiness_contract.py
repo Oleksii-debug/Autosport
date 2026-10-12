@@ -113,7 +113,7 @@ def test_external_uia_semantic_surface_returns_one_root_element_pair() -> None:
     assert "if ([int]$candidateProcessId -le 0) { continue }" in helper
     assert "return [pscustomobject]@{ Root = $window; Element = $window }" in helper
     assert "return [pscustomobject]@{ Root = $window; Element = $element }" in helper
-    assert "Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId" in helper
+    assert "Find-BoundedUiaSemanticViaChildren -Root $window -AutomationId $AutomationId" in helper
 
 
 def test_external_uia_contract_matches_current_semantic_webview_copy_and_types() -> None:

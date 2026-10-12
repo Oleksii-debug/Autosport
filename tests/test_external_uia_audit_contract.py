@@ -723,3 +723,52 @@ def test_windows_candidate_bounds_blocking_external_uia_without_false_pass() -> 
     assert "External UIA evidence did not prove packaged durable emergency STOP" in gate
     assert "$external.live_region_event_status -ne 'PASS'" in gate
     assert "$external.keyboard_shortcuts_status -ne 'PASS'" in gate
+
+
+def test_external_uia_progress_is_fixed_stage_only_not_a_pass_or_user_data() -> None:
+    """A blocked UIA provider leaves an atomic, bounded diagnostic, never PASS."""
+    audit = _audit()
+    assert "[string]$ProgressOutput = ''" in audit
+    assert "function Write-ExternalUiaProgress" in audit
+    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
+    assert "[System.IO.File]::WriteAllText($temporary, $Stage, [System.Text.Encoding]::ASCII)" in audit
+    assert "[System.IO.File]::Move($temporary, $target, $true)" in audit
+    assert "if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }" in audit
+    stages = (
+        "Write-ExternalUiaProgress -Stage 'START'",
+        "Write-ExternalUiaProgress -Stage 'UIA_ASSEMBLIES_READY'",
+        "Write-ExternalUiaProgress -Stage 'WINDOW_LAUNCHED'",
+        "Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'",
+        "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'",
+        "Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'",
+        "Write-ExternalUiaProgress -Stage 'AUDIT_COMPLETE'",
+    )
+    for stage in stages:
+        assert audit.count(stage) == 1
+    assert audit.index(stages[0]) < audit.index("Add-Type -AssemblyName UIAutomationClient")
+    assert audit.index(stages[1]) < audit.index("function Get-ExternalActionPattern")
+    assert audit.index(stages[2]) < audit.index("Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds")
+    assert audit.index(stages[3]) < audit.index("Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'")
+    assert audit.index(stages[4]) < audit.index("runtime_witness_status = 'PASS'")
+    assert audit.index(stages[5]) > audit.index("runtime_witness_status = 'PASS'")
+    assert audit.index(stages[6]) > audit.index("$report.status = 'PASS'")
+    assert "Write-ExternalUiaProgress -Stage 'PASS'" not in audit
+
+
+def test_windows_uia_watchdog_records_fresh_allowlisted_stage_and_stays_fail_closed() -> None:
+    workflow = _windows_workflow()
+    start = workflow.index("- name: External UIA fresh-extraction gate")
+    end = workflow.index("- name: Upload external UIA failure evidence", start)
+    gate = workflow[start:end]
+    assert "if (Test-Path -LiteralPath $stageEvidence) { Remove-Item" in gate
+    assert "param($packageRoot, $evidence, $hostileCwd, $expectedWorkspace, $auditScript, $stageEvidence)" in gate
+    assert "-ProgressOutput $stageEvidence" in gate
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in gate
+    assert "$observedStage = 'NOT_EMITTED'" in gate
+    assert "$observedStage = 'INVALID'" in gate
+    assert "if ($allowedStages -ccontains $candidateStage)" in gate
+    assert "throw \"External UIA audit exceeded 120-second watchdog at stage=$observedStage;" in gate
+    assert "Receive-Job -Job $auditJob -ErrorAction Stop" in gate
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in gate
+    assert "dist/fresh-extraction-external-uia-stage.txt" in workflow
+    assert "name: Autosport-external-uia-failure-evidence" in workflow

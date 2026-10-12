@@ -853,7 +853,7 @@ def test_external_uia_family_scan_reports_exact_preblocking_stage_without_false_
     assert positions[0] < fn.index("$desktop.FindAll(")
     assert fn.index("$desktop.FindAll(") < positions[1] < fn.index("$windowCount = $windows.Count")
     assert positions[2] < fn.index("$window.Current.AutomationId")
-    assert positions[3] < fn.index("$element = Find-UiaSemanticViaChildren -Root $window")
+    assert positions[3] < fn.index("$element = Find-BoundedUiaSemanticViaChildren -Root $window")
     assert "$report.status = 'PASS'" not in fn
     for stage in (
         "SEMANTIC_FAMILY_IDS_READY",
@@ -886,7 +886,7 @@ def test_external_uia_scoped_collection_iteration_has_watchdog_visible_boundarie
     get_item = family.index("$window = $windows[$windowIndex]", item)
     property_stage = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_WINDOW_PROPERTY_PROBE'", get_item)
     property_read = family.index("$window.Current.AutomationId", property_stage)
-    children = family.index("Find-UiaSemanticViaChildren -Root $window", property_read)
+    children = family.index("Find-BoundedUiaSemanticViaChildren -Root $window", property_read)
     assert scan < ready < count < get_count < indexed < item < get_item < property_stage < property_read < children
     assert "foreach ($window in $windows)" not in family
     assert "[System.Windows.Automation.AutomationElement]::ProcessIdProperty" in family
@@ -911,7 +911,7 @@ def test_external_uia_distinguishes_primary_from_child_descendant_provider_stall
     assert "$candidateProcessId = [int]$window.Current.ProcessId" not in helper
     assert "if ([int]$candidateProcessId -eq $RootProcessId)" in helper
     assert "-AutomationId '330' -RootProcessId $process.Id" in audit
-    before_find_first = helper.split("$element = Find-UiaSemanticViaChildren -Root $window", 1)[0]
+    before_find_first = helper.split("$element = Find-BoundedUiaSemanticViaChildren -Root $window", 1)[0]
     for stage in ("SEMANTIC_PRIMARY_DESCENDANT_PROBE", "SEMANTIC_CHILD_DESCENDANT_PROBE"):
         statement = f"Write-ExternalUiaProgress -Stage '{stage}'"
         assert statement in before_find_first
@@ -919,7 +919,7 @@ def test_external_uia_distinguishes_primary_from_child_descendant_provider_stall
         assert f"'{stage}'" in audit.split("function Write-ExternalUiaProgress", 1)[1].split("function", 1)[0]
     assert "$window.Current.Name" not in helper
     assert "$report.status = 'PASS'" not in helper
-    assert "Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId" in helper
+    assert "Find-BoundedUiaSemanticViaChildren -Root $window -AutomationId $AutomationId" in helper
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
 
 
@@ -958,7 +958,7 @@ def test_external_uia_semantic_readiness_uses_bounded_child_tree_not_recursive_p
         "function Wait-ForUiaElement {", 1
     )[0]
     assert "$window.FindFirst(" not in family
-    assert "Find-UiaSemanticViaChildren -Root $window" in family
+    assert "Find-BoundedUiaSemanticViaChildren -Root $window" in family
     assert "Find-UiaSemanticViaChildren -Root $uiaRoot" not in audit
     assert "$report.status = 'PASS'" not in helper
     workflow = _windows_workflow()
@@ -980,7 +980,7 @@ def test_external_uia_native_hwnd_candidates_preserve_real_semantic_and_process_
     assert family.index("AutomationElement]::FromHandle($nativeHandle)") < family.index("$desktop.FindAll(")
     assert "($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)" in family
     assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in family
-    assert "Find-UiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId" in family
+    assert "Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId" in family
     assert "return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }" in family
     assert "$report.status = 'PASS'" not in family
     for stage in ("SEMANTIC_NATIVE_HANDLES_PROBE", "SEMANTIC_NATIVE_UIA_PROBE",
@@ -1012,3 +1012,37 @@ def test_external_uia_native_hwnd_compiler_avoids_generic_forwarder() -> None:
     assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in audit
     assert "Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'" in audit
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
+
+
+
+def test_external_uia_provider_child_traversal_is_time_bounded_without_fake_acceptance() -> None:
+    """A synchronous Windows UIA provider hang must not consume the global watchdog.
+
+    Keep authentic AutomationId validation in the worker and all downstream
+    keyboard, live-region, emergency STOP and native witness gates mandatory.
+    """
+    audit = _audit()
+    workflow = _windows_workflow()
+    helper = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in helper
+    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in helper
+    assert "[Math]::Min(4, $remainingSeconds)" in helper
+    assert "if ($null -eq $completed)" in helper
+    assert "return $null" in helper
+    assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in helper
+    assert "Stop-Job -Job $job" not in helper
+    assert "$nativeSemantic = Find-BoundedUiaSemanticViaChildren -Root $nativeRoot" in family
+    assert "$element = Find-BoundedUiaSemanticViaChildren -Root $window" in family
+    assert "Find-UiaSemanticViaChildren -Root $nativeRoot" not in family
+    assert "Find-UiaSemanticViaChildren -Root $window" not in family
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow
+    assert "SEMANTIC_NATIVE_DESCENDANT_PROBE" in workflow
+    assert "AutomationId -ceq $AutomationId" in audit
+    assert "live_region_event_status" in workflow
+    assert "emergency_stop_activation_status" in workflow

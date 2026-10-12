@@ -711,12 +711,15 @@ function Find-UiaRootWithElementForProcessFamily {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_UIA_PROBE'
             $nativeRoot = [System.Windows.Automation.AutomationElement]::FromHandle($nativeHandle)
             if ($null -eq $nativeRoot) { continue }
-            if (-not ($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)) { continue }
+            # Read the COM-backed PID once: a repeat Current.ProcessId access
+            # before the isolated worker can block the caller outside its timeout.
+            $nativeProcessId = [int]$nativeRoot.Current.ProcessId
+            if (-not ($ProcessIds -contains $nativeProcessId)) { continue }
             if ([string]$nativeRoot.Current.AutomationId -ceq $AutomationId) {
                 return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeRoot }
             }
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'
-            $nativeSemantic = Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId ([int]$nativeRoot.Current.ProcessId)
+            $nativeSemantic = Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId
             if ($null -ne $nativeSemantic) {
                 return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }
             }

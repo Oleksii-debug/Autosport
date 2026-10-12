@@ -190,3 +190,23 @@ def test_external_uia_allows_empty_startup_collections_but_rejects_unnamed_items
     assert "unnamed semantic collection items" in script
     assert "CandidateCount = 0; NamedCount = 0; UnnamedCount = 0" in script
     assert "namedRowCount -lt 1" not in script
+
+
+def test_external_uia_native_pid_is_single_read_before_bounded_worker() -> None:
+    """Regression: a second provider COM read blocked outside the worker watchdog."""
+    script = _audit_script_text()
+    start = script.index("function Find-UiaRootWithElementForProcessFamily")
+    end = script.index("$report = [ordered]@{", start)
+    helper = script[start:end]
+    native_start = helper.index("foreach ($nativeHandle in $nativeWindows)")
+    fallback_start = helper.index("# The existing UIA desktop search", native_start)
+    native = helper[native_start:fallback_start]
+
+    assert native.count("$nativeRoot.Current.ProcessId") == 1
+    assert "$nativeProcessId = [int]$nativeRoot.Current.ProcessId" in native
+    assert "if (-not ($ProcessIds -contains $nativeProcessId)) { continue }" in native
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'" in native
+    assert "-NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in native
+    assert "Find-BoundedUiaSemanticViaChildren" in native
+    # The identity and semantic match still must be proven, not inferred from HWND.
+    assert "[string]$nativeRoot.Current.AutomationId -ceq $AutomationId" in native

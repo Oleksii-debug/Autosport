@@ -47,7 +47,8 @@ $runtimeFacades = @()
 if ($PSVersionTable.PSEdition -eq 'Core') {
     $runtimeFacades = @(
         (Join-Path $PSHOME 'System.Runtime.dll'),
-        (Join-Path $PSHOME 'System.Threading.dll')
+        (Join-Path $PSHOME 'System.Threading.dll'),
+        (Join-Path $PSHOME 'System.Collections.dll')
     )
     foreach ($reference in $runtimeFacades) {
         if (-not (Test-Path -LiteralPath $reference -PathType Leaf)) {

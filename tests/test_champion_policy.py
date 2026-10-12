@@ -11,6 +11,7 @@ from autosport.champion_policy import (
     load_champion_policy,
     persist_policy_state,
 )
+from autosport.integrity import atomic_write_json
 from autosport.learning_environment import (
     Action,
     EvidenceTruth,
@@ -411,13 +412,13 @@ def _write_minimal_promoted_registry(
             )
         )
     )
-    path.write_text(
-        json.dumps(
-            {"schema_version": ScientificRegistry.SCHEMA_VERSION, "records": entries},
-            ensure_ascii=False,
-            sort_keys=True,
-        ),
-        encoding="utf-8",
+    # Publish through the canonical integrity writer so the intentionally crafted
+    # restart fixture receives independent monotonic authority at write time. The
+    # fixture may still contain lineage combinations that ChampionPolicy must reject;
+    # read-time TOFU remains forbidden.
+    atomic_write_json(
+        path,
+        {"schema_version": ScientificRegistry.SCHEMA_VERSION, "records": entries},
     )
     return ScientificRegistry(path)
 

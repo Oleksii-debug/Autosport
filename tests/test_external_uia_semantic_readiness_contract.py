@@ -76,7 +76,8 @@ def test_external_uia_semantic_surface_returns_one_root_element_pair() -> None:
     helper = script[helper_start:report_start]
 
     assert "[System.Windows.Automation.TreeScope]::Children" in helper
-    assert "if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }" in helper
+    assert "$candidateProcessId = [int]$window.Current.ProcessId" in helper
+    assert "if (-not ($ProcessIds -contains $candidateProcessId)) { continue }" in helper
     assert "return [pscustomobject]@{ Root = $window; Element = $window }" in helper
     assert "return [pscustomobject]@{ Root = $window; Element = $element }" in helper
     assert "[System.Windows.Automation.TreeScope]::Descendants" in helper

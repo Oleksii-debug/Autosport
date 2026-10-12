@@ -1166,3 +1166,42 @@ def test_external_uia_raw_treewalker_sibling_cycle_fails_closed() -> None:
     assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in worker
     assert "$report.status = 'PASS'" not in helper
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
+
+
+def test_external_uia_native_treewalker_uses_same_mta_apartment_and_verified_hwnd_pid() -> None:
+    """An unresponsive foreign COM apartment cannot qualify packaged UIA semantics."""
+    audit = _audit()
+    worker = audit.split("function Find-UiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootForProcessFamily {", 1
+    )[0]
+    wrapper = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    native = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+
+    assert "[System.Threading.Thread]::CurrentThread.GetApartmentState()" in worker
+    assert "[System.Threading.ApartmentState]::MTA" in worker
+    assert "throw 'External UIA semantic worker requires MTA'" in worker
+    assert "throw 'External UIA semantic worker requires a verified process'" in worker
+    assert "$Root = [System.Windows.Automation.AutomationElement]::FromHandle($NativeWindowHandle)" in worker
+    assert "[int]$Root.Current.ProcessId -ne $ExpectedProcessId" in worker
+    assert "throw 'External UIA semantic worker window identity changed'" in worker
+
+    assert "$workerRoot = if ($NativeWindowHandle -ne [IntPtr]::Zero) { $null } else { $Root }" in wrapper
+    assert "$workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId" in wrapper
+    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in wrapper
+    assert "if ($null -eq $completed)" in wrapper
+    assert "Stop-Job -Job $job" not in wrapper
+    assert "-NativeWindowHandle $nativeHandle -ExpectedProcessId ([int]$nativeRoot.Current.ProcessId)" in native
+    assert "($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)" in native
+    assert "$report.status = 'PASS'" not in worker + wrapper + native
+
+    for stage in (
+        "SEMANTIC_WORKER_START_PROBE",
+        "SEMANTIC_WORKER_WAIT_PROBE",
+        "SEMANTIC_WORKER_RESULT_PROBE",
+    ):
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in wrapper
+        assert f"'{stage}'" in audit.split("function Write-ExternalUiaProgress", 1)[1].split("function", 1)[0]

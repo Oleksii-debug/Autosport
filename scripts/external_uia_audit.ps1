@@ -75,6 +75,8 @@ public static class AutosportNativeWindows
     private delegate bool EnumWindowsCallback(IntPtr window, IntPtr state);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr state);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EnumChildWindows(IntPtr parent, EnumWindowsCallback callback, IntPtr state);
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     public static IntPtr[] ForProcessFamily(int[] allowedIds)
@@ -97,8 +99,31 @@ public static class AutosportNativeWindows
         };
         if (!EnumWindows(callback, IntPtr.Zero))
             throw new InvalidOperationException("Native HWND enumeration failed or exceeded limit");
+        // The actual WebView2 accessibility provider can live beneath a native
+        // parent HWND. Enumerate bounded OS child HWNDs before attempting any
+        // potentially blocking UIA subtree calls on the top-level host.
+        // An HWND remains only a candidate; later UIA ProcessId/AutomationId,
+        // keyboard, live-region and durable STOP witnesses are still required.
+        var rootCount = count;
+        EnumWindowsCallback collectChild = (window, state) =>
+        {
+            uint processId;
+            if (GetWindowThreadProcessId(window, out processId) != 0 &&
+                Array.IndexOf(allowedIds, (int)processId) >= 0)
+            {
+                if (count >= windows.Length) return false;
+                windows[count++] = window;
+            }
+            return true;
+        };
+        for (var i = 0; i < rootCount; i++)
+        {
+            if (!EnumChildWindows(windows[i], collectChild, IntPtr.Zero))
+                throw new InvalidOperationException("Child HWND enumeration failed or exceeded limit");
+        }
         var result = new IntPtr[count];
         Array.Copy(windows, result, count);
+        Array.Reverse(result); // descendants first, native top-level hosts last
         return result;
     }
 }

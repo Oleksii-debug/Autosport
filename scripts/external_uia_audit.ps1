@@ -75,8 +75,12 @@ public static class AutosportNativeWindows
     private delegate bool EnumWindowsCallback(IntPtr window, IntPtr state);
     [DllImport("user32.dll", SetLastError = true)]
     private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr state);
-    [DllImport("user32.dll", SetLastError = true)]
-    private static extern bool EnumChildWindows(IntPtr parent, EnumWindowsCallback callback, IntPtr state);
+    // GetWindow reads one HWND relationship at a time; unlike recursive
+    // EnumChildWindows this cannot enter a provider-wide enumeration callback.
+    private const uint GW_HWNDNEXT = 2;
+    private const uint GW_CHILD = 5;
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     public static IntPtr[] ForProcessFamily(int[] allowedIds)
@@ -105,21 +109,40 @@ public static class AutosportNativeWindows
         // An HWND remains only a candidate; later UIA ProcessId/AutomationId,
         // keyboard, live-region and durable STOP witnesses are still required.
         var rootCount = count;
-        EnumWindowsCallback collectChild = (window, state) =>
+        var scheduled = new IntPtr[4096];
+        var visited = new IntPtr[4096];
+        Array.Copy(windows, scheduled, rootCount);
+        Array.Copy(windows, visited, rootCount);
+        var scheduledCount = rootCount;
+        var visitedCount = rootCount;
+        var probes = 0;
+        for (var cursor = 0; cursor < scheduledCount; cursor++)
         {
-            uint processId;
-            if (GetWindowThreadProcessId(window, out processId) != 0 &&
-                Array.IndexOf(allowedIds, (int)processId) >= 0)
+            // No implicit deep enumeration. Bound the total child/sibling probes
+            // and the breadth-first work queue, including foreign-process HWNDs.
+            // Fail closed on churn/cycles/cap exhaustion; never truncate to PASS.
+            var child = GetWindow(scheduled[cursor], GW_CHILD);
+            while (child != IntPtr.Zero)
             {
-                if (count >= windows.Length) return false;
-                windows[count++] = window;
+                if (++probes > visited.Length)
+                    throw new InvalidOperationException("Child HWND probe cap exceeded");
+                if (Array.IndexOf(visited, child, 0, visitedCount) < 0)
+                {
+                    if (visitedCount >= visited.Length || scheduledCount >= scheduled.Length)
+                        throw new InvalidOperationException("Child HWND enumeration limit exceeded");
+                    visited[visitedCount++] = child;
+                    scheduled[scheduledCount++] = child;
+                    uint processId;
+                    if (GetWindowThreadProcessId(child, out processId) != 0 &&
+                        Array.IndexOf(allowedIds, (int)processId) >= 0)
+                    {
+                        if (count >= windows.Length)
+                            throw new InvalidOperationException("Native HWND result cap exceeded");
+                        windows[count++] = child;
+                    }
+                }
+                child = GetWindow(child, GW_HWNDNEXT);
             }
-            return true;
-        };
-        for (var i = 0; i < rootCount; i++)
-        {
-            if (!EnumChildWindows(windows[i], collectChild, IntPtr.Zero))
-                throw new InvalidOperationException("Child HWND enumeration failed or exceeded limit");
         }
         var result = new IntPtr[count];
         Array.Copy(windows, result, count);

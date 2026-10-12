@@ -949,7 +949,10 @@ def test_external_uia_semantic_readiness_uses_bounded_child_tree_not_recursive_p
         "function Find-UiaRootForProcessFamily {", 1
     )[0]
     assert "[System.Collections.Generic.Queue[System.Windows.Automation.AutomationElement]]::new()" in helper
-    assert "[System.Windows.Automation.TreeScope]::Children" in helper
+    assert "[System.Windows.Automation.TreeWalker]::RawViewWalker" in helper
+    assert "$walker.GetFirstChild($node)" in helper
+    assert "$walker.GetNextSibling($child)" in helper
+    assert ".FindAll(" not in helper
     assert "if ($visited -ge 4096)" in helper
     assert "$pending.Count -ge 4096" in helper
     assert "[DateTime]::UtcNow -lt $Deadline" in helper
@@ -1132,3 +1135,34 @@ def test_external_uia_watchdog_does_not_block_on_provider_cleanup() -> None:
     assert "$external.live_region_event_status -ne 'PASS'" in gate
     assert "$external.keyboard_shortcuts_status -ne 'PASS'" in gate
     assert "$external.emergency_stop_activation_status -ne 'PASS'" in gate
+
+
+def test_external_uia_raw_treewalker_sibling_cycle_fails_closed() -> None:
+    """A cyclic or huge provider sibling chain must not invent semantic readiness.
+
+    TreeWalker is a bounded alternative to the blocking FindAll(Children) path;
+    individual COM calls remain inside the killable/timeout-protected UIA worker.
+    """
+    audit = _audit()
+    helper = audit.split("function Find-UiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootForProcessFamily {", 1
+    )[0]
+    worker = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+
+    assert "$walker = [System.Windows.Automation.TreeWalker]::RawViewWalker" in helper
+    assert "$child = $walker.GetFirstChild($node)" in helper
+    assert "$child = $walker.GetNextSibling($child)" in helper
+    assert "if ($siblingProbes -ge 4096)" in helper
+    assert "if ($pending.Count -ge 4096)" in helper
+    assert "if ($visited -ge 4096)" in helper
+    assert "[DateTime]::UtcNow -lt $Deadline" in helper
+    assert "[string]$node.Current.AutomationId -ceq $AutomationId" in helper
+    assert ".FindAll(" not in helper
+    assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in worker
+    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in worker
+    assert "if ($null -eq $completed)" in worker
+    assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in worker
+    assert "$report.status = 'PASS'" not in helper
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()

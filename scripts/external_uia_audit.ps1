@@ -386,17 +386,43 @@ function Get-SemanticChildStats {
 function Get-ProcessFamilyIds {
     param([int]$RootProcessId)
 
+    if ($RootProcessId -le 0) {
+        throw 'Invalid external UIA root process identifier'
+    }
+    # Previously this loop issued one CIM query per child, which could block
+    # before semantic UIA enumeration. Take a single bounded identity snapshot.
+    # Do not query or persist command lines, paths or user data.
+    $inventory = @(
+        Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId -OperationTimeoutSec 5 -ErrorAction Stop
+    )
+    if ($inventory.Count -gt 8192) {
+        throw 'External UIA process inventory exceeded its safety bound'
+    }
+    $childrenByParent = @{}
+    foreach ($entry in $inventory) {
+        $parentId = [int]$entry.ParentProcessId
+        $childId = [int]$entry.ProcessId
+        if ($parentId -le 0 -or $childId -le 0) { continue }
+        if (-not $childrenByParent.ContainsKey($parentId)) {
+            $childrenByParent[$parentId] = New-Object 'System.Collections.Generic.List[int]'
+        }
+        $childrenByParent[$parentId].Add($childId)
+    }
     $seen = New-Object 'System.Collections.Generic.HashSet[int]'
     $pending = New-Object 'System.Collections.Generic.Queue[int]'
     $pending.Enqueue($RootProcessId)
     while ($pending.Count -gt 0) {
         $currentId = $pending.Dequeue()
         if (-not $seen.Add($currentId)) { continue }
-        $children = @(
-            Get-CimInstance Win32_Process -Filter "ParentProcessId = $currentId" -ErrorAction SilentlyContinue
-        )
-        foreach ($child in $children) {
-            $pending.Enqueue([int]$child.ProcessId)
+        if ($seen.Count -gt 512) {
+            throw 'External UIA process family exceeded its safety bound'
+        }
+        if ($childrenByParent.ContainsKey($currentId)) {
+            foreach ($childId in $childrenByParent[$currentId]) {
+                if (-not $seen.Contains($childId)) {
+                    $pending.Enqueue($childId)
+                }
+            }
         }
     }
     return @($seen | ForEach-Object { [int]$_ })

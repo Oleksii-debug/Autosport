@@ -567,7 +567,7 @@ function Find-UiaRootWithElementForProcessFamily {
             for ($windowIndex = 0; $windowIndex -lt $windowCount; $windowIndex++) {
                 if ([DateTime]::UtcNow -ge $Deadline) { break }
                 Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ITEM_PROBE'
-                $window = $windows.Item($windowIndex)
+                $window = $windows[$windowIndex]
                 Write-ExternalUiaProgress -Stage 'SEMANTIC_WINDOW_PROPERTY_PROBE'
                 if ([string]$window.Current.AutomationId -eq $AutomationId) {
                     return [pscustomobject]@{ Root = $window; Element = $window }

@@ -730,7 +730,7 @@ def test_external_uia_progress_is_fixed_stage_only_not_a_pass_or_user_data() -> 
     audit = _audit()
     assert "[string]$ProgressOutput = ''" in audit
     assert "function Write-ExternalUiaProgress" in audit
-    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
+    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE''SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
     assert "[System.IO.File]::WriteAllText($temporary, $Stage, [System.Text.Encoding]::ASCII)" in audit
     assert "[System.IO.File]::Move($temporary, $target, $true)" in audit
     assert "if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }" in audit
@@ -801,4 +801,39 @@ def test_external_uia_preblocking_progress_identifies_native_fallback_or_search_
         assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
         assert f"'{stage}'" in workflow
     assert "[System.IO.File]::WriteAllText($temporary, $Stage, [System.Text.Encoding]::ASCII)" in audit
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
+
+
+def test_external_uia_family_scan_reports_exact_preblocking_stage_without_false_pass() -> None:
+    """The actual Windows watchdog must distinguish process discovery, UIA desktop enumeration and provider calls."""
+    audit = _audit()
+    workflow = _windows_workflow()
+    family_start = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'")
+    ids = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_IDS_READY'", family_start)
+    scan = audit.index("Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds", ids)
+    assert family_start < ids < scan
+    fn_start = audit.index("function Find-UiaRootWithElementForProcessFamily {")
+    fn_end = audit.index("function Wait-ForUiaElement {", fn_start)
+    fn = audit[fn_start:fn_end]
+    positions = [fn.index(f"Write-ExternalUiaProgress -Stage '{stage}'") for stage in (
+        "SEMANTIC_DESKTOP_ENUM_PROBE",
+        "SEMANTIC_DESKTOP_WINDOWS_READY",
+        "SEMANTIC_WINDOW_PROPERTY_PROBE",
+        "SEMANTIC_DESCENDANT_PROBE",
+    )]
+    assert positions == sorted(positions)
+    assert positions[0] < fn.index("$desktop.FindAll(")
+    assert fn.index("$desktop.FindAll(") < positions[1] < fn.index("foreach ($window in $windows)")
+    assert positions[2] < fn.index("$window.Current.ProcessId")
+    assert positions[3] < fn.index("$window.FindFirst(")
+    assert "$report.status = 'PASS'" not in fn
+    for stage in (
+        "SEMANTIC_FAMILY_IDS_READY",
+        "SEMANTIC_DESKTOP_ENUM_PROBE",
+        "SEMANTIC_DESKTOP_WINDOWS_READY",
+        "SEMANTIC_WINDOW_PROPERTY_PROBE",
+        "SEMANTIC_DESCENDANT_PROBE",
+    ):
+        assert f"'{stage}'" in workflow
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow

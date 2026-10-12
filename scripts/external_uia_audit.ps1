@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE''SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -470,16 +470,20 @@ function Find-UiaRootWithElementForProcessFamily {
         $AutomationId
     )
     try {
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ENUM_PROBE'
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         $windows = $desktop.FindAll(
             [System.Windows.Automation.TreeScope]::Children,
             [System.Windows.Automation.Condition]::TrueCondition
         )
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WINDOWS_READY'
         foreach ($window in $windows) {
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_WINDOW_PROPERTY_PROBE'
             if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }
             if ([string]$window.Current.AutomationId -eq $AutomationId) {
                 return [pscustomobject]@{ Root = $window; Element = $window }
             }
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESCENDANT_PROBE'
             $element = $window.FindFirst(
                 [System.Windows.Automation.TreeScope]::Descendants,
                 $condition
@@ -658,6 +662,7 @@ try {
         if ($now -ge $nextFamilyRefresh) {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'
             $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_IDS_READY'
             $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
             if ($null -ne $semanticSurface) {
                 $uiaRoot = $semanticSurface.Root

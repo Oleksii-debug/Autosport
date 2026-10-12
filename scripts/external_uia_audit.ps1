@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -66,6 +66,36 @@ if ($runtimeFacades.Count -gt 0) {
 Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'
 using System;
 using System.Windows.Automation;
+using System.Runtime.InteropServices;
+
+// OS HWND discovery is candidate selection, not semantic UIA acceptance.
+public static class AutosportNativeWindows
+{
+    private delegate bool EnumWindowsCallback(IntPtr window, IntPtr state);
+    [DllImport("user32.dll", SetLastError = true)]
+    private static extern bool EnumWindows(EnumWindowsCallback callback, IntPtr state);
+    [DllImport("user32.dll")]
+    private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    public static IntPtr[] ForProcessFamily(int[] allowedIds)
+    {
+        if (allowedIds == null || allowedIds.Length == 0) return Array.Empty<IntPtr>();
+        var windows = new System.Collections.Generic.List<IntPtr>();
+        EnumWindowsCallback callback = (window, state) =>
+        {
+            uint processId;
+            if (GetWindowThreadProcessId(window, out processId) != 0 &&
+                Array.IndexOf(allowedIds, (int)processId) >= 0)
+            {
+                if (windows.Count >= 4096) return false;
+                windows.Add(window);
+            }
+            return true;
+        };
+        if (!EnumWindows(callback, IntPtr.Zero))
+            throw new InvalidOperationException("Native HWND enumeration failed or exceeded limit");
+        return windows.ToArray();
+    }
+}
 
 public sealed class AutosportExternalLiveRegionProbe : IDisposable
 {
@@ -536,6 +566,34 @@ function Find-UiaRootWithElementForProcessFamily {
     )
 
     if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) { return $null }
+    # Enumerate candidate top-level HWNDs via the OS process family rather than
+    # blocking on the UIA desktop collection Count (38239442361).
+    # A window handle NEVER constitutes semantic readiness without the real
+    # provider exposing the expected AutomationId and process identity.
+    Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_PROBE'
+    $nativeWindows = [AutosportNativeWindows]::ForProcessFamily($ProcessIds)
+    foreach ($nativeHandle in $nativeWindows) {
+        if ([DateTime]::UtcNow -ge $Deadline) { break }
+        try {
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_UIA_PROBE'
+            $nativeRoot = [System.Windows.Automation.AutomationElement]::FromHandle($nativeHandle)
+            if ($null -eq $nativeRoot) { continue }
+            if (-not ($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)) { continue }
+            if ([string]$nativeRoot.Current.AutomationId -ceq $AutomationId) {
+                return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeRoot }
+            }
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'
+            $nativeSemantic = Find-UiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId -Deadline $Deadline
+            if ($null -ne $nativeSemantic) {
+                return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }
+            }
+        } catch [System.Windows.Automation.ElementNotAvailableException] {
+            # A stale or reused HWND is not a valid accessibility witness.
+            continue
+        }
+    }
+    # The existing UIA desktop search remains a fail-closed fallback if no
+    # native-window candidate exposes the semantic surface.
     try {
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         # The unfiltered desktop child enumeration succeeded on Windows CI, but

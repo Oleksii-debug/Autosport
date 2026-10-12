@@ -963,3 +963,27 @@ def test_external_uia_semantic_readiness_uses_bounded_child_tree_not_recursive_p
     assert "$report.status = 'PASS'" not in helper
     workflow = _windows_workflow()
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
+
+
+def test_external_uia_native_hwnd_candidates_preserve_real_semantic_and_process_proof() -> None:
+    """Native HWND discovery may bypass a blocked collection, never the UIA gate."""
+    audit = _audit()
+    workflow = _windows_workflow()
+    assert "public static class AutosportNativeWindows" in audit
+    assert "GetWindowThreadProcessId(IntPtr window, out uint processId)" in audit
+    assert "Array.IndexOf(allowedIds, (int)processId) >= 0" in audit
+    assert "if (!EnumWindows(callback, IntPtr.Zero))" in audit
+    family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert family.index("[AutosportNativeWindows]::ForProcessFamily($ProcessIds)") < family.index("$desktop.FindAll(")
+    assert family.index("AutomationElement]::FromHandle($nativeHandle)") < family.index("$desktop.FindAll(")
+    assert "($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)" in family
+    assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in family
+    assert "Find-UiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId" in family
+    assert "return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }" in family
+    assert "$report.status = 'PASS'" not in family
+    for stage in ("SEMANTIC_NATIVE_HANDLES_PROBE", "SEMANTIC_NATIVE_UIA_PROBE",
+                  "SEMANTIC_NATIVE_DESCENDANT_PROBE"):
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in family
+        assert f"'{stage}'" in workflow

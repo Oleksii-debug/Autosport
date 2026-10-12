@@ -5,10 +5,33 @@ param(
     [string]$Output,
     [string]$WorkingDirectory = '',
     [string]$Workspace = '',
-    [int]$TimeoutSeconds = 20
+    [int]$TimeoutSeconds = 20,
+    [string]$ProgressOutput = ''
 )
 
 $ErrorActionPreference = 'Stop'
+# This file is a bounded diagnostic of the real external audit, NOT audit PASS.
+# Never persist UIA names, command lines, paths, environment or user data.
+function Write-ExternalUiaProgress {
+    param(
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [string]$Stage
+    )
+    if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
+    $target = [System.IO.Path]::GetFullPath($ProgressOutput)
+    $directory = [System.IO.Path]::GetDirectoryName($target)
+    [System.IO.Directory]::CreateDirectory($directory) | Out-Null
+    $temporary = "$target.$PID.tmp"
+    try {
+        [System.IO.File]::WriteAllText($temporary, $Stage, [System.Text.Encoding]::ASCII)
+        [System.IO.File]::Move($temporary, $target, $true)
+    } finally {
+        if ([System.IO.File]::Exists($temporary)) {
+            [System.IO.File]::Delete($temporary)
+        }
+    }
+}
+Write-ExternalUiaProgress -Stage 'START'
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
@@ -154,6 +177,7 @@ public sealed class AutosportExternalLiveRegionProbe : IDisposable
     }
 }
 '@
+Write-ExternalUiaProgress -Stage 'UIA_ASSEMBLIES_READY'
 
 # This gate describes the semantic HTML/WebView2 surface that ships in the
 # package.  It intentionally validates externally observable UIA semantics, not
@@ -570,6 +594,7 @@ try {
 
     $process = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru
     $report.launcher_process_id = $process.Id
+    Write-ExternalUiaProgress -Stage 'WINDOW_LAUNCHED'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $deadline) {
         $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
@@ -581,6 +606,7 @@ try {
         throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
     }
     $report.initial_window_observed = $true
+    Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'
 
     # Native host visibility is not semantic readiness. The already discovered
     # top-level window is the cheapest and strongest same-window probe, so poll its
@@ -624,6 +650,8 @@ try {
     if ($null -eq $semanticReady -or $null -eq $uiaRoot) {
         throw "Timed out waiting for WebView2 semantic UIA readiness (automation_id=330) across packaged process family"
     }
+
+    Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'
 
     # Bind the externally observed packaged UIA session to the product-owned
     # witness emitted by the actual native CoreWebView2 Environment before bridge
@@ -672,6 +700,7 @@ try {
         }
         $report.runtime_browser_version = $browserVersion
         $report.runtime_witness_status = 'PASS'
+        Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'
     }
 
     # While the real packaged semantic shell is alive, a second normal launch must
@@ -1079,6 +1108,7 @@ try {
 
     if ($report.failures.Count -eq 0) {
         $report.status = 'PASS'
+        Write-ExternalUiaProgress -Stage 'AUDIT_COMPLETE'
     }
 } catch {
     $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"

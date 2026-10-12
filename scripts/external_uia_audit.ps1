@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -557,8 +557,17 @@ function Find-UiaRootWithElementForProcessFamily {
                 $processCondition
             )
             Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WINDOWS_READY'
-            foreach ($window in $windows) {
+            # PowerShell's implicit AutomationElementCollection enumerator can
+            # enter a synchronous UIA provider before the loop body. Use indexed
+            # access so the independent watchdog can distinguish collection
+            # count, item retrieval and actual window property/child traversal.
+            # No UIA result is inferred from a successful enumeration.
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_COUNT_PROBE'
+            $windowCount = $windows.Count
+            for ($windowIndex = 0; $windowIndex -lt $windowCount; $windowIndex++) {
                 if ([DateTime]::UtcNow -ge $Deadline) { break }
+                Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ITEM_PROBE'
+                $window = $windows.Item($windowIndex)
                 Write-ExternalUiaProgress -Stage 'SEMANTIC_WINDOW_PROPERTY_PROBE'
                 if ([string]$window.Current.AutomationId -eq $AutomationId) {
                     return [pscustomobject]@{ Root = $window; Element = $window }

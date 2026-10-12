@@ -563,6 +563,50 @@ function Find-UiaElementForProcessFamily {
     return $null
 }
 
+# Windows UIA providers can block forever inside FindAll(Children), even with a
+# source-level deadline. Execute each candidate's *real* UIA search in a bounded
+# in-process thread job. ThreadJob returns live AutomationElement references:
+# no mocked elements or status markers can satisfy the external audit.
+# A timed-out provider thread is intentionally not Stop-Job'd (Stop-Job can
+# itself block on the same COM call); the enclosing isolated audit process has
+# an independent 120-second watchdog and disposes these bounded workers.
+function Find-BoundedUiaSemanticViaChildren {
+    param(
+        [System.Windows.Automation.AutomationElement]$Root,
+        [string]$AutomationId,
+        [DateTime]$Deadline
+    )
+    if ($null -eq $Root) { return $null }
+    $remainingSeconds = [int][Math]::Ceiling(($Deadline - [DateTime]::UtcNow).TotalSeconds)
+    if ($remainingSeconds -le 0) { return $null }
+    $budgetSeconds = [int][Math]::Min(4, $remainingSeconds)
+    $job = Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren} -ArgumentList @(
+        $Root, $AutomationId, $Deadline
+    ) -ErrorAction Stop
+    $completed = Wait-Job -Job $job -Timeout $budgetSeconds
+    if ($null -eq $completed) {
+        # No semantic acceptance: the provider call did not complete.
+        # Do not synchronously stop/remove the blocked worker.
+        return $null
+    }
+    try {
+        if ($job.State -ne 'Completed') {
+            Receive-Job -Job $job -ErrorAction Stop | Out-Null
+            throw 'External UIA semantic search worker did not complete'
+        }
+        $result = Receive-Job -Job $job -ErrorAction Stop
+        if ($null -eq $result) { return $null }
+        if ($result -isnot [System.Windows.Automation.AutomationElement]) {
+            throw 'External UIA semantic worker returned an invalid element'
+        }
+        # The worker's traversal itself read the real matching AutomationId.
+        # All later UIA/keyboard/live-region/STOP validations remain mandatory.
+        return $result
+    } finally {
+        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
+    }
+}
+
 function Find-UiaRootWithElementForProcessFamily {
     param(
         [int[]]$ProcessIds,
@@ -589,7 +633,7 @@ function Find-UiaRootWithElementForProcessFamily {
                 return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeRoot }
             }
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'
-            $nativeSemantic = Find-UiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId -Deadline $Deadline
+            $nativeSemantic = Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId -Deadline $Deadline
             if ($null -ne $nativeSemantic) {
                 return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }
             }
@@ -642,7 +686,7 @@ function Find-UiaRootWithElementForProcessFamily {
                 } else {
                     Write-ExternalUiaProgress -Stage 'SEMANTIC_CHILD_DESCENDANT_PROBE'
                 }
-                $element = Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId -Deadline $Deadline
+                $element = Find-BoundedUiaSemanticViaChildren -Root $window -AutomationId $AutomationId -Deadline $Deadline
                 if ($null -ne $element) {
                     return [pscustomobject]@{ Root = $window; Element = $element }
                 }

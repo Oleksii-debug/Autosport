@@ -47,7 +47,10 @@ def test_external_uia_avoids_early_unready_webview2_provider_probe() -> None:
 
     witness_wait = script.index("$preSemanticWitness = Join-Path")
     semantic_poll = script.index("$semanticReady = $null")
-    semantic_provider_call = script.index("Find-UiaSemanticViaChildren -Root $uiaRoot", semantic_poll)
+    semantic_provider_call = script.index(
+        "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds",
+        semantic_poll,
+    )
     guard = script[witness_wait:semantic_poll]
 
     assert witness_wait < semantic_poll < semantic_provider_call
@@ -70,9 +73,10 @@ def test_external_uia_semantic_readiness_reuses_bounded_startup_deadline() -> No
     semantic_block = script[semantic_state_index:semantic_timeout_index]
 
     assert "while ([DateTime]::UtcNow -lt $deadline)" in semantic_block
-    direct_probe = "$semanticReady = Find-UiaSemanticViaChildren -Root $uiaRoot -AutomationId '330'"
+    direct_probe = "if ([string]$uiaRoot.Current.AutomationId -eq '330') {"
     family_probe = "Get-ProcessFamilyIds -RootProcessId $process.Id"
     assert direct_probe in semantic_block
+    assert "Find-UiaSemanticViaChildren -Root $uiaRoot" not in semantic_block
     assert family_probe in semantic_block
     assert semantic_block.index(direct_probe) < semantic_block.index(family_probe)
     assert "$nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)" in semantic_block

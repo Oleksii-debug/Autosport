@@ -716,11 +716,12 @@ try {
         $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
     }
 
-    # Native host visibility is not semantic readiness. The already discovered
-    # top-level window is the cheapest and strongest same-window probe, so poll its
-    # descendants directly. WebView2 can finish attaching under another process-
-    # family top-level after the native host first appears; retain that bounded
-    # rediscovery path, but rate-limit the expensive CIM + desktop enumeration.
+    # Native host visibility is not semantic readiness. The local native HWND
+    # AutomationId read is retained, but optional subtree enumeration on this
+    # unscoped native window blocked fresh-extraction Windows UIA for 120 seconds
+    # even after the child-BFS repair (run 38227085863). Do not perform that
+    # redundant pre-family traversal. Family-scoped real UIA search below remains
+    # mandatory; no runtime witness or native HWND can substitute for it.
     # The native WinForms HWND can appear before CoreWebView2 finishes attaching.
     # At that instant a synchronous deep UIA provider probe can block past the
     # startup deadline. Wait for the product's per-launch native WebView2 witness
@@ -743,10 +744,6 @@ try {
         }
     }
     $semanticReady = $null
-    $semanticCondition = New-Object System.Windows.Automation.PropertyCondition(
-        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
-        '330'
-    )
     $nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)
     while ([DateTime]::UtcNow -lt $deadline) {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'
@@ -754,13 +751,11 @@ try {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_ROOT_ID_PROBE'
             if ([string]$uiaRoot.Current.AutomationId -eq '330') {
                 $semanticReady = $uiaRoot
-            } else {
-                # Distinguish a blocking native root-property read from a
-                # blocking descendant provider query. The stage is fixed ASCII
-                # only and does not grant semantic UIA readiness.
-                Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_DESCENDANT_PROBE'
-                $semanticReady = Find-UiaSemanticViaChildren -Root $uiaRoot -AutomationId '330' -Deadline $deadline
             }
+            # The observed native root is not necessarily the actual WebView2
+            # provider. The external process-family search below must produce
+            # the real semantic automation_id=330 instead of traversing this
+            # potentially blocking native subtree.
         } catch {
             $semanticReady = $null
         }

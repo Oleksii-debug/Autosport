@@ -814,7 +814,8 @@ def test_external_uia_preblocking_progress_identifies_native_fallback_or_search_
     semantic = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'", family_probe)
     assert start < name_probe < local_probe < family_probe < semantic
     assert name_probe < audit.index("$initialNativeName = [string]$uiaRoot.Current.Name")
-    assert local_probe < audit.index("Find-UiaSemanticViaChildren -Root $uiaRoot", local_probe)
+    assert local_probe < audit.index("$uiaRoot.Current.AutomationId", local_probe)
+    assert "Find-UiaSemanticViaChildren -Root $uiaRoot" not in audit
     assert family_probe < audit.index("Find-UiaRootWithElementForProcessFamily", family_probe)
     preprobe = audit[name_probe:local_probe]
     assert "NATIVE_EMERGENCY_STOP" in preprobe
@@ -849,7 +850,7 @@ def test_external_uia_family_scan_reports_exact_preblocking_stage_without_false_
     assert positions == sorted(positions)
     assert positions[0] < fn.index("$desktop.FindAll(")
     assert fn.index("$desktop.FindAll(") < positions[1] < fn.index("foreach ($window in $windows)")
-    assert positions[2] < fn.index("$window.Current.ProcessId")
+    assert positions[2] < fn.index("$window.Current.AutomationId")
     assert positions[3] < fn.index("$element = Find-UiaSemanticViaChildren -Root $window")
     assert "$report.status = 'PASS'" not in fn
     for stage in (
@@ -873,9 +874,10 @@ def test_external_uia_distinguishes_primary_from_child_descendant_provider_stall
     end = audit.index("function Wait-ForUiaElement {", start)
     helper = audit[start:end]
     assert "[int]$RootProcessId" in helper
-    assert "$candidateProcessId = [int]$window.Current.ProcessId" in helper
-    assert "if (-not ($ProcessIds -contains $candidateProcessId)) { continue }" in helper
-    assert "if ($candidateProcessId -eq $RootProcessId)" in helper
+    assert "foreach ($candidateProcessId in @($ProcessIds | Sort-Object -Unique))" in helper
+    assert "[System.Windows.Automation.AutomationElement]::ProcessIdProperty" in helper
+    assert "$candidateProcessId = [int]$window.Current.ProcessId" not in helper
+    assert "if ([int]$candidateProcessId -eq $RootProcessId)" in helper
     assert "-AutomationId '330' -RootProcessId $process.Id" in audit
     before_find_first = helper.split("$element = Find-UiaSemanticViaChildren -Root $window", 1)[0]
     for stage in ("SEMANTIC_PRIMARY_DESCENDANT_PROBE", "SEMANTIC_CHILD_DESCENDANT_PROBE"):
@@ -889,24 +891,20 @@ def test_external_uia_distinguishes_primary_from_child_descendant_provider_stall
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
 
 
-def test_external_uia_local_root_and_descendant_probes_are_independently_bounded() -> None:
-    """Identify a blocking property read versus a deep UIA provider search.
-
-    These fixed stages are diagnostic, not an accessibility acceptance bypass.
-    The independent Windows watchdog and semantic UIA/keyboard/STOP gates remain.
-    """
+def test_external_uia_local_native_probe_never_enters_blocking_unscoped_subtree() -> None:
+    """The fresh-extracted Windows audit must rely on real family-scoped semantic UIA."""
     audit = _audit()
     workflow = _windows_workflow()
     start = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'")
     root = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_ROOT_ID_PROBE'", start)
     property_read = audit.index("$uiaRoot.Current.AutomationId", root)
-    deep = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_DESCENDANT_PROBE'", property_read)
-    descendant_call = audit.index("$semanticReady = Find-UiaSemanticViaChildren -Root $uiaRoot", deep)
-    family = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'", descendant_call)
-    assert start < root < property_read < deep < descendant_call < family
-    for stage in ("SEMANTIC_LOCAL_ROOT_ID_PROBE", "SEMANTIC_LOCAL_DESCENDANT_PROBE"):
-        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
-        assert f"'{stage}'" in workflow
+    family = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'", property_read)
+    local = audit[start:family]
+    assert start < root < property_read < family
+    assert "Find-UiaSemanticViaChildren -Root $uiaRoot" not in audit
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_DESCENDANT_PROBE'" not in audit
+    assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in audit[family:]
+    assert "SEMANTIC_LOCAL_ROOT_ID_PROBE" in workflow
     assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow
     assert "$external.status -ne 'PASS'" in workflow
     assert "Write-ExternalUiaProgress -Stage 'PASS'" not in audit
@@ -929,7 +927,7 @@ def test_external_uia_semantic_readiness_uses_bounded_child_tree_not_recursive_p
     )[0]
     assert "$window.FindFirst(" not in family
     assert "Find-UiaSemanticViaChildren -Root $window" in family
-    assert "Find-UiaSemanticViaChildren -Root $uiaRoot" in audit
+    assert "Find-UiaSemanticViaChildren -Root $uiaRoot" not in audit
     assert "$report.status = 'PASS'" not in helper
     workflow = _windows_workflow()
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow

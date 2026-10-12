@@ -47,7 +47,7 @@ def test_external_uia_avoids_early_unready_webview2_provider_probe() -> None:
 
     witness_wait = script.index("$preSemanticWitness = Join-Path")
     semantic_poll = script.index("$semanticReady = $null")
-    semantic_provider_call = script.index("$uiaRoot.FindFirst(", semantic_poll)
+    semantic_provider_call = script.index("Find-UiaSemanticViaChildren -Root $uiaRoot", semantic_poll)
     guard = script[witness_wait:semantic_poll]
 
     assert witness_wait < semantic_poll < semantic_provider_call
@@ -70,7 +70,7 @@ def test_external_uia_semantic_readiness_reuses_bounded_startup_deadline() -> No
     semantic_block = script[semantic_state_index:semantic_timeout_index]
 
     assert "while ([DateTime]::UtcNow -lt $deadline)" in semantic_block
-    direct_probe = "$semanticReady = $uiaRoot.FindFirst("
+    direct_probe = "$semanticReady = Find-UiaSemanticViaChildren -Root $uiaRoot -AutomationId '330'"
     family_probe = "Get-ProcessFamilyIds -RootProcessId $process.Id"
     assert direct_probe in semantic_block
     assert family_probe in semantic_block
@@ -99,7 +99,7 @@ def test_external_uia_semantic_surface_returns_one_root_element_pair() -> None:
     assert "if (-not ($ProcessIds -contains $candidateProcessId)) { continue }" in helper
     assert "return [pscustomobject]@{ Root = $window; Element = $window }" in helper
     assert "return [pscustomobject]@{ Root = $window; Element = $element }" in helper
-    assert "[System.Windows.Automation.TreeScope]::Descendants" in helper
+    assert "Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId" in helper
 
 
 def test_external_uia_contract_matches_current_semantic_webview_copy_and_types() -> None:

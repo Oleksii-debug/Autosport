@@ -1015,6 +1015,29 @@ def test_external_uia_native_hwnd_compiler_avoids_generic_forwarder() -> None:
 
 
 
+def test_external_uia_os_child_hwnd_candidates_are_bounded_and_never_replace_semantic_proof() -> None:
+    """Child HWNDs prioritize the actual WebView2 provider, not native readiness."""
+    audit = _audit()
+    native = audit.split("public static class AutosportNativeWindows", 1)[1].split(
+        "public sealed class AutosportExternalLiveRegionProbe", 1
+    )[0]
+    family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert 'private static extern bool EnumChildWindows' in native
+    assert 'var rootCount = count;' in native
+    assert 'if (count >= windows.Length) return false;' in native
+    assert 'Array.IndexOf(allowedIds, (int)processId) >= 0' in native
+    assert 'if (!EnumChildWindows(windows[i], collectChild, IntPtr.Zero))' in native
+    assert 'Array.Reverse(result);' in native
+    assert 'AutomationElement]::FromHandle($nativeHandle)' in family
+    assert '($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)' in family
+    assert '$nativeRoot.Current.AutomationId -ceq $AutomationId' in family
+    assert 'Find-BoundedUiaSemanticViaChildren -Root $nativeRoot' in family
+    assert "SEMANTIC_NATIVE_DESCENDANT_PROBE" in family
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
+
+
 def test_external_uia_provider_child_traversal_is_time_bounded_without_fake_acceptance() -> None:
     """A synchronous Windows UIA provider hang must not consume the global watchdog.
 

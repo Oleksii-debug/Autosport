@@ -354,10 +354,12 @@ jobs:
                 throw "External UIA audit worker did not complete; state=$($auditJob.State)"
               }
             } finally {
-              if ($auditJob.State -eq 'Running') {
-                Stop-Job -Job $auditJob -ErrorAction SilentlyContinue
+              # Timed-out real UIA COM can block synchronous Stop-Job/Remove-Job.
+              # Keep the 120s failure authoritative; the out-of-process worker
+              # is terminated by the failing runner, not by COM-blocking cleanup.
+              if ($auditJob.State -ne 'Running') {
+                Remove-Job -Job $auditJob -Force -ErrorAction SilentlyContinue
               }
-              Remove-Job -Job $auditJob -Force -ErrorAction SilentlyContinue
             }
             if (-not (Test-Path -LiteralPath $evidence -PathType Leaf)) {
               throw 'External UIA audit worker did not publish independent evidence'

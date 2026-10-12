@@ -580,9 +580,9 @@ function Find-BoundedUiaSemanticViaChildren {
     $remainingSeconds = [int][Math]::Ceiling(($Deadline - [DateTime]::UtcNow).TotalSeconds)
     if ($remainingSeconds -le 0) { return $null }
     $budgetSeconds = [int][Math]::Min(4, $remainingSeconds)
-    $job = Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren} -ArgumentList @(
+    $job = Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren} -ErrorAction Stop -ArgumentList @(
         $Root, $AutomationId, $Deadline
-    ) -ErrorAction Stop
+    )
     $completed = Wait-Job -Job $job -Timeout $budgetSeconds
     if ($null -eq $completed) {
         # No semantic acceptance: the provider call did not complete.

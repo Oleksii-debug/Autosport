@@ -693,3 +693,33 @@ def test_external_uia_failure_records_only_bounded_precleanup_process_family_cou
     assert "Export neither descendant PIDs nor native window names" in finalizer
     assert "launcher_exit_state = 'NOT_OBSERVED'" in audit
     assert "$report.status = 'PASS'" not in finalizer
+
+
+def test_windows_candidate_bounds_blocking_external_uia_without_false_pass() -> None:
+    """A hung third-party UIA provider cannot consume the entire Windows runner."""
+    workflow = _windows_workflow()
+    start = workflow.index("- name: External UIA fresh-extraction gate")
+    end = workflow.index("- name: Upload external UIA failure evidence", start)
+    gate = workflow[start:end]
+
+    worker = gate.index("$auditJob = Start-Job -ScriptBlock")
+    actual_audit = gate.index("& $auditScript", worker)
+    wait = gate.index("$completedAudit = Wait-Job -Job $auditJob -Timeout 120")
+    receive = gate.index("Receive-Job -Job $auditJob -ErrorAction Stop")
+    evidence = gate.index("$external = Get-Content $evidence -Raw | ConvertFrom-Json")
+
+    assert worker < actual_audit < wait < receive < evidence
+    assert "-Exe (Join-Path $packageRoot 'Autosport.exe')" in gate
+    assert "-WorkingDirectory $hostileCwd" in gate
+    assert "-Workspace $expectedWorkspace" in gate
+    assert "if ($null -eq $completedAudit)" in gate
+    assert "real accessibility evidence remains unqualified" in gate
+    assert "if ($auditJob.State -ne 'Completed')" in gate
+    assert "Stop-Job -Job $auditJob -ErrorAction SilentlyContinue" in gate
+    assert "Remove-Job -Job $auditJob -Force -ErrorAction SilentlyContinue" in gate
+    assert "if (-not (Test-Path -LiteralPath $evidence -PathType Leaf))" in gate
+    assert "did not publish independent evidence" in gate
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in gate
+    assert "External UIA evidence did not prove packaged durable emergency STOP" in gate
+    assert "$external.live_region_event_status -ne 'PASS'" in gate
+    assert "$external.keyboard_shortcuts_status -ne 'PASS'" in gate

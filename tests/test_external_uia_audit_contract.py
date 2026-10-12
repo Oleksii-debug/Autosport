@@ -736,7 +736,8 @@ def test_windows_candidate_bounds_blocking_external_uia_without_false_pass() -> 
     assert "if ($null -eq $completedAudit)" in gate
     assert "real accessibility evidence remains unqualified" in gate
     assert "if ($auditJob.State -ne 'Completed')" in gate
-    assert "Stop-Job -Job $auditJob -ErrorAction SilentlyContinue" in gate
+    assert "Stop-Job -Job $auditJob" not in gate
+    assert "if ($auditJob.State -ne 'Running')" in gate
     assert "Remove-Job -Job $auditJob -Force -ErrorAction SilentlyContinue" in gate
     assert "if (-not (Test-Path -LiteralPath $evidence -PathType Leaf))" in gate
     assert "did not publish independent evidence" in gate
@@ -1107,3 +1108,27 @@ def test_external_uia_provider_child_traversal_is_time_bounded_without_fake_acce
     assert "AutomationId -ceq $AutomationId" in audit
     assert "live_region_event_status" in workflow
     assert "emergency_stop_activation_status" in workflow
+
+
+def test_external_uia_watchdog_does_not_block_on_provider_cleanup() -> None:
+    """A blocked UIA COM worker must remain FAILURE without hanging cancellation.
+
+    Windows Candidate 38276832352 ran into the real descendant UIA provider
+    and exceeded its watchdog; synchronous Stop-Job after timeout can itself
+    wait on that provider. The out-of-process worker is not semantic evidence.
+    """
+    workflow = _windows_workflow()
+    start = workflow.index("- name: External UIA fresh-extraction gate")
+    end = workflow.index("- name: Upload external UIA failure evidence", start)
+    gate = workflow[start:end]
+    assert "$auditJob = Start-Job -ScriptBlock" in gate
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in gate
+    assert "if ($null -eq $completedAudit)" in gate
+    assert "real accessibility evidence remains unqualified" in gate
+    assert "Stop-Job -Job $auditJob" not in gate
+    assert "if ($auditJob.State -ne 'Running')" in gate
+    assert "Remove-Job -Job $auditJob -Force" in gate
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in gate
+    assert "$external.live_region_event_status -ne 'PASS'" in gate
+    assert "$external.keyboard_shortcuts_status -ne 'PASS'" in gate
+    assert "$external.emergency_stop_activation_status -ne 'PASS'" in gate

@@ -989,18 +989,26 @@ def test_external_uia_native_hwnd_candidates_preserve_real_semantic_and_process_
         assert f"'{stage}'" in workflow
 
 
-def test_external_uia_native_hwnd_compiler_has_collection_reference() -> None:
-    """PowerShell 7's explicit Roslyn refs must include the HWND List<> facade.
+def test_external_uia_native_hwnd_compiler_avoids_generic_forwarder() -> None:
+    """Use a bounded HWND array: Roslyn on the Windows runner rejects List<>.
 
-    Without System.Collections.dll, Windows external UIA fails at Add-Type before
-    semantic keyboard, live-region and STOP gates can execute.
+    HWNDs select candidates only. The actual UIA semantic/keyboard/STOP gate
+    must remain mandatory and a truncated enumeration must fail closed.
     """
     audit = _audit()
-    facades = audit.split("$runtimeFacades = @(", 1)[1].split("\n    )", 1)[0]
-    assert "(Join-Path $PSHOME 'System.Collections.dll')" in facades
-    assert "(Join-Path $PSHOME 'System.Runtime.dll')" in facades
-    assert "(Join-Path $PSHOME 'System.Threading.dll')" in facades
-    assert "new System.Collections.Generic.List<IntPtr>()" in audit
+    native = audit.split("public static class AutosportNativeWindows", 1)[1].split(
+        "public sealed class AutosportExternalLiveRegionProbe", 1
+    )[0]
+    assert "new System.Collections.Generic.List<IntPtr>()" not in native
+    assert "var windows = new IntPtr[4096];" in native
+    assert "if (count >= windows.Length) return false;" in native
+    assert "windows[count++] = window;" in native
+    assert "if (!EnumWindows(callback, IntPtr.Zero))" in native
+    assert "throw new InvalidOperationException(\"Native HWND enumeration failed or exceeded limit\")" in native
+    assert "var result = new IntPtr[count];" in native
+    assert "Array.Copy(windows, result, count);" in native
+    assert "[AutosportNativeWindows]::ForProcessFamily($ProcessIds)" in audit
+    assert "AutomationElement]::FromHandle($nativeHandle)" in audit
+    assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in audit
     assert "Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'" in audit
-    assert "throw 'Required .NET reference facade for external UIA audit is unavailable'" in audit
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()

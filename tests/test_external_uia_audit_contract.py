@@ -982,7 +982,7 @@ def test_external_uia_native_hwnd_candidates_preserve_real_semantic_and_process_
     )[0]
     assert family.index("[AutosportNativeWindows]::ForProcessFamily($ProcessIds)") < family.index("$desktop.FindAll(")
     assert family.index("AutomationElement]::FromHandle($nativeHandle)") < family.index("$desktop.FindAll(")
-    assert "($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)" in family
+    assert "($ProcessIds -contains $nativeProcessId)" in family
     assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in family
     assert "Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId" in family
     assert "return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }" in family
@@ -1044,7 +1044,7 @@ def test_external_uia_os_child_hwnd_candidates_are_bounded_and_never_replace_sem
     assert 'throw new InvalidOperationException("Child HWND enumeration limit exceeded");' in native
     assert 'Array.Reverse(result);' in native
     assert 'AutomationElement]::FromHandle($nativeHandle)' in family
-    assert '($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)' in family
+    assert '($ProcessIds -contains $nativeProcessId)' in family
     assert '$nativeRoot.Current.AutomationId -ceq $AutomationId' in family
     assert 'Find-BoundedUiaSemanticViaChildren -Root $nativeRoot' in family
     assert "SEMANTIC_NATIVE_DESCENDANT_PROBE" in family
@@ -1194,8 +1194,10 @@ def test_external_uia_native_treewalker_uses_same_mta_apartment_and_verified_hwn
     assert "Wait-Job -Job $job -Timeout $budgetSeconds" in wrapper
     assert "if ($null -eq $completed)" in wrapper
     assert "Stop-Job -Job $job" not in wrapper
-    assert "-NativeWindowHandle $nativeHandle -ExpectedProcessId ([int]$nativeRoot.Current.ProcessId)" in native
-    assert "($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)" in native
+    assert "$nativeProcessId = [int]$nativeRoot.Current.ProcessId" in native
+    assert native.count("[int]$nativeRoot.Current.ProcessId") == 1
+    assert "-NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in native
+    assert "($ProcessIds -contains $nativeProcessId)" in native
     assert "$report.status = 'PASS'" not in worker + wrapper + native
 
     for stage in (

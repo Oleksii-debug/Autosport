@@ -885,7 +885,7 @@ def test_external_uia_distinguishes_primary_from_child_descendant_provider_stall
         assert f"'{stage}'" in audit.split("function Write-ExternalUiaProgress", 1)[1].split("function", 1)[0]
     assert "$window.Current.Name" not in helper
     assert "$report.status = 'PASS'" not in helper
-    assert "[System.Windows.Automation.TreeScope]::Descendants" in helper
+    assert "Find-UiaSemanticViaChildren -Root $window -AutomationId $AutomationId" in helper
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
 
 

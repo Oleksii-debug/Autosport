@@ -987,3 +987,20 @@ def test_external_uia_native_hwnd_candidates_preserve_real_semantic_and_process_
                   "SEMANTIC_NATIVE_DESCENDANT_PROBE"):
         assert f"Write-ExternalUiaProgress -Stage '{stage}'" in family
         assert f"'{stage}'" in workflow
+
+
+def test_external_uia_native_hwnd_compiler_has_collection_reference() -> None:
+    """PowerShell 7's explicit Roslyn refs must include the HWND List<> facade.
+
+    Without System.Collections.dll, Windows external UIA fails at Add-Type before
+    semantic keyboard, live-region and STOP gates can execute.
+    """
+    audit = _audit()
+    facades = audit.split("$runtimeFacades = @(", 1)[1].split("\n    )", 1)[0]
+    assert "(Join-Path $PSHOME 'System.Collections.dll')" in facades
+    assert "(Join-Path $PSHOME 'System.Runtime.dll')" in facades
+    assert "(Join-Path $PSHOME 'System.Threading.dll')" in facades
+    assert "new System.Collections.Generic.List<IntPtr>()" in audit
+    assert "Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'" in audit
+    assert "throw 'Required .NET reference facade for external UIA audit is unavailable'" in audit
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()

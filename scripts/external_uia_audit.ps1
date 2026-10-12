@@ -646,12 +646,18 @@ function Find-UiaElementForProcessFamily {
 # an independent 120-second watchdog and disposes these bounded workers.
 function Find-BoundedUiaSemanticViaChildren {
     param(
-        [System.Windows.Automation.AutomationElement]$Root,
+        [object]$Root,
         [string]$AutomationId,
         [DateTime]$Deadline,
         [IntPtr]$NativeWindowHandle = [IntPtr]::Zero,
         [int]$ExpectedProcessId = 0
     )
+    # The native path intentionally omits Root. Keep its PowerShell binder free
+    # of a provider-backed UIA type conversion before the bounded worker starts.
+    # Desktop fallback still requires a genuine AutomationElement.
+    if ($null -ne $Root -and $Root -isnot [System.Windows.Automation.AutomationElement]) {
+        throw 'External UIA semantic root is not an AutomationElement'
+    }
     if ($null -eq $Root -and $NativeWindowHandle -eq [IntPtr]::Zero) { return $null }
     $remainingSeconds = [int][Math]::Ceiling(($Deadline - [DateTime]::UtcNow).TotalSeconds)
     if ($remainingSeconds -le 0) { return $null }

@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -608,6 +608,25 @@ try {
     $report.initial_window_observed = $true
     Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'
 
+    # Record the exact last bounded diagnostic before a potentially blocking
+    # native UIA provider property read. Native emergency/startup dialogs must
+    # fail closed here, not be misinterpreted as missing semantic WebView DOM.
+    # UIA window names never enter the progress file or the error text.
+    Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'
+    $initialNativeName = ''
+    try { $initialNativeName = [string]$uiaRoot.Current.Name } catch {}
+    if ([string]::Equals($initialNativeName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
+        throw 'Packaged native emergency window is not semantic WebView2 readiness'
+    }
+    if ([string]::Equals($initialNativeName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
+        throw 'Packaged native startup-error window is not semantic WebView2 readiness'
+    }
+    if ([string]::Equals($initialNativeName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
+    }
+
     # Native host visibility is not semantic readiness. The already discovered
     # top-level window is the cheapest and strongest same-window probe, so poll its
     # descendants directly. WebView2 can finish attaching under another process-
@@ -620,6 +639,7 @@ try {
     )
     $nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)
     while ([DateTime]::UtcNow -lt $deadline) {
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'
         try {
             if ([string]$uiaRoot.Current.AutomationId -eq '330') {
                 $semanticReady = $uiaRoot
@@ -636,6 +656,7 @@ try {
 
         $now = [DateTime]::UtcNow
         if ($now -ge $nextFamilyRefresh) {
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'
             $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
             $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'
             if ($null -ne $semanticSurface) {

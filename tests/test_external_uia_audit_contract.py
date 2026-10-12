@@ -1024,17 +1024,55 @@ def test_external_uia_os_child_hwnd_candidates_are_bounded_and_never_replace_sem
     family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
         "function Wait-ForUiaElement {", 1
     )[0]
-    assert 'private static extern bool EnumChildWindows' in native
+    assert 'private static extern IntPtr GetWindow(IntPtr window, uint command);' in native
+    assert 'private const uint GW_CHILD = 5;' in native
+    assert 'private const uint GW_HWNDNEXT = 2;' in native
     assert 'var rootCount = count;' in native
     assert 'if (count >= windows.Length) return false;' in native
     assert 'Array.IndexOf(allowedIds, (int)processId) >= 0' in native
-    assert 'if (!EnumChildWindows(windows[i], collectChild, IntPtr.Zero))' in native
+    assert 'EnumChildWindows(' not in native
+    assert 'var child = GetWindow(scheduled[cursor], GW_CHILD);' in native
+    assert 'child = GetWindow(child, GW_HWNDNEXT);' in native
+    assert 'if (++probes > visited.Length)' in native
+    assert 'Array.IndexOf(visited, child, 0, visitedCount)' in native
+    assert 'visitedCount >= visited.Length || scheduledCount >= scheduled.Length' in native
+    assert 'throw new InvalidOperationException("Child HWND probe cap exceeded");' in native
+    assert 'throw new InvalidOperationException("Child HWND enumeration limit exceeded");' in native
     assert 'Array.Reverse(result);' in native
     assert 'AutomationElement]::FromHandle($nativeHandle)' in family
     assert '($ProcessIds -contains [int]$nativeRoot.Current.ProcessId)' in family
     assert '$nativeRoot.Current.AutomationId -ceq $AutomationId' in family
     assert 'Find-BoundedUiaSemanticViaChildren -Root $nativeRoot' in family
     assert "SEMANTIC_NATIVE_DESCENDANT_PROBE" in family
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
+
+
+def test_external_uia_native_hwnd_walk_fails_closed_on_cycle_or_unbounded_churn() -> None:
+    """Native GetWindow child/sibling discovery must not hang or certify readiness.
+
+    The former recursive EnumChildWindows API exceeded the independent Windows
+    watchdog. HWND discovery is only candidate discovery, never UIA PASS.
+    """
+    audit = _audit()
+    native = audit.split("public static class AutosportNativeWindows", 1)[1].split(
+        "public sealed class AutosportExternalLiveRegionProbe", 1
+    )[0]
+    family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "EnumChildWindows(" not in native
+    assert "var visited = new IntPtr[4096];" in native
+    assert "var scheduled = new IntPtr[4096];" in native
+    assert "for (var cursor = 0; cursor < scheduledCount; cursor++)" in native
+    assert "if (++probes > visited.Length)" in native
+    assert "Array.IndexOf(visited, child, 0, visitedCount)" in native
+    assert "throw new InvalidOperationException(\"Child HWND probe cap exceeded\")" in native
+    assert "throw new InvalidOperationException(\"Child HWND enumeration limit exceeded\")" in native
+    assert "Array.Reverse(result);" in native
+    assert "[AutosportNativeWindows]::ForProcessFamily($ProcessIds)" in family
+    assert "AutomationElement]::FromHandle($nativeHandle)" in family
+    assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in family
+    assert "Find-BoundedUiaSemanticViaChildren" in family
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
 
 

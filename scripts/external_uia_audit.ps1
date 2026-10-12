@@ -719,7 +719,10 @@ function Find-UiaRootWithElementForProcessFamily {
                 return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeRoot }
             }
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'
-            $nativeSemantic = Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId
+            # Never pass the live COM root into a nested invocation: on Windows
+            # the parameter binder can block before the bounded MTA job starts.
+            # The worker must reacquire it by verified HWND and PID instead.
+            $nativeSemantic = Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId
             if ($null -ne $nativeSemantic) {
                 return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }
             }

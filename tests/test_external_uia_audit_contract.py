@@ -730,7 +730,7 @@ def test_external_uia_progress_is_fixed_stage_only_not_a_pass_or_user_data() -> 
     audit = _audit()
     assert "[string]$ProgressOutput = ''" in audit
     assert "function Write-ExternalUiaProgress" in audit
-    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
+    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
     assert "[System.IO.File]::WriteAllText($temporary, $Stage, [System.Text.Encoding]::ASCII)" in audit
     assert "[System.IO.File]::Move($temporary, $target, $true)" in audit
     assert "if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }" in audit
@@ -772,3 +772,33 @@ def test_windows_uia_watchdog_records_fresh_allowlisted_stage_and_stays_fail_clo
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in gate
     assert "dist/fresh-extraction-external-uia-stage.txt" in workflow
     assert "name: Autosport-external-uia-failure-evidence" in workflow
+
+
+def test_external_uia_preblocking_progress_identifies_native_fallback_or_search_stage() -> None:
+    """Real watchdog failure must identify which provider probe was entered.
+
+    Native emergency/startup fallback remains a hard failure, never a fake UIA
+    PASS. The stage artifact contains only fixed ASCII tokens, not UIA names.
+    """
+    audit = _audit()
+    workflow = _windows_workflow()
+    start = audit.index("Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'")
+    name_probe = audit.index("Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'", start)
+    local_probe = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'", name_probe)
+    family_probe = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'", local_probe)
+    semantic = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'", family_probe)
+    assert start < name_probe < local_probe < family_probe < semantic
+    assert name_probe < audit.index("$initialNativeName = [string]$uiaRoot.Current.Name")
+    assert local_probe < audit.index("$uiaRoot.FindFirst(", local_probe)
+    assert family_probe < audit.index("Find-UiaRootWithElementForProcessFamily", family_probe)
+    preprobe = audit[name_probe:local_probe]
+    assert "NATIVE_EMERGENCY_STOP" in preprobe
+    assert "NATIVE_STARTUP_ERROR" in preprobe
+    assert "throw 'Packaged native emergency window is not semantic WebView2 readiness'" in preprobe
+    assert "throw 'Packaged native startup-error window is not semantic WebView2 readiness'" in preprobe
+    assert "$report.status = 'PASS'" not in preprobe
+    for stage in ("NATIVE_ROOT_NAME_PROBE", "SEMANTIC_LOCAL_PROBE", "SEMANTIC_FAMILY_PROBE"):
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
+        assert f"'{stage}'" in workflow
+    assert "[System.IO.File]::WriteAllText($temporary, $Stage, [System.Text.Encoding]::ASCII)" in audit
+    assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow

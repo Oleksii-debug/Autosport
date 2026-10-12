@@ -984,7 +984,7 @@ def test_external_uia_native_hwnd_candidates_preserve_real_semantic_and_process_
     assert family.index("AutomationElement]::FromHandle($nativeHandle)") < family.index("$desktop.FindAll(")
     assert "($ProcessIds -contains $nativeProcessId)" in family
     assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in family
-    assert "Find-BoundedUiaSemanticViaChildren -Root $nativeRoot -AutomationId $AutomationId" in family
+    assert "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in family
     assert "return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }" in family
     assert "$report.status = 'PASS'" not in family
     for stage in ("SEMANTIC_NATIVE_HANDLES_PROBE", "SEMANTIC_NATIVE_UIA_PROBE",
@@ -1046,7 +1046,7 @@ def test_external_uia_os_child_hwnd_candidates_are_bounded_and_never_replace_sem
     assert 'AutomationElement]::FromHandle($nativeHandle)' in family
     assert '($ProcessIds -contains $nativeProcessId)' in family
     assert '$nativeRoot.Current.AutomationId -ceq $AutomationId' in family
-    assert 'Find-BoundedUiaSemanticViaChildren -Root $nativeRoot' in family
+    assert 'Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId' in family
     assert "SEMANTIC_NATIVE_DESCENDANT_PROBE" in family
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
 
@@ -1101,7 +1101,7 @@ def test_external_uia_provider_child_traversal_is_time_bounded_without_fake_acce
     assert "return $null" in helper
     assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in helper
     assert "Stop-Job -Job $job" not in helper
-    assert "$nativeSemantic = Find-BoundedUiaSemanticViaChildren -Root $nativeRoot" in family
+    assert "$nativeSemantic = Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in family
     assert "$element = Find-BoundedUiaSemanticViaChildren -Root $window" in family
     assert "Find-UiaSemanticViaChildren -Root $nativeRoot" not in family
     assert "Find-UiaSemanticViaChildren -Root $window" not in family

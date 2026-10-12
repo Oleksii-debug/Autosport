@@ -751,7 +751,7 @@ def test_external_uia_progress_is_fixed_stage_only_not_a_pass_or_user_data() -> 
     audit = _audit()
     assert "[string]$ProgressOutput = ''" in audit
     assert "function Write-ExternalUiaProgress" in audit
-    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
+    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE''SEMANTIC_UIA_OBSERVED'" not in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in _windows_workflow()
@@ -887,3 +887,26 @@ def test_external_uia_distinguishes_primary_from_child_descendant_provider_stall
     assert "$report.status = 'PASS'" not in helper
     assert "[System.Windows.Automation.TreeScope]::Descendants" in helper
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
+
+
+def test_external_uia_local_root_and_descendant_probes_are_independently_bounded() -> None:
+    """Identify a blocking property read versus a deep UIA provider search.
+
+    These fixed stages are diagnostic, not an accessibility acceptance bypass.
+    The independent Windows watchdog and semantic UIA/keyboard/STOP gates remain.
+    """
+    audit = _audit()
+    workflow = _windows_workflow()
+    start = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'")
+    root = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_ROOT_ID_PROBE'", start)
+    property_read = audit.index("$uiaRoot.Current.AutomationId", root)
+    deep = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_DESCENDANT_PROBE'", property_read)
+    descendant_call = audit.index("$semanticReady = $uiaRoot.FindFirst(", deep)
+    family = audit.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'", descendant_call)
+    assert start < root < property_read < deep < descendant_call < family
+    for stage in ("SEMANTIC_LOCAL_ROOT_ID_PROBE", "SEMANTIC_LOCAL_DESCENDANT_PROBE"):
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
+        assert f"'{stage}'" in workflow
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow
+    assert "$external.status -ne 'PASS'" in workflow
+    assert "Write-ExternalUiaProgress -Stage 'PASS'" not in audit

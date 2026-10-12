@@ -80,21 +80,26 @@ public static class AutosportNativeWindows
     public static IntPtr[] ForProcessFamily(int[] allowedIds)
     {
         if (allowedIds == null || allowedIds.Length == 0) return Array.Empty<IntPtr>();
-        var windows = new System.Collections.Generic.List<IntPtr>();
+        // A fixed bound avoids PowerShell Add-Type's forwarded generic List<>
+        // compilation failure while preserving the same fail-closed HWND cap.
+        var windows = new IntPtr[4096];
+        var count = 0;
         EnumWindowsCallback callback = (window, state) =>
         {
             uint processId;
             if (GetWindowThreadProcessId(window, out processId) != 0 &&
                 Array.IndexOf(allowedIds, (int)processId) >= 0)
             {
-                if (windows.Count >= 4096) return false;
-                windows.Add(window);
+                if (count >= windows.Length) return false;
+                windows[count++] = window;
             }
             return true;
         };
         if (!EnumWindows(callback, IntPtr.Zero))
             throw new InvalidOperationException("Native HWND enumeration failed or exceeded limit");
-        return windows.ToArray();
+        var result = new IntPtr[count];
+        Array.Copy(windows, result, count);
+        return result;
     }
 }
 

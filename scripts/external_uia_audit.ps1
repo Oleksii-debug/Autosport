@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -700,9 +700,14 @@ try {
     while ([DateTime]::UtcNow -lt $deadline) {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'
         try {
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_ROOT_ID_PROBE'
             if ([string]$uiaRoot.Current.AutomationId -eq '330') {
                 $semanticReady = $uiaRoot
             } else {
+                # Distinguish a blocking native root-property read from a
+                # blocking descendant provider query. The stage is fixed ASCII
+                # only and does not grant semantic UIA readiness.
+                Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_DESCENDANT_PROBE'
                 $semanticReady = $uiaRoot.FindFirst(
                     [System.Windows.Automation.TreeScope]::Descendants,
                     $semanticCondition

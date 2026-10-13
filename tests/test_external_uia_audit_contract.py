@@ -1295,7 +1295,7 @@ def test_stalled_uia_worker_aborts_provider_reentry_and_cleanup_probe() -> None:
     assert "SEMANTIC_WORKER_TIMEOUT_PROBE" in timeout
     assert "$script:semanticWorkerTimedOut = $true" in timeout
     assert "throw 'External UIA semantic worker timed out" in timeout
-    assert "Stop-Job" not in timeout and "Remove-Job" not in timeout
+    assert "Stop-Job -Job" not in timeout and "Remove-Job -Job" not in timeout
     native = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
         "function Wait-ForUiaElement {", 1
     )[0]

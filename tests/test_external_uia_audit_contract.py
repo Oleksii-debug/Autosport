@@ -981,11 +981,11 @@ def test_external_uia_native_hwnd_candidates_preserve_real_semantic_and_process_
         "function Wait-ForUiaElement {", 1
     )[0]
     assert family.index("[AutosportNativeWindows]::ForProcessFamily($ProcessIds)") < family.index("$desktop.FindAll(")
-    assert family.index("AutomationElement]::FromHandle($nativeHandle)") < family.index("$desktop.FindAll(")
+    assert family.index("AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)") < family.index("$desktop.FindAll(")
     assert "($ProcessIds -contains $nativeProcessId)" in family
-    assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in family
+    assert "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId" in family
     assert "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in family
-    assert "return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }" in family
+    assert "return $nativeSemantic" in family
     assert "$report.status = 'PASS'" not in family
     for stage in ("SEMANTIC_NATIVE_HANDLES_PROBE", "SEMANTIC_NATIVE_UIA_PROBE",
                   "SEMANTIC_NATIVE_DESCENDANT_PROBE"):
@@ -1012,8 +1012,8 @@ def test_external_uia_native_hwnd_compiler_avoids_generic_forwarder() -> None:
     assert "var result = new IntPtr[count];" in native
     assert "Array.Copy(windows, result, count);" in native
     assert "[AutosportNativeWindows]::ForProcessFamily($ProcessIds)" in audit
-    assert "AutomationElement]::FromHandle($nativeHandle)" in audit
-    assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in audit
+    assert "AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)" in audit
+    assert "return [pscustomobject]@{ Root = $Root; Element = $node }" in audit
     assert "Add-Type -ReferencedAssemblies $uiaReferences -TypeDefinition @'" in audit
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
 
@@ -1043,9 +1043,9 @@ def test_external_uia_os_child_hwnd_candidates_are_bounded_and_never_replace_sem
     assert 'throw new InvalidOperationException("Child HWND probe cap exceeded");' in native
     assert 'throw new InvalidOperationException("Child HWND enumeration limit exceeded");' in native
     assert 'Array.Reverse(result);' in native
-    assert 'AutomationElement]::FromHandle($nativeHandle)' in family
+    assert 'AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)' in family
     assert '($ProcessIds -contains $nativeProcessId)' in family
-    assert '$nativeRoot.Current.AutomationId -ceq $AutomationId' in family
+    assert 'Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId' in family
     assert 'Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId' in family
     assert "SEMANTIC_NATIVE_DESCENDANT_PROBE" in family
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
@@ -1074,8 +1074,8 @@ def test_external_uia_native_hwnd_walk_fails_closed_on_cycle_or_unbounded_churn(
     assert "throw new InvalidOperationException(\"Child HWND enumeration limit exceeded\")" in native
     assert "Array.Reverse(result);" in native
     assert "[AutosportNativeWindows]::ForProcessFamily($ProcessIds)" in family
-    assert "AutomationElement]::FromHandle($nativeHandle)" in family
-    assert "$nativeRoot.Current.AutomationId -ceq $AutomationId" in family
+    assert "AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)" in family
+    assert "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId" in family
     assert "Find-BoundedUiaSemanticViaChildren" in family
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
 
@@ -1194,8 +1194,8 @@ def test_external_uia_native_treewalker_uses_same_mta_apartment_and_verified_hwn
     assert "Wait-Job -Job $job -Timeout $budgetSeconds" in wrapper
     assert "if ($null -eq $completed)" in wrapper
     assert "Stop-Job -Job $job" not in wrapper
-    assert "$nativeProcessId = [int]$nativeRoot.Current.ProcessId" in native
-    assert native.count("[int]$nativeRoot.Current.ProcessId") == 1
+    assert "$nativeProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)" in native
+    assert "[int]$nativeRoot.Current.ProcessId" not in native
     assert "-NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in native
     # The observed watchdog never reached the worker START stage. The native
     # path must not bind a COM AutomationElement in the caller before its
@@ -1227,3 +1227,22 @@ def test_external_uia_worker_diagnostic_stages_are_accepted_by_windows_watchdog(
         assert f"'{stage}'" in workflow
     assert "if ($allowedStages -ccontains $candidateStage)" in workflow
     assert "$observedStage = 'INVALID'" in workflow
+
+def test_native_uia_com_reads_are_owned_by_bounded_mta_worker() -> None:
+    """No UIA COM object may be read during native caller-to-worker admission."""
+    audit = _audit()
+    native = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split("function Wait-ForUiaElement {", 1)[0]
+    worker = audit.split("function Find-UiaSemanticViaChildren {", 1)[1].split("function Find-UiaRootForProcessFamily {", 1)[0]
+    wrapper = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split("function Find-UiaRootWithElementForProcessFamily {", 1)[0]
+    assert "ProcessIdForHandle($nativeHandle)" in native
+    assert "FromHandle($nativeHandle)" not in native
+    assert "$nativeRoot.Current" not in native
+    assert "$nativeSemantic = Find-BoundedUiaSemanticViaChildren" in native
+    assert "$Root = [System.Windows.Automation.AutomationElement]::FromHandle($NativeWindowHandle)" in worker
+    assert "[int]$Root.Current.ProcessId -ne $ExpectedProcessId" in worker
+    assert "[string]$node.Current.AutomationId -ceq $AutomationId" in worker
+    assert "return [pscustomobject]@{ Root = $Root; Element = $node }" in worker
+    assert "$result.Root -isnot [System.Windows.Automation.AutomationElement]" in wrapper
+    assert "$result.Element -isnot [System.Windows.Automation.AutomationElement]" in wrapper
+    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in wrapper
+    assert "$report.status = 'PASS'" not in worker + wrapper + native

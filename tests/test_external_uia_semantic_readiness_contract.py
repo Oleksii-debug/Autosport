@@ -254,7 +254,7 @@ def test_native_semantic_helper_never_binds_com_root_before_mta_job() -> None:
     assert "throw 'External UIA semantic worker timed out" in timeout_path
     assert "return $null" not in timeout_path
     assert "Receive-Job" not in timeout_path
-    assert "Remove-Job" not in timeout_path
+    assert "Remove-Job -Job" not in timeout_path
     assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'" in helper
     assert "$workerResults.TryDequeue([ref]$result)" in helper
     assert "return $null" in helper

@@ -1095,9 +1095,9 @@ def test_external_uia_provider_child_traversal_is_time_bounded_without_fake_acce
         "function Wait-ForUiaElement {", 1
     )[0]
     assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in helper
-    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in helper
+    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in helper
     assert "[Math]::Min(4, $remainingSeconds)" in helper
-    assert "if ($null -eq $completed)" in helper
+    assert "if (-not $workerTerminal)" in helper
     assert "return $null" in helper
     assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in helper
     assert "Stop-Job -Job $job" not in helper
@@ -1161,8 +1161,8 @@ def test_external_uia_raw_treewalker_sibling_cycle_fails_closed() -> None:
     assert "[string]$node.Current.AutomationId -ceq $AutomationId" in helper
     assert ".FindAll(" not in helper
     assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in worker
-    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in worker
-    assert "if ($null -eq $completed)" in worker
+    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in worker
+    assert "if (-not $workerTerminal)" in worker
     assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in worker
     assert "$report.status = 'PASS'" not in helper
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
@@ -1191,8 +1191,8 @@ def test_external_uia_native_treewalker_uses_same_mta_apartment_and_verified_hwn
 
     assert "$workerRoot = if ($NativeWindowHandle -ne [IntPtr]::Zero) { $null } else { $Root }" in wrapper
     assert "$workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId" in wrapper
-    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in wrapper
-    assert "if ($null -eq $completed)" in wrapper
+    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in wrapper
+    assert "if (-not $workerTerminal)" in wrapper
     assert "Stop-Job -Job $job" not in wrapper
     assert "$nativeProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)" in native
     assert "[int]$nativeRoot.Current.ProcessId" not in native
@@ -1244,5 +1244,28 @@ def test_native_uia_com_reads_are_owned_by_bounded_mta_worker() -> None:
     assert "return [pscustomobject]@{ Root = $Root; Element = $node }" in worker
     assert "$result.Root -isnot [System.Windows.Automation.AutomationElement]" in wrapper
     assert "$result.Element -isnot [System.Windows.Automation.AutomationElement]" in wrapper
-    assert "Wait-Job -Job $job -Timeout $budgetSeconds" in wrapper
+    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in wrapper
     assert "$report.status = 'PASS'" not in worker + wrapper + native
+
+def test_external_uia_monotonic_worker_wait_fails_closed() -> None:
+    """The real UIA COM worker cannot defeat the 4-second local wait budget.
+
+    Windows Candidate 38328253786 proved a blocked Wait-Job -Timeout call
+    at SEMANTIC_WORKER_WAIT_PROBE. A polling clock must remain independent
+    of COM completion; a timed-out worker is not semantic acceptance.
+    """
+    audit = _audit()
+    wrapper = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    assert "$waitClock = [System.Diagnostics.Stopwatch]::StartNew()" in wrapper
+    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in wrapper
+    assert "Start-Sleep -Milliseconds 50" in wrapper
+    assert "$workerState = $job.State" in wrapper
+    assert "if (-not $workerTerminal)" in wrapper
+    assert "return $null" in wrapper.split("if (-not $workerTerminal)", 1)[1]
+    assert "Wait-Job -Job $job" not in wrapper
+    assert "Stop-Job -Job $job" not in wrapper
+    assert "SEMANTIC_WORKER_WAIT_PROBE" in wrapper
+    assert "SEMANTIC_WORKER_RESULT_PROBE" in wrapper
+    assert "$report.status = 'PASS'" not in wrapper

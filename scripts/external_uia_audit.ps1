@@ -83,6 +83,12 @@ public static class AutosportNativeWindows
     private static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    public static int ProcessIdForHandle(IntPtr window)
+    {
+        uint processId;
+        return GetWindowThreadProcessId(window, out processId) == 0 || processId > (uint)int.MaxValue
+            ? 0 : (int)processId;
+    }
     public static IntPtr[] ForProcessFamily(int[] allowedIds)
     {
         if (allowedIds == null || allowedIds.Length == 0) return Array.Empty<IntPtr>();
@@ -555,6 +561,10 @@ function Find-UiaSemanticViaChildren {
         $visited += 1
         try {
             if ([string]$node.Current.AutomationId -ceq $AutomationId) {
+                # Return both native elements from the same bounded MTA apartment.
+                if ($NativeWindowHandle -ne [IntPtr]::Zero) {
+                    return [pscustomobject]@{ Root = $Root; Element = $node }
+                }
                 return $node
             }
             # A single provider GetFirstChild/GetNextSibling call may itself
@@ -685,6 +695,16 @@ function Find-BoundedUiaSemanticViaChildren {
         }
         $result = Receive-Job -Job $job -ErrorAction Stop
         if ($null -eq $result) { return $null }
+        if ($NativeWindowHandle -ne [IntPtr]::Zero) {
+            if (
+                $result -isnot [pscustomobject] -or
+                $result.Root -isnot [System.Windows.Automation.AutomationElement] -or
+                $result.Element -isnot [System.Windows.Automation.AutomationElement]
+            ) {
+                throw 'External UIA native worker returned invalid root/element evidence'
+            }
+            return $result
+        }
         if ($result -isnot [System.Windows.Automation.AutomationElement]) {
             throw 'External UIA semantic worker returned an invalid element'
         }
@@ -715,22 +735,15 @@ function Find-UiaRootWithElementForProcessFamily {
         if ([DateTime]::UtcNow -ge $Deadline) { break }
         try {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_UIA_PROBE'
-            $nativeRoot = [System.Windows.Automation.AutomationElement]::FromHandle($nativeHandle)
-            if ($null -eq $nativeRoot) { continue }
-            # Read the COM-backed PID once: a repeat Current.ProcessId access
-            # before the isolated worker can block the caller outside its timeout.
-            $nativeProcessId = [int]$nativeRoot.Current.ProcessId
+            # Candidate PID comes only from Win32, without UIA COM on the
+            # calling runspace. Real PID/AutomationId UIA proof remains inside
+            # the bounded MTA worker; a missing/hung provider stays FAILURE.
+            $nativeProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)
             if (-not ($ProcessIds -contains $nativeProcessId)) { continue }
-            if ([string]$nativeRoot.Current.AutomationId -ceq $AutomationId) {
-                return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeRoot }
-            }
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'
-            # Never pass the live COM root into a nested invocation: on Windows
-            # the parameter binder can block before the bounded MTA job starts.
-            # The worker must reacquire it by verified HWND and PID instead.
             $nativeSemantic = Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId
             if ($null -ne $nativeSemantic) {
-                return [pscustomobject]@{ Root = $nativeRoot; Element = $nativeSemantic }
+                return $nativeSemantic
             }
         } catch [System.Windows.Automation.ElementNotAvailableException] {
             # A stale or reused HWND is not a valid accessibility witness.

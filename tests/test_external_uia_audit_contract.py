@@ -1273,9 +1273,38 @@ def test_external_uia_monotonic_worker_wait_fails_closed() -> None:
     assert "$workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()" in wrapper
     assert "$job.State" not in wrapper
     assert "if (-not $workerTerminal)" in wrapper
-    assert "return $null" in wrapper.split("if (-not $workerTerminal)", 1)[1]
+    timeout_clause = wrapper.split("if (-not $workerTerminal) {", 1)[1].split("\n    }", 1)[0]
+    assert "$script:semanticWorkerTimedOut = $true" in timeout_clause
+    assert "throw 'External UIA semantic worker timed out" in timeout_clause
+    assert "return $null" not in timeout_clause
     assert "Wait-Job -Job $job" not in wrapper
     assert "Stop-Job -Job $job" not in wrapper
     assert "SEMANTIC_WORKER_WAIT_PROBE" in wrapper
     assert "SEMANTIC_WORKER_RESULT_PROBE" in wrapper
     assert "$report.status = 'PASS'" not in wrapper
+
+
+def test_stalled_uia_worker_aborts_provider_reentry_and_cleanup_probe() -> None:
+    """A real COM timeout must not trigger another HWND/desktop probe or
+    an unbounded cleanup UIA Name read. This does not constitute UIA PASS."""
+    audit = _audit()
+    wrapper = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    timeout = wrapper.split("if (-not $workerTerminal) {", 1)[1].split("\n    }", 1)[0]
+    assert "SEMANTIC_WORKER_TIMEOUT_PROBE" in timeout
+    assert "$script:semanticWorkerTimedOut = $true" in timeout
+    assert "throw 'External UIA semantic worker timed out" in timeout
+    assert "Stop-Job" not in timeout and "Remove-Job" not in timeout
+    native = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "catch [System.Windows.Automation.ElementNotAvailableException]" in native
+    assert "catch {" not in native.split("foreach ($nativeHandle in $nativeWindows)", 1)[1].split(
+        "# The existing UIA desktop search", 1
+    )[0]
+    cleanup = audit.split("} finally {\n    # Preserve a bounded count", 1)[1]
+    assert "if ($null -ne $uiaRoot -and -not $script:semanticWorkerTimedOut)" in cleanup
+    assert "observed_window_class = 'OTHER_OR_UNAVAILABLE'" in cleanup
+    assert "if ($report.status -ne 'PASS')" in audit
+    assert "exit 1" in audit

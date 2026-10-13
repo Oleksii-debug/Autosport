@@ -202,14 +202,26 @@ def test_external_uia_native_pid_is_single_read_before_bounded_worker() -> None:
     fallback_start = helper.index("# The existing UIA desktop search", native_start)
     native = helper[native_start:fallback_start]
 
-    assert native.count("$nativeRoot.Current.ProcessId") == 1
-    assert "$nativeProcessId = [int]$nativeRoot.Current.ProcessId" in native
+    # Read the candidate PID once from Win32; do not bind a COM UIA root
+    # on the caller runspace before starting the bounded MTA worker.
+    assert native.count("[AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)") == 1
+    assert "$nativeProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)" in native
+    assert "$nativeRoot" not in native
     assert "if (-not ($ProcessIds -contains $nativeProcessId)) { continue }" in native
     assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'" in native
     assert "-NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in native
     assert "Find-BoundedUiaSemanticViaChildren" in native
-    # The identity and semantic match still must be proven, not inferred from HWND.
-    assert "[string]$nativeRoot.Current.AutomationId -ceq $AutomationId" in native
+
+    # Verify the real MTA UIA worker still rechecks the HWND/PID pair and
+    # requires a semantic AutomationId rather than treating native HWND as PASS.
+    worker = script.split("function Find-UiaSemanticViaChildren {", 1)[1].split(
+        "function Find-BoundedUiaSemanticViaChildren {", 1
+    )[0]
+    assert "$Root = [System.Windows.Automation.AutomationElement]::FromHandle($NativeWindowHandle)" in worker
+    assert "[int]$Root.Current.ProcessId -ne $ExpectedProcessId" in worker
+    assert "throw 'External UIA semantic worker window identity changed'" in worker
+    assert "[string]$node.Current.AutomationId -ceq $AutomationId" in worker
+    assert "$report.status = 'PASS'" not in native + worker
 
 
 

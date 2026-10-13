@@ -32,6 +32,9 @@ function Write-ExternalUiaProgress {
     }
 }
 Write-ExternalUiaProgress -Stage 'START'
+# A timed-out UIA COM worker poisons this audit process for further provider
+# probes. Never retry another HWND or query the stalled provider in cleanup.
+$script:semanticWorkerTimedOut = $false
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
@@ -712,7 +715,13 @@ function Find-BoundedUiaSemanticViaChildren {
     $workerTerminal = $workerCompleted.Wait($budgetSeconds * 1000)
     if (-not $workerTerminal) {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_TIMEOUT_PROBE'
-        return $null
+        # This is a proven provider stall, not a missing semantic node. Retrying
+        # another HWND or entering the desktop fallback can reenter the same
+        # blocked COM provider and exhaust the independent 120s watchdog.
+        # Keep the hung ThreadJob owned by the isolated audit process; do not
+        # synchronously Stop-Job/Remove-Job or treat the timeout as PASS.
+        $script:semanticWorkerTimedOut = $true
+        throw 'External UIA semantic worker timed out without a real AutomationId witness'
     }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'
     $result = $null
@@ -1511,7 +1520,7 @@ try {
     # Classify only fixed, product-owned window titles. Never export an
     # arbitrary UIA Name, which could contain user data or a filesystem path.
     # This is a pre-cleanup diagnostic, NOT proof of WebView readiness or PASS.
-    if ($null -ne $uiaRoot) {
+    if ($null -ne $uiaRoot -and -not $script:semanticWorkerTimedOut) {
         $report.observed_window_class = 'OTHER_OR_UNAVAILABLE'
         try {
             $observedWindowName = [string]$uiaRoot.Current.Name

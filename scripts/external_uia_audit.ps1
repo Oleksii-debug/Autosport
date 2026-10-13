@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -531,8 +531,11 @@ function Find-UiaSemanticViaChildren {
         [string]$AutomationId,
         [DateTime]$Deadline,
         [IntPtr]$NativeWindowHandle = [IntPtr]::Zero,
-        [int]$ExpectedProcessId = 0
+        [int]$ExpectedProcessId = 0,
+        [object]$ResultQueue = $null,
+        [object]$CompletionSignal = $null
     )
+    try {
     # UI Automation elements must be created in the MTA worker that queries
     # their descendants. Passing the parent-runspace COM element across the
     # ThreadJob boundary can deadlock or invalidate its COM apartment.
@@ -563,7 +566,15 @@ function Find-UiaSemanticViaChildren {
             if ([string]$node.Current.AutomationId -ceq $AutomationId) {
                 # Return both native elements from the same bounded MTA apartment.
                 if ($NativeWindowHandle -ne [IntPtr]::Zero) {
+                    if ($null -ne $ResultQueue) {
+                        $ResultQueue.Enqueue([object]([pscustomobject]@{ Root = $Root; Element = $node }))
+                        return $null
+                    }
                     return [pscustomobject]@{ Root = $Root; Element = $node }
+                }
+                if ($null -ne $ResultQueue) {
+                    $ResultQueue.Enqueue([object]$node)
+                    return $null
                 }
                 return $node
             }
@@ -588,6 +599,13 @@ function Find-UiaSemanticViaChildren {
         }
     }
     return $null
+    } finally {
+        # A thread-safe completion signal is independent of the ThreadJob
+        # State/Wait-Job locks that may be held by a blocked COM provider.
+        if ($null -ne $CompletionSignal) {
+            $CompletionSignal.Set()
+        }
+    }
 }
 
 function Find-UiaRootForProcessFamily {
@@ -649,7 +667,7 @@ function Find-UiaElementForProcessFamily {
 
 # Windows UIA providers can block forever inside FindAll(Children), even with a
 # source-level deadline. Execute each candidate's *real* UIA search in a bounded
-# in-process thread job. ThreadJob returns live AutomationElement references:
+# in-process thread job. ThreadJob signals a shared completion event with real AutomationElement references:
 # no mocked elements or status markers can satisfy the external audit.
 # A timed-out provider thread is intentionally not Stop-Job'd (Stop-Job can
 # itself block on the same COM call); the enclosing isolated audit process has
@@ -677,59 +695,46 @@ function Find-BoundedUiaSemanticViaChildren {
     # traversal. Desktop fallback retains the previous bounded path.
     $workerRoot = if ($NativeWindowHandle -ne [IntPtr]::Zero) { $null } else { $Root }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_START_PROBE'
+    # Pass only primitive HWND/PID plus an in-process concurrent result queue
+    # and completion event. Neither Job.State nor Receive-Job can form a
+    # bounded wait when the UIA COM provider holds a ThreadJob internal lock.
+    $workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
     $job = Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren} -ErrorAction Stop -ArgumentList @(
-        $workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId
+        $workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId,
+        $workerResults, $workerCompleted
     )
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_WAIT_PROBE'
-    # Windows Candidate 38328253786 proved that Wait-Job -Timeout can stay
-    # blocked in a UIA COM provider past the independent 120s watchdog.
-    # Poll Job.State against a monotonic deadline; never wait on the provider.
-    $waitClock = [System.Diagnostics.Stopwatch]::StartNew()
-    $workerTerminal = $false
-    try {
-        while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds) {
-            $workerState = $job.State
-            if ($workerState -eq 'Completed' -or $workerState -eq 'Failed' -or $workerState -eq 'Stopped') {
-                $workerTerminal = $true
-                break
-            }
-            Start-Sleep -Milliseconds 50
-        }
-    } finally {
-        $waitClock.Stop()
-    }
+    # The kernel completion event never queries the ThreadJob state or
+    # synchronously cancels a possibly blocked COM provider. A timed-out worker
+    # yields NO semantic evidence and remains owned by the outer isolated
+    # 120-second process watchdog.
+    $workerTerminal = $workerCompleted.Wait($budgetSeconds * 1000)
     if (-not $workerTerminal) {
-        # No semantic acceptance: the provider call did not complete.
-        # Do not synchronously stop/remove the blocked worker.
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_TIMEOUT_PROBE'
         return $null
     }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'
-    try {
-        if ($job.State -ne 'Completed') {
-            Receive-Job -Job $job -ErrorAction Stop | Out-Null
-            throw 'External UIA semantic search worker did not complete'
+    $result = $null
+    $hasResult = $workerResults.TryDequeue([ref]$result)
+    $workerCompleted.Dispose()
+    if (-not $hasResult) { return $null }
+    if ($NativeWindowHandle -ne [IntPtr]::Zero) {
+        if (
+            $result -isnot [pscustomobject] -or
+            $result.Root -isnot [System.Windows.Automation.AutomationElement] -or
+            $result.Element -isnot [System.Windows.Automation.AutomationElement]
+        ) {
+            throw 'External UIA native worker returned invalid root/element evidence'
         }
-        $result = Receive-Job -Job $job -ErrorAction Stop
-        if ($null -eq $result) { return $null }
-        if ($NativeWindowHandle -ne [IntPtr]::Zero) {
-            if (
-                $result -isnot [pscustomobject] -or
-                $result.Root -isnot [System.Windows.Automation.AutomationElement] -or
-                $result.Element -isnot [System.Windows.Automation.AutomationElement]
-            ) {
-                throw 'External UIA native worker returned invalid root/element evidence'
-            }
-            return $result
-        }
-        if ($result -isnot [System.Windows.Automation.AutomationElement]) {
-            throw 'External UIA semantic worker returned an invalid element'
-        }
-        # The worker's traversal itself read the real matching AutomationId.
-        # All later UIA/keyboard/live-region/STOP validations remain mandatory.
         return $result
-    } finally {
-        Remove-Job -Job $job -Force -ErrorAction SilentlyContinue
     }
+    if ($result -isnot [System.Windows.Automation.AutomationElement]) {
+        throw 'External UIA semantic worker returned an invalid element'
+    }
+    # The worker itself still reads the real AutomationId and native PID.
+    # Keyboard, live-region, STOP and runtime-witness gates remain mandatory.
+    return $result
 }
 
 function Find-UiaRootWithElementForProcessFamily {

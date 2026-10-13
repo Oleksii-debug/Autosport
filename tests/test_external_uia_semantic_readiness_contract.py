@@ -241,19 +241,19 @@ def test_native_semantic_helper_never_binds_com_root_before_mta_job() -> None:
     assert "$workerRoot = if ($NativeWindowHandle -ne [IntPtr]::Zero) { $null } else { $Root }" in helper
     assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_START_PROBE'" in helper
     assert "$job = Start-ThreadJob" in helper
-    # Wait-Job -Timeout may block inside the UIA provider despite its
-    # advertised timeout. Keep the watchdog independent of provider COM.
+    # Neither Wait-Job nor Job.State is a reliable bounded wait when UIA COM
+    # holds ThreadJob locks; the shared completion event must own timeout.
     assert "Wait-Job -Job $job -Timeout $budgetSeconds" not in helper
-    assert "$waitClock = [System.Diagnostics.Stopwatch]::StartNew()" in helper
-    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in helper
-    assert "$workerState = $job.State" in helper
-    assert "Start-Sleep -Milliseconds 50" in helper
+    assert "$workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)" in helper
+    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in helper
+    assert "$job.State" not in helper
+    assert "$workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()" in helper
     assert "if (-not $workerTerminal)" in helper
     timeout_path = helper.split("if (-not $workerTerminal) {", 1)[1].split("}", 1)[0]
     assert "return $null" in timeout_path
     assert "Receive-Job" not in timeout_path
     assert "Remove-Job" not in timeout_path
     assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'" in helper
-    assert "if ($job.State -ne 'Completed')" in helper
+    assert "$workerResults.TryDequeue([ref]$result)" in helper
     assert "return $null" in helper
     assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in helper

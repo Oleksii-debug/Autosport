@@ -752,7 +752,7 @@ def test_external_uia_progress_is_fixed_stage_only_not_a_pass_or_user_data() -> 
     audit = _audit()
     assert "[string]$ProgressOutput = ''" in audit
     assert "function Write-ExternalUiaProgress" in audit
-    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
+    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE''SEMANTIC_UIA_OBSERVED'" not in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in _windows_workflow()
@@ -1095,7 +1095,7 @@ def test_external_uia_provider_child_traversal_is_time_bounded_without_fake_acce
         "function Wait-ForUiaElement {", 1
     )[0]
     assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in helper
-    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in helper
+    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in helper
     assert "[Math]::Min(4, $remainingSeconds)" in helper
     assert "if (-not $workerTerminal)" in helper
     assert "return $null" in helper
@@ -1161,7 +1161,7 @@ def test_external_uia_raw_treewalker_sibling_cycle_fails_closed() -> None:
     assert "[string]$node.Current.AutomationId -ceq $AutomationId" in helper
     assert ".FindAll(" not in helper
     assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in worker
-    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in worker
+    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in worker
     assert "if (-not $workerTerminal)" in worker
     assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in worker
     assert "$report.status = 'PASS'" not in helper
@@ -1191,7 +1191,7 @@ def test_external_uia_native_treewalker_uses_same_mta_apartment_and_verified_hwn
 
     assert "$workerRoot = if ($NativeWindowHandle -ne [IntPtr]::Zero) { $null } else { $Root }" in wrapper
     assert "$workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId" in wrapper
-    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in wrapper
+    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in wrapper
     assert "if (-not $workerTerminal)" in wrapper
     assert "Stop-Job -Job $job" not in wrapper
     assert "$nativeProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)" in native
@@ -1244,24 +1244,24 @@ def test_native_uia_com_reads_are_owned_by_bounded_mta_worker() -> None:
     assert "return [pscustomobject]@{ Root = $Root; Element = $node }" in worker
     assert "$result.Root -isnot [System.Windows.Automation.AutomationElement]" in wrapper
     assert "$result.Element -isnot [System.Windows.Automation.AutomationElement]" in wrapper
-    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in wrapper
+    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in wrapper
     assert "$report.status = 'PASS'" not in worker + wrapper + native
 
 def test_external_uia_monotonic_worker_wait_fails_closed() -> None:
     """The real UIA COM worker cannot defeat the 4-second local wait budget.
 
     Windows Candidate 38328253786 proved a blocked Wait-Job -Timeout call
-    at SEMANTIC_WORKER_WAIT_PROBE. A polling clock must remain independent
-    of COM completion; a timed-out worker is not semantic acceptance.
+    at SEMANTIC_WORKER_WAIT_PROBE. A kernel event must remain independent of the ThreadJob's COM-held
+    State lock; a timed-out worker is not semantic acceptance.
     """
     audit = _audit()
     wrapper = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
         "function Find-UiaRootWithElementForProcessFamily {", 1
     )[0]
-    assert "$waitClock = [System.Diagnostics.Stopwatch]::StartNew()" in wrapper
-    assert "while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds)" in wrapper
-    assert "Start-Sleep -Milliseconds 50" in wrapper
-    assert "$workerState = $job.State" in wrapper
+    assert "$workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)" in wrapper
+    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in wrapper
+    assert "$workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()" in wrapper
+    assert "$job.State" not in wrapper
     assert "if (-not $workerTerminal)" in wrapper
     assert "return $null" in wrapper.split("if (-not $workerTerminal)", 1)[1]
     assert "Wait-Job -Job $job" not in wrapper

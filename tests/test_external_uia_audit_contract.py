@@ -1215,18 +1215,28 @@ def test_external_uia_native_treewalker_uses_same_mta_apartment_and_verified_hwn
         assert f"'{stage}'" in audit.split("function Write-ExternalUiaProgress", 1)[1].split("function", 1)[0]
 
 def test_external_uia_worker_diagnostic_stages_are_accepted_by_windows_watchdog() -> None:
-    """A real provider stall remains FAIL with an accurate bounded stage witness."""
+    """Cross-check every real UIA progress token against the fail-closed watchdog.
+
+    Windows candidate 38340243440 masked a genuine UIA stall as stage=INVALID
+    because the worker's timeout stage was missing from this workflow.
+    """
+    import re
+
     source = _audit()
     workflow = _windows_workflow()
-    for stage in (
-        "SEMANTIC_WORKER_START_PROBE",
-        "SEMANTIC_WORKER_WAIT_PROBE",
-        "SEMANTIC_WORKER_RESULT_PROBE",
-    ):
-        assert f"'{stage}'" in source
-        assert f"'{stage}'" in workflow
+    declaration = source.split("function Write-ExternalUiaProgress {", 1)[1].split(
+        "function ", 1
+    )[0]
+    emitted = set(re.findall(r"Write-ExternalUiaProgress -Stage '([A-Z_]+)'", source))
+    declared = set(re.findall(r"'([A-Z_]+)'", declaration))
+    allowlist = workflow.split("$allowedStages = @(", 1)[1].split(")", 1)[0]
+    accepted = set(re.findall(r"'([A-Z_]+)'", allowlist))
+    assert emitted and emitted <= declared
+    assert declared == accepted
+    assert "SEMANTIC_WORKER_TIMEOUT_PROBE" in emitted
     assert "if ($allowedStages -ccontains $candidateStage)" in workflow
     assert "$observedStage = 'INVALID'" in workflow
+    assert "External UIA audit exceeded 120-second watchdog" in workflow
 
 def test_native_uia_com_reads_are_owned_by_bounded_mta_worker() -> None:
     """No UIA COM object may be read during native caller-to-worker admission."""

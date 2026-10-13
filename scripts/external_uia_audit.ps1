@@ -681,8 +681,24 @@ function Find-BoundedUiaSemanticViaChildren {
         $workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId
     )
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_WAIT_PROBE'
-    $completed = Wait-Job -Job $job -Timeout $budgetSeconds
-    if ($null -eq $completed) {
+    # Windows Candidate 38328253786 proved that Wait-Job -Timeout can stay
+    # blocked in a UIA COM provider past the independent 120s watchdog.
+    # Poll Job.State against a monotonic deadline; never wait on the provider.
+    $waitClock = [System.Diagnostics.Stopwatch]::StartNew()
+    $workerTerminal = $false
+    try {
+        while ($waitClock.Elapsed.TotalSeconds -lt $budgetSeconds) {
+            $workerState = $job.State
+            if ($workerState -eq 'Completed' -or $workerState -eq 'Failed' -or $workerState -eq 'Stopped') {
+                $workerTerminal = $true
+                break
+            }
+            Start-Sleep -Milliseconds 50
+        }
+    } finally {
+        $waitClock.Stop()
+    }
+    if (-not $workerTerminal) {
         # No semantic acceptance: the provider call did not complete.
         # Do not synchronously stop/remove the blocked worker.
         return $null

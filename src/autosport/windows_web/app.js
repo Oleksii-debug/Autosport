@@ -16,6 +16,11 @@
   let refreshPending = false;
   let refreshClosed = false;
   let stateProjectionEpoch = 0;
+  // A delayed bridge reply may restore focus only if the operator has not moved.
+  let operatorFocusEpoch = 0;
+  document.addEventListener("focusin", () => {
+    operatorFocusEpoch += 1;
+  }, true);
   // The backend may accept an operation before WebView loses the response.
   // Only explicit operator acknowledgment dismisses the UNKNOWN warning.
   let unconfirmedDispatchResult = false;
@@ -332,6 +337,8 @@
     const useGlobalAnnouncement = options.globalAnnouncement !== false;
     const useResultFocus = options.resultFocus !== false;
     const usePostRefresh = options.postRefresh !== false;
+    const focusEpochAtRequest = operatorFocusEpoch;
+    const focusedElementAtRequest = document.activeElement;
     invalidateStateProjection();
     try {
       const result = await globalThis.pywebview.api.dispatch({
@@ -351,7 +358,15 @@
           announce(message, rejected);
         }
       }
-      if (useResultFocus) focusResult(result);
+      // Preserve explicit Tab/keyboard navigation, including away-and-back.
+      // Announcement and state refresh continue normally without forced focus.
+      if (
+        useResultFocus
+        && operatorFocusEpoch === focusEpochAtRequest
+        && document.activeElement === focusedElementAtRequest
+      ) {
+        focusResult(result);
+      }
       if (usePostRefresh) await refreshState();
       return result;
     } catch (_error) {

@@ -97,6 +97,22 @@ public static class AutosportNativeWindows
         return GetWindowThreadProcessId(window, out processId) == 0 || processId > (uint)int.MaxValue
             ? 0 : (int)processId;
     }
+    // Privacy-bounded OS-only classification BEFORE any UIA COM provider call.
+    // Never persist HWND, PID, raw class/title, executable path or user data.
+    // These fixed buckets are forensic hints, NEVER accessibility PASS.
+    public static string DiagnosticClassBucket(IntPtr window)
+    {
+        if (window == IntPtr.Zero) return "UNKNOWN";
+        var className = new System.Text.StringBuilder(128);
+        var length = GetClassName(window, className, className.Capacity);
+        if (length <= 0) return "UNKNOWN";
+        var name = className.ToString();
+        var kind = name.Equals("Chrome_RenderWidgetHostHWND", StringComparison.Ordinal)
+            ? "RENDER_WIDGET"
+            : name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)
+                ? "CHROME_WIDGET" : "OTHER";
+        return kind + (IsWindowVisible(window) ? "_VISIBLE" : "_HIDDEN");
+    }
     public static IntPtr[] ForProcessFamily(int[] allowedIds)
     {
         if (allowedIds == null || allowedIds.Length == 0) return Array.Empty<IntPtr>();
@@ -743,6 +759,13 @@ function Find-BoundedUiaSemanticViaChildren {
     # its UIA object is reacquired in the same MTA worker that performs the
     # traversal. Desktop fallback retains the previous bounded path.
     $workerRoot = if ($NativeWindowHandle -ne [IntPtr]::Zero) { $null } else { $Root }
+    # Snapshot OS-only class/visibility BEFORE starting the potentially blocking
+    # MTA provider worker. A timed-out worker must not trigger new HWND/UIA calls.
+    $nativeCandidateBucket = if ($NativeWindowHandle -ne [IntPtr]::Zero) {
+        [AutosportNativeWindows]::DiagnosticClassBucket($NativeWindowHandle)
+    } else {
+        'NO_NATIVE_HANDLE'
+    }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_START_PROBE'
     # Pass only primitive HWND/PID plus an in-process concurrent result queue
     # and completion event. Neither Job.State nor Receive-Job can form a
@@ -776,7 +799,7 @@ function Find-BoundedUiaSemanticViaChildren {
         # Keep the hung ThreadJob owned by the isolated audit process; do not
         # synchronously Stop-Job/Remove-Job or treat the timeout as PASS.
         $script:semanticWorkerTimedOut = $true
-        throw "External UIA semantic worker timed out without a real AutomationId witness; last_worker_stage=$lastWorkerStage"
+        throw "External UIA semantic worker timed out without a real AutomationId witness; last_worker_stage=$lastWorkerStage; native_class_bucket=$nativeCandidateBucket"
     }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'
     $result = $null

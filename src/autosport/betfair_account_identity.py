@@ -60,18 +60,19 @@ class BetfairAuthenticatedAccountIdentity:
     observed_at: str
 
     def __post_init__(self) -> None:
-        if self.venue_id != VENUE_ID:
+        if type(self.venue_id) is not str or self.venue_id != VENUE_ID:
             raise BetfairAccountIdentityError("venue_id is product-owned")
         if self.mode is not BetfairAccountIdentityMode.PERSONAL_DEVELOPER:
             raise BetfairAccountIdentityError(
                 "stable licensed-vendor account identity is not available on this authority"
             )
-        if self.identity_scope != IDENTITY_SCOPE:
+        if type(self.identity_scope) is not str or self.identity_scope != IDENTITY_SCOPE:
             raise BetfairAccountIdentityError(
                 "personal-developer identity must remain session-context scoped"
             )
-        if not isinstance(self.session_context_id, str) or not self.session_context_id.startswith(
-            _CONTEXT_PREFIX
+        if (
+            type(self.session_context_id) is not str
+            or not self.session_context_id.startswith(_CONTEXT_PREFIX)
         ):
             raise BetfairAccountIdentityError("session_context_id is not canonical")
         _sha256_hex(
@@ -96,6 +97,10 @@ class BetfairAuthenticatedAccountIdentity:
 
     @property
     def identity_id(self) -> str:
+        # Identity-bearing reads revalidate the frozen DTO. This makes an
+        # object.__setattr__ tamper fail closed instead of dispatching through a
+        # hostile string subclass while constructing canonical identity bytes.
+        self.__post_init__()
         payload = {
             "schema": IDENTITY_SCHEMA,
             "schema_version": IDENTITY_SCHEMA_VERSION,
@@ -185,7 +190,7 @@ def _make_account_identity_authority():
 
     def validate_sha256(value: str, field: str) -> str:
         if (
-            not isinstance(value, str)
+            type(value) is not str
             or len(value) != 64
             or any(character not in "0123456789abcdef" for character in value)
         ):
@@ -194,7 +199,7 @@ def _make_account_identity_authority():
 
     def validate_currency(value: str) -> str:
         if (
-            not isinstance(value, str)
+            type(value) is not str
             or len(value) != 3
             or not value.isascii()
             or not value.isalpha()
@@ -206,7 +211,7 @@ def _make_account_identity_authority():
         return value
 
     def validate_timestamp(value: str) -> str:
-        if not isinstance(value, str) or not value or value != value.strip():
+        if type(value) is not str or not value or value != value.strip():
             raise identity_error_type(
                 "account observed_at must be canonical timestamp text"
             )
@@ -224,7 +229,31 @@ def _make_account_identity_authority():
         )
         return hmac_digest(process_hmac_key, material, "sha256")
 
+    def validate_context_id(value: str) -> str:
+        if type(value) is not str or not value.startswith(context_prefix):
+            raise identity_error_type("session_context_id is not canonical")
+        validate_sha256(value.removeprefix(context_prefix), "session_context_id")
+        return value
+
+    def validate_identity(value: BetfairAuthenticatedAccountIdentity) -> None:
+        if type(value) is not identity_type:
+            raise identity_error_type("account identity must use the exact canonical type")
+        if type(value.venue_id) is not str or value.venue_id != venue_id:
+            raise identity_error_type("venue_id is product-owned")
+        if value.mode is not personal_mode:
+            raise identity_error_type("account identity mode is not canonical")
+        if type(value.identity_scope) is not str or value.identity_scope != identity_scope:
+            raise identity_error_type("account identity scope is not canonical")
+        validate_context_id(value.session_context_id)
+        validate_currency(value.currency_code)
+        validate_sha256(value.account_details_sha256, "account_details_sha256")
+        validate_timestamp(value.observed_at)
+
     def issued_identity_digest(value: BetfairAuthenticatedAccountIdentity) -> str:
+        # Revalidate exact identity fields before equality/string/JSON dispatch.
+        # Authority verification therefore fails closed on hostile post-init
+        # scalar substitution instead of trusting only a prior digest mismatch.
+        validate_identity(value)
         # Authority integrity must not depend on the public identity_id property
         # or module-level validation/JSON helpers after closure initialization.
         payload = {
@@ -583,7 +612,7 @@ def _canonical_json(value: object) -> bytes:
 
 def _sha256_hex(value: str, field: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or len(value) != 64
         or any(character not in "0123456789abcdef" for character in value)
     ):
@@ -593,7 +622,7 @@ def _sha256_hex(value: str, field: str) -> str:
 
 def _currency_code(value: str) -> str:
     if (
-        not isinstance(value, str)
+        type(value) is not str
         or len(value) != 3
         or not value.isascii()
         or not value.isalpha()
@@ -606,7 +635,7 @@ def _currency_code(value: str) -> str:
 
 
 def _canonical_timestamp(value: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if type(value) is not str or not value or value != value.strip():
         raise BetfairAccountIdentityError("account observed_at must be canonical timestamp text")
     # The canonical client already validates evidence timestamps. Keep the exact
     # provider-observation text so identity binds the source evidence byte-for-byte.

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from decimal import Decimal
 from unittest.mock import patch
 
 import autosport.strategies as strategies
@@ -8,8 +9,11 @@ from autosport.agents import (
     AgentContext,
     AgentOrchestrator,
     MarketMirrorAgent,
+    _LatestQuotesView,
     agent_composition_sha256,
 )
+from autosport.domain import MarketEvent
+from autosport.market_mirror import MarketMirror
 from autosport.paper import PaperBook
 from autosport.strategies import available_strategies, build_strategy_agents
 
@@ -92,6 +96,141 @@ class AgentCompositionIdentityTests(unittest.TestCase):
         self.assertEqual(first, second)
         self.assertEqual(len(first), 64)
         self.assertNotEqual(first, reversed_hash)
+
+    def test_agent_composition_rejects_identity_subclass_before_dispatch(self):
+        dispatch_calls = []
+
+        class HostileAgentName(str):
+            def strip(self, *args, **kwargs):
+                dispatch_calls.append("strip")
+                raise AssertionError(
+                    "hostile agent identity stripped before exact-type admission"
+                )
+
+            def __hash__(self):
+                dispatch_calls.append("hash")
+                raise AssertionError(
+                    "hostile agent identity hashed before exact-type admission"
+                )
+
+        with self.assertRaisesRegex(
+            ValueError,
+            "agent names must be non-empty canonical strings",
+        ):
+            agent_composition_sha256((HostileAgentName("market-mirror"),))
+
+        self.assertEqual(dispatch_calls, [])
+
+    def test_latest_quotes_rejects_identity_subclasses_before_hash_dispatch(self):
+        dispatch_calls = []
+
+        class HostileIdentity(str):
+            def __hash__(self):
+                dispatch_calls.append("hash")
+                raise AssertionError("latest quote identity hashed before exact admission")
+
+            def strip(self, *args, **kwargs):
+                dispatch_calls.append("strip")
+                raise AssertionError("latest quote identity stripped before exact admission")
+
+        view = _LatestQuotesView(())
+
+        with self.assertRaises(KeyError):
+            _ = view[HostileIdentity("quote")]
+        self.assertEqual(dispatch_calls, [])
+
+        with self.assertRaisesRegex(ValueError, "latest_quotes source_id"):
+            _ = view[(HostileIdentity("source"), "quote")]
+        self.assertEqual(dispatch_calls, [])
+
+        with self.assertRaisesRegex(ValueError, "latest_quotes quote_key"):
+            _ = view[("source", HostileIdentity("quote"))]
+        self.assertEqual(dispatch_calls, [])
+
+        event = MarketEvent(
+            event_id="event",
+            market_id="market",
+            selection_id="selection",
+            decimal_odds=Decimal("2.0"),
+            observed_ts="2026-10-07T00:00:00+00:00",
+            source_id="source",
+            sequence=1,
+            ingest_ts="2026-10-07T00:00:01+00:00",
+        )
+        object.__setattr__(event, "source_id", HostileIdentity("source"))
+
+        with self.assertRaisesRegex(ValueError, "latest_quotes source_id"):
+            _LatestQuotesView((event,))
+        self.assertEqual(dispatch_calls, [])
+
+    def test_context_rejects_noncanonical_provider_account_identity_text(self):
+        context_book = PaperBook("100")
+        invalid_bindings = (
+            (("provider\nalpha", "account-a"), "source_id"),
+            (("provider-a", "account\x7fa"), "account_id"),
+            (("provider-a", "account-\ud800"), "account_id"),
+        )
+
+        for binding, _field in invalid_bindings:
+            with self.subTest(binding=repr(binding)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "paper_provider_accounts must contain canonical non-empty text",
+                ):
+                    AgentContext(
+                        context_book,
+                        paper_provider_accounts=(binding,),
+                    )
+
+    def test_context_rejects_provider_account_str_subclass_before_virtual_dispatch(self):
+        dispatch_calls = []
+
+        class HostileIdentity(str):
+            def strip(self, *args, **kwargs):
+                dispatch_calls.append("strip")
+                raise AssertionError(
+                    "provider account identity virtual method must not execute"
+                )
+
+            def encode(self, *args, **kwargs):
+                dispatch_calls.append("encode")
+                raise AssertionError(
+                    "provider account identity encoding must not execute"
+                )
+
+        for binding in (
+            (HostileIdentity("provider-a"), "account-a"),
+            ("provider-a", HostileIdentity("account-a")),
+        ):
+            with self.subTest(binding=repr(binding)):
+                with self.assertRaisesRegex(
+                    ValueError,
+                    "paper_provider_accounts must contain canonical non-empty text",
+                ):
+                    AgentContext(
+                        PaperBook("100"),
+                        paper_provider_accounts=(binding,),
+                    )
+                self.assertEqual(dispatch_calls, [])
+
+    def test_context_rejects_market_mirror_subclass_before_authority_dispatch(self):
+        dispatch_calls = []
+
+        class HostileMarketMirror(MarketMirror):
+            def snapshot(self):
+                dispatch_calls.append("snapshot")
+                raise AssertionError("MarketMirror subclass authority must not execute")
+
+            def apply(self, event):
+                dispatch_calls.append("apply")
+                raise AssertionError("MarketMirror subclass authority must not execute")
+
+        hostile = HostileMarketMirror()
+
+        with self.assertRaisesRegex(TypeError, "exact MarketMirror"):
+            AgentContext(PaperBook("100"), market_mirror=hostile)
+
+        self.assertEqual(dispatch_calls, [])
 
     def test_orchestrator_rejects_duplicate_agent_identity(self):
         context = AgentContext(PaperBook("100"))

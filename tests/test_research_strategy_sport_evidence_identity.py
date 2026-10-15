@@ -55,17 +55,16 @@ def test_research_event_evidence_hash_binds_sport_identity() -> None:
 def test_research_market_snapshot_hash_binds_sport_inside_projection() -> None:
     football = _event(sport="football")
     tennis = replace(football, sport="tennis")
-    lookup_key = "fixed-research-slot"
-
-    # Canonical quote identity already binds sport. Hold the caller lookup key
-    # constant here to prove the research event projection independently does too.
+    # The snapshot mapping itself is canonical identity authority: each key must
+    # be the exact event quote_key. Sport is therefore bound both by the mapping
+    # key and by the event projection.
     assert football.quote_key != tennis.quote_key
     assert research_market_snapshot_hash(
-        {lookup_key: football},
-        (lookup_key,),
+        {football.quote_key: football},
+        (football.quote_key,),
     ) != research_market_snapshot_hash(
-        {lookup_key: tennis},
-        (lookup_key,),
+        {tennis.quote_key: tennis},
+        (tennis.quote_key,),
     )
 
 @pytest.mark.parametrize(
@@ -85,8 +84,6 @@ def test_research_hashes_bind_concrete_optional_market_identity(
     baseline = _event(sport="football")
     first = replace(baseline, **{field_name: first_value})
     second = replace(baseline, **{field_name: second_value})
-    lookup_key = "fixed-research-slot"
-
     if field_name == "exchange_side":
         assert first.quote_key != second.quote_key
     else:
@@ -95,10 +92,10 @@ def test_research_hashes_bind_concrete_optional_market_identity(
         assert first.quote_key == second.quote_key
     assert market_event_evidence_hash(first) != market_event_evidence_hash(second)
     assert research_market_snapshot_hash(
-        {lookup_key: first},
-        (lookup_key,),
+        {first.quote_key: first},
+        (first.quote_key,),
     ) != research_market_snapshot_hash(
-        {lookup_key: second},
-        (lookup_key,),
+        {second.quote_key: second},
+        (second.quote_key,),
     )
 

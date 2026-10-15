@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import re
 import math
 import os
 import threading
@@ -12,6 +13,12 @@ from decimal import Decimal, InvalidOperation
 from enum import Enum
 from pathlib import Path
 from typing import Any, Callable, TypeVar
+
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
 
 
 SCHEMA_VERSION = 1
@@ -86,6 +93,37 @@ def _text(value: str, name: str) -> str:
     return value
 
 
+def _identity_text(value: object, name: str) -> str:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{name} must be exact canonical identity text")
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be exact canonical UTF-8 identity text") from exc
+    return value
+
+
+def _exact_dict_fields(
+    value: object,
+    expected_fields: set[str],
+    error_message: str,
+) -> dict[str, Any]:
+    if type(value) is not dict:
+        raise ExecutionLedgerIntegrityError(error_message)
+    raw_keys = tuple(value.keys())
+    if (
+        any(type(key) is not str for key in raw_keys)
+        or set(raw_keys) != expected_fields
+    ):
+        raise ExecutionLedgerIntegrityError(error_message)
+    return value
+
+
 def _sha256_text(value: str, name: str) -> str:
     _text(value, name)
     if len(value) != 64 or any(char not in "0123456789abcdef" for char in value):
@@ -95,6 +133,14 @@ def _sha256_text(value: str, name: str) -> str:
 
 def _timestamp(value: str, name: str) -> datetime:
     _text(value, name)
+    for match in re.finditer(r"[.,]([0-9]+)", value):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise ValueError(
+                f"{name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -233,10 +279,10 @@ class ExecutionAction:
             "event_id",
             "market_id",
             "selection_id",
-            "side",
             "quote_id",
         ):
-            _text(getattr(self, name), name)
+            _identity_text(getattr(self, name), name)
+        _text(self.side, "side")
         observed = _timestamp(self.quote_observed_at, "quote_observed_at")
         expires = _timestamp(self.expires_at, "expires_at")
         if expires <= observed:
@@ -287,7 +333,7 @@ class ExecutionPlan:
             "decision_id",
             "approval_id",
         ):
-            _text(getattr(self, name), name)
+            _identity_text(getattr(self, name), name)
         _timestamp(self.created_at, "created_at")
         if type(self.schema_version) is not int or self.schema_version != SCHEMA_VERSION:
             raise ValueError("unsupported execution plan schema")
@@ -311,7 +357,9 @@ class ExecutionPlan:
 
     @property
     def fingerprint(self) -> str:
-        return _digest(self.to_dict())
+        if type(self) is not ExecutionPlan:
+            raise ValueError("execution plan must be an exact ExecutionPlan")
+        return _digest(ExecutionPlan.to_dict(self))
 
 
 @dataclass(frozen=True, slots=True)
@@ -322,12 +370,24 @@ class ExecutionAttempt:
     effect_fingerprint: str
     reserved_at: str
 
+    def __post_init__(self) -> None:
+        _identity_text(self.attempt_id, "attempt_id")
+        _identity_text(self.plan_id, "plan_id")
+        _identity_text(self.action_id, "action_id")
+        _sha256_text(self.effect_fingerprint, "effect_fingerprint")
+        _timestamp(self.reserved_at, "reserved_at")
+
 
 @dataclass(frozen=True, slots=True)
 class ExternalReceiptIdentity:
     bookmaker_id: str
     account_id: str
     external_receipt_id: str
+
+    def __post_init__(self) -> None:
+        _identity_text(self.bookmaker_id, "bookmaker_id")
+        _identity_text(self.account_id, "account_id")
+        _identity_text(self.external_receipt_id, "external_receipt_id")
 
 
 @dataclass(frozen=True, slots=True)
@@ -341,13 +401,16 @@ class ExternalAcknowledgement:
     reconciliation_evidence_id: str | None = None
 
     def __post_init__(self) -> None:
-        _text(self.attempt_id, "attempt_id")
-        _text(self.external_receipt_id, "external_receipt_id")
+        _identity_text(self.attempt_id, "attempt_id")
+        _identity_text(self.external_receipt_id, "external_receipt_id")
         _timestamp(self.acknowledged_at, "acknowledged_at")
         if not isinstance(self.status, AcknowledgementStatus):
             raise ValueError("status must be AcknowledgementStatus")
         if self.reconciliation_evidence_id is not None:
-            _text(self.reconciliation_evidence_id, "reconciliation_evidence_id")
+            _identity_text(
+                self.reconciliation_evidence_id,
+                "reconciliation_evidence_id",
+            )
         if self.status in {
             AcknowledgementStatus.ACCEPTED,
             AcknowledgementStatus.PARTIAL,
@@ -402,13 +465,9 @@ class ExternalEffectReconciliation:
     source: str
 
     def __post_init__(self) -> None:
-        for name in (
-            "attempt_id",
-            "evidence_id",
-            "external_receipt_id",
-            "source",
-        ):
-            _text(getattr(self, name), name)
+        for name in ("attempt_id", "evidence_id", "external_receipt_id"):
+            _identity_text(getattr(self, name), name)
+        _text(self.source, "source")
         _timestamp(self.observed_at, "observed_at")
 
     def to_dict(self) -> dict[str, Any]:
@@ -430,8 +489,9 @@ class ReconciliationSnapshot:
     source: str
 
     def __post_init__(self) -> None:
-        for name in ("attempt_id", "evidence_id", "source"):
-            _text(getattr(self, name), name)
+        for name in ("attempt_id", "evidence_id"):
+            _identity_text(getattr(self, name), name)
+        _text(self.source, "source")
         _timestamp(self.observed_at, "observed_at")
         if type(self.external_effect_found) is not bool:
             raise ValueError("external_effect_found must be bool")
@@ -573,23 +633,26 @@ class RealExecutionLedger:
         self._path_durable = True
 
     def _mutate(self, operation: Callable[[], _T]) -> _T:
+        """Hold a crash-releasing OS writer lock, never a stale-file existence lease.
+
+        Persistent lock-file bytes are not ownership: a killed writer must leave
+        SUBMITTED effects reconcilable without allowing duplicate provider sends.
+        """
         with self._thread_lock:
             try:
-                fd = os.open(
-                    self._lock_path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600
-                )
-            except FileExistsError as exc:
+                with WorkspaceEconomicLock(
+                    self.path.parent.resolve(),
+                    file_name=self._lock_path.name,
+                ):
+                    return operation()
+            except WorkspaceEconomicLockBusyError as exc:
                 raise ExecutionLedgerBusyError(
-                    "writer lock exists; fail closed until writer/crash ownership is resolved"
+                    "writer lock is owned by another process; fail closed"
                 ) from exc
-            try:
-                return operation()
-            finally:
-                os.close(fd)
-                try:
-                    self._lock_path.unlink()
-                except FileNotFoundError:
-                    pass
+            except WorkspaceEconomicLockError as exc:
+                raise ExecutionLedgerIntegrityError(
+                    "execution ledger crash-releasing writer lock failed"
+                ) from exc
 
     @classmethod
     def _validate_event(
@@ -602,7 +665,12 @@ class RealExecutionLedger:
             )
         if type(event["schema_version"]) is not int or event["schema_version"] != SCHEMA_VERSION:
             raise ExecutionLedgerIntegrityError(f"unsupported event schema{where}")
-        for name in ("event_id", "event_type", "recorded_at", "plan_id"):
+        for name in ("event_id", "plan_id"):
+            try:
+                _identity_text(event[name], name)
+            except ValueError as exc:
+                raise ExecutionLedgerIntegrityError(f"invalid {name}{where}") from exc
+        for name in ("event_type", "recorded_at"):
             if type(event[name]) is not str or not event[name].strip():
                 raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
         try:
@@ -615,10 +683,13 @@ class RealExecutionLedger:
             raise ExecutionLedgerIntegrityError(f"unknown event type{where}")
         for name in ("action_id", "attempt_id"):
             value = event[name]
-            if value is not None and (
-                type(value) is not str or not value.strip()
-            ):
-                raise ExecutionLedgerIntegrityError(f"invalid {name}{where}")
+            if value is not None:
+                try:
+                    _identity_text(value, name)
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        f"invalid {name}{where}"
+                    ) from exc
         if not isinstance(event["payload"], dict):
             raise ExecutionLedgerIntegrityError(f"invalid payload{where}")
         try:
@@ -737,7 +808,7 @@ class RealExecutionLedger:
     def _plan_event(
         events: list[dict[str, Any]], plan_id: str
     ) -> dict[str, Any] | None:
-        _text(plan_id, "plan_id")
+        _identity_text(plan_id, "plan_id")
         matches = [
             event
             for event in events
@@ -758,7 +829,7 @@ class RealExecutionLedger:
     def _attempt_events(
         events: list[dict[str, Any]], attempt_id: str
     ) -> list[dict[str, Any]]:
-        _text(attempt_id, "attempt_id")
+        _identity_text(attempt_id, "attempt_id")
         return [event for event in events if event["attempt_id"] == attempt_id]
 
     @classmethod
@@ -791,24 +862,29 @@ class RealExecutionLedger:
                     raise ExecutionLedgerIntegrityError(
                         "found reconciliation requires UNKNOWN"
                     )
-                evidence_id = event["payload"].get("evidence_id")
-                if not isinstance(evidence_id, str) or not evidence_id.strip():
-                    raise ExecutionLedgerIntegrityError(
-                        "found reconciliation lacks evidence identity"
+                try:
+                    evidence_id = _identity_text(
+                        event["payload"].get("evidence_id"),
+                        "evidence_id",
                     )
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation lacks canonical evidence identity"
+                    ) from exc
                 prior = found_reconciliations.get(evidence_id)
                 if prior is not None and prior != event["payload"]:
                     raise ExecutionLedgerIntegrityError(
                         "conflicting found reconciliation evidence"
                     )
-                external_receipt_id = event["payload"].get("external_receipt_id")
-                if (
-                    not isinstance(external_receipt_id, str)
-                    or not external_receipt_id.strip()
-                ):
-                    raise ExecutionLedgerIntegrityError(
-                        "found reconciliation lacks receipt identity"
+                try:
+                    external_receipt_id = _identity_text(
+                        event["payload"].get("external_receipt_id"),
+                        "external_receipt_id",
                     )
+                except ValueError as exc:
+                    raise ExecutionLedgerIntegrityError(
+                        "found reconciliation lacks canonical receipt identity"
+                    ) from exc
                 if (
                     found_receipt_id is not None
                     and found_receipt_id != external_receipt_id
@@ -883,7 +959,7 @@ class RealExecutionLedger:
         plan_id: str,
         action_id: str,
     ) -> tuple[dict[str, Any], dict[str, Any]]:
-        _text(action_id, "action_id")
+        _identity_text(action_id, "action_id")
         plan_event = cls._plan_event(events, plan_id)
         if plan_event is None:
             raise ExecutionStateError(f"plan {plan_id!r} is not reserved")
@@ -954,17 +1030,20 @@ class RealExecutionLedger:
 
     @classmethod
     def _plan_from_dict(cls, value: object) -> ExecutionPlan:
-        if not isinstance(value, dict) or set(value) != {
-            "schema_version",
-            "plan_id",
-            "bookmaker_profile_version",
-            "decision_id",
-            "approval_id",
-            "created_at",
-            "actions",
-        }:
-            raise ExecutionLedgerIntegrityError("stored plan schema is invalid")
-        if not isinstance(value["actions"], list):
+        value = _exact_dict_fields(
+            value,
+            {
+                "schema_version",
+                "plan_id",
+                "bookmaker_profile_version",
+                "decision_id",
+                "approval_id",
+                "created_at",
+                "actions",
+            },
+            "stored plan schema is invalid",
+        )
+        if type(value["actions"]) is not list:
             raise ExecutionLedgerIntegrityError("stored plan actions are invalid")
         actions: list[ExecutionAction] = []
         expected_action_fields = {
@@ -983,10 +1062,11 @@ class RealExecutionLedger:
         }
         try:
             for raw in value["actions"]:
-                if not isinstance(raw, dict) or set(raw) != expected_action_fields:
-                    raise ExecutionLedgerIntegrityError(
-                        "stored action schema is invalid"
-                    )
+                raw = _exact_dict_fields(
+                    raw,
+                    expected_action_fields,
+                    "stored action schema is invalid",
+                )
                 actions.append(ExecutionAction(**raw))
             return ExecutionPlan(
                 plan_id=value["plan_id"],
@@ -1013,15 +1093,20 @@ class RealExecutionLedger:
             "accepted_stake",
             "reconciliation_evidence_id",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored acknowledgement schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored acknowledgement schema is invalid",
+        )
         try:
+            status = _identity_text(
+                value["status"],
+                "acknowledgement status",
+            )
             acknowledgement = ExternalAcknowledgement(
                 attempt_id=value["attempt_id"],
                 external_receipt_id=value["external_receipt_id"],
-                status=AcknowledgementStatus(value["status"]),
+                status=AcknowledgementStatus(status),
                 acknowledged_at=value["acknowledged_at"],
                 accepted_odds=value["accepted_odds"],
                 accepted_stake=value["accepted_stake"],
@@ -1048,10 +1133,11 @@ class RealExecutionLedger:
             "observed_at",
             "source",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored found reconciliation schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored found reconciliation schema is invalid",
+        )
         try:
             reconciliation = ExternalEffectReconciliation(**value)
         except (TypeError, ValueError) as exc:
@@ -1075,10 +1161,11 @@ class RealExecutionLedger:
             "external_effect_found",
             "source",
         }
-        if not isinstance(value, dict) or set(value) != expected_fields:
-            raise ExecutionLedgerIntegrityError(
-                "stored not-found reconciliation schema is invalid"
-            )
+        value = _exact_dict_fields(
+            value,
+            expected_fields,
+            "stored not-found reconciliation schema is invalid",
+        )
         try:
             snapshot = ReconciliationSnapshot(**value)
         except (TypeError, ValueError) as exc:
@@ -1601,7 +1688,7 @@ class RealExecutionLedger:
         approved_at: str,
         evidence_sha256: str,
     ) -> None:
-        _text(approval_id, "approval_id")
+        _identity_text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
         _timestamp(approved_at, "approved_at")
         _sha256_text(evidence_sha256, "evidence_sha256")
@@ -1652,7 +1739,8 @@ class RealExecutionLedger:
         revoked_at: str,
         revocation_evidence_sha256: str,
     ) -> None:
-        _text(approval_id, "approval_id")
+        _identity_text(plan_id, "plan_id")
+        _identity_text(approval_id, "approval_id")
         _sha256_text(approval_fingerprint, "approval_fingerprint")
         _timestamp(revoked_at, "revoked_at")
         _sha256_text(revocation_evidence_sha256, "revocation_evidence_sha256")
@@ -1710,7 +1798,13 @@ class RealExecutionLedger:
                 payload,
             )
 
-        self._mutate(operation)
+        # Revocation and the product-owned Betfair final-send path must share
+        # one cross-process, crash-releasing authority fence.  Otherwise a
+        # revocation can commit after the sender's approval read and before
+        # the irreversible provider POST.  A concurrent revocation fails
+        # closed while a send owns the economic writer lock.
+        with WorkspaceEconomicLock(self.path.parent.resolve()):
+            self._mutate(operation)
 
     def supervised_approval_is_active(
         self,
@@ -1719,6 +1813,9 @@ class RealExecutionLedger:
         approval_id: str,
         approval_fingerprint: str,
     ) -> bool:
+        _identity_text(plan_id, "plan_id")
+        _identity_text(approval_id, "approval_id")
+        _sha256_text(approval_fingerprint, "approval_fingerprint")
         events = self._events()
         bindings = [
             event
@@ -1747,8 +1844,8 @@ class RealExecutionLedger:
         provider_id: str,
     ) -> str:
         """Durably bind a provider-safe <=32-char order reference before submission."""
-        _text(attempt_id, "attempt_id")
-        provider = _text(provider_id, "provider_id")
+        _identity_text(attempt_id, "attempt_id")
+        provider = _identity_text(provider_id, "provider_id")
 
         def operation() -> str:
             events = self._events()
@@ -1765,7 +1862,7 @@ class RealExecutionLedger:
                 raise ExecutionIdentityConflict(
                     "provider order reference authority mismatches action bookmaker"
                 )
-            account_id = _text(action["account_id"], "account_id")
+            account_id = _identity_text(action["account_id"], "account_id")
             binding_sha256 = _digest(
                 {
                     "schema": "autosport.provider_order_reference_binding",
@@ -1832,7 +1929,7 @@ class RealExecutionLedger:
         attempt_id: str,
         provider_id: str,
     ) -> str | None:
-        provider = _text(provider_id, "provider_id")
+        provider = _identity_text(provider_id, "provider_id")
         events = self._events()
         matches = [
             event["payload"]
@@ -1862,7 +1959,7 @@ class RealExecutionLedger:
         observed_at: str,
         source: str,
     ) -> None:
-        _text(attempt_id, "attempt_id")
+        _identity_text(attempt_id, "attempt_id")
         _sha256_text(evidence_id, "evidence_id")
         _timestamp(observed_at, "observed_at")
         _text(source, "source")
@@ -1978,7 +2075,7 @@ class RealExecutionLedger:
         attempt_id: str,
         reserved_at: str | None = None,
     ) -> ExecutionAttempt:
-        _text(attempt_id, "attempt_id")
+        _identity_text(attempt_id, "attempt_id")
         reserved_at = reserved_at or _now()
         _timestamp(reserved_at, "reserved_at")
 
@@ -2585,7 +2682,7 @@ class RealExecutionLedger:
         the canonical writer/admission authority.
         """
 
-        _text(plan_id, "plan_id")
+        _identity_text(plan_id, "plan_id")
         snapshot = self.verified_snapshot()
         # Parse the captured bytes, never a second filesystem read, so every
         # returned fact is mechanically tied to snapshot.sha256/event_count.

@@ -69,7 +69,7 @@ class ParlayApiMalformedQuoteStructureTests(unittest.TestCase):
 
         event = copy.deepcopy(_BASE_EVENT)
         del event["bookmakers"][0]["markets"][0]["outcomes"][0]["name"]
-        cases.append(("outcome-name", event, "outcome is missing name"))
+        cases.append(("outcome-name", event, "outcome name must be a string"))
 
         event = copy.deepcopy(_BASE_EVENT)
         event["bookmakers"][0]["markets"][0]["outcomes"][0]["price"] = "not-a-price"

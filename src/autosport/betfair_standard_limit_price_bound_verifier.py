@@ -193,6 +193,8 @@ def _build_product_verifier():
 
     captured_place_action = _price_bound_module._CANONICAL_PLACE_ACTION
     captured_place_action_code = captured_place_action.__code__
+    captured_request_body = _price_bound_module._CANONICAL_REQUEST_BODY
+    captured_request_body_code = captured_request_body.__code__
     execution_to_dict = ExecutionAction.to_dict
     execution_to_dict_code = execution_to_dict.__code__
     bound_verify = BoundSupervisedExecutionPlan.verify_binding
@@ -221,6 +223,9 @@ def _build_product_verifier():
             or captured_place_action.__code__ is not captured_place_action_code
             or _price_bound_module.BetfairSupervisedPlaceOrdersClient.place_action
             is not captured_place_action
+            or _price_bound_module._CANONICAL_REQUEST_BODY is not captured_request_body
+            or captured_request_body.__code__ is not captured_request_body_code
+            or _price_bound_module._canonical_place_orders_request_body is not captured_request_body
         ):
             raise BetfairStandardLimitPriceBoundError(
                 "canonical Betfair placeOrders writer authority changed"

@@ -5,7 +5,9 @@ import json
 import os
 import subprocess
 import sys
+from collections.abc import Iterator, Mapping
 from dataclasses import replace
+from types import MappingProxyType
 from pathlib import Path
 
 import pytest
@@ -18,6 +20,34 @@ from autosport.performance_qualification import (
 )
 
 SOURCE_SHA = "a" * 40
+
+
+class _FlipOnIterationReport(Mapping[str, object]):
+    """Show one state to keyed reads and another when materialized."""
+
+    def __init__(
+        self,
+        validation_view: dict[str, object],
+        materialized_view: dict[str, object],
+    ) -> None:
+        self._validation_view = validation_view
+        self._materialized_view = materialized_view
+        self._materializing = False
+
+    def __getitem__(self, key: str) -> object:
+        source = (
+            self._materialized_view
+            if self._materializing
+            else self._validation_view
+        )
+        return source[key]
+
+    def __iter__(self) -> Iterator[str]:
+        self._materializing = True
+        return iter(self._materialized_view)
+
+    def __len__(self) -> int:
+        return len(self._materialized_view)
 
 
 def _canonical_digest(value: object) -> str:
@@ -135,6 +165,79 @@ def test_exact_boundaries_pass_and_identity_is_deterministic() -> None:
     assert first.qualification_id == second.qualification_id
     assert first.target_machine_acceptance is False
     assert len(first.checks) == 6
+
+
+def test_stateful_mapping_cannot_change_between_validation_and_report_hash() -> None:
+    validation_view = _report()
+    materialized_view = _report()
+    materialized_view["status"] = "FAIL"
+    materialized_view["failures"] = ["changed after keyed validation"]
+    materialized_view["accepted_events_per_second"] = 1.0
+    report = _FlipOnIterationReport(validation_view, materialized_view)
+
+    with pytest.raises(
+        PerformanceQualificationError,
+        match="correctness status must be PASS",
+    ):
+        qualify_endurance_report(
+            report,
+            _budget(),
+            source_sha=SOURCE_SHA,
+            machine_profile="machine",
+        )
+
+
+def test_read_only_mapping_input_remains_supported() -> None:
+    report = MappingProxyType(_report())
+
+    result = qualify_endurance_report(
+        report,
+        _budget(),
+        source_sha=SOURCE_SHA,
+        machine_profile="machine",
+    )
+
+    assert result.status == "PASS"
+
+
+@pytest.mark.parametrize("key", [True, 7])
+def test_report_snapshot_rejects_non_string_nested_object_keys(key: object) -> None:
+    report = _report()
+    config = report["config"]
+    assert isinstance(config, dict)
+    config[key] = "aliased-value"
+
+    with pytest.raises(
+        PerformanceQualificationError,
+        match="object keys must be strings",
+    ):
+        qualify_endurance_report(
+            report,
+            _budget(),
+            source_sha=SOURCE_SHA,
+            machine_profile="machine",
+        )
+
+
+def test_report_snapshot_rejects_tuple_alias_for_json_array() -> None:
+    report = _report()
+    restart_hashes = report["restart_hashes"]
+    assert type(restart_hashes) is list
+    report["restart_hashes"] = tuple(restart_hashes)
+
+    # json.dumps serializes list and tuple identically, so the precomputed stable
+    # fingerprint still matches unless the snapshot layer enforces JSON-native
+    # container types before validation/identity construction.
+    with pytest.raises(
+        PerformanceQualificationError,
+        match="unsupported non-JSON value",
+    ):
+        qualify_endurance_report(
+            report,
+            _budget(),
+            source_sha=SOURCE_SHA,
+            machine_profile="machine",
+        )
 
 
 def test_correctness_failure_cannot_become_performance_pass() -> None:
@@ -362,3 +465,185 @@ def test_script_returns_zero_for_pass_and_five_for_budget_failure(tmp_path: Path
     )
     assert failed.returncode == 5
     assert "performance_qualification=FAIL" in failed.stdout
+
+
+@pytest.mark.parametrize("phase", ["keys", "lookup"])
+@pytest.mark.parametrize("exception_type", [OSError, KeyError, RuntimeError])
+def test_hostile_report_mapping_error_is_redacted(
+    phase: str, exception_type: type[Exception]
+) -> None:
+    """Untrusted report Mapping exceptions must never enter diagnostic traceback."""
+    import traceback
+
+    secret = "CANARY_PRIVATE_REPORT_TOKEN_DO_NOT_EMIT"
+
+    class HostileReport(Mapping[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            if phase == "keys":
+                raise exception_type(secret)
+            return iter(("status",))
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            raise exception_type(secret)
+
+    with pytest.raises(
+        PerformanceQualificationError, match="could not be snapshotted"
+    ) as caught:
+        qualify_endurance_report(
+            HostileReport(),
+            _budget(),
+            source_sha=SOURCE_SHA,
+            machine_profile="untrusted-mapping-negative-fixture",
+        )
+
+    rendered = "".join(
+        traceback.format_exception(
+            type(caught.value), caught.value, caught.value.__traceback__
+        )
+    )
+    assert secret not in rendered
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
+def test_unbounded_report_mapping_iteration_rejected_without_len_or_retry() -> None:
+    """An infinite Mapping iterator cannot force unbounded dict(report) work."""
+    reads: list[int] = []
+
+    class InfiniteKeys(Mapping[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            index = 0
+            while True:
+                yield f"entry{index}"
+                index += 1
+
+        def __len__(self) -> int:
+            raise AssertionError("untrusted Mapping length must not be read")
+
+        def __getitem__(self, key: str) -> object:
+            reads.append(1)
+            return "fixture"
+
+    with pytest.raises(PerformanceQualificationError, match="snapshot node limit"):
+        qualify_endurance_report(
+            InfiniteKeys(), _budget(), source_sha=SOURCE_SHA,
+            machine_profile="bounded-iterator-negative-fixture",
+        )
+    assert len(reads) == 10_000
+
+
+def test_report_snapshot_rejects_deep_bombs_without_recursion_error() -> None:
+    payload: dict[str, object] = {}
+    current = payload
+    for _ in range(80):
+        child: dict[str, object] = {}
+        current["child"] = child
+        current = child
+    report = _report()
+    report["host_metadata"] = payload
+    with pytest.raises(PerformanceQualificationError, match="snapshot depth limit"):
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="deep-snapshot-negative-fixture",
+        )
+
+
+def test_report_snapshot_rejects_wide_bombs_without_unbounded_materialization() -> None:
+    report = _report()
+    report["host_metadata"] = [None] * 10_001
+    with pytest.raises(PerformanceQualificationError, match="snapshot node limit"):
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="wide-snapshot-negative-fixture",
+        )
+
+
+def test_report_snapshot_rejects_excessive_text_before_canonical_json() -> None:
+    report = _report()
+    report["host_metadata"] = "x" * 8_000_001
+    with pytest.raises(PerformanceQualificationError, match="snapshot text limit"):
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="oversized-text-negative-fixture",
+        )
+
+
+def test_report_snapshot_rejects_duplicate_keys_before_any_validation() -> None:
+    class DuplicateKeys(Mapping[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            return iter(("status", "status"))
+
+        def __len__(self) -> int:
+            return 2
+
+        def __getitem__(self, key: str) -> object:
+            return "PASS"
+
+    with pytest.raises(PerformanceQualificationError, match="duplicate keys"):
+        qualify_endurance_report(
+            DuplicateKeys(), _budget(), source_sha=SOURCE_SHA,
+            machine_profile="duplicate-mapping-negative-fixture",
+        )
+
+
+def test_mapping_owned_exception_of_qualification_type_is_still_redacted() -> None:
+    import traceback
+
+    secret = "CANARY_PRIVATE_MAPPING_EXCEPTION_NEVER_ECHO"
+
+    class HostileReport(Mapping[str, object]):
+        def __iter__(self) -> Iterator[str]:
+            raise PerformanceQualificationError(secret)
+
+        def __len__(self) -> int:
+            return 1
+
+        def __getitem__(self, key: str) -> object:
+            raise PerformanceQualificationError(secret)
+
+    with pytest.raises(PerformanceQualificationError, match="could not be snapshotted") as caught:
+        qualify_endurance_report(
+            HostileReport(), _budget(), source_sha=SOURCE_SHA,
+            machine_profile="private-exception-negative-fixture",
+        )
+    diagnostic = "".join(traceback.format_exception(type(caught.value), caught.value, caught.value.__traceback__))
+    assert secret not in diagnostic
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
+def test_malformed_unicode_report_value_fails_closed_without_private_trace() -> None:
+    import traceback
+
+    secret = "PRIVATE_REPORT_VALUE_NEVER_EMIT"
+    report = _report()
+    report["host_metadata"] = secret + "\ud800"
+    with pytest.raises(PerformanceQualificationError, match="invalid UTF-8 text") as caught:
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="surrogate-negative-fixture",
+        )
+    diagnostic = "".join(traceback.format_exception(type(caught.value), caught.value, caught.value.__traceback__))
+    assert secret not in diagnostic
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True
+
+
+def test_malformed_unicode_report_key_fails_closed_without_private_trace() -> None:
+    import traceback
+
+    secret = "PRIVATE_REPORT_KEY_NEVER_EMIT"
+    report = _report()
+    report[secret + "\ud800"] = "fixture"
+    with pytest.raises(PerformanceQualificationError, match="keys must be valid UTF-8") as caught:
+        qualify_endurance_report(
+            report, _budget(), source_sha=SOURCE_SHA,
+            machine_profile="surrogate-key-negative-fixture",
+        )
+    diagnostic = "".join(traceback.format_exception(type(caught.value), caught.value, caught.value.__traceback__))
+    assert secret not in diagnostic
+    assert caught.value.__cause__ is None
+    assert caught.value.__suppress_context__ is True

@@ -11,11 +11,51 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _MAX_EXECUTION_DECIMAL_TEXT_LENGTH,
+    _validate_decimal_text_resource_bound,
+)
 
 
 _SCHEMA_VERSION = 2
 _ANCHOR_SCHEMA_VERSION = 1
+_MAX_DURABLE_ANCHOR_CHARS = 64 * 1024
+_MAX_DURABLE_EVENT_LINE_CHARS = 4 * 1024 * 1024
+_CANONICAL_DECIMAL_TYPE = Decimal
+_CANONICAL_INVALID_OPERATION = InvalidOperation
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR = _validate_decimal_text_resource_bound
+_CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE = _validate_decimal_text_resource_bound.__code__
+_CANONICAL_DECIMAL_INPUT_TEXT_LIMIT = _MAX_EXECUTION_DECIMAL_TEXT_LENGTH
+# Any base-10 integer with <= N digits has strictly fewer than 4*N bits.
+# Bound exact-int ingress before Decimal allocates its coefficient; the
+# canonical fixed-point validator remains the exact acceptance authority.
+_CANONICAL_DECIMAL_INPUT_INT_MAX_BITS = _MAX_EXECUTION_DECIMAL_TEXT_LENGTH * 4
+_CANONICAL_DECIMAL_FORMATTER = Decimal.__format__
+_CANONICAL_DATETIME_FROMISOFORMAT = datetime.fromisoformat
+_CANONICAL_TIMEZONE_UTC = timezone.utc
+_CANONICAL_JSON_DUMPS = json.dumps
+_CANONICAL_JSON_LOADS = json.loads
+_CANONICAL_JSON_DECODE_ERROR = json.JSONDecodeError
+_CANONICAL_SHA256 = hashlib.sha256
+_CANONICAL_PATH_TYPE = Path
+_CANONICAL_RLOCK_FACTORY = threading.RLock
+_CANONICAL_THREAD_IDENT = threading.get_ident
+_CANONICAL_OS_NAME = os.name
+_CANONICAL_OS_OPEN = os.open
+_CANONICAL_OS_FSYNC = os.fsync
+_CANONICAL_OS_CLOSE = os.close
+_CANONICAL_OS_REPLACE = os.replace
+_CANONICAL_OS_GETPID = os.getpid
+_CANONICAL_OS_O_RDONLY = os.O_RDONLY
+_CANONICAL_OS_O_DIRECTORY = getattr(os, "O_DIRECTORY", 0)
+_CANONICAL_OS_O_CREAT = os.O_CREAT
+_CANONICAL_OS_O_EXCL = os.O_EXCL
+_CANONICAL_OS_O_WRONLY = os.O_WRONLY
+_CANONICAL_EXECUTION_ACTION_TYPE = ExecutionAction
+_CANONICAL_EXECUTION_PLAN_TYPE = ExecutionPlan
+_CANONICAL_MAPPING_TYPE = Mapping
 
 
 class PaperExecutionRealityError(RuntimeError):
@@ -49,6 +89,21 @@ class RecoveryDecision(str, Enum):
     HEDGE_REVIEW_REQUIRED = "HEDGE_REVIEW_REQUIRED"
 
 
+_CANONICAL_EVIDENCE_GRADE_TYPE = EvidenceGrade
+_CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE = PaperAttemptOutcome
+_CANONICAL_RECOVERY_DECISION_TYPE = RecoveryDecision
+_EVIDENCE_CONFIGURED = EvidenceGrade.CONFIGURED
+_EVIDENCE_EMPIRICAL = EvidenceGrade.EMPIRICAL
+_EVIDENCE_SYNTHETIC = EvidenceGrade.SYNTHETIC
+_OUTCOME_ACCEPTED = PaperAttemptOutcome.ACCEPTED
+_OUTCOME_PARTIAL = PaperAttemptOutcome.PARTIAL
+_OUTCOME_REJECTED = PaperAttemptOutcome.REJECTED
+_OUTCOME_UNKNOWN = PaperAttemptOutcome.UNKNOWN
+_RECOVERY_NONE = RecoveryDecision.NONE
+_RECOVERY_NO_EXPOSURE = RecoveryDecision.NO_EXPOSURE
+_RECOVERY_HEDGE_REVIEW_REQUIRED = RecoveryDecision.HEDGE_REVIEW_REQUIRED
+
+
 def _text(value: object, name: str) -> str:
     if type(value) is not str or not value or value.strip() != value or "\x00" in value:
         raise ValueError(f"{name} must be non-empty canonical text")
@@ -59,43 +114,136 @@ def _text(value: object, name: str) -> str:
     return value
 
 
+_CANONICAL_TEXT_VALIDATOR = _text
+_CANONICAL_TEXT_VALIDATOR_CODE = _text.__code__
+
+
 def _timestamp(value: object, name: str) -> datetime:
-    raw = _text(value, name)
+    text_validator = _CANONICAL_TEXT_VALIDATOR
+    if text_validator.__code__ is not _CANONICAL_TEXT_VALIDATOR_CODE:
+        raise ValueError("text validator authority changed")
+    raw = text_validator(value, name)
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+        parsed = _CANONICAL_DATETIME_FROMISOFORMAT(raw.replace("Z", "+00:00"))
     except ValueError as exc:
         raise ValueError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise ValueError(f"{name} must be timezone-aware")
-    return parsed.astimezone(timezone.utc)
+    return parsed.astimezone(_CANONICAL_TIMEZONE_UTC)
+
+
+_CANONICAL_TIMESTAMP_PARSER = _timestamp
+_CANONICAL_TIMESTAMP_PARSER_CODE = _timestamp.__code__
 
 
 def _timestamp_text(value: datetime) -> str:
     if value.tzinfo is None or value.utcoffset() is None:
         raise ValueError("timestamp must be timezone-aware")
-    return value.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    return value.astimezone(_CANONICAL_TIMEZONE_UTC).isoformat(timespec="microseconds")
 
 
-def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
-    try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError) as exc:
-        raise ValueError(f"{name} must be a finite Decimal") from exc
-    if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
-        comparator = ">= 0" if allow_zero else "> 0"
-        raise ValueError(f"{name} must be finite and {comparator}")
-    return parsed
+_CANONICAL_TIMESTAMP_FORMATTER = _timestamp_text
+_CANONICAL_TIMESTAMP_FORMATTER_CODE = _timestamp_text.__code__
 
 
-def _decimal_text(value: Decimal) -> str:
-    if not value.is_finite():
-        raise ValueError("Decimal must be finite")
-    return format(value, "f")
+def _build_decimal_parser():
+    validator = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+    validator_code = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE
+    decimal_type = _CANONICAL_DECIMAL_TYPE
+    invalid_operation = _CANONICAL_INVALID_OPERATION
+    input_text_limit = _CANONICAL_DECIMAL_INPUT_TEXT_LIMIT
+    input_int_max_bits = _CANONICAL_DECIMAL_INPUT_INT_MAX_BITS
+
+    def parse(
+        value: object,
+        name: str,
+        *,
+        allow_zero: bool = False,
+    ) -> Decimal:
+        if validator.__code__ is not validator_code:
+            raise ValueError("decimal resource validator authority changed")
+        if type(value) is decimal_type:
+            parsed = value
+        elif type(value) is str:
+            if len(value) > input_text_limit:
+                raise ValueError("decimal input text exceeds resource limit")
+            try:
+                parsed = decimal_type(value)
+            except (invalid_operation, ValueError) as exc:
+                raise ValueError(f"{name} must be a finite Decimal") from exc
+        elif type(value) is int:
+            if value.bit_length() > input_int_max_bits:
+                raise ValueError("decimal integer input exceeds resource limit")
+            parsed = decimal_type(value)
+        else:
+            raise ValueError(f"{name} must be a Decimal, decimal string, or int")
+        if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
+            comparator = ">= 0" if allow_zero else "> 0"
+            raise ValueError(f"{name} must be finite and {comparator}")
+        validator(parsed)
+        return parsed
+
+    return parse
+
+
+_decimal = _build_decimal_parser()
+del _build_decimal_parser
+
+
+def _build_decimal_preflight():
+    validator = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR
+    validator_code = _CANONICAL_DECIMAL_RESOURCE_VALIDATOR_CODE
+    decimal_type = _CANONICAL_DECIMAL_TYPE
+
+    def preflight(*values: Decimal | None) -> None:
+        """Validate every sibling Decimal before fixed-point string allocation."""
+        if validator.__code__ is not validator_code:
+            raise ValueError("decimal resource validator authority changed")
+        for value in values:
+            if value is None:
+                continue
+            if type(value) is not decimal_type or not value.is_finite():
+                raise ValueError("Decimal must be finite")
+            validator(value)
+
+    return preflight
+
+
+_preflight_decimal_text_fields = _build_decimal_preflight()
+del _build_decimal_preflight
+
+
+_CANONICAL_DECIMAL_PARSER = _decimal
+_CANONICAL_DECIMAL_PARSER_CODE = _decimal.__code__
+_CANONICAL_DECIMAL_PREFLIGHT = _preflight_decimal_text_fields
+_CANONICAL_DECIMAL_PREFLIGHT_CODE = _preflight_decimal_text_fields.__code__
+
+
+def _build_decimal_text_formatter():
+    preflight = _CANONICAL_DECIMAL_PREFLIGHT
+    preflight_code = _CANONICAL_DECIMAL_PREFLIGHT_CODE
+    decimal_formatter = _CANONICAL_DECIMAL_FORMATTER
+
+    def decimal_text(value: Decimal) -> str:
+        if preflight.__code__ is not preflight_code:
+            raise ValueError("decimal preflight authority changed")
+        preflight(value)
+        return decimal_formatter(value, "f")
+
+    return decimal_text
+
+
+_decimal_text = _build_decimal_text_formatter()
+del _build_decimal_text_formatter
+
+
+_CANONICAL_DECIMAL_TEXT_FORMATTER = _decimal_text
+_CANONICAL_DECIMAL_TEXT_FORMATTER_CODE = _decimal_text.__code__
 
 
 def _canonical(value: Any) -> str:
     try:
-        return json.dumps(
+        return _CANONICAL_JSON_DUMPS(
             value,
             ensure_ascii=False,
             sort_keys=True,
@@ -106,8 +254,19 @@ def _canonical(value: Any) -> str:
         raise PaperExecutionIntegrityError("value is not canonical JSON") from exc
 
 
+_CANONICAL_CANONICALIZER = _canonical
+_CANONICAL_CANONICALIZER_CODE = _canonical.__code__
+
+
 def _digest(value: Any) -> str:
-    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+    canonicalizer = _CANONICAL_CANONICALIZER
+    if canonicalizer.__code__ is not _CANONICAL_CANONICALIZER_CODE:
+        raise ValueError("canonical JSON authority changed")
+    return _CANONICAL_SHA256(canonicalizer(value).encode("utf-8")).hexdigest()
+
+
+_CANONICAL_DIGEST = _digest
+_CANONICAL_DIGEST_CODE = _digest.__code__
 
 
 def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
@@ -120,7 +279,7 @@ def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
         return result
 
     try:
-        value = json.loads(
+        value = _CANONICAL_JSON_LOADS(
             raw,
             object_pairs_hook=pairs,
             parse_constant=lambda token: (_ for _ in ()).throw(
@@ -131,11 +290,20 @@ def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
         )
     except PaperExecutionIntegrityError:
         raise
-    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+    except (
+        _CANONICAL_JSON_DECODE_ERROR,
+        UnicodeDecodeError,
+        RecursionError,
+        OverflowError,
+    ) as exc:
         raise PaperExecutionIntegrityError(f"invalid {what} JSON") from exc
     if type(value) is not dict:
         raise PaperExecutionIntegrityError(f"{what} must be a JSON object")
     return value
+
+
+_CANONICAL_JSON_OBJECT_PARSER = _parse_json_object
+_CANONICAL_JSON_OBJECT_PARSER_CODE = _parse_json_object.__code__
 
 
 def _milliseconds(delta: timedelta, name: str) -> int:
@@ -153,7 +321,11 @@ def _deterministic_int(seed_material: str, label: str, modulus: int) -> int:
     if modulus <= 0:
         raise ValueError("modulus must be positive")
     payload = f"{seed_material}\x1f{label}".encode("utf-8")
-    return int.from_bytes(hashlib.sha256(payload).digest()[:8], "big") % modulus
+    return int.from_bytes(_CANONICAL_SHA256(payload).digest()[:8], "big") % modulus
+
+
+_CANONICAL_DETERMINISTIC_INT = _deterministic_int
+_CANONICAL_DETERMINISTIC_INT_CODE = _deterministic_int.__code__
 
 
 @dataclass(frozen=True, slots=True)
@@ -173,11 +345,11 @@ class PaperExecutionModelConfig:
     max_slippage_bps: int = 0
 
     def __post_init__(self) -> None:
-        _text(self.model_id, "model_id")
-        _text(self.model_version, "model_version")
-        _text(self.evidence_source, "evidence_source")
-        _text(self.seed, "seed")
-        if not isinstance(self.evidence_grade, EvidenceGrade):
+        _CANONICAL_TEXT_VALIDATOR(self.model_id, "model_id")
+        _CANONICAL_TEXT_VALIDATOR(self.model_version, "model_version")
+        _CANONICAL_TEXT_VALIDATOR(self.evidence_source, "evidence_source")
+        _CANONICAL_TEXT_VALIDATOR(self.seed, "seed")
+        if type(self.evidence_grade) is not _CANONICAL_EVIDENCE_GRADE_TYPE:
             raise ValueError("evidence_grade must be EvidenceGrade")
         for name in (
             "max_quote_age_ms",
@@ -205,7 +377,7 @@ class PaperExecutionModelConfig:
 
     @property
     def fingerprint(self) -> str:
-        return _digest(
+        return _CANONICAL_DIGEST(
             {
                 "schema": "autosport.paper_execution_model",
                 "schema_version": _SCHEMA_VERSION,
@@ -224,6 +396,9 @@ class PaperExecutionModelConfig:
                 "max_slippage_bps": self.max_slippage_bps,
             }
         )
+
+
+_CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE = PaperExecutionModelConfig
 
 
 @dataclass(frozen=True, slots=True)
@@ -246,6 +421,9 @@ class PaperExecutionEvidenceRecord:
     reason: str = "observed execution evidence"
 
     def __post_init__(self) -> None:
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+            raise ValueError("decimal parser authority changed")
         for name in (
             "action_id",
             "bookmaker_id",
@@ -258,19 +436,19 @@ class PaperExecutionEvidenceRecord:
             "evidence_source",
             "reason",
         ):
-            _text(getattr(self, name), name)
-        _timestamp(self.observed_at, "observed_at")
-        if not isinstance(self.outcome, PaperAttemptOutcome):
+            _CANONICAL_TEXT_VALIDATOR(getattr(self, name), name)
+        _CANONICAL_TIMESTAMP_PARSER(self.observed_at, "observed_at")
+        if type(self.outcome) is not _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE:
             raise ValueError("outcome must be PaperAttemptOutcome")
-        if self.evidence_grade not in {EvidenceGrade.CONFIGURED, EvidenceGrade.EMPIRICAL}:
+        if self.evidence_grade not in {_EVIDENCE_CONFIGURED, _EVIDENCE_EMPIRICAL}:
             raise ValueError("registered execution evidence must be CONFIGURED or EMPIRICAL")
         if type(self.suspended) is not bool:
             raise ValueError("suspended must be bool")
-        if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if self.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             if self.accepted_odds is None or self.accepted_stake is None:
                 raise ValueError("accepted/partial evidence requires odds and stake")
-            odds = _decimal(self.accepted_odds, "accepted_odds")
-            stake = _decimal(self.accepted_stake, "accepted_stake")
+            odds = decimal_parser(self.accepted_odds, "accepted_odds")
+            stake = decimal_parser(self.accepted_stake, "accepted_stake")
             if odds <= 1:
                 raise ValueError("accepted_odds must be > 1")
             object.__setattr__(self, "accepted_odds", odds)
@@ -279,6 +457,13 @@ class PaperExecutionEvidenceRecord:
             raise ValueError("rejected/unknown evidence cannot claim accepted odds/stake")
 
     def to_dict(self) -> dict[str, Any]:
+        preflight = _CANONICAL_DECIMAL_PREFLIGHT
+        decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+        if preflight.__code__ is not _CANONICAL_DECIMAL_PREFLIGHT_CODE:
+            raise ValueError("decimal preflight authority changed")
+        if decimal_formatter.__code__ is not _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE:
+            raise ValueError("decimal formatter authority changed")
+        preflight(self.accepted_odds, self.accepted_stake)
         return {
             "action_id": self.action_id,
             "bookmaker_id": self.bookmaker_id,
@@ -293,10 +478,10 @@ class PaperExecutionEvidenceRecord:
             "evidence_grade": self.evidence_grade.value,
             "evidence_source": self.evidence_source,
             "accepted_odds": (
-                None if self.accepted_odds is None else _decimal_text(self.accepted_odds)
+                None if self.accepted_odds is None else decimal_formatter(self.accepted_odds)
             ),
             "accepted_stake": (
-                None if self.accepted_stake is None else _decimal_text(self.accepted_stake)
+                None if self.accepted_stake is None else decimal_formatter(self.accepted_stake)
             ),
             "suspended": self.suspended,
             "reason": self.reason,
@@ -304,7 +489,7 @@ class PaperExecutionEvidenceRecord:
 
     @property
     def evidence_sha256(self) -> str:
-        return _digest(
+        return _CANONICAL_DIGEST(
             {
                 "schema": "autosport.paper_execution_observation_evidence",
                 "schema_version": 1,
@@ -355,6 +540,16 @@ class PaperExecutionEvidenceRecord:
         }
         if set(raw) != expected:
             raise PaperExecutionIntegrityError("evidence record schema is invalid")
+        if (
+            raw["accepted_odds"] is not None
+            and type(raw["accepted_odds"]) is not str
+        ) or (
+            raw["accepted_stake"] is not None
+            and type(raw["accepted_stake"]) is not str
+        ):
+            raise PaperExecutionIntegrityError(
+                "evidence decimal fields must use canonical text"
+            )
         try:
             return cls(
                 action_id=raw["action_id"],
@@ -365,9 +560,9 @@ class PaperExecutionEvidenceRecord:
                 selection_id=raw["selection_id"],
                 side=raw["side"],
                 quote_id=raw["quote_id"],
-                outcome=PaperAttemptOutcome(raw["outcome"]),
+                outcome=_CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE(raw["outcome"]),
                 observed_at=raw["observed_at"],
-                evidence_grade=EvidenceGrade(raw["evidence_grade"]),
+                evidence_grade=_CANONICAL_EVIDENCE_GRADE_TYPE(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
                 accepted_odds=raw["accepted_odds"],
                 accepted_stake=raw["accepted_stake"],
@@ -376,6 +571,9 @@ class PaperExecutionEvidenceRecord:
             )
         except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
             raise PaperExecutionIntegrityError("invalid evidence record") from exc
+
+
+_CANONICAL_PAPER_EXECUTION_EVIDENCE_RECORD_TYPE = PaperExecutionEvidenceRecord
 
 
 @dataclass(frozen=True, slots=True)
@@ -393,31 +591,37 @@ class ObservedPaperExecution:
     reason: str = "observed execution evidence"
 
     def __post_init__(self) -> None:
-        _text(self.action_id, "action_id")
-        _timestamp(self.observed_at, "observed_at")
-        if not isinstance(self.outcome, PaperAttemptOutcome):
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+            raise ValueError("decimal parser authority changed")
+        _CANONICAL_TEXT_VALIDATOR(self.action_id, "action_id")
+        _CANONICAL_TIMESTAMP_PARSER(self.observed_at, "observed_at")
+        if type(self.outcome) is not _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE:
             raise ValueError("outcome must be PaperAttemptOutcome")
-        if self.evidence_grade not in {EvidenceGrade.CONFIGURED, EvidenceGrade.EMPIRICAL}:
+        if self.evidence_grade not in {_EVIDENCE_CONFIGURED, _EVIDENCE_EMPIRICAL}:
             raise ValueError("observed execution evidence must be CONFIGURED or EMPIRICAL")
-        _text(self.evidence_source, "evidence_source")
-        _text(self.evidence_id, "evidence_id")
-        digest = _text(self.evidence_sha256, "evidence_sha256")
+        _CANONICAL_TEXT_VALIDATOR(self.evidence_source, "evidence_source")
+        _CANONICAL_TEXT_VALIDATOR(self.evidence_id, "evidence_id")
+        digest = _CANONICAL_TEXT_VALIDATOR(self.evidence_sha256, "evidence_sha256")
         if len(digest) != 64 or any(ch not in "0123456789abcdef" for ch in digest):
             raise ValueError("evidence_sha256 must be lowercase SHA-256 hex")
-        _text(self.reason, "reason")
+        _CANONICAL_TEXT_VALIDATOR(self.reason, "reason")
         if type(self.suspended) is not bool:
             raise ValueError("suspended must be bool")
-        if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if self.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             if self.accepted_odds is None or self.accepted_stake is None:
                 raise ValueError("accepted/partial observation requires odds and stake")
-            odds = _decimal(self.accepted_odds, "accepted_odds")
-            stake = _decimal(self.accepted_stake, "accepted_stake")
+            odds = decimal_parser(self.accepted_odds, "accepted_odds")
+            stake = decimal_parser(self.accepted_stake, "accepted_stake")
             if odds <= 1:
                 raise ValueError("accepted_odds must be > 1")
             object.__setattr__(self, "accepted_odds", odds)
             object.__setattr__(self, "accepted_stake", stake)
         elif self.accepted_odds is not None or self.accepted_stake is not None:
             raise ValueError("rejected/unknown observation cannot claim accepted odds/stake")
+
+
+_CANONICAL_OBSERVED_PAPER_EXECUTION_TYPE = ObservedPaperExecution
 
 
 @dataclass(frozen=True, slots=True)
@@ -452,6 +656,9 @@ class PaperLegAttempt:
     reason: str
 
     def __post_init__(self) -> None:
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+            raise ValueError("decimal parser authority changed")
         for name in (
             "attempt_id",
             "run_id",
@@ -468,52 +675,52 @@ class PaperLegAttempt:
             "model_fingerprint",
             "reason",
         ):
-            _text(getattr(self, name), name)
+            _CANONICAL_TEXT_VALIDATOR(getattr(self, name), name)
         if type(self.sequence) is not int or self.sequence < 0:
             raise ValueError("sequence must be a non-negative int")
-        decision_odds = _decimal(self.decision_odds, "decision_odds")
+        decision_odds = decimal_parser(self.decision_odds, "decision_odds")
         if decision_odds <= 1:
             raise ValueError("decision_odds must be > 1")
         object.__setattr__(self, "decision_odds", decision_odds)
         object.__setattr__(
             self,
             "requested_stake",
-            _decimal(self.requested_stake, "requested_stake"),
+            decimal_parser(self.requested_stake, "requested_stake"),
         )
-        decision_time = _timestamp(self.decision_observed_at, "decision_observed_at")
-        execution_time = _timestamp(self.execution_observed_at, "execution_observed_at")
+        decision_time = _CANONICAL_TIMESTAMP_PARSER(self.decision_observed_at, "decision_observed_at")
+        execution_time = _CANONICAL_TIMESTAMP_PARSER(self.execution_observed_at, "execution_observed_at")
         if execution_time < decision_time:
             raise ValueError("execution evidence cannot predate decision quote")
         if type(self.delay_ms) is not int or self.delay_ms < 0:
             raise ValueError("delay_ms must be non-negative int")
         if type(self.quote_age_ms) is not int or self.quote_age_ms < 0:
             raise ValueError("quote_age_ms must be non-negative int")
-        if not isinstance(self.outcome, PaperAttemptOutcome):
+        if type(self.outcome) is not _CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE:
             raise ValueError("outcome must be PaperAttemptOutcome")
         if type(self.suspended) is not bool:
             raise ValueError("suspended must be bool")
-        if not isinstance(self.evidence_grade, EvidenceGrade):
+        if type(self.evidence_grade) is not _CANONICAL_EVIDENCE_GRADE_TYPE:
             raise ValueError("evidence_grade must be EvidenceGrade")
-        if self.evidence_grade is EvidenceGrade.SYNTHETIC:
+        if self.evidence_grade is _EVIDENCE_SYNTHETIC:
             if self.evidence_id is not None or self.evidence_sha256 is not None:
                 raise ValueError("synthetic attempt cannot claim registered evidence identity")
         else:
-            _text(self.evidence_id, "evidence_id")
-            digest = _text(self.evidence_sha256, "evidence_sha256")
+            _CANONICAL_TEXT_VALIDATOR(self.evidence_id, "evidence_id")
+            digest = _CANONICAL_TEXT_VALIDATOR(self.evidence_sha256, "evidence_sha256")
             if len(digest) != 64:
                 raise ValueError("evidence_sha256 must be SHA-256 hex")
-        if self.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if self.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             if self.execution_odds is None or self.execution_stake is None:
                 raise ValueError("accepted/partial attempt requires execution odds and stake")
-            execution_odds = _decimal(self.execution_odds, "execution_odds")
+            execution_odds = decimal_parser(self.execution_odds, "execution_odds")
             if execution_odds <= 1:
                 raise ValueError("execution_odds must be > 1")
-            execution_stake = _decimal(self.execution_stake, "execution_stake")
+            execution_stake = decimal_parser(self.execution_stake, "execution_stake")
             if execution_stake > self.requested_stake:
                 raise ValueError("execution_stake cannot exceed requested_stake")
-            if self.outcome is PaperAttemptOutcome.ACCEPTED and execution_stake != self.requested_stake:
+            if self.outcome is _OUTCOME_ACCEPTED and execution_stake != self.requested_stake:
                 raise ValueError("ACCEPTED attempt must fill the requested stake")
-            if self.outcome is PaperAttemptOutcome.PARTIAL and execution_stake >= self.requested_stake:
+            if self.outcome is _OUTCOME_PARTIAL and execution_stake >= self.requested_stake:
                 raise ValueError("PARTIAL attempt must fill less than requested stake")
             object.__setattr__(self, "execution_odds", execution_odds)
             object.__setattr__(self, "execution_stake", execution_stake)
@@ -521,6 +728,18 @@ class PaperLegAttempt:
             raise ValueError("rejected/unknown attempt cannot claim execution odds/stake")
 
     def to_dict(self) -> dict[str, Any]:
+        preflight = _CANONICAL_DECIMAL_PREFLIGHT
+        decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+        if preflight.__code__ is not _CANONICAL_DECIMAL_PREFLIGHT_CODE:
+            raise ValueError("decimal preflight authority changed")
+        if decimal_formatter.__code__ is not _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE:
+            raise ValueError("decimal formatter authority changed")
+        preflight(
+            self.decision_odds,
+            self.requested_stake,
+            self.execution_odds,
+            self.execution_stake,
+        )
         return {
             "attempt_id": self.attempt_id,
             "run_id": self.run_id,
@@ -534,18 +753,18 @@ class PaperLegAttempt:
             "selection_id": self.selection_id,
             "side": self.side,
             "decision_quote_id": self.decision_quote_id,
-            "decision_odds": _decimal_text(self.decision_odds),
-            "requested_stake": _decimal_text(self.requested_stake),
+            "decision_odds": decimal_formatter(self.decision_odds),
+            "requested_stake": decimal_formatter(self.requested_stake),
             "decision_observed_at": self.decision_observed_at,
             "execution_observed_at": self.execution_observed_at,
             "delay_ms": self.delay_ms,
             "quote_age_ms": self.quote_age_ms,
             "outcome": self.outcome.value,
             "execution_odds": (
-                None if self.execution_odds is None else _decimal_text(self.execution_odds)
+                None if self.execution_odds is None else decimal_formatter(self.execution_odds)
             ),
             "execution_stake": (
-                None if self.execution_stake is None else _decimal_text(self.execution_stake)
+                None if self.execution_stake is None else decimal_formatter(self.execution_stake)
             ),
             "suspended": self.suspended,
             "evidence_grade": self.evidence_grade.value,
@@ -571,6 +790,20 @@ class PaperLegAttempt:
         }
         if set(raw) != expected:
             raise PaperExecutionIntegrityError("attempt payload schema is invalid")
+        for decimal_name in (
+            "decision_odds",
+            "requested_stake",
+            "execution_odds",
+            "execution_stake",
+        ):
+            decimal_value = raw[decimal_name]
+            if decimal_value is not None and type(decimal_value) is not str:
+                raise PaperExecutionIntegrityError(
+                    "attempt decimal fields must use canonical text"
+                )
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+            raise PaperExecutionIntegrityError("decimal parser authority changed")
         try:
             return cls(
                 attempt_id=raw["attempt_id"],
@@ -585,25 +818,36 @@ class PaperLegAttempt:
                 selection_id=raw["selection_id"],
                 side=raw["side"],
                 decision_quote_id=raw["decision_quote_id"],
-                decision_odds=Decimal(raw["decision_odds"]),
-                requested_stake=Decimal(raw["requested_stake"]),
+                decision_odds=decimal_parser(raw["decision_odds"], "decision_odds"),
+                requested_stake=decimal_parser(raw["requested_stake"], "requested_stake"),
                 decision_observed_at=raw["decision_observed_at"],
                 execution_observed_at=raw["execution_observed_at"],
                 delay_ms=raw["delay_ms"],
                 quote_age_ms=raw["quote_age_ms"],
-                outcome=PaperAttemptOutcome(raw["outcome"]),
-                execution_odds=None if raw["execution_odds"] is None else Decimal(raw["execution_odds"]),
-                execution_stake=None if raw["execution_stake"] is None else Decimal(raw["execution_stake"]),
+                outcome=_CANONICAL_PAPER_ATTEMPT_OUTCOME_TYPE(raw["outcome"]),
+                execution_odds=(
+                    None
+                    if raw["execution_odds"] is None
+                    else decimal_parser(raw["execution_odds"], "execution_odds")
+                ),
+                execution_stake=(
+                    None
+                    if raw["execution_stake"] is None
+                    else decimal_parser(raw["execution_stake"], "execution_stake")
+                ),
                 suspended=raw["suspended"],
-                evidence_grade=EvidenceGrade(raw["evidence_grade"]),
+                evidence_grade=_CANONICAL_EVIDENCE_GRADE_TYPE(raw["evidence_grade"]),
                 evidence_source=raw["evidence_source"],
                 evidence_id=raw["evidence_id"],
                 evidence_sha256=raw["evidence_sha256"],
                 model_fingerprint=raw["model_fingerprint"],
                 reason=raw["reason"],
             )
-        except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
+        except (KeyError, ValueError, TypeError) as exc:
             raise PaperExecutionIntegrityError("invalid attempt payload") from exc
+
+
+_CANONICAL_PAPER_LEG_ATTEMPT_TYPE = PaperLegAttempt
 
 
 @dataclass(frozen=True, slots=True)
@@ -621,21 +865,24 @@ class PaperExecutionRun:
     completed: bool
 
     def __post_init__(self) -> None:
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+            raise ValueError("decimal parser authority changed")
         for name in ("run_id", "trigger_id", "plan_id", "plan_fingerprint", "model_fingerprint"):
-            _text(getattr(self, name), name)
-        _timestamp(self.started_at, "started_at")
-        if not all(isinstance(item, PaperLegAttempt) for item in self.attempts):
-            raise ValueError("attempts must contain PaperLegAttempt values")
+            _CANONICAL_TEXT_VALIDATOR(getattr(self, name), name)
+        _CANONICAL_TIMESTAMP_PARSER(self.started_at, "started_at")
+        if not all(type(item) is _CANONICAL_PAPER_LEG_ATTEMPT_TYPE for item in self.attempts):
+            raise ValueError("attempts must contain exact PaperLegAttempt values")
         if len({item.action_id for item in self.attempts}) != len(self.attempts):
             raise ValueError("run attempts must have unique action ids")
         if any(type(value) is not str or not value for value in self.pending_action_ids):
             raise ValueError("pending_action_ids must contain non-empty strings")
-        if not isinstance(self.recovery_decision, RecoveryDecision):
+        if type(self.recovery_decision) is not _CANONICAL_RECOVERY_DECISION_TYPE:
             raise ValueError("recovery_decision must be RecoveryDecision")
         object.__setattr__(
             self,
             "worst_case_exposure",
-            _decimal(self.worst_case_exposure, "worst_case_exposure", allow_zero=True),
+            decimal_parser(self.worst_case_exposure, "worst_case_exposure", allow_zero=True),
         )
         if type(self.completed) is not bool:
             raise ValueError("completed must be bool")
@@ -646,7 +893,7 @@ class PaperExecutionRun:
             self.completed
             and not self.pending_action_ids
             and bool(self.attempts)
-            and all(item.outcome is PaperAttemptOutcome.ACCEPTED for item in self.attempts)
+            and all(item.outcome is _OUTCOME_ACCEPTED for item in self.attempts)
         )
 
 
@@ -654,22 +901,22 @@ class PaperExecutionLedger:
     """Append-only PAPER evidence with a chained log and durable latest-root anchor."""
 
     def __init__(self, path: str | Path) -> None:
-        self.path = Path(path)
+        self.path = _CANONICAL_PATH_TYPE(path)
         self.path.parent.mkdir(parents=True, exist_ok=True)
         self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
         self._anchor_path = self.path.with_name(self.path.name + ".anchor.json")
-        self._lock = threading.RLock()
+        self._lock = _CANONICAL_RLOCK_FACTORY()
         self._path_durable = False
 
     def _sync_parent_directory(self) -> None:
-        if os.name == "nt":
+        if _CANONICAL_OS_NAME == "nt":
             return
-        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
-        directory_fd = os.open(self.path.parent, flags)
+        flags = _CANONICAL_OS_O_RDONLY | _CANONICAL_OS_O_DIRECTORY
+        directory_fd = _CANONICAL_OS_OPEN(self.path.parent, flags)
         try:
-            os.fsync(directory_fd)
+            _CANONICAL_OS_FSYNC(directory_fd)
         finally:
-            os.close(directory_fd)
+            _CANONICAL_OS_CLOSE(directory_fd)
 
     def _ensure_existing_path_durable(self) -> None:
         if self._path_durable or not self.path.exists():
@@ -677,7 +924,7 @@ class PaperExecutionLedger:
         try:
             with self.path.open("a", encoding="utf-8", newline="\n") as handle:
                 handle.flush()
-                os.fsync(handle.fileno())
+                _CANONICAL_OS_FSYNC(handle.fileno())
             self._sync_parent_directory()
         except OSError as exc:
             self._path_durable = False
@@ -689,9 +936,9 @@ class PaperExecutionLedger:
     def _with_writer_lock(self, operation):
         with self._lock:
             try:
-                fd = os.open(
+                fd = _CANONICAL_OS_OPEN(
                     self._lock_path,
-                    os.O_CREAT | os.O_EXCL | os.O_WRONLY,
+                    _CANONICAL_OS_O_CREAT | _CANONICAL_OS_O_EXCL | _CANONICAL_OS_O_WRONLY,
                     0o600,
                 )
             except FileExistsError as exc:
@@ -702,7 +949,7 @@ class PaperExecutionLedger:
             try:
                 return operation()
             finally:
-                os.close(fd)
+                _CANONICAL_OS_CLOSE(fd)
                 try:
                     self._lock_path.unlink()
                 except FileNotFoundError:
@@ -720,23 +967,30 @@ class PaperExecutionLedger:
     ) -> dict[str, Any]:
         body = {
             "schema_version": _SCHEMA_VERSION,
-            "event_type": _text(event_type, "event_type"),
-            "run_id": _text(run_id, "run_id"),
-            "event_key": _text(key, "event_key"),
+            "event_type": _CANONICAL_TEXT_VALIDATOR(event_type, "event_type"),
+            "run_id": _CANONICAL_TEXT_VALIDATOR(run_id, "run_id"),
+            "event_key": _CANONICAL_TEXT_VALIDATOR(key, "event_key"),
             "sequence": sequence,
             "previous_sha256": previous_sha256,
             "payload": payload,
         }
-        return {**body, "event_sha256": _digest(body)}
+        return {**body, "event_sha256": _CANONICAL_DIGEST(body)}
 
     def _read_anchor_unlocked(self) -> dict[str, Any] | None:
         if not self._anchor_path.exists():
             return None
         try:
-            raw = self._anchor_path.read_text(encoding="utf-8")
+            with self._anchor_path.open("r", encoding="utf-8", newline="") as handle:
+                raw = handle.read(_MAX_DURABLE_ANCHOR_CHARS + 1)
+                if len(raw) > _MAX_DURABLE_ANCHOR_CHARS or handle.read(1):
+                    raise PaperExecutionIntegrityError(
+                        "PAPER execution anchor exceeds resource limit"
+                    )
+        except PaperExecutionIntegrityError:
+            raise
         except (OSError, UnicodeError) as exc:
             raise PaperExecutionIntegrityError("cannot read PAPER execution anchor") from exc
-        anchor = _parse_json_object(raw, what="ledger anchor")
+        anchor = _CANONICAL_JSON_OBJECT_PARSER(raw, what="ledger anchor")
         expected = {
             "anchor_schema_version", "ledger_schema_version", "event_count",
             "ledger_root_sha256", "anchor_sha256",
@@ -744,7 +998,7 @@ class PaperExecutionLedger:
         if set(anchor) != expected:
             raise PaperExecutionIntegrityError("ledger anchor schema is invalid")
         body = {key: anchor[key] for key in expected if key != "anchor_sha256"}
-        if anchor["anchor_sha256"] != _digest(body):
+        if anchor["anchor_sha256"] != _CANONICAL_DIGEST(body):
             raise PaperExecutionIntegrityError("ledger anchor digest mismatch")
         return anchor
 
@@ -756,16 +1010,21 @@ class PaperExecutionLedger:
             "event_count": len(events),
             "ledger_root_sha256": root,
         }
-        anchor = {**body, "anchor_sha256": _digest(body)}
+        anchor = {**body, "anchor_sha256": _CANONICAL_DIGEST(body)}
+        encoded_anchor = _CANONICAL_CANONICALIZER(anchor) + "\n"
+        if len(encoded_anchor) > _MAX_DURABLE_ANCHOR_CHARS:
+            raise PaperExecutionIntegrityError(
+                "PAPER execution anchor exceeds resource limit"
+            )
         tmp = self._anchor_path.with_name(
-            self._anchor_path.name + f".tmp-{os.getpid()}-{threading.get_ident()}"
+            self._anchor_path.name + f".tmp-{_CANONICAL_OS_GETPID()}-{_CANONICAL_THREAD_IDENT()}"
         )
         try:
             with tmp.open("w", encoding="utf-8", newline="\n") as handle:
-                handle.write(_canonical(anchor) + "\n")
+                handle.write(encoded_anchor)
                 handle.flush()
-                os.fsync(handle.fileno())
-            os.replace(tmp, self._anchor_path)
+                _CANONICAL_OS_FSYNC(handle.fileno())
+            _CANONICAL_OS_REPLACE(tmp, self._anchor_path)
             self._sync_parent_directory()
         except OSError as exc:
             try:
@@ -783,11 +1042,6 @@ class PaperExecutionLedger:
                 if anchor is None or anchor["event_count"] != 0:
                     raise PaperExecutionIntegrityError("ledger is missing but anchor claims history")
             return []
-        try:
-            lines = self.path.read_text(encoding="utf-8").splitlines()
-        except (OSError, UnicodeError) as exc:
-            raise PaperExecutionIntegrityError("cannot read PAPER execution ledger") from exc
-
         events: list[dict[str, Any]] = []
         seen: set[str] = set()
         previous_sha256: str | None = None
@@ -795,29 +1049,53 @@ class PaperExecutionLedger:
             "schema_version", "event_type", "run_id", "event_key", "sequence",
             "previous_sha256", "payload", "event_sha256",
         }
-        for sequence, raw in enumerate(lines):
-            if not raw:
-                raise PaperExecutionIntegrityError("ledger contains blank event line")
-            event = _parse_json_object(raw, what="ledger event")
-            if set(event) != expected_keys or event["schema_version"] != _SCHEMA_VERSION:
-                raise PaperExecutionIntegrityError("ledger event schema is invalid")
-            if event["sequence"] != sequence:
-                raise PaperExecutionIntegrityError("ledger event sequence is not contiguous")
-            if event["previous_sha256"] != previous_sha256:
-                raise PaperExecutionIntegrityError("ledger event chain predecessor mismatch")
-            body = {key: event[key] for key in expected_keys if key != "event_sha256"}
-            if event["event_sha256"] != _digest(body):
-                raise PaperExecutionIntegrityError("ledger event digest mismatch")
-            key = event["event_key"]
-            if type(key) is not str or not key:
-                raise PaperExecutionIntegrityError("ledger event_key is invalid")
-            if key in seen:
-                raise PaperExecutionIntegrityError("duplicate event_key in durable ledger")
-            seen.add(key)
-            events.append(event)
-            previous_sha256 = event["event_sha256"]
+        try:
+            with self.path.open("r", encoding="utf-8", newline="") as handle:
+                sequence = 0
+                while True:
+                    raw = handle.readline(_MAX_DURABLE_EVENT_LINE_CHARS + 2)
+                    if raw == "":
+                        break
+                    if len(raw) > _MAX_DURABLE_EVENT_LINE_CHARS + 1:
+                        raise PaperExecutionIntegrityError(
+                            "PAPER execution ledger event exceeds resource limit"
+                        )
+                    if raw.endswith("\n"):
+                        raw = raw[:-1]
+                        if raw.endswith("\r"):
+                            raw = raw[:-1]
+                    elif len(raw) > _MAX_DURABLE_EVENT_LINE_CHARS:
+                        raise PaperExecutionIntegrityError(
+                            "PAPER execution ledger event exceeds resource limit"
+                        )
+                    if not raw:
+                        raise PaperExecutionIntegrityError("ledger contains blank event line")
+                    event = _CANONICAL_JSON_OBJECT_PARSER(raw, what="ledger event")
+                    if set(event) != expected_keys or event["schema_version"] != _SCHEMA_VERSION:
+                        raise PaperExecutionIntegrityError("ledger event schema is invalid")
+                    if event["sequence"] != sequence:
+                        raise PaperExecutionIntegrityError("ledger event sequence is not contiguous")
+                    if event["previous_sha256"] != previous_sha256:
+                        raise PaperExecutionIntegrityError("ledger event chain predecessor mismatch")
+                    body = {key: event[key] for key in expected_keys if key != "event_sha256"}
+                    if event["event_sha256"] != _CANONICAL_DIGEST(body):
+                        raise PaperExecutionIntegrityError("ledger event digest mismatch")
+                    key = event["event_key"]
+                    if type(key) is not str or not key:
+                        raise PaperExecutionIntegrityError("ledger event_key is invalid")
+                    if key in seen:
+                        raise PaperExecutionIntegrityError("duplicate event_key in durable ledger")
+                    seen.add(key)
+                    events.append(event)
+                    previous_sha256 = event["event_sha256"]
+                    sequence += 1
+        except PaperExecutionIntegrityError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            raise PaperExecutionIntegrityError("cannot read PAPER execution ledger") from exc
 
         anchor = self._read_anchor_unlocked()
+
         if events and anchor is None:
             raise PaperExecutionIntegrityError("non-empty ledger is missing latest-root anchor")
         if anchor is not None:
@@ -837,7 +1115,7 @@ class PaperExecutionLedger:
             events = self._load_unlocked()
             if run_id is None:
                 return tuple(events)
-            _text(run_id, "run_id")
+            _CANONICAL_TEXT_VALIDATOR(run_id, "run_id")
             return tuple(event for event in events if event["run_id"] == run_id)
 
     def _append_event(
@@ -877,13 +1155,17 @@ class PaperExecutionLedger:
                         "event_key already has different payload"
                     )
                 return
-            encoded = _canonical(event) + "\n"
+            encoded = _CANONICAL_CANONICALIZER(event) + "\n"
+            if len(encoded) > _MAX_DURABLE_EVENT_LINE_CHARS + 1:
+                raise PaperExecutionIntegrityError(
+                    "PAPER execution ledger event exceeds resource limit"
+                )
             path_existed_before = self.path.exists()
             try:
                 with self.path.open("a", encoding="utf-8", newline="\n") as handle:
                     handle.write(encoded)
                     handle.flush()
-                    os.fsync(handle.fileno())
+                    _CANONICAL_OS_FSYNC(handle.fileno())
                 if not path_existed_before or not self._path_durable:
                     self._sync_parent_directory()
                 self._write_anchor_unlocked(events + [event])
@@ -899,8 +1181,8 @@ class PaperExecutionLedger:
     def register_observation_evidence(
         self, record: PaperExecutionEvidenceRecord
     ) -> None:
-        if not isinstance(record, PaperExecutionEvidenceRecord):
-            raise TypeError("record must be PaperExecutionEvidenceRecord")
+        if type(record) is not _CANONICAL_PAPER_EXECUTION_EVIDENCE_RECORD_TYPE:
+            raise TypeError("record must be exact PaperExecutionEvidenceRecord")
         payload = {
             "evidence_id": record.evidence_id,
             "evidence_sha256": record.evidence_sha256,
@@ -916,7 +1198,7 @@ class PaperExecutionLedger:
     def resolve_observation_evidence(
         self, evidence_id: str
     ) -> PaperExecutionEvidenceRecord:
-        evidence_id = _text(evidence_id, "evidence_id")
+        evidence_id = _CANONICAL_TEXT_VALIDATOR(evidence_id, "evidence_id")
         matches = [
             event
             for event in self.events()
@@ -979,10 +1261,13 @@ class PaperExecutionLedger:
         recovery_decision: RecoveryDecision,
         worst_case_exposure: Decimal,
     ) -> None:
+        decimal_formatter = _CANONICAL_DECIMAL_TEXT_FORMATTER
+        if decimal_formatter.__code__ is not _CANONICAL_DECIMAL_TEXT_FORMATTER_CODE:
+            raise ValueError("decimal formatter authority changed")
         payload = {
             "pending_action_ids": list(pending_action_ids),
             "recovery_decision": recovery_decision.value,
-            "worst_case_exposure": _decimal_text(worst_case_exposure),
+            "worst_case_exposure": decimal_formatter(worst_case_exposure),
         }
         self._append_event(
             event_type="RUN_COMPLETED",
@@ -1036,11 +1321,32 @@ class PaperExecutionLedger:
             raise PaperExecutionIntegrityError("run has multiple completion events")
         if completions:
             payload = completions[0]["payload"]
+            if type(payload) is not dict or set(payload) != {
+                "pending_action_ids",
+                "recovery_decision",
+                "worst_case_exposure",
+            }:
+                raise PaperExecutionIntegrityError("completion payload schema is invalid")
+            pending_raw = payload["pending_action_ids"]
+            exposure_raw = payload["worst_case_exposure"]
+            if (
+                type(pending_raw) is not list
+                or any(type(item) is not str or not item for item in pending_raw)
+                or type(exposure_raw) is not str
+            ):
+                raise PaperExecutionIntegrityError("completion payload schema is invalid")
+            decimal_parser = _CANONICAL_DECIMAL_PARSER
+            if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+                raise PaperExecutionIntegrityError("decimal parser authority changed")
             try:
-                recovery = RecoveryDecision(payload["recovery_decision"])
-                pending = tuple(payload["pending_action_ids"])
-                exposure = Decimal(payload["worst_case_exposure"])
-            except (KeyError, ValueError, InvalidOperation, TypeError) as exc:
+                recovery = _CANONICAL_RECOVERY_DECISION_TYPE(payload["recovery_decision"])
+                pending = tuple(pending_raw)
+                exposure = decimal_parser(
+                    exposure_raw,
+                    "worst_case_exposure",
+                    allow_zero=True,
+                )
+            except (ValueError, TypeError) as exc:
                 raise PaperExecutionIntegrityError("invalid completion payload") from exc
             return PaperExecutionRun(
                 run_id=run_id,
@@ -1055,14 +1361,17 @@ class PaperExecutionLedger:
                 worst_case_exposure=exposure,
                 completed=True,
             )
-        known_exposure = Decimal("0")
-        worst_case = Decimal("0")
+        decimal_parser = _CANONICAL_DECIMAL_PARSER
+        if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+            raise PaperExecutionIntegrityError("decimal parser authority changed")
+        known_exposure = decimal_parser("0", "known_exposure", allow_zero=True)
+        worst_case = decimal_parser("0", "worst_case_exposure", allow_zero=True)
         for attempt in attempts:
-            if attempt.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+            if attempt.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
                 assert attempt.execution_stake is not None
                 known_exposure += attempt.execution_stake
                 worst_case = max(worst_case, known_exposure)
-            elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+            elif attempt.outcome is _OUTCOME_UNKNOWN:
                 worst_case = max(worst_case, known_exposure + attempt.requested_stake)
         return PaperExecutionRun(
             run_id=run_id,
@@ -1074,20 +1383,23 @@ class PaperExecutionLedger:
             attempts=attempts,
             pending_action_ids=tuple(action.action_id for action in plan.actions[len(attempts):]),
             recovery_decision=(
-                RecoveryDecision.HEDGE_REVIEW_REQUIRED
+                _RECOVERY_HEDGE_REVIEW_REQUIRED
                 if worst_case > 0
-                else RecoveryDecision.NONE
+                else _RECOVERY_NONE
             ),
             worst_case_exposure=worst_case,
             completed=False,
         )
 
 
+_CANONICAL_PAPER_EXECUTION_LEDGER_TYPE = PaperExecutionLedger
+
+
 class PaperExecutionEvidenceRegistry:
     """Immutable resolver for configured/empirical PAPER execution observations."""
 
     def __init__(self, ledger: PaperExecutionLedger) -> None:
-        if not isinstance(ledger, PaperExecutionLedger):
+        if not isinstance(ledger, _CANONICAL_PAPER_EXECUTION_LEDGER_TYPE):
             raise TypeError("ledger must be PaperExecutionLedger")
         self._ledger = ledger
 
@@ -1104,17 +1416,17 @@ def _run_id(
     trigger_id: str,
     config: PaperExecutionModelConfig,
 ) -> str:
-    return "paper-exec-v2-" + _digest(
+    return "paper-exec-v2-" + _CANONICAL_DIGEST(
         {
             "plan_fingerprint": plan.fingerprint,
-            "trigger_id": _text(trigger_id, "trigger_id"),
+            "trigger_id": _CANONICAL_TEXT_VALIDATOR(trigger_id, "trigger_id"),
             "model_fingerprint": config.fingerprint,
         }
     )
 
 
 def _attempt_id(run_id: str, action: ExecutionAction, sequence: int) -> str:
-    return "paper-attempt-v2-" + _digest(
+    return "paper-attempt-v2-" + _CANONICAL_DIGEST(
         {
             "run_id": run_id,
             "action_id": action.action_id,
@@ -1138,72 +1450,87 @@ def _synthetic_attempt(
             "synthetic PAPER exposure model supports BACK only; non-BACK must use "
             "explicit empirical/configured execution evidence"
         )
-    start = _timestamp(started_at, "started_at")
+    decimal_parser = _CANONICAL_DECIMAL_PARSER
+    if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+        raise PaperExecutionStateError("decimal parser authority changed")
+    start = _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     delay_span = config.max_delay_ms - config.min_delay_ms
     delay_ms = config.min_delay_ms
     if delay_span:
-        delay_ms += _deterministic_int(
+        delay_ms += _CANONICAL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "delay",
             delay_span + 1,
         )
     execution_time = start + timedelta(milliseconds=delay_ms)
-    decision_time = _timestamp(action.quote_observed_at, "quote_observed_at")
+    decision_time = _CANONICAL_TIMESTAMP_PARSER(action.quote_observed_at, "quote_observed_at")
     quote_age_ms = _milliseconds(execution_time - decision_time, "quote age")
-    expires = _timestamp(action.expires_at, "expires_at")
+    expires = _CANONICAL_TIMESTAMP_PARSER(action.expires_at, "expires_at")
     reason: str
     outcome: PaperAttemptOutcome
     execution_odds: Decimal | None = None
     execution_stake: Decimal | None = None
 
     if suspended:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "configured/synthetic suspension at execution time"
     elif execution_time >= expires:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "decision quote expired before PAPER-equivalent execution"
     elif quote_age_ms > config.max_quote_age_ms:
-        outcome = PaperAttemptOutcome.REJECTED
+        outcome = _OUTCOME_REJECTED
         reason = "decision quote exceeded configured PAPER freshness bound"
     else:
-        bucket = _deterministic_int(
+        bucket = _CANONICAL_DETERMINISTIC_INT(
             f"{config.seed}:{run_id}:{action.action_id}",
             "outcome",
             10_000,
         )
         if bucket < config.unknown_bps:
-            outcome = PaperAttemptOutcome.UNKNOWN
+            outcome = _OUTCOME_UNKNOWN
             reason = "deterministic execution model produced UNKNOWN"
         elif bucket < config.unknown_bps + config.rejected_bps:
-            outcome = PaperAttemptOutcome.REJECTED
+            outcome = _OUTCOME_REJECTED
             reason = "deterministic execution model produced REJECTED"
         elif bucket < config.unknown_bps + config.rejected_bps + config.partial_bps:
-            outcome = PaperAttemptOutcome.PARTIAL
+            outcome = _OUTCOME_PARTIAL
             reason = "deterministic execution model produced PARTIAL"
         else:
-            outcome = PaperAttemptOutcome.ACCEPTED
+            outcome = _OUTCOME_ACCEPTED
             reason = "deterministic execution model produced ACCEPTED"
 
-        if outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             slippage_bps = (
                 0
                 if config.max_slippage_bps == 0
-                else _deterministic_int(
+                else _CANONICAL_DETERMINISTIC_INT(
                     f"{config.seed}:{run_id}:{action.action_id}",
                     "slippage",
                     config.max_slippage_bps + 1,
                 )
             )
-            odds_margin = action.requested_odds - Decimal("1")
-            execution_odds = Decimal("1") + (
-                odds_margin * (Decimal(10_000 - slippage_bps) / Decimal(10_000))
+            one = decimal_parser(1, "decimal_one")
+            ten_thousand = decimal_parser(10_000, "basis_point_denominator")
+            odds_margin = action.requested_odds - one
+            execution_odds = one + (
+                odds_margin
+                * (
+                    decimal_parser(
+                        10_000 - slippage_bps,
+                        "slippage_basis_points",
+                    )
+                    / ten_thousand
+                )
             )
             execution_stake = action.requested_stake
-            if outcome is PaperAttemptOutcome.PARTIAL:
+            if outcome is _OUTCOME_PARTIAL:
                 execution_stake = (
                     action.requested_stake
-                    * Decimal(config.partial_fill_bps)
-                    / Decimal(10_000)
+                    * decimal_parser(
+                        config.partial_fill_bps,
+                        "partial_fill_basis_points",
+                    )
+                    / ten_thousand
                 )
 
     return PaperLegAttempt(
@@ -1222,14 +1549,14 @@ def _synthetic_attempt(
         decision_odds=action.requested_odds,
         requested_stake=action.requested_stake,
         decision_observed_at=action.quote_observed_at,
-        execution_observed_at=_timestamp_text(execution_time),
+        execution_observed_at=_CANONICAL_TIMESTAMP_FORMATTER(execution_time),
         delay_ms=delay_ms,
         quote_age_ms=quote_age_ms,
         outcome=outcome,
         execution_odds=execution_odds,
         execution_stake=execution_stake,
         suspended=suspended,
-        evidence_grade=EvidenceGrade.SYNTHETIC,
+        evidence_grade=_EVIDENCE_SYNTHETIC,
         evidence_source=config.evidence_source,
         evidence_id=None,
         evidence_sha256=None,
@@ -1244,8 +1571,8 @@ def _verify_observation_authority(
     observation: ObservedPaperExecution,
     registry: PaperExecutionEvidenceRegistry,
 ) -> PaperExecutionEvidenceRecord:
-    if not isinstance(observation, ObservedPaperExecution):
-        raise TypeError("observation values must be ObservedPaperExecution")
+    if type(observation) is not _CANONICAL_OBSERVED_PAPER_EXECUTION_TYPE:
+        raise TypeError("observation values must be exact ObservedPaperExecution")
     record = registry.resolve(observation.evidence_id)
     if observation.evidence_sha256 != record.evidence_sha256:
         raise PaperExecutionStateError("observation evidence digest mismatch")
@@ -1283,31 +1610,31 @@ def _observed_attempt(
 ) -> PaperLegAttempt:
     if observation.action_id != action.action_id:
         raise PaperExecutionStateError("observation action_id mismatch")
-    execution_time = _timestamp(observation.observed_at, "observed_at")
-    decision_time = _timestamp(action.quote_observed_at, "quote_observed_at")
+    execution_time = _CANONICAL_TIMESTAMP_PARSER(observation.observed_at, "observed_at")
+    decision_time = _CANONICAL_TIMESTAMP_PARSER(action.quote_observed_at, "quote_observed_at")
     delay_ms = _milliseconds(
-        execution_time - _timestamp(started_at, "started_at"),
+        execution_time - _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at"),
         "execution delay",
     )
     quote_age_ms = _milliseconds(execution_time - decision_time, "quote age")
-    if execution_time >= _timestamp(action.expires_at, "expires_at"):
+    if execution_time >= _CANONICAL_TIMESTAMP_PARSER(action.expires_at, "expires_at"):
         raise PaperExecutionStateError("observed execution occurs at/after action expiry")
     if quote_age_ms > config.max_quote_age_ms:
         raise PaperExecutionStateError("observed execution violates configured quote freshness")
     if observation.suspended and observation.outcome in {
-        PaperAttemptOutcome.ACCEPTED,
-        PaperAttemptOutcome.PARTIAL,
+        _OUTCOME_ACCEPTED,
+        _OUTCOME_PARTIAL,
     }:
         raise PaperExecutionStateError("suspended observation cannot claim a fill")
     if observation.accepted_stake is not None and observation.accepted_stake > action.requested_stake:
         raise PaperExecutionStateError("observed accepted stake exceeds requested stake")
     if (
-        observation.outcome is PaperAttemptOutcome.ACCEPTED
+        observation.outcome is _OUTCOME_ACCEPTED
         and observation.accepted_stake != action.requested_stake
     ):
         raise PaperExecutionStateError("ACCEPTED observation must fill requested stake")
     if (
-        observation.outcome is PaperAttemptOutcome.PARTIAL
+        observation.outcome is _OUTCOME_PARTIAL
         and observation.accepted_stake is not None
         and observation.accepted_stake >= action.requested_stake
     ):
@@ -1344,6 +1671,9 @@ def _observed_attempt(
     )
 
 
+_CANONICAL_PAPER_EXECUTION_EVIDENCE_REGISTRY_TYPE = PaperExecutionEvidenceRegistry
+
+
 def execute_paper_plan(
     *,
     plan: ExecutionPlan,
@@ -1356,17 +1686,17 @@ def execute_paper_plan(
     suspended_action_ids: frozenset[str] = frozenset(),
 ) -> PaperExecutionRun:
     """Execute/resume one PAPER/SHADOW run without provider writes or real money."""
-    if not isinstance(plan, ExecutionPlan):
-        raise TypeError("plan must be ExecutionPlan")
-    if not isinstance(config, PaperExecutionModelConfig):
-        raise TypeError("config must be PaperExecutionModelConfig")
-    if not isinstance(ledger, PaperExecutionLedger):
-        raise TypeError("ledger must be PaperExecutionLedger")
-    trigger_id = _text(trigger_id, "trigger_id")
-    _timestamp(started_at, "started_at")
+    if type(plan) is not _CANONICAL_EXECUTION_PLAN_TYPE:
+        raise TypeError("plan must be exact ExecutionPlan")
+    if type(config) is not _CANONICAL_PAPER_EXECUTION_MODEL_CONFIG_TYPE:
+        raise TypeError("config must be exact PaperExecutionModelConfig")
+    if type(ledger) is not _CANONICAL_PAPER_EXECUTION_LEDGER_TYPE:
+        raise TypeError("ledger must be exact PaperExecutionLedger")
+    trigger_id = _CANONICAL_TEXT_VALIDATOR(trigger_id, "trigger_id")
+    _CANONICAL_TIMESTAMP_PARSER(started_at, "started_at")
     if observations is None:
         observations = {}
-    if not isinstance(observations, Mapping):
+    if not isinstance(observations, _CANONICAL_MAPPING_TYPE):
         raise TypeError("observations must be a mapping")
     action_by_id = {action.action_id: action for action in plan.actions}
     unknown_observation_ids = set(observations) - set(action_by_id)
@@ -1375,9 +1705,9 @@ def execute_paper_plan(
     unknown_suspended = set(suspended_action_ids) - set(action_by_id)
     if unknown_suspended:
         raise PaperExecutionStateError("suspended_action_ids contain action outside execution plan")
-    if observations and not isinstance(evidence_registry, PaperExecutionEvidenceRegistry):
+    if observations and type(evidence_registry) is not _CANONICAL_PAPER_EXECUTION_EVIDENCE_REGISTRY_TYPE:
         raise PaperExecutionStateError(
-            "configured/empirical observations require a durable evidence registry"
+            "configured/empirical observations require an exact durable evidence registry"
         )
 
     observation_evidence_ids: dict[str, str] = {}
@@ -1412,13 +1742,13 @@ def execute_paper_plan(
         return existing
 
     attempts = list(existing.attempts)
-    if attempts and attempts[-1].outcome is not PaperAttemptOutcome.ACCEPTED:
+    if attempts and attempts[-1].outcome is not _OUTCOME_ACCEPTED:
         next_index = len(attempts)
         pending = tuple(action.action_id for action in plan.actions[next_index:])
         recovery = (
-            RecoveryDecision.HEDGE_REVIEW_REQUIRED
+            _RECOVERY_HEDGE_REVIEW_REQUIRED
             if existing.worst_case_exposure > 0
-            else RecoveryDecision.NO_EXPOSURE
+            else _RECOVERY_NO_EXPOSURE
         )
         ledger.complete_run(
             run_id=run_id,
@@ -1437,10 +1767,17 @@ def execute_paper_plan(
         assert result is not None
         return result
 
-    known_exposure = Decimal("0")
-    worst_case_exposure = Decimal("0")
+    decimal_parser = _CANONICAL_DECIMAL_PARSER
+    if decimal_parser.__code__ is not _CANONICAL_DECIMAL_PARSER_CODE:
+        raise PaperExecutionStateError("decimal parser authority changed")
+    known_exposure = decimal_parser("0", "known_exposure", allow_zero=True)
+    worst_case_exposure = decimal_parser(
+        "0",
+        "worst_case_exposure",
+        allow_zero=True,
+    )
     for prior in attempts:
-        assert prior.outcome is PaperAttemptOutcome.ACCEPTED
+        assert prior.outcome is _OUTCOME_ACCEPTED
         assert prior.execution_stake is not None
         known_exposure += prior.execution_stake
         worst_case_exposure = max(worst_case_exposure, known_exposure)
@@ -1476,25 +1813,25 @@ def execute_paper_plan(
         ledger.record_attempt(attempt)
         attempts.append(attempt)
 
-        if attempt.outcome in {PaperAttemptOutcome.ACCEPTED, PaperAttemptOutcome.PARTIAL}:
+        if attempt.outcome in {_OUTCOME_ACCEPTED, _OUTCOME_PARTIAL}:
             assert attempt.execution_stake is not None
             known_exposure += attempt.execution_stake
             worst_case_exposure = max(worst_case_exposure, known_exposure)
-        elif attempt.outcome is PaperAttemptOutcome.UNKNOWN:
+        elif attempt.outcome is _OUTCOME_UNKNOWN:
             worst_case_exposure = max(
                 worst_case_exposure,
                 known_exposure + attempt.requested_stake,
             )
 
-        if attempt.outcome is not PaperAttemptOutcome.ACCEPTED:
+        if attempt.outcome is not _OUTCOME_ACCEPTED:
             pending = tuple(
                 pending_action.action_id
                 for pending_action in plan.actions[sequence + 1 :]
             )
             recovery = (
-                RecoveryDecision.HEDGE_REVIEW_REQUIRED
+                _RECOVERY_HEDGE_REVIEW_REQUIRED
                 if worst_case_exposure > 0
-                else RecoveryDecision.NO_EXPOSURE
+                else _RECOVERY_NO_EXPOSURE
             )
             ledger.complete_run(
                 run_id=run_id,
@@ -1516,7 +1853,7 @@ def execute_paper_plan(
     ledger.complete_run(
         run_id=run_id,
         pending_action_ids=(),
-        recovery_decision=RecoveryDecision.NONE,
+        recovery_decision=_RECOVERY_NONE,
         worst_case_exposure=worst_case_exposure,
     )
     result = ledger.load_run(

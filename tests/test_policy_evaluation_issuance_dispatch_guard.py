@@ -35,6 +35,11 @@ def _bound_workspace(tmp_path, monkeypatch):
     return authority
 
 
+def test_product_issuer_freezes_private_registry_append_compatibility_authority():
+    assert hasattr(ScientificRegistry, "_append")
+    assert issuance._REGISTRY_PRIVATE_APPEND is ScientificRegistry._append
+
+
 def test_product_issuer_rejects_same_class_store_constructor_rebind_before_dispatch(
     tmp_path,
     monkeypatch,

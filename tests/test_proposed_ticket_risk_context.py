@@ -142,7 +142,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate leg identity"):
             ProposedTicketRiskContext(legs=(duplicate, duplicate))
 
-        with self.assertRaisesRegex(ValueError, "invalid leg"):
+        with self.assertRaisesRegex(ValueError, "event_id.*non-empty"):
             ProposedTicketRiskContext(
                 legs=(TicketLeg(" event-1", "market-1", "selection-1", Decimal("2")),)
             )

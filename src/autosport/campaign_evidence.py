@@ -1131,12 +1131,43 @@ def _validate_registry_bindings(campaign: PaperCampaign, registry: ScientificReg
             raise CampaignIntegrityError(
                 f"DatasetSnapshot:{session.dataset_snapshot_id} lacks causal_cutoff authority"
             )
-        if _instant(
+        # A frozen training snapshot may predate a prospective evaluation.
+        # A snapshot spanning the window is not a valid substitute for
+        # precommitted training data or a completed historical snapshot.
+        snapshot_cutoff = _instant(dataset_cutoff, "DatasetSnapshot.causal_cutoff")
+        window_start = _instant(
+            session.evaluation_window_start, "session.evaluation_window_start"
+        )
+        window_end = _instant(
             session.evaluation_window_end, "session.evaluation_window_end"
-        ) > _instant(dataset_cutoff, "DatasetSnapshot.causal_cutoff"):
-            raise CampaignIntegrityError(
-                "session evaluation window exceeds DatasetSnapshot causal cutoff"
+        )
+        if window_end > snapshot_cutoff:
+            if snapshot_cutoff > window_start:
+                raise CampaignIntegrityError(
+                    "session evaluation window straddles DatasetSnapshot causal cutoff"
+                )
+            # An evaluation bundle is outcome evidence published after the
+            # evaluation, not permission to backdate training or policy choice.
+            predeclared = [protocol, hypothesis, dataset]
+            predeclared.append(
+                _required_registry_entry(
+                    registry, "StrategyVersion", session.strategy_version_id
+                )
             )
+            if session.model_version_id is not None:
+                predeclared.append(
+                    _required_registry_entry(
+                        registry, "ModelVersion", session.model_version_id
+                    )
+                )
+            if any(
+                _instant(entry.available_at, "predeclared authority available_at")
+                > window_start
+                for entry in predeclared
+            ):
+                raise CampaignIntegrityError(
+                    "prospective session uses authority unavailable at evaluation start"
+                )
 
         strategy = _required_registry_entry(
             registry, "StrategyVersion", session.strategy_version_id

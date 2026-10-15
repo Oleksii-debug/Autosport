@@ -24,7 +24,7 @@ class ForecastDigestCanonicalTests(unittest.TestCase):
         return ForecastRecord(**values)
 
     def test_scalar_evidence_hash_string_fails_closed_before_character_iteration(self) -> None:
-        with self.assertRaisesRegex(ValueError, "ordered collection"):
+        with self.assertRaisesRegex(ValueError, "exact list or tuple"):
             self._record(evidence_hashes="a" * 64)
 
     def test_only_ordered_tuple_or_list_evidence_hash_containers_are_accepted(self) -> None:
@@ -37,7 +37,7 @@ class ForecastDigestCanonicalTests(unittest.TestCase):
         ]
         for value in unsupported:
             with self.subTest(value_type=type(value).__name__):
-                with self.assertRaisesRegex(ValueError, "ordered collection"):
+                with self.assertRaisesRegex(ValueError, "exact list or tuple"):
                     self._record(evidence_hashes=value)
 
     def test_canonical_list_normalizes_to_immutable_tuple(self) -> None:

@@ -1,6 +1,6 @@
-"""Causal, restart-safe participant identity and alias lineage.
+"""Causal, restart-safe sport/competition/participant identity and alias lineage.
 
-This is deliberately an identity authority only.  It does not score participants,
+This is deliberately an identity authority only.  It does not score entities,
 infer behaviour, replace provider event identity, or grant strategy/execution power.
 """
 
@@ -18,13 +18,17 @@ from .integrity import atomic_write_json
 
 
 _SCHEMA = "autosport.participant_identity"
-_VERSION = 1
+_LEGACY_VERSION = 1
+_VERSION = 2
+_LEGACY_ENTITY_KIND_VALUES = frozenset({"LEAGUE", "PARTICIPANT", "TEAM"})
 
 
 class EntityKind(StrEnum):
+    SPORT = "SPORT"
+    LEAGUE = "LEAGUE"
+    SEASON = "SEASON"
     PARTICIPANT = "PARTICIPANT"
     TEAM = "TEAM"
-    LEAGUE = "LEAGUE"
 
 
 class IdentityView(StrEnum):
@@ -50,7 +54,12 @@ class ParticipantIdentityError(ValueError):
 
 
 def _text(name: str, value: object) -> str:
-    if type(value) is not str or not value or value != value.strip() or "\x00" in value:
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise ParticipantIdentityError(f"{name} must be a non-empty canonical string")
     value.encode("utf-8")
     return value
@@ -74,6 +83,18 @@ def _time_text(name: str, value: object) -> str:
 def _digest(payload: dict[str, Any]) -> str:
     raw = json.dumps(payload, ensure_ascii=False, sort_keys=True, separators=(",", ":"), allow_nan=False)
     return hashlib.sha256(raw.encode("utf-8")).hexdigest()
+
+
+def _unique_json_object(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject duplicate authority-bearing JSON keys at every object depth."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise ParticipantIdentityError(
+                f"duplicate identity registry JSON key: {key}"
+            )
+        result[key] = value
+    return result
 
 
 @dataclass(frozen=True, slots=True)
@@ -136,7 +157,9 @@ class AliasRecord:
 
     @property
     def record_id(self) -> str:
-        return _digest(self.payload())
+        if type(self) is not AliasRecord:
+            raise ParticipantIdentityError("alias record must be an exact AliasRecord")
+        return _digest(AliasRecord.payload(self))
 
     def payload(self) -> dict[str, str | None]:
         return {"source_id": self.source_id, "alias": self.alias, "entity_id": self.entity_id,
@@ -209,7 +232,9 @@ class EntityLineage:
 
     @property
     def record_id(self) -> str:
-        return _digest(self.payload())
+        if type(self) is not EntityLineage:
+            raise ParticipantIdentityError("entity lineage must be an exact EntityLineage")
+        return _digest(EntityLineage.payload(self))
 
     def payload(self) -> dict[str, str | None]:
         return {
@@ -222,6 +247,69 @@ class EntityLineage:
             "evidence_sha256": self.evidence_sha256,
             "valid_until": None if self.valid_until is None else _time_text("valid_until", self.valid_until),
         }
+
+
+def _snapshot_entity_identity(value: EntityIdentity) -> EntityIdentity:
+    if type(value) is not EntityIdentity:
+        raise TypeError("entity must be EntityIdentity")
+    EntityIdentity.__post_init__(value)
+    return EntityIdentity(
+        entity_id=value.entity_id,
+        kind=value.kind,
+        source_reference=value.source_reference,
+        evidence_sha256=value.evidence_sha256,
+        first_known_at=value.first_known_at,
+        available_at=value.available_at,
+    )
+
+
+def _snapshot_alias_record(value: AliasRecord) -> AliasRecord:
+    if type(value) is not AliasRecord:
+        raise TypeError("alias must be AliasRecord")
+    AliasRecord.__post_init__(value)
+    return AliasRecord(
+        source_id=value.source_id,
+        alias=value.alias,
+        entity_id=value.entity_id,
+        valid_from=value.valid_from,
+        valid_until=value.valid_until,
+        available_at=value.available_at,
+        evidence_sha256=value.evidence_sha256,
+        recorded_at=value.recorded_at,
+        relation=value.relation,
+        supersedes_record_id=value.supersedes_record_id,
+    )
+
+
+def _snapshot_roster_membership(value: RosterMembership) -> RosterMembership:
+    if type(value) is not RosterMembership:
+        raise TypeError("membership must be RosterMembership")
+    RosterMembership.__post_init__(value)
+    return RosterMembership(
+        event_id=value.event_id,
+        source_id=value.source_id,
+        entity_id=value.entity_id,
+        member_from=value.member_from,
+        member_until=value.member_until,
+        available_at=value.available_at,
+        evidence_sha256=value.evidence_sha256,
+    )
+
+
+def _snapshot_entity_lineage(value: EntityLineage) -> EntityLineage:
+    if type(value) is not EntityLineage:
+        raise TypeError("lineage must be EntityLineage")
+    EntityLineage.__post_init__(value)
+    return EntityLineage(
+        predecessor_entity_id=value.predecessor_entity_id,
+        successor_entity_id=value.successor_entity_id,
+        relation=value.relation,
+        effective_from=value.effective_from,
+        available_at=value.available_at,
+        recorded_at=value.recorded_at,
+        evidence_sha256=value.evidence_sha256,
+        valid_until=value.valid_until,
+    )
 
 
 class ParticipantIdentityRegistry:
@@ -246,8 +334,7 @@ class ParticipantIdentityRegistry:
         return registry
 
     def add_entity(self, entity: EntityIdentity) -> None:
-        if not isinstance(entity, EntityIdentity):
-            raise TypeError("entity must be EntityIdentity")
+        entity = _snapshot_entity_identity(entity)
         existing = self._entities.get(entity.entity_id)
         if existing is not None:
             if existing != entity:
@@ -259,8 +346,7 @@ class ParticipantIdentityRegistry:
         self._entities = candidate_entities
 
     def add_alias(self, alias: AliasRecord) -> None:
-        if not isinstance(alias, AliasRecord):
-            raise TypeError("alias must be AliasRecord")
+        alias = _snapshot_alias_record(alias)
         if alias.entity_id not in self._entities:
             raise ParticipantIdentityError("alias references unknown entity")
         if alias in self._aliases:
@@ -276,6 +362,10 @@ class ParticipantIdentityRegistry:
                 raise ParticipantIdentityError("alias correction must preserve source and alias")
             if target.entity_id == alias.entity_id:
                 raise ParticipantIdentityError("alias correction must change entity")
+            if self._entities[target.entity_id].kind is not self._entities[alias.entity_id].kind:
+                raise ParticipantIdentityError(
+                    "alias correction identities must have the same EntityKind"
+                )
             if not _overlap(target.valid_from, target.valid_until, alias.valid_from, alias.valid_until):
                 raise ParticipantIdentityError("alias correction must overlap superseded interval")
             if _instant("available_at", alias.available_at) <= _instant("available_at", target.available_at):
@@ -319,10 +409,14 @@ class ParticipantIdentityRegistry:
         self._aliases = candidate_aliases
 
     def add_roster_membership(self, membership: RosterMembership) -> None:
-        if not isinstance(membership, RosterMembership):
-            raise TypeError("membership must be RosterMembership")
+        membership = _snapshot_roster_membership(membership)
         if membership.entity_id not in self._entities:
             raise ParticipantIdentityError("roster membership references unknown entity")
+        entity = self._entities[membership.entity_id]
+        if entity.kind not in {EntityKind.PARTICIPANT, EntityKind.TEAM}:
+            raise ParticipantIdentityError(
+                "event roster membership requires PARTICIPANT or TEAM identity"
+            )
         if membership in self._rosters:
             return
         candidate_rosters = [*self._rosters, membership]
@@ -332,8 +426,7 @@ class ParticipantIdentityRegistry:
 
     def add_lineage(self, lineage: EntityLineage) -> None:
         """Append correction provenance without changing prior resolutions."""
-        if not isinstance(lineage, EntityLineage):
-            raise TypeError("lineage must be EntityLineage")
+        lineage = _snapshot_entity_lineage(lineage)
         if lineage.predecessor_entity_id not in self._entities or lineage.successor_entity_id not in self._entities:
             raise ParticipantIdentityError("lineage references unknown entity")
         predecessor = self._entities[lineage.predecessor_entity_id]
@@ -423,7 +516,7 @@ class ParticipantIdentityRegistry:
         _text("entity_id", entity_id)
         moment = _instant("as_of", as_of)
         return tuple(
-            record for record in self._lineages
+            _snapshot_entity_lineage(record) for record in self._lineages
             if entity_id in (record.predecessor_entity_id, record.successor_entity_id)
             and _contains(record.effective_from, record.valid_until, moment)
             and (
@@ -470,10 +563,10 @@ class ParticipantIdentityRegistry:
         tips = [record for record in matches if record.record_id not in superseded_ids]
         if not tips or len({record.entity_id for record in tips}) != 1:
             raise ParticipantIdentityError("alias cannot be resolved unambiguously at requested causal view")
-        return max(
+        return _snapshot_alias_record(max(
             tips,
             key=lambda record: (_instant("available_at", record.available_at), record.record_id),
-        )
+        ))
 
     def resolve_alias(self, source_id: str, alias: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> EntityIdentity:
         moment = _instant("as_of", as_of)
@@ -481,7 +574,7 @@ class ParticipantIdentityRegistry:
         entity = self._entities[record.entity_id]
         if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
             raise ParticipantIdentityError("entity was not known at requested causal view")
-        return entity
+        return _snapshot_entity_identity(entity)
 
     def roster_at(self, event_id: str, source_id: str, *, as_of: str, view: IdentityView = IdentityView.AS_KNOWN_AT_DECISION) -> tuple[EntityIdentity, ...]:
         moment = _instant("as_of", as_of)
@@ -495,7 +588,10 @@ class ParticipantIdentityRegistry:
                     if view is IdentityView.AS_KNOWN_AT_DECISION and _instant("available_at", entity.available_at) > moment:
                         raise ParticipantIdentityError("roster references entity not known at requested causal view")
                     result[entity.entity_id] = entity
-        return tuple(sorted(result.values(), key=lambda entity: entity.entity_id))
+        return tuple(
+            _snapshot_entity_identity(entity)
+            for entity in sorted(result.values(), key=lambda entity: entity.entity_id)
+        )
 
     def _persist_state(
         self,
@@ -522,28 +618,138 @@ class ParticipantIdentityRegistry:
 
     def _load(self) -> None:
         try:
-            raw = json.loads(self.path.read_text(encoding="utf-8"))
+            raw = json.loads(
+                self.path.read_text(encoding="utf-8"),
+                object_pairs_hook=_unique_json_object,
+            )
+        except ParticipantIdentityError:
+            raise
         except (OSError, json.JSONDecodeError) as exc:
             raise ParticipantIdentityError(f"cannot load identity registry: {exc}") from exc
-        if not isinstance(raw, dict) or raw.get("schema") != _SCHEMA or raw.get("version") != _VERSION:
+        expected_fields = {
+            "schema",
+            "version",
+            "entities",
+            "aliases",
+            "rosters",
+            "lineages",
+        }
+        if (
+            type(raw) is not dict
+            or set(raw) != expected_fields
+            or raw.get("schema") != _SCHEMA
+            or type(raw.get("version")) is not int
+            or raw.get("version") not in {_LEGACY_VERSION, _VERSION}
+            or any(
+                type(raw[field]) is not list
+                for field in ("entities", "aliases", "rosters", "lineages")
+            )
+        ):
             raise ParticipantIdentityError("unsupported identity registry schema")
+        record_fields = {
+            "entities": {
+                "entity_id",
+                "kind",
+                "source_reference",
+                "evidence_sha256",
+                "first_known_at",
+                "available_at",
+            },
+            "aliases": {
+                "source_id",
+                "alias",
+                "entity_id",
+                "valid_from",
+                "valid_until",
+                "available_at",
+                "evidence_sha256",
+                "recorded_at",
+                "relation",
+                "supersedes_record_id",
+            },
+            "rosters": {
+                "event_id",
+                "source_id",
+                "entity_id",
+                "member_from",
+                "member_until",
+                "available_at",
+                "evidence_sha256",
+            },
+            "lineages": {
+                "predecessor_entity_id",
+                "successor_entity_id",
+                "relation",
+                "effective_from",
+                "available_at",
+                "recorded_at",
+                "evidence_sha256",
+                "valid_until",
+            },
+        }
+        for collection, expected in record_fields.items():
+            seen_records: set[str] = set()
+            for item in raw[collection]:
+                if type(item) is not dict or set(item) != expected:
+                    raise ParticipantIdentityError(
+                        f"unsupported identity registry {collection} record schema"
+                    )
+                canonical_record = json.dumps(
+                    item,
+                    ensure_ascii=False,
+                    sort_keys=True,
+                    separators=(",", ":"),
+                )
+                if canonical_record in seen_records:
+                    raise ParticipantIdentityError(
+                        f"duplicate identity registry {collection} record"
+                    )
+                seen_records.add(canonical_record)
+
+        loaded_version = raw["version"]
         self._loading = True
         try:
-            for item in raw.get("entities", []):
-                entity = EntityIdentity(item["entity_id"], EntityKind(item["kind"]), item["source_reference"], item["evidence_sha256"], item["first_known_at"], item["available_at"])
+            for item in raw["entities"]:
+                raw_kind = item["kind"]
+                if (
+                    loaded_version == _LEGACY_VERSION
+                    and (
+                        type(raw_kind) is not str
+                        or raw_kind not in _LEGACY_ENTITY_KIND_VALUES
+                    )
+                ):
+                    raise ParticipantIdentityError(
+                        "legacy v1 identity registry contains unsupported entity kind"
+                    )
+                try:
+                    kind = EntityKind(raw_kind)
+                except ValueError as exc:
+                    raise ParticipantIdentityError("unsupported entity identity kind") from exc
+                entity = EntityIdentity(
+                    item["entity_id"],
+                    kind,
+                    item["source_reference"],
+                    item["evidence_sha256"],
+                    item["first_known_at"],
+                    item["available_at"],
+                )
                 if entity.entity_id in self._entities:
                     raise ParticipantIdentityError("duplicate entity identity")
                 self._entities[entity.entity_id] = entity
-            for item in raw.get("aliases", []):
+            for item in raw["aliases"]:
                 self.add_alias(AliasRecord(**item))
-            for item in raw.get("rosters", []):
+            for item in raw["rosters"]:
                 self.add_roster_membership(RosterMembership(**item))
-            for item in raw.get("lineages", []):
+            for item in raw["lineages"]:
+                try:
+                    relation = LineageRelation(item["relation"])
+                except ValueError as exc:
+                    raise ParticipantIdentityError("unsupported identity lineage relation") from exc
                 self.add_lineage(EntityLineage(
                     item["predecessor_entity_id"], item["successor_entity_id"],
-                    LineageRelation(item["relation"]), item["effective_from"],
+                    relation, item["effective_from"],
                     item["available_at"], item["recorded_at"], item["evidence_sha256"],
-                    item.get("valid_until"),
+                    item["valid_until"],
                 ))
         finally:
             self._loading = False

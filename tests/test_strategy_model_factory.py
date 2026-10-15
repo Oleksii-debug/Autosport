@@ -243,7 +243,7 @@ def _factory_foundation(tmp_path, *, points=None, minimum_train_size=2):
         "lawful-provider:fixture",
         "license-evidence:v1",
         T2,
-        T0,
+        T2,
         outcome_reveal_after=T2,
     )
     features = FeatureSet("features-factory", "v1", SHA_B, SHA_C, T0)

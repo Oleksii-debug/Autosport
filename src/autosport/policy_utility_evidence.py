@@ -14,6 +14,7 @@ import threading
 from typing import Any, Mapping
 
 from .integrity import durable_path_lock
+from .json_integrity import strict_json_loads
 
 
 SCHEMA_VERSION = 1
@@ -23,6 +24,17 @@ _CURRENCY_RE = re.compile(r"^[A-Z]{3}$")
 
 class PolicyUtilityError(ValueError):
     """Raised when policy-utility evidence is malformed or unsafe to trust."""
+
+
+def _finite_decimal(
+    value: Decimal,
+    label: str,
+    *,
+    _decimal_type: type[Decimal] = Decimal,
+    _error_type: type[PolicyUtilityError] = PolicyUtilityError,
+) -> None:
+    if type(value) is not _decimal_type or not value.is_finite():
+        raise _error_type(f"{label} must be an exact finite Decimal")
 
 
 class UtilityCompleteness(StrEnum):
@@ -111,21 +123,41 @@ class PolicyUtilityEvidence:
     effective_sample_size: Decimal | None = None
     uncertainty: Decimal | None = None
 
-    def __post_init__(self) -> None:
-        if type(self.completeness) is not UtilityCompleteness:
-            raise PolicyUtilityError("completeness must be UtilityCompleteness")
-        if type(self.truth_class) is not UtilityTruthClass:
-            raise PolicyUtilityError("truth_class must be UtilityTruthClass")
-        if type(self.decision_kind) is not DecisionKind:
-            raise PolicyUtilityError("decision_kind must be DecisionKind")
+    def __post_init__(
+        self,
+        _completeness_type: type[UtilityCompleteness] = UtilityCompleteness,
+        _truth_type: type[UtilityTruthClass] = UtilityTruthClass,
+        _decision_type: type[DecisionKind] = DecisionKind,
+        _authority_ref_type: type[AuthorityRef] = AuthorityRef,
+        _finite_decimal_validator=_finite_decimal,
+        _unsupported: UtilityCompleteness = UtilityCompleteness.UNSUPPORTED,
+        _estimated: UtilityTruthClass = UtilityTruthClass.ESTIMATED,
+        _simulated: UtilityTruthClass = UtilityTruthClass.SIMULATED,
+        _observed: UtilityTruthClass = UtilityTruthClass.OBSERVED,
+        _wait_no_bet: DecisionKind = DecisionKind.WAIT_NO_BET,
+        _zero_decimal: Decimal = Decimal("0"),
+        _error_type: type[PolicyUtilityError] = PolicyUtilityError,
+    ) -> None:
+        if type(self.completeness) is not _completeness_type:
+            raise _error_type("completeness must be UtilityCompleteness")
+        if type(self.truth_class) is not _truth_type:
+            raise _error_type("truth_class must be UtilityTruthClass")
+        if type(self.decision_kind) is not _decision_type:
+            raise _error_type("decision_kind must be DecisionKind")
         if type(self.authority_refs) is not tuple or any(
-            type(item) is not AuthorityRef for item in self.authority_refs
+            type(item) is not _authority_ref_type for item in self.authority_refs
         ):
-            raise PolicyUtilityError("authority_refs must contain exact AuthorityRef values")
-        if self.denominator_ref is not None and type(self.denominator_ref) is not AuthorityRef:
-            raise PolicyUtilityError("denominator_ref must be AuthorityRef or None")
-        if self.counterfactual_ref is not None and type(self.counterfactual_ref) is not AuthorityRef:
-            raise PolicyUtilityError("counterfactual_ref must be AuthorityRef or None")
+            raise _error_type("authority_refs must contain exact AuthorityRef values")
+        if (
+            self.denominator_ref is not None
+            and type(self.denominator_ref) is not _authority_ref_type
+        ):
+            raise _error_type("denominator_ref must be AuthorityRef or None")
+        if (
+            self.counterfactual_ref is not None
+            and type(self.counterfactual_ref) is not _authority_ref_type
+        ):
+            raise _error_type("counterfactual_ref must be AuthorityRef or None")
 
         for value, label in (
             (self.environment_id, "environment_id"),
@@ -154,58 +186,68 @@ class PolicyUtilityEvidence:
         _utc(self.available_at, "available_at")
 
         if tuple(sorted(self.authority_refs)) != self.authority_refs:
-            raise PolicyUtilityError("authority_refs must be sorted")
+            raise _error_type("authority_refs must be sorted")
         if len(set(self.authority_refs)) != len(self.authority_refs):
-            raise PolicyUtilityError("authority_refs must be unique")
+            raise _error_type("authority_refs must be unique")
 
         if self.currency is not None:
             if not isinstance(self.currency, str) or _CURRENCY_RE.fullmatch(self.currency) is None:
-                raise PolicyUtilityError("currency must be an uppercase three-letter code")
+                raise _error_type("currency must be an uppercase three-letter code")
         if self.utility_value is not None:
-            _finite_decimal(self.utility_value, "utility_value")
+            _finite_decimal_validator(self.utility_value, "utility_value")
             if self.currency is None:
-                raise PolicyUtilityError("utility_value requires canonical currency")
-        if self.completeness is UtilityCompleteness.UNSUPPORTED and self.utility_value is not None:
-            raise PolicyUtilityError("UNSUPPORTED utility cannot carry a utility_value")
+                raise _error_type("utility_value requires canonical currency")
+        if self.completeness is _unsupported and self.utility_value is not None:
+            raise _error_type("UNSUPPORTED utility cannot carry a utility_value")
 
         if self.support_count is not None:
             if type(self.support_count) is not int or self.support_count <= 0:
-                raise PolicyUtilityError("support_count must be a positive integer")
+                raise _error_type("support_count must be a positive integer")
         if self.effective_sample_size is not None:
-            _finite_decimal(self.effective_sample_size, "effective_sample_size")
+            _finite_decimal_validator(
+                self.effective_sample_size,
+                "effective_sample_size",
+            )
             if self.effective_sample_size <= 0:
-                raise PolicyUtilityError("effective_sample_size must be positive")
+                raise _error_type("effective_sample_size must be positive")
+            if (
+                self.support_count is not None
+                and self.effective_sample_size > self.support_count
+            ):
+                raise _error_type(
+                    "effective_sample_size cannot exceed support_count"
+                )
         if self.uncertainty is not None:
-            _finite_decimal(self.uncertainty, "uncertainty")
+            _finite_decimal_validator(self.uncertainty, "uncertainty")
             if self.uncertainty < 0:
-                raise PolicyUtilityError("uncertainty cannot be negative")
+                raise _error_type("uncertainty cannot be negative")
 
-        if self.truth_class in {UtilityTruthClass.ESTIMATED, UtilityTruthClass.SIMULATED}:
+        if self.truth_class in {_estimated, _simulated}:
             if (
                 self.support_count is None
                 or self.effective_sample_size is None
                 or self.uncertainty is None
             ):
-                raise PolicyUtilityError(
+                raise _error_type(
                     "estimated/simulated utility requires support, ESS and uncertainty"
                 )
-        if self.truth_class is UtilityTruthClass.SIMULATED and self.counterfactual_ref is None:
-            raise PolicyUtilityError("SIMULATED utility requires counterfactual authority")
+        if self.truth_class is _simulated and self.counterfactual_ref is None:
+            raise _error_type("SIMULATED utility requires counterfactual authority")
 
         if (
-            self.decision_kind is DecisionKind.WAIT_NO_BET
-            and self.utility_value not in (None, Decimal("0"))
+            self.decision_kind is _wait_no_bet
+            and self.utility_value not in (None, _zero_decimal)
             and (self.denominator_ref is None or self.counterfactual_ref is None)
         ):
-            raise PolicyUtilityError(
+            raise _error_type(
                 "non-zero WAIT/NO_BET utility requires denominator and counterfactual authority"
             )
         if (
-            self.decision_kind is DecisionKind.WAIT_NO_BET
-            and self.truth_class is UtilityTruthClass.OBSERVED
-            and self.utility_value not in (None, Decimal("0"))
+            self.decision_kind is _wait_no_bet
+            and self.truth_class is _observed
+            and self.utility_value not in (None, _zero_decimal)
         ):
-            raise PolicyUtilityError("OBSERVED WAIT/NO_BET utility must be zero or absent")
+            raise _error_type("OBSERVED WAIT/NO_BET utility must be zero or absent")
 
     @property
     def source_resolved(self) -> bool:
@@ -265,7 +307,11 @@ class PolicyUtilityEvidence:
             "decision_kind": self.decision_kind.value,
             "available_at": _datetime_text(self.available_at),
             "currency": self.currency,
-            "utility_value": None if self.utility_value is None else _decimal_text(self.utility_value),
+            "utility_value": (
+                None
+                if self.utility_value is None
+                else _decimal_text(self.utility_value)
+            ),
             "authority_refs": [item.to_dict() for item in self.authority_refs],
             "denominator_ref": (
                 None if self.denominator_ref is None else self.denominator_ref.to_dict()
@@ -509,17 +555,22 @@ class PolicyUtilityStore:
         by_semantic: dict[str, PolicyUtilityEvidence] = {}
         if self.path.exists():
             try:
-                lines = self.path.read_text(encoding="utf-8").splitlines()
-            except OSError as exc:
+                payload = self.path.read_text(encoding="utf-8")
+            except (OSError, UnicodeError) as exc:
                 raise PolicyUtilityError("unable to read policy utility store") from exc
+            if payload and not payload.endswith("\n"):
+                raise PolicyUtilityError(
+                    "policy utility store lacks canonical trailing record boundary"
+                )
+            lines = payload.splitlines()
             for line_number, line in enumerate(lines, start=1):
                 if not line:
                     raise PolicyUtilityError(
                         f"empty policy utility store record at line {line_number}"
                     )
                 try:
-                    raw = json.loads(line)
-                except (json.JSONDecodeError, UnicodeError) as exc:
+                    raw = strict_json_loads(line)
+                except (ValueError, UnicodeError) as exc:
                     raise PolicyUtilityError(
                         f"invalid policy utility store JSON at line {line_number}"
                     ) from exc
@@ -637,27 +688,37 @@ def _parse_datetime(value: Any, label: str) -> datetime:
     return parsed
 
 
-def _finite_decimal(value: Decimal, label: str) -> None:
-    if not isinstance(value, Decimal) or not value.is_finite():
-        raise PolicyUtilityError(f"{label} must be a finite Decimal")
-
-
-def _decimal_text(value: Decimal) -> str:
-    _finite_decimal(value, "decimal")
+def _decimal_text(
+    value: Decimal,
+    *,
+    _finite_decimal_validator=_finite_decimal,
+) -> str:
+    _finite_decimal_validator(value, "decimal")
     if value == 0:
         return "0"
-    return format(value.normalize(), "f")
+    text = format(value, "f")
+    if "." in text:
+        text = text.rstrip("0").rstrip(".")
+    return text
 
 
-def _parse_decimal(value: Any, label: str) -> Decimal:
+def _parse_decimal(
+    value: Any,
+    label: str,
+    *,
+    _decimal_type: type[Decimal] = Decimal,
+    _invalid_operation_type: type[InvalidOperation] = InvalidOperation,
+    _finite_decimal_validator=_finite_decimal,
+    _decimal_text_impl=_decimal_text,
+) -> Decimal:
     if not isinstance(value, str) or not value:
         raise PolicyUtilityError(f"{label} must be canonical decimal text")
     try:
-        parsed = Decimal(value)
-    except InvalidOperation as exc:
+        parsed = _decimal_type(value)
+    except _invalid_operation_type as exc:
         raise PolicyUtilityError(f"{label} must be canonical decimal text") from exc
-    _finite_decimal(parsed, label)
-    if _decimal_text(parsed) != value:
+    _finite_decimal_validator(parsed, label)
+    if _decimal_text_impl(parsed) != value:
         raise PolicyUtilityError(f"{label} must use canonical decimal text")
     return parsed
 

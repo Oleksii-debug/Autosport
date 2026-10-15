@@ -63,6 +63,8 @@ class _DispatchState:
         "_result_artifact_kind",
         "_bundle_id_prefix",
         "_issuer_source_sha256",
+        "_no_action_issuer_source_sha256",
+        "_issuer_source_selector",
         "_trusted_datetime",
         "_trusted_utc",
         "_public_open",
@@ -161,6 +163,16 @@ class _DispatchState:
         object.__setattr__(self, "_result_artifact_kind", issuance_module._RESULT_ARTIFACT_KIND)
         object.__setattr__(self, "_bundle_id_prefix", issuance_module._BUNDLE_ID_PREFIX)
         object.__setattr__(self, "_issuer_source_sha256", issuance_module._ISSUER_SOURCE_SHA256)
+        object.__setattr__(
+            self,
+            "_no_action_issuer_source_sha256",
+            issuance_module._NO_ACTION_ISSUER_SOURCE_SHA256,
+        )
+        object.__setattr__(
+            self,
+            "_issuer_source_selector",
+            issuance_module._issuer_source_sha256,
+        )
 
         trusted_datetime = _datetime_type
         trusted_utc = _timezone_type.utc
@@ -210,6 +222,7 @@ class _DispatchState:
             ("predecessor verify", issuance_module.verify_product_policy_evaluation),
             ("target", self._target),
             ("issuance id", self._issuance_id),
+            ("issuer source selector", self._issuer_source_selector),
             ("source evaluation", self._require_source),
             ("derive policy evaluation", self._derive),
             ("registry get", self._registry_get),
@@ -260,6 +273,14 @@ class _DispatchState:
                 ("datetime", issuance_module.datetime),
                 ("timezone", issuance_module.timezone),
                 ("EvaluationContractFamily", issuance_module.EvaluationContractFamily),
+                (
+                    "CANONICAL_PAPER_ABSTENTION_ACTIONS",
+                    issuance_module.CANONICAL_PAPER_ABSTENTION_ACTIONS,
+                ),
+                (
+                    "CANONICAL_PAPER_MATERIAL_ACTIONS",
+                    issuance_module.CANONICAL_PAPER_MATERIAL_ACTIONS,
+                ),
                 ("_Target", issuance_module._Target),
                 ("_SourceEvaluation", issuance_module._SourceEvaluation),
                 ("_BOOTSTRAP_REPLICATES", issuance_module._BOOTSTRAP_REPLICATES),
@@ -400,6 +421,10 @@ class _DispatchState:
             or issuance_module._RESULT_ARTIFACT_KIND != self._result_artifact_kind
             or issuance_module._BUNDLE_ID_PREFIX != self._bundle_id_prefix
             or issuance_module._ISSUER_SOURCE_SHA256 != self._issuer_source_sha256
+            or issuance_module._NO_ACTION_ISSUER_SOURCE_SHA256
+            != self._no_action_issuer_source_sha256
+            or issuance_module._issuer_source_sha256
+            is not self._issuer_source_selector
         ):
             raise self._error_type(
                 "product PolicyEvaluation issuance authority was rebound: "

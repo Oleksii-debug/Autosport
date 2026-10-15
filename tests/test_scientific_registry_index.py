@@ -66,7 +66,7 @@ def _seed_registry(path):
         frozen_at_utc=T0,
     )
     protocol = ResearchProtocol(binding, SHA_C, SHA_D, SHA_A, T0)
-    dataset = DatasetSnapshot("dataset-1", SHA_A, "fixture", "fixture-rights", T1, T0)
+    dataset = DatasetSnapshot("dataset-1", SHA_A, "fixture", "fixture-rights", T1, T1)
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
     model = ModelVersion(
         "model-1",

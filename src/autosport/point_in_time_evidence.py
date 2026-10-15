@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import tempfile
 import threading
 from dataclasses import dataclass
@@ -55,9 +56,11 @@ def _text(value: object, name: str) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
+    text = _text(value, name)
     if len(text) != 64 or any(char not in _HEX for char in text):
-        raise PointInTimeEvidenceError(f"{name} must be a canonical SHA-256 hex string")
+        raise PointInTimeEvidenceError(
+            f"{name} must be a canonical lowercase SHA-256 hex string"
+        )
     return text
 
 
@@ -69,6 +72,14 @@ def _optional_sha256(value: object, name: str) -> str | None:
 
 def _instant(value: object, name: str) -> datetime:
     text = _text(value, name)
+    for match in re.finditer(r"[.,]([0-9]+)", text):
+        fractional_digits = match.group(1)
+        if len(fractional_digits) > 6 and any(
+            digit != "0" for digit in fractional_digits[6:]
+        ):
+            raise PointInTimeEvidenceError(
+                f"{name} precision finer than microseconds is unsupported"
+            )
     try:
         parsed = datetime.fromisoformat(text.replace("Z", "+00:00"))
     except ValueError as exc:
@@ -235,13 +246,19 @@ class FeatureAvailabilityEvidence:
             "schema_version": _SCHEMA_VERSION,
             "feature_identity": self.feature_identity,
             "feature_version": self.feature_version,
-            "feature_definition_sha256": self.feature_definition_sha256.lower(),
+            "feature_definition_sha256": _sha256(
+                self.feature_definition_sha256, "feature_definition_sha256"
+            ),
             "source_identity": self.source_identity,
-            "source_revision": self.source_revision.lower(),
+            "source_revision": _sha256(self.source_revision, "source_revision"),
             "revision_policy_id": self.revision_policy_id,
             "dataset_snapshot_id": self.dataset_snapshot_id,
-            "dataset_manifest_sha256": self.dataset_manifest_sha256.lower(),
-            "feature_payload_sha256": self.feature_payload_sha256.lower(),
+            "dataset_manifest_sha256": _sha256(
+                self.dataset_manifest_sha256, "dataset_manifest_sha256"
+            ),
+            "feature_payload_sha256": _sha256(
+                self.feature_payload_sha256, "feature_payload_sha256"
+            ),
             "as_of_utc": self.as_of_utc,
             "available_at_utc": self.available_at_utc,
             "decision_cutoff_utc": self.decision_cutoff_utc,
@@ -349,11 +366,15 @@ class HoldoutConsumption:
 
     def to_payload(self) -> dict[str, Any]:
         return {
-            "holdout_access_id": self.holdout_access_id,
-            "holdout_freshness_id": self.holdout_freshness_id,
+            "holdout_access_id": _sha256(self.holdout_access_id, "holdout_access_id"),
+            "holdout_freshness_id": _sha256(
+                self.holdout_freshness_id, "holdout_freshness_id"
+            ),
             "research_protocol_id": self.research_protocol_id,
             "confirmation_trial_family_id": self.confirmation_trial_family_id,
-            "dataset_manifest_sha256": self.dataset_manifest_sha256.lower(),
+            "dataset_manifest_sha256": _sha256(
+                self.dataset_manifest_sha256, "dataset_manifest_sha256"
+            ),
             "source_identity": self.source_identity,
             "license_identity": self.license_identity,
             "consumer_identity": self.consumer_identity,
@@ -472,7 +493,11 @@ class HoldoutConsumptionLedger:
             payload = json.loads(raw)
         except (OSError, UnicodeError, json.JSONDecodeError) as exc:
             raise EvidenceLedgerCorruptError("holdout ledger is unreadable") from exc
-        if type(payload) is not dict or payload.get("schema_version") != _SCHEMA_VERSION:
+        if (
+            type(payload) is not dict
+            or type(payload.get("schema_version")) is not int
+            or payload.get("schema_version") != _SCHEMA_VERSION
+        ):
             raise EvidenceLedgerCorruptError("holdout ledger schema is unsupported")
         records_payload = payload.get("records")
         if type(records_payload) is not list or not records_payload:

@@ -128,7 +128,7 @@ def test_general_risk_admission_recovers_crash_after_pre_action_before_commit(
 ) -> None:
     event, policy, pre_action_path = _inject_pre_action_commit_crash(tmp_path, monkeypatch)
 
-    restarted_book = PaperBook.load(pre_action_path)
+    restarted_book = PaperBook.load(tmp_path / "paper-book.json")
     restarted_runtime = _runtime(tmp_path, restarted_book)
     restarted_context = _context(tmp_path, restarted_book, restarted_runtime)
     recovering = _agent(event, policy, forecasts=False)
@@ -173,7 +173,7 @@ def test_general_risk_admission_prepare_rejects_policy_drift_after_crash(
 ) -> None:
     event, _, pre_action_path = _inject_pre_action_commit_crash(tmp_path, monkeypatch)
     changed_policy = PaperRiskPolicy(max_ticket_fraction=Decimal("0.03"))
-    restarted_book = PaperBook.load(pre_action_path)
+    restarted_book = PaperBook.load(tmp_path / "paper-book.json")
     restarted_runtime = _runtime(tmp_path, restarted_book)
     restarted_context = _context(tmp_path, restarted_book, restarted_runtime)
 
@@ -247,7 +247,10 @@ def test_general_recovery_prepare_cannot_bypass_exact_pre_action_risk_gate(tmp_p
         decision_id,
     )
     witness_path.parent.mkdir(parents=True, exist_ok=True)
-    book.save(pre_action_path)
+    pre_action_book = policy._shadow_book_for_allocation(book)
+    assert pre_action_book is not None
+    assert pre_action_book is not book
+    pre_action_book.save(pre_action_path)
     recovery.atomic_write_json(
         recovery._prepare_path(witness_path),
         recovery._prepare_payload(witness),

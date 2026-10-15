@@ -3,6 +3,7 @@ from __future__ import annotations
 import json
 import os
 import tempfile
+import threading
 import uuid
 from decimal import (
     Context,
@@ -16,6 +17,7 @@ from decimal import (
     localcontext,
 )
 from pathlib import Path
+from weakref import WeakKeyDictionary
 
 from .domain import PaperTicket, TicketLeg, TicketStatus, utc_now_iso
 from .forecasting import parse_iso_timestamp
@@ -25,10 +27,339 @@ _PAPER_DECIMAL_PRECISION = 28
 _PAPER_DECIMAL_EMIN = -999999
 _PAPER_DECIMAL_EMAX = 999999
 _PAPER_SNAPSHOT_SCHEMA_VERSION = 7
+
+
+def _exact_financial_decimal(value: Decimal | str, *, field: str) -> Decimal:
+    """Admit exact financial transport; never round-trip binary floats via str()."""
+    if type(value) is Decimal:
+        return value
+    if type(value) is str:
+        try:
+            return Decimal(value)
+        except InvalidOperation as exc:
+            raise ValueError(f"{field} must be a decimal value") from exc
+    raise ValueError(f"{field} must be a Decimal or decimal string")
+
+
 _SUPPORTED_PAPER_SNAPSHOT_SCHEMA_VERSIONS = frozenset({2, 3, 4, 5, 6, 7})
 _SCHEMA_MISSING = object()
 
 _LifecycleEntry = tuple[str, str, tuple[str, ...], tuple[str, ...]]
+
+
+def _ticket_leg_opening_commitment(leg: object) -> tuple[object, ...]:
+    """Snapshot one admitted leg without retaining caller-owned object identity."""
+
+    if type(leg) is not TicketLeg:
+        raise ValueError("PaperBook opening authority requires exact TicketLeg values")
+    if (
+        type(leg.event_id) is not str
+        or type(leg.market_id) is not str
+        or type(leg.selection_id) is not str
+        or type(leg.locked_odds) is not Decimal
+        or (leg.sport is not None and type(leg.sport) is not str)
+        or (leg.exchange_side is not None and type(leg.exchange_side) is not str)
+    ):
+        raise ValueError(
+            "PaperBook opening authority leg identity must use exact scalar types"
+        )
+    return (
+        leg.event_id,
+        leg.market_id,
+        leg.selection_id,
+        leg.locked_odds,
+        leg.sport,
+        leg.exchange_side,
+    )
+
+
+def _ticket_opening_commitment(ticket: object) -> tuple[object, ...]:
+    """Return detached immutable opening facts that authorized PAPER economics."""
+
+    if type(ticket) is not PaperTicket:
+        raise ValueError("PaperBook opening authority requires exact PaperTicket values")
+    if type(ticket.legs) is not tuple:
+        raise ValueError("PaperBook opening authority ticket legs must be an exact tuple")
+    if (
+        type(ticket.stake) is not Decimal
+        or type(ticket.placed_at) is not str
+        or type(ticket.strategy_reason) is not str
+        or type(ticket.provider_source_ids) is not tuple
+        or type(ticket.provider_accounts) is not tuple
+        or (ticket.bankroll_id is not None and type(ticket.bankroll_id) is not str)
+        or (ticket.currency is not None and type(ticket.currency) is not str)
+    ):
+        raise ValueError(
+            "PaperBook opening authority ticket identity must use exact scalar/container types"
+        )
+    if any(type(source_id) is not str for source_id in ticket.provider_source_ids):
+        raise ValueError(
+            "PaperBook opening authority provider_source_ids must contain exact strings"
+        )
+    for binding in ticket.provider_accounts:
+        if (
+            type(binding) is not tuple
+            or len(binding) != 2
+            or type(binding[0]) is not str
+            or type(binding[1]) is not str
+        ):
+            raise ValueError(
+                "PaperBook opening authority provider_accounts must contain exact string pairs"
+            )
+    return (
+        ticket.stake,
+        tuple(_ticket_leg_opening_commitment(leg) for leg in ticket.legs),
+        ticket.placed_at,
+        ticket.strategy_reason,
+        ticket.provider_source_ids,
+        ticket.provider_accounts,
+        ticket.bankroll_id,
+        ticket.currency,
+    )
+
+
+def _make_ticket_opening_authority_registry():
+    # Opening economics are product-issued facts. Keep the authoritative copy
+    # outside caller-visible PaperTicket fields so coherent field rewrites cannot
+    # become their own witness.
+    authorities = WeakKeyDictionary()
+    guard = threading.RLock()
+
+    def register_book(book: object) -> None:
+        with guard:
+            authorities[book] = {}
+
+    def record(book: object, ticket: PaperTicket) -> None:
+        commitment = _ticket_opening_commitment(ticket)
+        with guard:
+            current = authorities.get(book)
+            if current is None:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            existing = current.get(ticket.ticket_id)
+            if existing is not None and existing != commitment:
+                raise ValueError("PaperBook ticket opening authority cannot be rebound")
+            current[ticket.ticket_id] = commitment
+
+    def revoke(book: object) -> None:
+        with guard:
+            authorities.pop(book, None)
+
+    def install_validated_snapshot(book: object) -> None:
+        commitments = {
+            ticket_id: _ticket_opening_commitment(ticket)
+            for ticket_id, ticket in book.tickets.items()
+        }
+        with guard:
+            if book not in authorities:
+                raise RuntimeError("PaperBook opening authority registry is unavailable")
+            authorities[book] = commitments
+
+    def require_current(book: object) -> None:
+        with guard:
+            current = authorities.get(book)
+            if current is None:
+                raise ValueError(
+                    "PaperBook byte-loaded snapshot lacks product-issued opening authority"
+                )
+            expected = dict(current)
+        tickets = getattr(book, "tickets", None)
+        if type(tickets) is not dict:
+            raise ValueError("PaperBook ticket mapping must be an exact dict")
+        ticket_ids = tuple(tickets.keys())
+        if any(type(ticket_id) is not str for ticket_id in ticket_ids):
+            raise ValueError("PaperBook ticket identity keys must be exact strings")
+        if frozenset(ticket_ids) != frozenset(expected):
+            raise ValueError(
+                "PaperBook ticket set changed outside product-issued opening authority"
+            )
+        for ticket_id, ticket in tickets.items():
+            if expected[ticket_id] != _ticket_opening_commitment(ticket):
+                raise ValueError(
+                    "PaperBook ticket opening economic identity changed after admission"
+                )
+
+    def require_candidate(source_book: object, candidate_book: object) -> None:
+        with guard:
+            current = authorities.get(source_book)
+            if current is None:
+                raise ValueError(
+                    "PaperBook byte-loaded snapshot lacks product-issued opening authority"
+                )
+            expected = dict(current)
+        candidate_tickets = getattr(candidate_book, "tickets", None)
+        if type(candidate_tickets) is not dict:
+            raise ValueError("PaperBook serialized candidate ticket mapping must be an exact dict")
+        candidate_ticket_ids = tuple(candidate_tickets.keys())
+        if any(type(ticket_id) is not str for ticket_id in candidate_ticket_ids):
+            raise ValueError(
+                "PaperBook serialized candidate ticket identity keys must be exact strings"
+            )
+        if frozenset(candidate_ticket_ids) != frozenset(expected):
+            raise ValueError(
+                "PaperBook serialized candidate ticket set differs from product-issued opening authority"
+            )
+        for ticket_id, ticket in candidate_tickets.items():
+            if (
+                type(ticket) is not PaperTicket
+                or _ticket_opening_commitment(ticket) != expected[ticket_id]
+            ):
+                raise ValueError(
+                    "PaperBook serialized candidate opening economic identity differs from product-issued authority"
+                )
+
+    return (
+        register_book,
+        record,
+        revoke,
+        install_validated_snapshot,
+        require_current,
+        require_candidate,
+    )
+
+
+(
+    _register_ticket_opening_authority_book,
+    _record_ticket_opening_authority,
+    _revoke_ticket_opening_authority,
+    _install_validated_ticket_opening_authority,
+    _require_ticket_opening_authority,
+    _require_snapshot_candidate_opening_authority,
+) = _make_ticket_opening_authority_registry()
+
+
+def _paperbook_causal_history_snapshot(book: object) -> tuple[object, ...]:
+    lifecycle = getattr(book, "_lifecycle", None)
+    settlement_times = getattr(book, "_settlement_times", None)
+    if type(lifecycle) is not list or type(settlement_times) is not dict:
+        raise ValueError("PaperBook causal history state is not canonical")
+
+    for entry in lifecycle:
+        if type(entry) is not tuple or len(entry) != 4:
+            raise ValueError("PaperBook lifecycle entry must be an exact four-item tuple")
+        action, ticket_id, winners, voids = entry
+        if type(action) is not str or type(ticket_id) is not str:
+            raise ValueError("PaperBook lifecycle action/ticket identities must be exact strings")
+        if (
+            type(winners) is not tuple
+            or type(voids) is not tuple
+            or any(type(value) is not str for value in winners)
+            or any(type(value) is not str for value in voids)
+        ):
+            raise ValueError("PaperBook lifecycle quote identities must be exact string tuples")
+
+    settlement_items = tuple(settlement_times.items())
+    if any(type(ticket_id) is not str for ticket_id, _ in settlement_items):
+        raise ValueError("PaperBook settlement history ticket identity keys must be exact strings")
+
+    return (
+        tuple(lifecycle),
+        tuple(sorted(settlement_items)),
+    )
+
+
+def _make_paperbook_causal_history_authority_registry():
+    # Lifecycle/settlement chronology is product-issued economic history. Keep
+    # the authoritative copy outside caller-visible mutable PaperBook fields.
+    authorities = WeakKeyDictionary()
+    guard = threading.RLock()
+
+    def register_book(book: object) -> None:
+        with guard:
+            authorities[book] = ((), ())
+
+    def revoke(book: object) -> None:
+        with guard:
+            authorities.pop(book, None)
+
+    def install_validated_snapshot(book: object) -> None:
+        snapshot = _paperbook_causal_history_snapshot(book)
+        with guard:
+            authorities[book] = snapshot
+
+    def require_current(book: object) -> None:
+        actual = _paperbook_causal_history_snapshot(book)
+        with guard:
+            expected = authorities.get(book)
+        if expected is None:
+            raise ValueError(
+                "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
+            )
+        if actual != expected:
+            raise ValueError(
+                "PaperBook causal history changed outside product-issued transitions"
+            )
+
+    def require_candidate(source_book: object, candidate_book: object) -> None:
+        candidate = _paperbook_causal_history_snapshot(candidate_book)
+        with guard:
+            expected = authorities.get(source_book)
+        if expected is None:
+            raise ValueError(
+                "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
+            )
+        if candidate != expected:
+            raise ValueError(
+                "PaperBook serialized candidate causal history differs from product-issued authority"
+            )
+
+    def advance_open(book: object, ticket_id: str) -> None:
+        with guard:
+            expected = authorities.get(book)
+            if expected is None:
+                raise ValueError(
+                    "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
+                )
+            lifecycle, settlement_times = expected
+            authorities[book] = (
+                lifecycle + (("open", ticket_id, (), ()),),
+                settlement_times,
+            )
+
+    def advance_settle(
+        book: object,
+        ticket_id: str,
+        winners: tuple[str, ...],
+        voids: tuple[str, ...],
+        settled_at: str | None,
+    ) -> None:
+        with guard:
+            expected = authorities.get(book)
+            if expected is None:
+                raise ValueError(
+                    "PaperBook byte-loaded snapshot lacks product-issued causal history authority"
+                )
+            lifecycle, settlement_times = expected
+            settlement_mapping = dict(settlement_times)
+            if ticket_id in settlement_mapping:
+                raise ValueError(
+                    "PaperBook causal history settlement authority cannot be rebound"
+                )
+            settlement_mapping[ticket_id] = settled_at
+            authorities[book] = (
+                lifecycle + (("settle", ticket_id, winners, voids),),
+                tuple(sorted(settlement_mapping.items())),
+            )
+
+    return (
+        register_book,
+        revoke,
+        install_validated_snapshot,
+        require_current,
+        require_candidate,
+        advance_open,
+        advance_settle,
+    )
+
+
+(
+    _register_paperbook_causal_history_authority_book,
+    _revoke_paperbook_causal_history_authority,
+    _install_validated_paperbook_causal_history_authority,
+    _require_paperbook_causal_history_authority,
+    _require_snapshot_candidate_causal_history_authority,
+    _advance_paperbook_causal_history_open,
+    _advance_paperbook_causal_history_settle,
+) = _make_paperbook_causal_history_authority_registry()
 
 
 def _paper_decimal_context() -> Context:
@@ -62,7 +393,9 @@ class PaperBook:
     """Virtual bankroll and auditable paper tickets. No real-money execution path exists."""
 
     def __init__(self, initial_bankroll: Decimal | str = Decimal("10000")) -> None:
-        initial = Decimal(str(initial_bankroll))
+        _register_ticket_opening_authority_book(self)
+        _register_paperbook_causal_history_authority_book(self)
+        initial = _exact_financial_decimal(initial_bankroll, field="initial_bankroll")
         self._require_finite(initial, "initial_bankroll")
         if initial <= 0:
             raise ValueError("initial virtual bankroll must be positive")
@@ -80,6 +413,9 @@ class PaperBook:
 
     @property
     def committed_stake(self) -> Decimal:
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        self._validate_loaded_state(self)
         return sum((t.stake for t in self.tickets.values() if t.status is TicketStatus.OPEN), Decimal("0"))
 
     @classmethod
@@ -111,7 +447,10 @@ class PaperBook:
         bankroll_id: str | None = None,
         currency: str | None = None,
     ) -> PaperTicket:
-        amount = Decimal(str(stake))
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        self._validate_loaded_state(self)
+        amount = _exact_financial_decimal(stake, field="stake")
         new_balance = self._debit_balance(self.balance, amount)
 
         ticket_placed_at = self._validate_placed_at(
@@ -148,22 +487,31 @@ class PaperBook:
             bankroll_id=bankroll_id,
             currency=currency,
         )
+        _record_ticket_opening_authority(self, ticket)
         self.balance = new_balance
         self.tickets[ticket.ticket_id] = ticket
         self._lifecycle.append(("open", ticket.ticket_id, (), ()))
+        _advance_paperbook_causal_history_open(self, ticket.ticket_id)
         return ticket
 
-    @staticmethod
-    def _normalize_resolution_keys(values: object, label: str) -> set[str]:
-        if isinstance(values, str) or values is None:
+    @classmethod
+    def _normalize_resolution_keys(cls, values: object, label: str) -> set[str]:
+        if type(values) is str or values is None:
             raise ValueError(f"PaperBook {label} must be a collection of quote keys")
         try:
-            normalized = set(values)
+            raw_values = tuple(values)
         except TypeError as exc:
             raise ValueError(f"PaperBook {label} must be a collection of quote keys") from exc
-        if any(not isinstance(value, str) or not value for value in normalized):
-            raise ValueError(f"PaperBook {label} must contain non-empty string quote keys")
-        return normalized
+
+        canonical_values: list[str] = []
+        for value in raw_values:
+            canonical_values.append(
+                cls._require_canonical_text(
+                    value,
+                    f"{label} quote_key",
+                )
+            )
+        return set(canonical_values)
 
     @classmethod
     def _settlement_result(
@@ -174,6 +522,8 @@ class PaperBook:
         void_quote_keys: set[str],
     ) -> tuple[TicketStatus, Decimal, Decimal]:
         cls._require_finite(balance, "balance")
+        for leg in ticket.legs:
+            cls._validate_ticket_leg(leg, ticket_id=ticket.ticket_id)
         leg_quote_keys = {leg.quote_key for leg in ticket.legs}
         unknown_winners = winning_quote_keys - leg_quote_keys
         unknown_voids = void_quote_keys - leg_quote_keys
@@ -218,6 +568,10 @@ class PaperBook:
         *,
         settled_at: str | None = None,
     ) -> PaperTicket:
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
+        self._validate_loaded_state(self)
+        ticket_id = self._require_canonical_text(ticket_id, "ticket_id")
         ticket = self.tickets[ticket_id]
         if ticket.status is not TicketStatus.OPEN:
             raise ValueError("ticket already settled")
@@ -253,6 +607,13 @@ class PaperBook:
             )
         )
         self._settlement_times[ticket.ticket_id] = settlement_time
+        _advance_paperbook_causal_history_settle(
+            self,
+            ticket.ticket_id,
+            tuple(sorted(winners)),
+            tuple(sorted(voids)),
+            settlement_time,
+        )
         return ticket
 
     def _lifecycle_to_json(self) -> list[dict[str, object]]:
@@ -273,6 +634,8 @@ class PaperBook:
         return payload
 
     def save(self, path: str | Path) -> None:
+        _require_ticket_opening_authority(self)
+        _require_paperbook_causal_history_authority(self)
         # PaperBook and PaperTicket are intentionally mutable during a paper run.
         # Revalidate the complete economic/identity state immediately before any
         # durable replacement so caller/agent mutation cannot persist a snapshot
@@ -316,6 +679,14 @@ class PaperBook:
             ],
             "lifecycle": self._lifecycle_to_json(),
         }
+
+        # The raw snapshot is detached from the mutable live object. Validate
+        # that exact candidate against product-issued opening commitments before
+        # any durable replacement, closing coherent mutation during collection.
+        candidate = self._from_raw_snapshot(raw)
+        _require_snapshot_candidate_opening_authority(self, candidate)
+        _require_snapshot_candidate_causal_history_authority(self, candidate)
+
         temporary: Path | None = None
         try:
             with tempfile.NamedTemporaryFile(
@@ -341,13 +712,13 @@ class PaperBook:
 
     @staticmethod
     def _require_finite(value: object, label: str) -> None:
-        if not isinstance(value, Decimal) or not value.is_finite():
+        if type(value) is not Decimal or not value.is_finite():
             raise ValueError(f"PaperBook snapshot contains non-finite {label}")
 
     @staticmethod
     def _require_utf8_string(value: object, label: str) -> str:
-        if not isinstance(value, str):
-            raise ValueError(f"PaperBook {label} must be a string")
+        if type(value) is not str:
+            raise ValueError(f"PaperBook {label} must be an exact string")
         try:
             value.encode("utf-8", errors="strict")
         except UnicodeEncodeError as exc:
@@ -365,6 +736,8 @@ class PaperBook:
         text = cls._require_utf8_string(value, label)
         if not text or text.strip() != text:
             raise ValueError(f"PaperBook {label} must be a non-empty trimmed string")
+        if any(ord(character) < 32 or ord(character) == 127 for character in text):
+            raise ValueError(f"PaperBook {label} must not contain control characters")
         if forbid_quote_key_delimiter and "|" in text:
             raise ValueError(f"PaperBook {label} must not contain quote-key delimiter '|'")
         return text
@@ -488,17 +861,14 @@ class PaperBook:
         cls._require_canonical_text(
             leg.event_id,
             f"event_id{suffix}",
-            forbid_quote_key_delimiter=True,
         )
         cls._require_canonical_text(
             leg.market_id,
             f"market_id{suffix}",
-            forbid_quote_key_delimiter=True,
         )
         cls._require_canonical_text(
             leg.selection_id,
             f"selection_id{suffix}",
-            forbid_quote_key_delimiter=True,
         )
         if leg.sport is not None:
             sport = cls._require_canonical_text(
@@ -522,6 +892,10 @@ class PaperBook:
             if exchange_side not in {"back", "lay"}:
                 raise ValueError(
                     "PaperBook ticket exchange_side must be canonical 'back' or 'lay'"
+                )
+            if exchange_side == "lay":
+                raise ValueError(
+                    "PaperBook LAY economic materialization is not supported"
                 )
         cls._require_finite(leg.locked_odds, f"locked_odds{suffix}")
         if leg.locked_odds <= 1:
@@ -995,6 +1369,10 @@ class PaperBook:
             )
 
         cls._validate_loaded_state(book)
+        # Decoding arbitrary bytes proves structure only. It must not mint the
+        # product-issued opening authority needed for economic mutation/readout.
+        _revoke_ticket_opening_authority(book)
+        _revoke_paperbook_causal_history_authority(book)
         return book
 
     @classmethod
@@ -1017,4 +1395,7 @@ class PaperBook:
 
     @classmethod
     def load(cls, path: str | Path) -> "PaperBook":
-        return cls.load_bytes(Path(path).read_bytes())
+        book = cls.load_bytes(Path(path).read_bytes())
+        _install_validated_ticket_opening_authority(book)
+        _install_validated_paperbook_causal_history_authority(book)
+        return book

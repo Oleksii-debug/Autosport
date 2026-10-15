@@ -5,6 +5,7 @@ from decimal import localcontext
 import pytest
 
 import autosport.drift_control as drift_control
+import autosport.scientific_registry as registry_module
 from autosport.drift_control import (
     DriftCausalityError,
     DriftKind,
@@ -408,7 +409,84 @@ def test_effective_sample_size_is_explicit_hash_bound_evidence(tmp_path):
     )
     target["payload"]["effective_sample_size"] = 2
     registry.path.write_text(json.dumps(raw), encoding="utf-8")
-    with pytest.raises(ValueError, match="record digest mismatch"):
+    with pytest.raises(ValueError, match="record (?:digest|identity) mismatch"):
+        ScientificRegistry(registry.path)
+
+
+
+def _rehash_registry_entry(entry: dict[str, object]) -> None:
+    entry["record_sha256"] = registry_module._digest(
+        {
+            "record_type": entry["record_type"],
+            "record_id": entry["record_id"],
+            "available_at": entry["available_at"],
+            "payload": entry["payload"],
+        }
+    )
+
+
+def test_restart_rejects_self_consistent_external_hash_derived_identity_mismatch(
+    tmp_path,
+) -> None:
+    registry = _registry(tmp_path)
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor)
+
+    state = json.loads(registry.path.read_text(encoding="utf-8"))
+    target = next(
+        item
+        for item in state["records"]
+        if item["record_type"] == "DriftReference"
+        and item["record_id"] == reference.reference_id
+    )
+    target["payload"]["model_version_id"] = "model-forged"
+    _rehash_registry_entry(target)
+    registry.path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="record identity mismatch"):
+        ScientificRegistry(registry.path)
+
+
+def test_restart_rejects_self_consistent_external_explicit_identity_mismatch(
+    tmp_path,
+) -> None:
+    registry = _registry(tmp_path)
+    monitor = DriftMonitor(registry)
+    reference = _reference(monitor)
+    finding = monitor.evaluate(
+        reference.reference_id,
+        _current_window(),
+        evaluated_at=EVALUATED_AT,
+    )
+
+    state = json.loads(registry.path.read_text(encoding="utf-8"))
+    target = next(
+        item
+        for item in state["records"]
+        if item["record_type"] == "DriftFinding"
+        and item["record_id"] == finding.finding_id
+    )
+    target["payload"]["finding_id"] = "f" * 64
+    _rehash_registry_entry(target)
+    registry.path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(ValueError, match="record identity mismatch"):
         ScientificRegistry(registry.path)
 
 

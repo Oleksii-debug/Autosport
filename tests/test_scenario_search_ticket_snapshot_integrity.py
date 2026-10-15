@@ -11,6 +11,7 @@ from autosport.market_outcomes import (
     assess_betfair_historical_market_definition_authority,
 )
 from autosport.paper import PaperBook
+import autosport.portfolio as portfolio_module
 from autosport.portfolio import PortfolioEngine
 from autosport.scenario_search import (
     ScenarioGroup,
@@ -150,20 +151,21 @@ class ScenarioSearchTicketSnapshotIntegrityTests(unittest.TestCase):
             "10",
             provider_source_ids=(self.SOURCE_ID,),
         )
-        canonical_ticket_type = type(ticket)
         copied = False
+        canonical_fingerprint = portfolio_module._analysis_ticket_fingerprint
 
-        def copy_then_mutate_source(*args, **kwargs):
+        def fingerprint_then_mutate_source(source_ticket):
             nonlocal copied
-            snapshot = canonical_ticket_type(*args, **kwargs)
+            snapshot = canonical_fingerprint(source_ticket)
             if not copied:
                 copied = True
                 ticket.provider_source_ids = ("provider-b",)
             return snapshot
 
-        with patch(
-            "autosport.portfolio.PaperTicket",
-            side_effect=copy_then_mutate_source,
+        with patch.object(
+            portfolio_module,
+            "_analysis_ticket_fingerprint",
+            side_effect=fingerprint_then_mutate_source,
         ):
             with self.assertRaisesRegex(
                 ValueError,

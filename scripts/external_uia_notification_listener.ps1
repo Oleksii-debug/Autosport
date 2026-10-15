@@ -189,6 +189,11 @@ if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 300) {
 if ($MinimumEvents -lt 0 -or $MinimumEvents -gt 10000) {
     throw 'MinimumEvents must be between 0 and 10000'
 }
+if (-not $CapabilityProbeOnly -and $MinimumEvents -eq 0) {
+    # A zero-event runtime listen must not mint a PASS-shaped UIA evidence report.
+    # CapabilityProbeOnly has its own explicit CAPABILITY_READY evidence class.
+    throw 'MinimumEvents must be at least 1 for runtime notification evidence'
+}
 
 if ($CapabilityProbeOnly) {
     $report.status = 'CAPABILITY_READY'

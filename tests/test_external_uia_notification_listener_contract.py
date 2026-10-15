@@ -133,3 +133,41 @@ def test_capability_probe_executes_on_windows(tmp_path: Path) -> None:
     assert report["human_tested"] is False
     assert report["nvda_verified"] is False
     assert report["whole_product_complete"] is False
+
+def test_zero_event_runtime_threshold_is_not_a_passing_uia_observation() -> None:
+    # The independent capability-only probe stays CAPABILITY_READY; a live
+    # subscription must demand at least one real, process-bound notification.
+    guard = "if (-not $CapabilityProbeOnly -and $MinimumEvents -eq 0) {"
+    assert guard in TEXT
+    assert "MinimumEvents must be at least 1 for runtime notification evidence" in TEXT
+    assert TEXT.index(guard) < TEXT.index("if ($CapabilityProbeOnly) {")
+    assert "if ($report.event_count -lt $MinimumEvents)" in TEXT
+
+
+def test_zero_event_runtime_threshold_is_rejected_on_windows(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    import sys
+    import pytest
+
+    if sys.platform != "win32":
+        pytest.skip("Runtime notification threshold probe requires Windows UIA")
+    pwsh = shutil.which("pwsh")
+    assert pwsh is not None
+    output = tmp_path / "uia-zero-event-rejection.json"
+    completed = subprocess.run(
+        [
+            pwsh, "-NoProfile", "-File", str(SCRIPT),
+            "-Output", str(output), "-RootProcessId", "1",
+            "-MinimumEvents", "0",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "MinimumEvents must be at least 1 for runtime notification evidence" in (
+        completed.stdout + completed.stderr
+    )
+    assert not output.exists()

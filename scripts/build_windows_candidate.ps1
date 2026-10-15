@@ -17,7 +17,18 @@ if (-not (Test-Path -LiteralPath $skipGateHelper -PathType Leaf)) {
 
 $builderText = [System.IO.File]::ReadAllText($builderScript)
 $candidateText = ConvertTo-WindowsCandidateCoreText -CoreText $builderText
-Invoke-WindowsCandidateCoreText -CoreText $candidateText
+try {
+  Invoke-WindowsCandidateCoreText -CoreText $candidateText
+} catch {
+  # Restore the canonical builder's failure evidence without bypassing the failure.
+  $restartRecoveryAudit = Join-Path (Get-Location).Path 'dist/restart-recovery-audit.json'
+  if (Test-Path -LiteralPath $restartRecoveryAudit -PathType Leaf) {
+    Write-Host '--- packaged restart/recovery audit evidence ---'
+    Write-Host ([System.IO.File]::ReadAllText($restartRecoveryAudit))
+    Write-Host '--- end packaged restart/recovery audit evidence ---'
+  }
+  throw
+}
 
 # The stage-neutral transition runs only from source_sha Git objects. Do not execute
 # the live materializer path after the canonical build has finished: late checkout

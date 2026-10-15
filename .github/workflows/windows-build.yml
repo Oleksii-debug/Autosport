@@ -235,6 +235,58 @@ jobs:
           name: Autosport-external-uia-failure-evidence
           path: dist/fresh-extraction-external-uia-audit.json
           if-no-files-found: ignore
+      # The candidate builder emits two archives. Qualify the stage-neutral one
+      # independently instead of publishing only the legacy transitional ZIP.
+      - name: Verify independent stage-neutral release extraction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stageArchive = Join-Path $PWD 'dist/Autosport-windows-x64.zip'
+          $stageReportPath = Join-Path $PWD 'dist/stage-neutral-release-verification.json'
+          foreach ($required in @($stageArchive, $stageReportPath)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Stage-neutral release output is missing: $required"
+            }
+          }
+          $stageReport = Get-Content -LiteralPath $stageReportPath -Raw | ConvertFrom-Json
+          if ($stageReport.status -ne 'PASS') { throw 'Stage-neutral verifier did not PASS' }
+          if ([string]$stageReport.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) {
+            throw 'Stage-neutral source SHA does not match exact workflow head'
+          }
+          if ([string]$stageReport.archive_name -ne 'Autosport-windows-x64.zip') {
+            throw 'Stage-neutral archive identity is incorrect'
+          }
+          if ([string]$stageReport.package_prefix -ne 'Autosport/') {
+            throw 'Stage-neutral extraction prefix is incorrect'
+          }
+          foreach ($field in @('real_money_execution', 'human_tested', 'nvda_verified', 'whole_product_complete')) {
+            if ($stageReport.$field -ne $false) { throw "Stage-neutral evidence $field is not false" }
+          }
+          $stageHash = (Get-FileHash -LiteralPath $stageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ([string]$stageReport.package_sha256 -ne $stageHash) {
+            throw 'Stage-neutral ZIP changed since exact-source verification'
+          }
+          $stageExtractRoot = Join-Path $PWD '.build-stage-neutral-fresh-extraction'
+          if (Test-Path -LiteralPath $stageExtractRoot) {
+            Remove-Item -LiteralPath $stageExtractRoot -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $stageArchive -DestinationPath $stageExtractRoot
+          $stagePackageRoot = Join-Path $stageExtractRoot 'Autosport'
+          $stageExe = Join-Path $stagePackageRoot 'Autosport.exe'
+          $stageInfoPath = Join-Path $stagePackageRoot 'BUILD_INFO.json'
+          if (-not (Test-Path -LiteralPath $stageExe -PathType Leaf) -or -not (Test-Path -LiteralPath $stageInfoPath -PathType Leaf)) {
+            throw 'Fresh stage-neutral extraction is missing canonical executable or BUILD_INFO'
+          }
+          $stageInfo = Get-Content -LiteralPath $stageInfoPath -Raw | ConvertFrom-Json
+          if ([string]$stageInfo.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) {
+            throw 'Fresh stage-neutral BUILD_INFO source drift'
+          }
+          if ([string]$stageInfo.autosport_exe_sha256 -ne (Get-FileHash -LiteralPath $stageExe -Algorithm SHA256).Hash.ToLowerInvariant()) {
+            throw 'Fresh stage-neutral EXE digest mismatch'
+          }
+          foreach ($field in @('real_money_execution', 'human_tested', 'nvda_verified', 'whole_product_complete')) {
+            if ($stageInfo.$field -ne $false) { throw "Fresh stage-neutral BUILD_INFO $field is not false" }
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Autosport-V1-Windows-prehuman
@@ -265,4 +317,11 @@ jobs:
             dist/nvda-evidence-package-smoke.json
             dist/nvda-evidence-packaged-template.json
             dist/nvda-evidence-fresh-extracted-template.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-Windows-stage-neutral-prehuman
+          path: |
+            dist/Autosport-windows-x64.zip
+            dist/stage-neutral-release-verification.json
           if-no-files-found: error

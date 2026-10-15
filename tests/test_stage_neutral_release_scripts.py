@@ -54,3 +54,38 @@ def test_canonical_candidate_build_executes_exact_git_materializer() -> None:
     assert "-SourceSha $sourceSha -RepoRoot $repoRoot" in script
     assert "build_stage_neutral_windows_candidate.ps1" not in script
     assert "& $materializer -SourceSha" not in script
+
+
+def test_stage_neutral_release_is_independently_checked_and_published() -> None:
+    """The production Windows CI artifact must include the *new* exact ZIP."""
+    workflow = (REPO_ROOT / ".github" / "workflows" / "windows-build.yml").read_text(
+        encoding="utf-8"
+    )
+    verification = workflow.index("name: Verify independent stage-neutral release extraction")
+    legacy_upload = workflow.index("name: Autosport-V1-Windows-prehuman")
+    stage_upload = workflow.index("name: Autosport-Windows-stage-neutral-prehuman")
+    assert verification < legacy_upload < stage_upload
+    stage_gate = workflow[verification:legacy_upload]
+    for required in (
+        "stage-neutral-release-verification.json",
+        "stageReport.source_sha",
+        "stageReport.package_sha256",
+        "stageReport.real_money_execution",
+        "Get-FileHash -LiteralPath $stageArchive -Algorithm SHA256",
+        "Expand-Archive -LiteralPath $stageArchive",
+        "BUILD_INFO.json",
+        "stageInfo.autosport_exe_sha256",
+        "stageInfo.nvda_verified",
+        "whole_product_complete",
+    ):
+        if required == "stageReport.real_money_execution":
+            # Truth-label checks are iterated through all fields.
+            assert "@('real_money_execution', 'human_tested', 'nvda_verified', 'whole_product_complete')" in stage_gate
+        elif required == "stageInfo.nvda_verified":
+            assert "$stageInfo.$field -ne $false" in stage_gate
+        else:
+            assert required in stage_gate
+    stage_artifact = workflow[stage_upload:]
+    assert "dist/Autosport-windows-x64.zip" in stage_artifact
+    assert "dist/stage-neutral-release-verification.json" in stage_artifact
+    assert "if-no-files-found: error" in stage_artifact

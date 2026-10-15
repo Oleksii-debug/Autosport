@@ -9,7 +9,7 @@
 7. Для read-only live observation виберіть режим «Public preview — без ключа» або «API key з environment» і натисніть «Оновити live snapshot».
 8. Authenticated live режим читає ключ тільки зі змінної середовища AUTOSPORT_PARLAYAPI_KEY. Ключ не вводиться в інтерфейс і не зберігається у workspace.
 9. Live acquisition і economic replay виконуються поза Tk/UIA thread; клавіатурна навігація та screen-reader UI не повинні блокуватися очікуванням мережі або replay.
-10. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; Ctrl+L — оновити live snapshot; F6 — paper tickets; F7 — live quotes; F8 — Evaluation і portfolio evidence. Strategy combobox і кнопка research plan входять у Tab traversal та мають UIA names/descriptions.
+10. Ctrl+O — вибрати dataset; Ctrl+R — запустити replay; Ctrl+Shift+R — запустити fail-closed відновлення поточного workspace через GUI; Ctrl+L — оновити live snapshot; F6 — paper tickets; F7 — live quotes; F8 — Evaluation і portfolio evidence. Strategy combobox, кнопка research plan і кнопка recovery входять у Tab traversal та мають UIA names/descriptions.
 11. Віртуальний банк, рішення, market history, source health та run summaries зберігаються у локальному Autosport workspace і відновлюються після перезапуску. Economic history різних strategy/plan identities ізольована у strategy-specific workspaces.
 
 PORTABLE DATA / RESEARCH TOOLS

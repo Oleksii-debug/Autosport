@@ -20,12 +20,63 @@ class _NativeDialog:
         return self.responses.pop(0) if self.responses else 2
 
 
+class _DialogUser32Proxy:
+    """Mock MessageBoxW only; retain every other real Windows user32 API."""
+
+    def __init__(self, original: object | None, dialog: _NativeDialog) -> None:
+        self._original = original
+        self._dialog = dialog
+
+    def MessageBoxW(self, parent: object, message: str, title: str, flags: int) -> int:
+        return self._dialog.MessageBoxW(parent, message, title, flags)
+
+    def __getattr__(self, name: str) -> object:
+        if self._original is None:
+            raise AttributeError(name)
+        return getattr(self._original, name)
+
+
+class _DialogWinDLLProxy:
+    """Preserve shell32 needed by the real durable STOP authority on Windows."""
+
+    def __init__(self, original: object | None, dialog: _NativeDialog) -> None:
+        self._original = original
+        existing_user32 = getattr(original, "user32", None) if original is not None else None
+        self.user32 = _DialogUser32Proxy(existing_user32, dialog)
+
+    def __getattr__(self, name: str) -> object:
+        if self._original is None:
+            raise AttributeError(name)
+        return getattr(self._original, name)
+
+
 def _dialogs(monkeypatch: pytest.MonkeyPatch, *responses: int) -> _NativeDialog:
     native = _NativeDialog(tuple(responses))
     monkeypatch.setattr(
-        ctypes, "windll", SimpleNamespace(user32=native), raising=False
+        ctypes, "windll", _DialogWinDLLProxy(getattr(ctypes, "windll", None), native),
+        raising=False,
     )
     return native
+
+
+def test_dialog_fixture_keeps_real_shell32_and_other_win32_functions(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    shell32 = object()
+    kernel32 = object()
+    other_user32 = object()
+    original = SimpleNamespace(
+        shell32=shell32,
+        kernel32=kernel32,
+        user32=SimpleNamespace(GetWindowLongW=other_user32),
+    )
+    monkeypatch.setattr(ctypes, "windll", original, raising=False)
+    dialog = _dialogs(monkeypatch, 7)
+    assert ctypes.windll.shell32 is shell32
+    assert ctypes.windll.kernel32 is kernel32
+    assert ctypes.windll.user32.GetWindowLongW is other_user32
+    assert ctypes.windll.user32.MessageBoxW(None, "Повідомлення", "Тема", 0x104) == 7
+    assert len(dialog.calls) == 1
 
 
 def test_webview_failure_native_choice_defaults_to_no_and_does_not_stop(

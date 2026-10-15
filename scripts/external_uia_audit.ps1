@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -844,6 +844,7 @@ function Find-UiaRootWithElementForProcessFamily {
     # provider exposing the expected AutomationId and process identity.
     Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_PROBE'
     $nativeWindows = [AutosportNativeWindows]::ForProcessFamily($ProcessIds)
+    Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_READY'
     foreach ($nativeHandle in $nativeWindows) {
         if ([DateTime]::UtcNow -ge $Deadline) { break }
         try {
@@ -863,10 +864,15 @@ function Find-UiaRootWithElementForProcessFamily {
             continue
         }
     }
+    # A native HWND is only a candidate. Preserve an independent diagnostic
+    # boundary before entering any fallback UIA COM call. No stage is PASS.
+    Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED'
     # The existing UIA desktop search remains a fail-closed fallback if no
     # native-window candidate exposes the semantic surface.
     try {
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_PROBE'
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_READY'
         # The unfiltered desktop child enumeration succeeded on Windows CI, but
         # reading ProcessId on a foreign top-level UIA provider then blocked the
         # independent watchdog (38222339505, SEMANTIC_WINDOW_PROPERTY_PROBE).

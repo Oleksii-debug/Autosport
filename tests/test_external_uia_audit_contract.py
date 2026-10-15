@@ -752,7 +752,7 @@ def test_external_uia_progress_is_fixed_stage_only_not_a_pass_or_user_data() -> 
     audit = _audit()
     assert "[string]$ProgressOutput = ''" in audit
     assert "function Write-ExternalUiaProgress" in audit
-    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
+    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE''SEMANTIC_UIA_OBSERVED'" not in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in _windows_workflow()
@@ -1347,3 +1347,38 @@ def test_stalled_uia_worker_aborts_provider_reentry_and_cleanup_probe() -> None:
     assert "observed_window_class = 'OTHER_OR_UNAVAILABLE'" in cleanup
     assert "if ($report.status -ne 'PASS')" in audit
     assert "exit 1" in audit
+
+
+def test_external_uia_watchdog_distinguishes_native_enumeration_from_desktop_com() -> None:
+    """The 120s failure must identify the exact boundary, not grant UIA PASS.
+
+    A stall reported as NATIVE_HANDLES_PROBE used to also cover a desktop COM
+    RootElement read when the native HWND list was empty. These probes cannot
+    replace the real AutomationId, keyboard, live-region, or STOP requirements.
+    """
+    audit = _audit()
+    workflow = _windows_workflow()
+    native = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    for token in (
+        "SEMANTIC_NATIVE_HANDLES_PROBE", "SEMANTIC_NATIVE_HANDLES_READY",
+        "SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED", "SEMANTIC_DESKTOP_ROOT_PROBE",
+        "SEMANTIC_DESKTOP_ROOT_READY",
+    ):
+        assert f"Write-ExternalUiaProgress -Stage '{token}'" in native
+        assert f"'{token}'" in workflow
+    assert native.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_PROBE'") < native.index(
+        "$nativeWindows = [AutosportNativeWindows]::ForProcessFamily($ProcessIds)"
+    ) < native.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_READY'")
+    assert native.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_READY'") < native.index(
+        "foreach ($nativeHandle in $nativeWindows)"
+    ) < native.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED'")
+    assert native.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_PROBE'") < native.index(
+        "$desktop = [System.Windows.Automation.AutomationElement]::RootElement"
+    ) < native.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_READY'")
+    assert native.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_READY'") < native.index(
+        "Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ENUM_PROBE'"
+    )
+    assert "$report.status = 'PASS'" not in native
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow

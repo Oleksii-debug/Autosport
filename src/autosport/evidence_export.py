@@ -1510,20 +1510,48 @@ def verify_evidence_manifest(manifest: str | Path, workspace: str | Path) -> dic
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-export-evidence",
-        description="Export a deterministic metadata-only Autosport workspace evidence manifest",
+        description=(
+            "Експортує детермінований маніфест доказів робочого простору Autosport, "
+            "що містить лише метадані."
+        ),
     )
-    parser.add_argument("workspace", type=Path, help="existing Autosport workspace")
-    parser.add_argument("--output", type=Path, required=True, help="destination JSON manifest")
+    parser.add_argument(
+        "workspace",
+        type=Path,
+        metavar="РОБОЧИЙ_ПРОСТІР",
+        help="наявний робочий простір Autosport",
+    )
+    parser.add_argument(
+        "--output",
+        type=Path,
+        required=True,
+        metavar="JSON_ФАЙЛ",
+        help="файл призначення для JSON-маніфесту доказів",
+    )
     return parser
 
 
 def build_verify_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-verify-evidence",
-        description="Verify an Autosport evidence manifest against current workspace evidence",
+        description=(
+            "Перевіряє маніфест доказів Autosport щодо поточного стану доказів "
+            "у робочому просторі."
+        ),
     )
-    parser.add_argument("manifest", type=Path, help="evidence manifest JSON")
-    parser.add_argument("--workspace", type=Path, required=True, help="existing Autosport workspace")
+    parser.add_argument(
+        "manifest",
+        type=Path,
+        metavar="МАНІФЕСТ",
+        help="JSON-маніфест доказів для перевірки",
+    )
+    parser.add_argument(
+        "--workspace",
+        type=Path,
+        required=True,
+        metavar="РОБОЧИЙ_ПРОСТІР",
+        help="наявний робочий простір Autosport",
+    )
     return parser
 
 

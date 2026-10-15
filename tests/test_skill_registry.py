@@ -5,6 +5,8 @@ from dataclasses import replace
 
 import pytest
 
+import autosport.skill_registry as skill_registry_module
+
 from autosport.agent_loop import AgentLoopRuntime
 from autosport.learning_environment import CausalLearningEnvironment, EnvironmentIdentity
 from autosport.skill_registry import (
@@ -31,6 +33,25 @@ SHA_D = "d" * 64
 def _slow_handler(_payload):
     time.sleep(2)
     return SkillExecutionResult(output={})
+
+
+def _large_result_handler(_payload):
+    return SkillExecutionResult(output={"payload": "x" * (1024 * 1024)})
+
+
+def _partial_spool_stall_handler(_payload):
+    def stalled_write_text(self, data, *args, **kwargs):
+        with self.open("w", encoding="utf-8") as handle:
+            handle.write(data[:1])
+            handle.flush()
+        time.sleep(60)
+        return len(data)
+
+    # Child-local mutation only. The real bounded transport captures the Path
+    # class but serialization/file publication still happens inside the killable
+    # child, so a partial write must remain covered by the handler deadline.
+    skill_registry_module.Path.write_text = stalled_write_text
+    return SkillExecutionResult(output={"payload": "never-authoritative"})
 
 
 def _undeclared_mutation_handler(_payload):
@@ -411,6 +432,1541 @@ def test_executable_builtin_definition_cannot_be_pre_registered_with_weaker_poli
         registry.register(forged)
 
 
+def test_handler_result_pipe_is_drained_before_process_exit_wait(monkeypatch):
+    expected = SkillExecutionResult(output={"payload": "x" * 4096})
+    events = []
+
+    class FakeReceiver:
+        def __init__(self):
+            self.ready = False
+            self.drained = False
+            self.closed = False
+
+        def poll(self):
+            events.append("poll")
+            return self.ready
+
+        def recv(self):
+            events.append("recv")
+            self.drained = True
+            process.alive = False
+            return "OK", expected
+
+        def close(self):
+            self.closed = True
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    receiver = FakeReceiver()
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+            self.join_timeouts = []
+
+        def start(self):
+            receiver.ready = True
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+            events.append("join")
+            # Simulate a child whose handler has finished but whose result send
+            # fills the OS pipe. It cannot exit until the parent drains recv().
+            if receiver.drained:
+                self.alive = False
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert error is None
+    assert result == expected
+    assert process.killed is False
+    assert process.closed is True
+    assert receiver.closed is True
+    assert "recv" in events
+    assert "join" not in events[: events.index("recv")]
+
+
+def test_handler_large_result_crosses_transport_without_false_timeout():
+    result, error = SkillRegistry._execute_handler_bounded(
+        _large_result_handler,
+        {},
+        10,
+    )
+
+    assert error is None
+    assert result is not None
+    assert len(result.output["payload"]) == 1024 * 1024
+
+
+def test_handler_oversized_result_is_bounded_before_spool_publication(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-result.json"
+    max_bytes = 256
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_HANDLER_RESULT_SPOOL_MAX_BYTES",
+        max_bytes,
+    )
+
+    real_write_text = skill_registry_module.Path.write_text
+    published_sizes = []
+
+    def bounded_write_text(self, data, *args, **kwargs):
+        encoded_size = len(data.encode("utf-8"))
+        published_sizes.append(encoded_size)
+        assert encoded_size <= max_bytes
+        return real_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_registry_module.Path,
+        "write_text",
+        bounded_write_text,
+    )
+
+    def oversized_handler(_payload):
+        return SkillExecutionResult(output={"payload": "x" * 4096})
+
+    skill_registry_module._skill_handler_spooled_process(
+        oversized_handler,
+        {},
+        str(spool_path),
+    )
+
+    result, error = skill_registry_module._decode_handler_result_spool(spool_path)
+    assert result is None
+    assert error == "HANDLER_RESULT_TOO_LARGE"
+    assert published_sizes
+    assert spool_path.stat().st_size <= max_bytes
+
+
+def test_handler_oversized_error_record_is_bounded_before_spool_publication(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-error.json"
+    max_bytes = 256
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_HANDLER_RESULT_SPOOL_MAX_BYTES",
+        max_bytes,
+    )
+
+    real_write_text = skill_registry_module.Path.write_text
+    published_sizes = []
+
+    def bounded_write_text(self, data, *args, **kwargs):
+        encoded_size = len(data.encode("utf-8"))
+        published_sizes.append(encoded_size)
+        assert encoded_size <= max_bytes
+        return real_write_text(self, data, *args, **kwargs)
+
+    monkeypatch.setattr(
+        skill_registry_module.Path,
+        "write_text",
+        bounded_write_text,
+    )
+
+    def failing_handler(_payload):
+        raise RuntimeError("simulated handler failure")
+
+    def oversized_error_canonicalizer(record):
+        if record.get("kind") == "ERROR":
+            return "x" * 4096
+        return json.dumps(
+            record,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+
+    skill_registry_module._skill_handler_spooled_process(
+        failing_handler,
+        {},
+        str(spool_path),
+        _canonicalize=oversized_error_canonicalizer,
+    )
+
+    result, error = skill_registry_module._decode_handler_result_spool(spool_path)
+    assert result is None
+    assert error == "HANDLER_RESULT_TOO_LARGE"
+    assert published_sizes
+    assert spool_path.stat().st_size <= max_bytes
+
+
+def test_handler_partial_result_spool_write_remains_timeout_bounded():
+    started = time.monotonic()
+    result, error = SkillRegistry._execute_handler_bounded(
+        _partial_spool_stall_handler,
+        {},
+        1,
+    )
+    elapsed = time.monotonic() - started
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT"
+    assert elapsed < 3
+
+
+def test_handler_spool_decode_baseexception_cleans_spool_before_reraise(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-result.json"
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            assert timeout == 1
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_spooled_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert args[2] == str(spool_path)
+            assert daemon is True
+            return process
+
+    def fake_mkstemp(*, prefix, suffix):
+        assert prefix == "autosport-skill-result-"
+        assert suffix == ".json"
+        descriptor = skill_registry_module.os.open(
+            spool_path,
+            skill_registry_module.os.O_CREAT
+            | skill_registry_module.os.O_RDWR,
+        )
+        return descriptor, str(spool_path)
+
+    monkeypatch.setattr(skill_registry_module.tempfile, "mkstemp", fake_mkstemp)
+
+    def interrupt_decode(_path):
+        raise KeyboardInterrupt("simulated parent decode interruption")
+
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_decode_handler_result_spool",
+        interrupt_decode,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="simulated parent decode interruption"):
+        skill_registry_module._execute_handler_spooled_bounded(
+            FakeContext(),
+            _slow_handler,
+            {},
+            1,
+        )
+
+    assert process.closed is True
+    assert not spool_path.exists()
+
+
+@pytest.mark.parametrize(
+    ("stop_mode", "expected_error"),
+    (
+        ("stop_failed", "HANDLER_TIMEOUT_STOP_FAILED"),
+        ("handle_close_failed", "HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED"),
+    ),
+)
+def test_handler_spool_cleanup_failure_does_not_mask_process_stop_truth(
+    tmp_path, monkeypatch, stop_mode, expected_error
+):
+    spool_path = tmp_path / "handler-result.json"
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            if stop_mode == "stop_failed":
+                raise OSError("simulated kill failure")
+            self.alive = False
+
+        def terminate(self):
+            if stop_mode == "stop_failed":
+                raise OSError("simulated terminate failure")
+            self.alive = False
+
+        def close(self):
+            if stop_mode == "handle_close_failed":
+                raise OSError("simulated process handle close failure")
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_spooled_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert args[2] == str(spool_path)
+            assert daemon is True
+            return process
+
+    def fake_mkstemp(*, prefix, suffix):
+        assert prefix == "autosport-skill-result-"
+        assert suffix == ".json"
+        descriptor = skill_registry_module.os.open(
+            spool_path,
+            skill_registry_module.os.O_CREAT
+            | skill_registry_module.os.O_RDWR,
+        )
+        return descriptor, str(spool_path)
+
+    monkeypatch.setattr(skill_registry_module.tempfile, "mkstemp", fake_mkstemp)
+    cleanup_attempts = []
+
+    def fail_spool_cleanup(path, *, suppress_base_exceptions=False):
+        assert suppress_base_exceptions is False
+        cleanup_attempts.append(path)
+        return False
+
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_remove_handler_result_spool",
+        fail_spool_cleanup,
+    )
+
+    try:
+        result, error = skill_registry_module._execute_handler_spooled_bounded(
+            FakeContext(),
+            _slow_handler,
+            {},
+            1,
+        )
+
+        assert result is None
+        assert error == expected_error
+        if stop_mode == "stop_failed":
+            # A possibly-live child still owns the original private spool path;
+            # unlinking it could let the child recreate a less-private file.
+            assert cleanup_attempts == []
+            assert spool_path.exists()
+        else:
+            # The child is stopped; only its handle failed to close, so spool
+            # cleanup is safe to attempt and must not mask stronger truth.
+            assert cleanup_attempts == [spool_path]
+        assert process.closed is False
+    finally:
+        spool_path.unlink(missing_ok=True)
+
+
+def test_stop_failed_invocation_remains_recovery_required(
+    tmp_path, monkeypatch
+):
+    registry = _registry(tmp_path)
+    definition = _definition("diagnose_provider_gap")
+
+    monkeypatch.setattr(
+        SkillRegistry,
+        "_execute_handler_bounded",
+        staticmethod(
+            lambda handler, payload, timeout_seconds: (
+                None,
+                "HANDLER_TIMEOUT_STOP_FAILED",
+            )
+        ),
+    )
+
+    interrupted = _invoke(
+        registry,
+        definition,
+        call_id="stop-failed-recovery",
+    )
+
+    assert interrupted.status is SkillRunStatus.INTERRUPTED
+    assert interrupted.error_code == "HANDLER_TIMEOUT_STOP_FAILED"
+    assert interrupted.completed_at == "2026-09-19T04:00:00Z"
+
+    with pytest.raises(SkillRecoveryRequiredError, match="recovery"):
+        _invoke(
+            SkillRegistry(registry.path),
+            definition,
+            call_id="stop-failed-recovery",
+            at="2026-09-19T04:05:00Z",
+        )
+
+
+def test_handler_spool_cleanup_failure_still_invalidates_success(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-result.json"
+    expected = SkillExecutionResult(output={})
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_spooled_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert args[2] == str(spool_path)
+            assert daemon is True
+            return process
+
+    def fake_mkstemp(*, prefix, suffix):
+        assert prefix == "autosport-skill-result-"
+        assert suffix == ".json"
+        descriptor = skill_registry_module.os.open(
+            spool_path,
+            skill_registry_module.os.O_CREAT
+            | skill_registry_module.os.O_RDWR,
+        )
+        return descriptor, str(spool_path)
+
+    monkeypatch.setattr(skill_registry_module.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_decode_handler_result_spool",
+        lambda _path: (expected, None),
+    )
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_remove_handler_result_spool",
+        lambda _path, *, suppress_base_exceptions=False: False,
+    )
+
+    try:
+        result, error = skill_registry_module._execute_handler_spooled_bounded(
+            FakeContext(),
+            _slow_handler,
+            {},
+            1,
+        )
+
+        assert result is None
+        assert error == "HANDLER_RESULT_SPOOL_CLEANUP_FAILED"
+        assert process.closed is True
+    finally:
+        spool_path.unlink(missing_ok=True)
+
+
+def test_handler_timeout_cleanup_hard_kills_before_bounded_reap(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.join_timeouts = []
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT"
+    assert process.killed is True
+    assert process.join_timeouts[0] == 1
+    assert len(process.join_timeouts) == 2
+    assert 0 < process.join_timeouts[1] < 1
+
+
+def test_handler_timeout_kill_failure_falls_back_to_bounded_terminate(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.terminated = False
+            self.join_timeouts = []
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            raise OSError("simulated kill race/failure")
+
+        def terminate(self):
+            self.terminated = True
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+    process.closed = False
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT"
+    assert process.terminated is True
+    assert process.closed is True
+    assert process.join_timeouts[0] == 1
+    assert len(process.join_timeouts) == 3
+    assert all(0 < timeout < 1 for timeout in process.join_timeouts[1:])
+
+
+def test_handler_timeout_stop_failure_is_distinct_and_leaves_handle_open(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.join_timeouts = []
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            raise OSError("simulated kill failure")
+
+        def terminate(self):
+            raise OSError("simulated terminate failure")
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT_STOP_FAILED"
+    assert process.is_alive() is True
+    assert process.closed is False
+    assert len(process.join_timeouts) == 3
+    assert process.join_timeouts[0] == 1
+    assert all(0 < timeout < 1 for timeout in process.join_timeouts[1:])
+
+
+def test_handler_timeout_handle_close_failure_is_terminal_infrastructure_truth(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.join_timeouts = []
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_timeouts.append(timeout)
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.alive = False
+
+        def close(self):
+            raise ValueError("simulated process handle close failure")
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT_HANDLE_CLOSE_FAILED"
+    assert process.is_alive() is False
+    assert len(process.join_timeouts) == 2
+    assert process.join_timeouts[0] == 1
+    assert 0 < process.join_timeouts[1] < 1
+
+
+def test_handler_result_handle_close_failure_cannot_escape_or_claim_success(monkeypatch):
+    expected = SkillExecutionResult(output={})
+
+    class FakeReceiver:
+        def close(self):
+            return None
+
+        def poll(self):
+            return True
+
+        def recv(self):
+            return "OK", expected
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            raise OSError("simulated process handle close failure")
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeReceiver(), FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+
+
+def test_handler_unexpected_process_handle_close_failure_becomes_terminal_truth(monkeypatch):
+    expected = SkillExecutionResult(output={})
+
+    class FakeReceiver:
+        def close(self):
+            return None
+
+        def poll(self):
+            return True
+
+        def recv(self):
+            return "OK", expected
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            raise RuntimeError("simulated unexpected process handle close failure")
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeReceiver(), FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return FakeProcess()
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_HANDLE_CLOSE_FAILED"
+
+
+@pytest.mark.parametrize("failure_point", ("poll", "recv"))
+@pytest.mark.parametrize("failure_type", (ValueError, RuntimeError))
+def test_handler_result_pipe_failure_becomes_terminal_truth(monkeypatch, failure_point, failure_type):
+    class FakeReceiver:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+        def poll(self):
+            if failure_point == "poll":
+                raise failure_type("simulated result pipe failure during poll")
+            return True
+
+        def recv(self):
+            if failure_point == "recv":
+                raise failure_type("simulated result pipe failure during recv")
+            raise AssertionError("unexpected recv")
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeReceiver()
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_RESULT_UNAVAILABLE"
+    assert receiver.closed is True
+    assert process.closed is True
+
+
+def test_handler_process_construction_failure_closes_both_pipe_endpoints(monkeypatch):
+    class FakeEndpoint:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeEndpoint()
+    sender = FakeEndpoint()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            raise RuntimeError("simulated process construction failure")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CONSTRUCTION_RUNTIMEERROR"
+    assert receiver.closed is True
+    assert sender.closed is True
+
+
+def test_handler_spawn_failure_attempts_all_cleanup_even_when_pipe_close_fails(monkeypatch):
+    class FailingReceiver:
+        def __init__(self):
+            self.close_attempted = False
+
+        def close(self):
+            self.close_attempted = True
+            raise RuntimeError("simulated receiver close failure")
+
+    class Sender:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FailingReceiver()
+    sender = Sender()
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            raise RuntimeError("simulated spawn failure")
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_START_PIPE_CLOSE_FAILED"
+    assert receiver.close_attempted is True
+    assert sender.closed is True
+    assert process.closed is True
+
+
+def test_handler_spawn_failure_stops_partially_started_child(monkeypatch):
+    class FakeEndpoint:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeEndpoint()
+    sender = FakeEndpoint()
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            raise RuntimeError("simulated partial spawn failure")
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_START_RUNTIMEERROR"
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+    assert sender.closed is True
+
+
+@pytest.mark.parametrize(
+    ("close_fails", "expected_error"),
+    (
+        (False, "HANDLER_START_RUNTIMEERROR"),
+        (True, "HANDLER_START_HANDLE_CLOSE_FAILED"),
+    ),
+)
+def test_handler_spawn_failure_closes_process_handle_and_preserves_terminal_truth(
+    monkeypatch, close_fails, expected_error
+):
+    class FakeEndpoint:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeEndpoint()
+    sender = FakeEndpoint()
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            raise RuntimeError("simulated spawn failure")
+
+        def close(self):
+            if close_fails:
+                raise RuntimeError("simulated process handle close failure")
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == expected_error
+    assert receiver.closed is True
+    assert sender.closed is True
+    assert process.closed is (not close_fails)
+
+
+def test_handler_sender_close_failure_stops_child_and_becomes_terminal_truth(monkeypatch):
+    class FakeReceiver:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeSender:
+        def close(self):
+            raise RuntimeError("simulated parent sender close failure")
+
+    receiver = FakeReceiver()
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_RESULT_PIPE_CLOSE_FAILED"
+    assert receiver.closed is True
+    assert process.killed is True
+    assert process.closed is True
+
+
+def test_handler_parent_keyboard_interrupt_reaps_child_and_reraises(monkeypatch):
+    class FakeEndpoint:
+        def __init__(self):
+            self.closed = False
+
+        def close(self):
+            self.closed = True
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.join_calls = 0
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+            if self.join_calls == 1:
+                raise KeyboardInterrupt()
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    receiver = FakeEndpoint()
+    sender = FakeEndpoint()
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, sender
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert process.killed is True
+    assert process.closed is True
+    assert process.join_calls == 2
+    assert receiver.closed is True
+    assert sender.closed is True
+
+
+def test_handler_initial_join_failure_stops_child_and_becomes_terminal_truth(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.join_calls = 0
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+            if self.join_calls == 1:
+                raise RuntimeError("simulated initial join failure")
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_JOIN_FAILED"
+    assert process.killed is True
+    assert process.closed is True
+    assert process.join_calls == 2
+
+
+def test_handler_initial_state_query_failure_stops_child_and_becomes_terminal_truth(monkeypatch):
+    class FakeEndpoint:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.state_calls = 0
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            self.state_calls += 1
+            if self.state_calls == 1:
+                raise RuntimeError("simulated initial state query failure")
+            return self.alive
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeEndpoint(), FakeEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_STATE_UNAVAILABLE"
+    assert process.killed is True
+    assert process.closed is True
+    assert process.state_calls == 2
+
+
+
+def test_handler_context_failure_after_running_is_durable_terminal_truth(tmp_path, monkeypatch):
+    registry = _registry(tmp_path)
+    definition = _definition("diagnose_provider_gap")
+
+    def fail_context(_method):
+        raise RuntimeError("simulated multiprocessing context failure")
+
+    monkeypatch.setattr(skill_registry_module.multiprocessing, "get_context", fail_context)
+
+    run = _invoke(registry, definition, payload={})
+
+    assert run.status is SkillRunStatus.FAILED
+    assert run.error_code == "HANDLER_INFRASTRUCTURE_RUNTIMEERROR"
+    assert run.completed_at is not None
+    assert SkillRegistry(registry.path).get_run(run.run_id) == run
+
+def test_handler_timeout_receiver_close_failure_is_terminal_cleanup_truth(monkeypatch):
+    class FakeReceiver:
+        def close(self):
+            raise RuntimeError("simulated receiver close failure")
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeReceiver(), FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_TIMEOUT_PIPE_CLOSE_FAILED"
+    assert process.closed is True
+
+
+def test_handler_success_receiver_close_failure_cannot_claim_success(monkeypatch):
+    expected = SkillExecutionResult(output={})
+
+    class FakeReceiver:
+        def poll(self):
+            return True
+
+        def recv(self):
+            return "OK", expected
+
+        def close(self):
+            raise RuntimeError("simulated receiver close failure")
+
+    class FakeSender:
+        def close(self):
+            return None
+
+    class FakeProcess:
+        def __init__(self):
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    process = FakeProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return FakeReceiver(), FakeSender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_RESULT_PIPE_CLOSE_FAILED"
+    assert process.closed is True
+
+
 def test_handler_timeout_terminates_and_persists_terminal_failure(tmp_path):
     registry = SkillRegistry.initialize(tmp_path / "skills.json")
     definition = SkillDefinition(
@@ -624,3 +2180,808 @@ def test_agent_loop_skill_invocation_binds_exact_loop_snapshot(tmp_path):
     assert run.caller_state_sha256 == before.state_sha256
     assert run.source_sha256 == before.source_sha256
     assert runtime.snapshot().state_sha256 == before.state_sha256
+
+def test_handler_interrupt_cleanup_baseexception_cannot_mask_original(monkeypatch):
+    class InterruptingEndpoint:
+        def close(self):
+            raise SystemExit("cleanup pipe close")
+
+    class InterruptingProcess:
+        def __init__(self):
+            self.alive = True
+            self.join_calls = 0
+
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+            if self.join_calls == 1:
+                raise KeyboardInterrupt("original parent interrupt")
+
+        def is_alive(self):
+            return self.alive
+
+        def kill(self):
+            raise SystemExit("cleanup kill")
+
+        def terminate(self):
+            self.alive = False
+
+        def close(self):
+            raise SystemExit("cleanup process close")
+
+    process = InterruptingProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return InterruptingEndpoint(), InterruptingEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            assert args[0] is _slow_handler
+            assert args[1] == {}
+            assert daemon is True
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="original parent interrupt"):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert process.alive is False
+    assert process.join_calls >= 2
+
+
+def test_handler_construction_interrupt_cleanup_baseexception_cannot_mask_original(
+    monkeypatch,
+):
+    class InterruptingEndpoint:
+        def close(self):
+            raise SystemExit("cleanup pipe close")
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return InterruptingEndpoint(), InterruptingEndpoint()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            raise KeyboardInterrupt("original construction interrupt")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="original construction interrupt"):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+
+def test_handler_result_interrupt_cleanup_baseexception_cannot_mask_original(
+    monkeypatch,
+):
+    class InterruptingReceiver:
+        def poll(self):
+            raise KeyboardInterrupt("original result interrupt")
+
+        def close(self):
+            raise SystemExit("cleanup receiver close")
+
+    class Sender:
+        def close(self):
+            return None
+
+    class InterruptingProcess:
+        def start(self):
+            return None
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            raise SystemExit("cleanup process close")
+
+    process = InterruptingProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return InterruptingReceiver(), Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="original result interrupt"):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+
+def test_handler_deadline_clock_failure_reaps_child_and_returns_terminal_truth(
+    monkeypatch,
+):
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_process
+            return process
+
+    def fail_clock():
+        raise RuntimeError("simulated monotonic failure")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(skill_registry_module.time, "monotonic", fail_clock)
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert process.killed is True
+    assert process.alive is False
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_poll_loop_clock_failure_reaps_child(monkeypatch):
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    clock_calls = 0
+
+    def fail_second_clock():
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 1:
+            return 100.0
+        raise RuntimeError("simulated loop clock failure")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(skill_registry_module.time, "monotonic", fail_second_clock)
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert clock_calls == 2
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_result_reap_clock_failure_cannot_claim_success(monkeypatch):
+    expected = SkillExecutionResult(output={"large": "done"})
+
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return True
+
+        def recv(self):
+            return ("OK", expected)
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    clock_calls = 0
+
+    def fail_second_clock():
+        nonlocal clock_calls
+        clock_calls += 1
+        if clock_calls == 1:
+            return 100.0
+        raise RuntimeError("simulated post-result clock failure")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(skill_registry_module.time, "monotonic", fail_second_clock)
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert clock_calls == 2
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_clock_interrupt_cleanup_cannot_mask_original(monkeypatch):
+    class InterruptingReceiver:
+        def poll(self):
+            return False
+
+        def close(self):
+            raise SystemExit("cleanup pipe close")
+
+    class Sender:
+        def close(self):
+            return None
+
+    class InterruptingProcess:
+        def start(self):
+            return None
+
+        def kill(self):
+            raise SystemExit("cleanup kill")
+
+        def terminate(self):
+            raise SystemExit("cleanup terminate")
+
+        def join(self, timeout=None):
+            raise SystemExit("cleanup join")
+
+        def is_alive(self):
+            return False
+
+        def close(self):
+            raise SystemExit("cleanup process close")
+
+    process = InterruptingProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return InterruptingReceiver(), Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    def interrupt_clock():
+        raise KeyboardInterrupt("original clock interrupt")
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(skill_registry_module.time, "monotonic", interrupt_clock)
+
+    with pytest.raises(KeyboardInterrupt, match="original clock interrupt"):
+        SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+
+@pytest.mark.parametrize("clock_value", [float("nan"), float("inf"), float("-inf")])
+def test_handler_invalid_deadline_clock_value_reaps_child(monkeypatch, clock_value):
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(
+        skill_registry_module.time, "monotonic", lambda: clock_value
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_hostile_clock_subclass_is_rejected_before_arithmetic(monkeypatch):
+    class HostileFloat(float):
+        def __add__(self, other):
+            raise AssertionError("hostile clock arithmetic executed")
+
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        def poll(self):
+            return False
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+    monkeypatch.setattr(
+        skill_registry_module.time, "monotonic", lambda: HostileFloat(100.0)
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_PROCESS_CLOCK_UNAVAILABLE"
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+
+def test_handler_poll_method_lookup_failure_reaps_child(monkeypatch):
+    class Receiver:
+        def __init__(self):
+            self.closed = False
+
+        @property
+        def poll(self):
+            raise RuntimeError("simulated poll lookup failure")
+
+        def close(self):
+            self.closed = True
+
+    class Sender:
+        def close(self):
+            return None
+
+    class Process:
+        def __init__(self):
+            self.alive = True
+            self.killed = False
+            self.closed = False
+
+        def start(self):
+            return None
+
+        def kill(self):
+            self.killed = True
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            return None
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            self.closed = True
+
+    receiver = Receiver()
+    process = Process()
+
+    class FakeContext:
+        @staticmethod
+        def Pipe(*, duplex):
+            assert duplex is False
+            return receiver, Sender()
+
+        @staticmethod
+        def Process(*, target, args, daemon):
+            return process
+
+    monkeypatch.setattr(
+        skill_registry_module.multiprocessing,
+        "get_context",
+        lambda method: FakeContext(),
+    )
+
+    result, error = SkillRegistry._execute_handler_bounded(_slow_handler, {}, 1)
+
+    assert result is None
+    assert error == "HANDLER_RESULT_UNAVAILABLE"
+    assert process.killed is True
+    assert process.closed is True
+    assert receiver.closed is True
+
+def test_close_pipe_endpoints_baseexception_attempts_all_before_reraise():
+    events = []
+
+    class InterruptingEndpoint:
+        def close(self):
+            events.append("interrupting")
+            raise KeyboardInterrupt("cleanup interrupt")
+
+    class LaterEndpoint:
+        def close(self):
+            events.append("later")
+
+    with pytest.raises(KeyboardInterrupt, match="cleanup interrupt"):
+        skill_registry_module._close_pipe_endpoints(
+            InterruptingEndpoint(),
+            LaterEndpoint(),
+        )
+
+    assert events == ["interrupting", "later"]
+
+
+def test_stop_process_baseexception_reaps_before_reraise():
+    class FakeProcess:
+        def __init__(self):
+            self.alive = True
+            self.kill_calls = 0
+            self.join_calls = 0
+            self.closed = False
+
+        def kill(self):
+            self.kill_calls += 1
+            if self.kill_calls == 1:
+                raise KeyboardInterrupt("stop interrupt")
+            self.alive = False
+
+        def terminate(self):
+            self.alive = False
+
+        def join(self, timeout=None):
+            self.join_calls += 1
+
+        def is_alive(self):
+            return self.alive
+
+        def close(self):
+            assert self.alive is False
+            self.closed = True
+
+    process = FakeProcess()
+
+    with pytest.raises(KeyboardInterrupt, match="stop interrupt"):
+        skill_registry_module._stop_process_bounded(process)
+
+    assert process.kill_calls == 2
+    assert process.join_calls >= 1
+    assert process.alive is False
+    assert process.closed is True
+
+def test_interrupted_child_stop_failure_preserves_live_spool(tmp_path, monkeypatch):
+    spool_path = tmp_path / "handler-result.json"
+
+    class InterruptingProcess:
+        def start(self):
+            raise KeyboardInterrupt("original parent interrupt")
+
+    process = InterruptingProcess()
+
+    class FakeContext:
+        @staticmethod
+        def Process(*, target, args, daemon):
+            assert target is skill_registry_module._skill_handler_spooled_process
+            assert args[2] == str(spool_path)
+            assert daemon is True
+            return process
+
+    def fake_mkstemp(*, prefix, suffix):
+        assert prefix == "autosport-skill-result-"
+        assert suffix == ".json"
+        descriptor = skill_registry_module.os.open(
+            spool_path,
+            skill_registry_module.os.O_CREAT
+            | skill_registry_module.os.O_RDWR,
+        )
+        return descriptor, str(spool_path)
+
+    cleanup_calls = []
+
+    def fake_remove(path, *, suppress_base_exceptions=False):
+        cleanup_calls.append((path, suppress_base_exceptions))
+        path.unlink(missing_ok=True)
+        return True
+
+    monkeypatch.setattr(skill_registry_module.tempfile, "mkstemp", fake_mkstemp)
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_stop_process_bounded",
+        lambda _process, *, suppress_base_exceptions=False: "STOP_FAILED",
+    )
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_remove_handler_result_spool",
+        fake_remove,
+    )
+
+    try:
+        with pytest.raises(KeyboardInterrupt, match="original parent interrupt"):
+            skill_registry_module._execute_handler_spooled_bounded(
+                FakeContext(),
+                _slow_handler,
+                {},
+                1,
+            )
+
+        assert cleanup_calls == []
+        assert spool_path.exists()
+    finally:
+        spool_path.unlink(missing_ok=True)
+
+def test_spool_aware_normal_stop_interrupt_preserves_live_spool(
+    tmp_path, monkeypatch
+):
+    spool_path = tmp_path / "handler-result.json"
+    spool_path.write_text("", encoding="utf-8")
+    stop_calls = []
+    cleanup_calls = []
+
+    def fake_stop(_process, *, suppress_base_exceptions=False):
+        stop_calls.append(suppress_base_exceptions)
+        if not suppress_base_exceptions:
+            raise KeyboardInterrupt("cleanup interrupt")
+        return "STOP_FAILED"
+
+    def fake_remove(path, *, suppress_base_exceptions=False):
+        cleanup_calls.append((path, suppress_base_exceptions))
+        path.unlink(missing_ok=True)
+        return True
+
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_stop_process_bounded",
+        fake_stop,
+    )
+    monkeypatch.setattr(
+        skill_registry_module,
+        "_remove_handler_result_spool",
+        fake_remove,
+    )
+
+    with pytest.raises(KeyboardInterrupt, match="cleanup interrupt"):
+        skill_registry_module._stop_spooled_process_bounded(
+            object(),
+            spool_path,
+        )
+
+    assert stop_calls == [False, True]
+    assert cleanup_calls == []
+    assert spool_path.exists()
+

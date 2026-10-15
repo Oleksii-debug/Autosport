@@ -90,17 +90,38 @@ function Get-Sha256Text {
 function Get-ProcessFamilyIds {
     param([int]$RootId)
 
+    if ($RootId -le 0) { throw 'Invalid external UIA process family root' }
+    # Reuse the bounded process-family strategy in canonical external_uia_audit.ps1.
+    # Read only process identity, not paths, arguments, or account data.
+    $inventory = @(
+        Get-CimInstance -ClassName Win32_Process -Property ProcessId, ParentProcessId -OperationTimeoutSec 5 -ErrorAction Stop
+    )
+    if ($inventory.Count -gt 8192) {
+        throw 'External UIA process inventory exceeded its safety bound'
+    }
+    $childrenByParent = @{}
+    foreach ($entry in $inventory) {
+        $parentId = [int]$entry.ParentProcessId
+        $childId = [int]$entry.ProcessId
+        if ($parentId -le 0 -or $childId -le 0) { continue }
+        if (-not $childrenByParent.ContainsKey($parentId)) {
+            $childrenByParent[$parentId] = New-Object 'System.Collections.Generic.List[int]'
+        }
+        $childrenByParent[$parentId].Add($childId)
+    }
     $seen = New-Object 'System.Collections.Generic.HashSet[int]'
     $pending = New-Object 'System.Collections.Generic.Queue[int]'
     $pending.Enqueue($RootId)
     while ($pending.Count -gt 0) {
         $currentId = $pending.Dequeue()
         if (-not $seen.Add($currentId)) { continue }
-        $children = @(
-            Get-CimInstance Win32_Process -Filter "ParentProcessId = $currentId" -ErrorAction SilentlyContinue
-        )
-        foreach ($child in $children) {
-            $pending.Enqueue([int]$child.ProcessId)
+        if ($seen.Count -gt 512) {
+            throw 'External UIA process family exceeded its safety bound'
+        }
+        if ($childrenByParent.ContainsKey($currentId)) {
+            foreach ($childId in $childrenByParent[$currentId]) {
+                if (-not $seen.Contains($childId)) { $pending.Enqueue($childId) }
+            }
         }
     }
     return @($seen | ForEach-Object { [int]$_ })
@@ -209,6 +230,7 @@ if ($RootProcessId -le 0) {
 
 $root = $null
 $recorder = $null
+$listenStage = 'DISCOVER'
 $subscribed = $false
 try {
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
@@ -226,6 +248,7 @@ try {
         throw 'Timed out waiting for an externally inspectable process-family UIA root'
     }
 
+    $listenStage = 'SUBSCRIBE'
     $report.focus_before = Get-FocusIdentity
     $recorder = New-Object AutosportUiaNotificationRecorder
     [System.Windows.Automation.Automation]::AddAutomationEventHandler(
@@ -235,6 +258,7 @@ try {
         $recorder.Handler
     )
     $subscribed = $true
+    $listenStage = 'LISTEN'
 
     $eventDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     while ([DateTime]::UtcNow -lt $eventDeadline) {
@@ -242,6 +266,7 @@ try {
         Start-Sleep -Milliseconds 50
     }
 
+    $listenStage = 'COLLECT'
     $raw = $null
     while ($recorder.Records.TryDequeue([ref]$raw)) {
         $display = [string]$raw.DisplayString
@@ -261,6 +286,7 @@ try {
         $report.events += $record
     }
 
+    $listenStage = 'VERIFY'
     $report.event_count = $report.events.Count
     $report.focus_after = Get-FocusIdentity
     $beforeJson = $report.focus_before | ConvertTo-Json -Compress
@@ -288,7 +314,8 @@ try {
         $report.status = 'PASS'
     }
 } catch {
-    $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+    # Third-party UIA and CIM exception text can contain private user data.
+    $report.failures += "External UIA notification listener failed at stage=$listenStage"
 } finally {
     if ($subscribed -and $null -ne $root -and $null -ne $recorder) {
         try {
@@ -298,7 +325,7 @@ try {
                 $recorder.Handler
             )
         } catch {
-            $report.failures += "event unsubscribe failed: $($_.Exception.Message)"
+            $report.failures += 'External UIA notification listener unsubscribe failed'
             $report.status = 'FAIL'
         }
     }

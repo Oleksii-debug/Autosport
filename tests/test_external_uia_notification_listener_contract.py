@@ -171,3 +171,24 @@ def test_zero_event_runtime_threshold_is_rejected_on_windows(tmp_path: Path) -> 
         completed.stdout + completed.stderr
     )
     assert not output.exists()
+
+
+def test_process_family_discovery_uses_one_bounded_identity_snapshot() -> None:
+    section = TEXT.split("function Get-ProcessFamilyIds {", 1)[1].split(
+        "function Find-UiaRootForProcessFamily {", 1
+    )[0]
+    assert section.count("Get-CimInstance") == 1
+    assert "-Property ProcessId, ParentProcessId" in section
+    assert "-OperationTimeoutSec 5" in section
+    assert "$inventory.Count -gt 8192" in section
+    assert "$seen.Count -gt 512" in section
+    assert "ParentProcessId = $currentId" not in section
+    assert "CommandLine" not in section
+
+
+def test_listener_does_not_serialize_untrusted_exception_messages() -> None:
+    assert "$_.Exception.Message" not in TEXT
+    assert "External UIA notification listener failed at stage=$listenStage" in TEXT
+    assert "External UIA notification listener unsubscribe failed" in TEXT
+    for stage in ("DISCOVER", "SUBSCRIBE", "LISTEN", "COLLECT", "VERIFY"):
+        assert f"$listenStage = '{stage}'" in TEXT

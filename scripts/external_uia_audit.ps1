@@ -877,7 +877,7 @@ function Find-UiaRootWithElementForProcessFamily {
     $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
     $workerProgress = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     $processIdsCsv = (@($ProcessIds | Sort-Object -Unique) -join ',')
-    $childSearchScript = __SEARCH_FUNCTION__
+    $childSearchScript = ${function:Find-UiaSemanticViaChildren}
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_START_PROBE'
     $desktopJob = Start-ThreadJob -ScriptBlock {
         param(

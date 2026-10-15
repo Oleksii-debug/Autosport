@@ -1406,3 +1406,21 @@ def test_actual_desktop_uia_provider_is_bounded_inside_real_mta_worker() -> None
     assert "SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE" in workflow
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
     assert "$report.status = 'PASS'" not in helper
+
+def test_desktop_uia_fallback_binds_actual_rawview_search_function() -> None:
+    """Desktop fallback must pass the real RawView search, never a placeholder.
+
+    This checks source binding only; packaged external UIA remains a hard gate.
+    """
+    source = _audit()
+    fallback = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "__SEARCH_FUNCTION__" not in source
+    assert source.count("$childSearchScript = \u0024{function:Find-UiaSemanticViaChildren}") == 1
+    assert "function Find-UiaSemanticViaChildren {" in source
+    assert "[scriptblock]$ChildSearchScript" in fallback
+    assert "& $ChildSearchScript -Root $Root -AutomationId $AutomationId -Deadline $Deadline" in fallback
+    assert "Start-ThreadJob -ScriptBlock {" in fallback
+    assert "$script:semanticWorkerTimedOut = $true" in fallback
+    assert "$ResultQueue.Enqueue([object](New-BoundedUiaPair" in fallback

@@ -83,10 +83,6 @@ def test_blank_aria_labelledby_has_precedence_over_button_text(
     assert html.count(old) == 1
     # Valid target exists, but is empty; own button text must not mask it.
     html = html.replace(
-        '<span id="__never-present__">',
-        '<span id="__never-present__">',
-    )
-    html = html.replace(
         old,
         old + ' aria-labelledby="as05-empty-label"',
         1,

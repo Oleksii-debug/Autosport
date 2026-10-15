@@ -149,7 +149,7 @@ class _SemanticShellParser(HTMLParser):
         self.h1_count = 0
         self.positive_tabindex: list[str] = []
         self.status_regions: list[dict[str, str | None]] = []
-       self.alert_regions: list[dict[str, str | None]] = []
+        self.alert_regions: list[dict[str, str | None]] = []
         # Static name evidence, distinct from the mere existence of a label/IDREF.
         self.element_text: dict[str, list[str]] = {}
         self.label_text: dict[str, list[str]] = {}

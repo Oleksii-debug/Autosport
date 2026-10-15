@@ -34,7 +34,7 @@ def _snapshot(snapshot_id: str) -> DatasetSnapshot:
 @pytest.fixture(autouse=True)
 def _use_isolated_product_authority_root(tmp_path, monkeypatch):
     product_root = (
-        tmp_path.parent / f"{tmp_path.name}-lineage-authority"
+        tmp_path.parent / f"{tmp_path.name}-machine-authority"
     ).resolve(strict=False)
     monkeypatch.setattr(
         lineage_trust_root,
@@ -52,7 +52,7 @@ def _canonical_lineage(tmp_path):
     lineage = DatasetSnapshotLineageAuthority.initialize_pristine(
         tmp_path / "dataset-snapshot-lineage.json",
         registry,
-        authority_root=tmp_path.parent / f"{tmp_path.name}-lineage-authority",
+        authority_root=tmp_path.parent / f"{tmp_path.name}-machine-authority",
     )
     lineage.register(snapshot_id=first.dataset_snapshot_id, member_sha256=(_MEMBER_SHA,))
     lineage.register(

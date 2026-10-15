@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import json
 import tempfile
 import unittest
@@ -39,6 +40,8 @@ T10 = "2026-09-20T00:00:10Z"
 
 @dataclass(frozen=True)
 class RawScientificRecord:
+    """Test-only historical registry fixture."""
+
     record_type: str
     record_id: str
     available_at: str
@@ -46,6 +49,39 @@ class RawScientificRecord:
 
     def to_payload(self) -> dict[str, Any]:
         return self.payload
+
+
+def _persist_raw_scientific_fixture(
+    registry: ScientificRegistry,
+    record: RawScientificRecord,
+) -> None:
+    envelope = {
+        "record_type": record.record_type,
+        "record_id": record.record_id,
+        "available_at": record.available_at,
+        "payload": record.to_payload(),
+    }
+    encoded = json.dumps(
+        envelope,
+        ensure_ascii=False,
+        sort_keys=True,
+        separators=(",", ":"),
+        allow_nan=False,
+    ).encode("utf-8")
+    envelope["record_sha256"] = hashlib.sha256(encoded).hexdigest()
+    state = registry._read()
+    state["records"].append(envelope)
+    registry.path.write_text(
+        json.dumps(
+            state,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ),
+        encoding="utf-8",
+    )
+    registry._read()
 
 
 class VOCProductionV2BridgeTests(unittest.TestCase):
@@ -87,7 +123,8 @@ class VOCProductionV2BridgeTests(unittest.TestCase):
                     "decision_recorded_through": T10,
                 },
             }
-            registry.append(
+            _persist_raw_scientific_fixture(
+                registry,
                 RawScientificRecord(
                     record_type="ResearchProtocol",
                     record_id="protocol-1",

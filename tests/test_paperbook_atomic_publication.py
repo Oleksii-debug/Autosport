@@ -3,8 +3,10 @@ import tempfile
 import unittest
 from decimal import Decimal
 from pathlib import Path
+from types import FunctionType, SimpleNamespace
 from unittest.mock import patch
 
+import autosport._paperbook_preload_authority_guard as paper_guard
 from autosport.domain import TicketLeg
 from autosport.paper import PaperBook
 
@@ -50,14 +52,20 @@ class PaperBookAtomicPublicationTests(unittest.TestCase):
         self.assertEqual(restored.balance, Decimal("90"))
         self.assertEqual(len(restored.tickets), 1)
 
-    def test_publish_failure_preserves_last_good_snapshot_and_cleans_unique_temp(self) -> None:
+    def test_late_replace_injection_is_rejected_without_durable_mutation(self) -> None:
         book = self._book()
         book.save(self.path)
         last_good = self.path.read_bytes()
 
-        with patch("autosport.paper.os.replace", side_effect=OSError("injected replace failure")):
-            with self.assertRaisesRegex(OSError, "injected replace failure"):
-                book.save(self.path)
+        with self.assertRaisesRegex(
+            AttributeError,
+            "PaperBook persistence module surface is frozen",
+        ):
+            with patch(
+                "autosport.paper.os.replace",
+                side_effect=OSError("injected replace failure"),
+            ):
+                pass
 
         self.assertEqual(self.path.read_bytes(), last_good)
         temporary_files = tuple(
@@ -66,6 +74,47 @@ class PaperBookAtomicPublicationTests(unittest.TestCase):
             if path.name.startswith(f".{self.path.name}.") and path.name.endswith(".tmp")
         )
         self.assertEqual(temporary_files, ())
+
+
+    def test_raw_serializer_replace_failure_preserves_snapshot_and_cleans_temp(self) -> None:
+        book = self._book()
+        book.save(self.path)
+        last_good = self.path.read_bytes()
+
+        raw_save = paper_guard._ORIGINAL_SAVE
+        self.assertIsInstance(raw_save, FunctionType)
+        private_globals = dict(raw_save.__globals__)
+
+        def failing_replace(_source, _destination) -> None:
+            raise OSError("injected private replace failure")
+
+        private_globals["os"] = SimpleNamespace(
+            fsync=os.fsync,
+            replace=failing_replace,
+        )
+        faulted_save = FunctionType(
+            raw_save.__code__,
+            private_globals,
+            name=raw_save.__name__,
+            argdefs=raw_save.__defaults__,
+            closure=raw_save.__closure__,
+        )
+        if raw_save.__kwdefaults__ is not None:
+            faulted_save.__kwdefaults__ = dict(raw_save.__kwdefaults__)
+
+        with self.assertRaisesRegex(OSError, "injected private replace failure"):
+            faulted_save(book, self.path)
+
+        self.assertEqual(self.path.read_bytes(), last_good)
+        temporary_files = tuple(
+            path
+            for path in self.root.iterdir()
+            if path.name.startswith(f".{self.path.name}.") and path.name.endswith(".tmp")
+        )
+        self.assertEqual(temporary_files, ())
+        restored = PaperBook.load(self.path)
+        self.assertEqual(restored.balance, Decimal("90"))
+        self.assertEqual(len(restored.tickets), 1)
 
 
 if __name__ == "__main__":

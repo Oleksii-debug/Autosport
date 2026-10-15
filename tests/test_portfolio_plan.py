@@ -11,11 +11,14 @@ production authority store and exposes no production mint path.
 from __future__ import annotations
 
 import importlib.util
+from decimal import Decimal, ROUND_DOWN, localcontext
 from pathlib import Path
 from unittest.mock import patch
 
 from autosport import predictive_authority as _runtime_authority
 from autosport.opportunity import Opportunity
+from autosport.paper import PaperBook
+from autosport.portfolio_plan import PortfolioAction
 
 
 _IMPL_PATH = Path(__file__).with_name("_test_portfolio_plan_impl.py")
@@ -65,7 +68,58 @@ _IMPL.build_portfolio_plan = _historical_build_portfolio_plan
 
 
 class PortfolioPlanTests(_IMPL.PortfolioPlanTests):
-    pass
+    def test_correlated_positive_candidates_use_robust_haircut_and_remain_exact_decimal(
+        self,
+    ) -> None:
+        # The Wave-B robust authority intentionally changed monetary projection from
+        # host-context quantize rounding to a deterministic conservative floor.  Run
+        # the preserved expectation under that same explicit legacy rounding mode;
+        # dedicated quantum-grid tests cover non-power-of-ten quanta and hostile
+        # ambient contexts independently.
+        with localcontext() as context:
+            context.rounding = ROUND_DOWN
+            super().test_correlated_positive_candidates_use_robust_haircut_and_remain_exact_decimal()
+
+    def test_typed_dependency_evidence_is_required_to_admit_correlated_predictive_candidates(
+        self,
+    ) -> None:
+        goal = self._goal()
+        first = self._intent(goal, suffix="joint-a", signal=Decimal("0.05"))
+        second = self._intent(goal, suffix="joint-b", signal=Decimal("0.04"))
+        intents = (first, second)
+        book = PaperBook("1000")
+        graph = self._graph(
+            book,
+            intents,
+            dependency_edges=(
+                tuple(sorted((first.candidate_sha256, second.candidate_sha256))),
+            ),
+        )
+        evidence = self._dependency_evidence(
+            book,
+            intents,
+            dependency=Decimal("0.20"),
+            uncertainty=Decimal("0.05"),
+            fee=Decimal("0.01"),
+            partial_fill=Decimal("0.05"),
+        )
+        plan = _historical_build_portfolio_plan(
+            book,
+            intents,
+            self._policy(goal),
+            self.DECISION_TS,
+            dependency_graph=graph,
+            dependency_evidence=evidence,
+        )
+        self.assertEqual(plan.action, PortfolioAction.STAKE_VECTOR)
+        self.assertEqual(
+            plan.stakes,
+            (
+                Decimal("35.73"),
+                Decimal("28.59"),
+            ),
+        )
+        self.assertIn("endogenous whole-portfolio stake vector", plan.reason)
 
 
 if __name__ == "__main__":

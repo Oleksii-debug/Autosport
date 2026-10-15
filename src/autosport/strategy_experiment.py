@@ -20,15 +20,27 @@ _MAX_PROTOCOL_JSON_DEPTH = 32
 
 
 def _require_text(value: Any, field: str) -> str:
-    if not isinstance(value, str) or not value.strip():
-        raise ValueError(f"{field} must be a non-empty string")
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(f"{field} must be a non-empty trimmed string")
+    if "\x00" in value:
+        raise ValueError(f"{field} must not contain NUL")
+    if any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise ValueError(f"{field} must not contain control characters")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{field} must be valid UTF-8") from exc
     return value
 
 
 def _require_sha256(value: Any, field: str) -> str:
-    text = _require_text(value, field).lower()
-    if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
-        raise ValueError(f"{field} must be a SHA-256 hex digest")
+    text = _require_text(value, field)
+    if (
+        text != text.lower()
+        or len(text) != 64
+        or any(char not in "0123456789abcdef" for char in text)
+    ):
+        raise ValueError(f"{field} must be a canonical lowercase SHA-256 hex digest")
     return text
 
 
@@ -100,8 +112,8 @@ def _require_bool(value: Any, field: str) -> bool:
 
 
 def _require_text_tuple(value: Any, field: str) -> tuple[str, ...]:
-    if not isinstance(value, tuple):
-        raise ValueError(f"{field} must be a tuple of strings")
+    if type(value) is not tuple:
+        raise ValueError(f"{field} must be an exact tuple of strings")
     normalized = tuple(
         _require_text(item, f"{field}[{index}]") for index, item in enumerate(value)
     )
@@ -222,6 +234,7 @@ class ScientificProtocolBinding:
             _require_text(self.config_id, "config_id")
 
     def canonical_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         payload = {
             "protocol_version": self.protocol_version,
             "research_protocol_id": self.research_protocol_id,
@@ -255,8 +268,12 @@ class ScientificProtocolBinding:
 
     @property
     def binding_sha256(self) -> str:
+        if type(self) is not ScientificProtocolBinding:
+            raise ValueError(
+                "scientific protocol binding identity requires an exact ScientificProtocolBinding"
+            )
         canonical = json.dumps(
-            self.canonical_dict(),
+            ScientificProtocolBinding.canonical_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -302,6 +319,9 @@ class EvaluationCase:
 
     @property
     def identity(self) -> tuple[Any, ...]:
+        if type(self) is not EvaluationCase:
+            raise ValueError("evaluation case identity requires an exact EvaluationCase")
+        EvaluationCase.__post_init__(self)
         return (
             self.dataset_name,
             self.sport,
@@ -321,6 +341,7 @@ class EvaluationCase:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "case_id": self.case_id,
             "dataset_name": self.dataset_name,
@@ -358,6 +379,9 @@ class CandidateRef:
 
     @property
     def runtime_identity_sha256(self) -> str:
+        if type(self) is not CandidateRef:
+            raise ValueError("candidate runtime identity requires an exact CandidateRef")
+        CandidateRef.__post_init__(self)
         return _runtime_identity_sha256(
             self.canonical_strategy_id,
             self.agent_composition_sha256,
@@ -365,6 +389,7 @@ class CandidateRef:
         )
 
     def promotion_identity_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "candidate_id": self.candidate_id,
             "canonical_strategy_id": self.canonical_strategy_id,
@@ -373,6 +398,7 @@ class CandidateRef:
         }
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "candidate_id": self.candidate_id,
             "canonical_strategy_id": self.canonical_strategy_id,
@@ -392,6 +418,7 @@ class GuardrailRule:
     max_regression: Decimal = Decimal("0")
 
     def __post_init__(self) -> None:
+        _require_text(self.metric, "metric")
         if self.metric not in _SUPPORTED_METRICS:
             raise ValueError(f"unsupported guardrail metric: {self.metric}")
         _require_bool(self.higher_is_better, "higher_is_better")
@@ -400,6 +427,7 @@ class GuardrailRule:
         )
 
     def to_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "metric": self.metric,
             "higher_is_better": self.higher_is_better,
@@ -426,34 +454,43 @@ class ChampionChallengerProtocol:
         _require_text(self.experiment_id, "experiment_id")
         _require_text(self.research_question_id, "research_question_id")
         _require_text(self.hypothesis_id, "hypothesis_id")
-        if not isinstance(self.scientific_protocol, ScientificProtocolBinding):
-            raise ValueError("scientific_protocol must be a ScientificProtocolBinding")
+        if type(self.scientific_protocol) is not ScientificProtocolBinding:
+            raise ValueError("scientific_protocol must be an exact ScientificProtocolBinding")
+        self.scientific_protocol.__post_init__()
         if self.scientific_protocol.research_question_id != self.research_question_id:
             raise ValueError("scientific protocol research question identity mismatch")
         if self.scientific_protocol.hypothesis_id != self.hypothesis_id:
             raise ValueError("scientific protocol hypothesis identity mismatch")
         if type(self.protocol_schema_version) is not int or self.protocol_schema_version != 1:
             raise ValueError("protocol_schema_version must be 1")
-        if not isinstance(self.champion, CandidateRef):
-            raise ValueError("champion must be a CandidateRef")
-        if not isinstance(self.challengers, tuple) or not all(
-            isinstance(candidate, CandidateRef) for candidate in self.challengers
+        if type(self.champion) is not CandidateRef:
+            raise ValueError("champion must be an exact CandidateRef")
+        if type(self.challengers) is not tuple or not all(
+            type(candidate) is CandidateRef for candidate in self.challengers
         ):
             raise ValueError("challengers must be a tuple of CandidateRef values")
-        if not isinstance(self.cases, tuple) or not all(
-            isinstance(case, EvaluationCase) for case in self.cases
+        if type(self.cases) is not tuple or not all(
+            type(case) is EvaluationCase for case in self.cases
         ):
             raise ValueError("cases must be a tuple of EvaluationCase values")
-        if not isinstance(self.guardrails, tuple) or not all(
-            isinstance(rule, GuardrailRule) for rule in self.guardrails
+        if type(self.guardrails) is not tuple or not all(
+            type(rule) is GuardrailRule for rule in self.guardrails
         ):
             raise ValueError("guardrails must be a tuple of GuardrailRule values")
+        self.champion.__post_init__()
+        for candidate in self.challengers:
+            candidate.__post_init__()
+        for case in self.cases:
+            case.__post_init__()
+        for rule in self.guardrails:
+            rule.__post_init__()
         if not self.challengers:
             raise ValueError("at least one challenger is required")
         if not self.cases:
             raise ValueError("at least one evaluation case is required")
-        if self.primary_metric not in _SUPPORTED_METRICS:
-            raise ValueError(f"unsupported primary metric: {self.primary_metric}")
+        primary_metric = _require_text(self.primary_metric, "primary_metric")
+        if primary_metric not in _SUPPORTED_METRICS:
+            raise ValueError(f"unsupported primary metric: {primary_metric}")
         _require_decimal_instance(
             self.minimum_total_improvement,
             "minimum_total_improvement",
@@ -488,6 +525,7 @@ class ChampionChallengerProtocol:
         those hashes must themselves bind this payload before any evaluation can
         produce a promotion-capable recommendation.
         """
+        self.__post_init__()
         return {
             "protocol_schema_version": self.protocol_schema_version,
             "experiment_id": self.experiment_id,
@@ -510,8 +548,12 @@ class ChampionChallengerProtocol:
 
     @property
     def promotion_plan_sha256(self) -> str:
+        if type(self) is not ChampionChallengerProtocol:
+            raise ValueError(
+                "promotion plan identity requires an exact ChampionChallengerProtocol"
+            )
         canonical = json.dumps(
-            self.promotion_plan_dict(),
+            ChampionChallengerProtocol.promotion_plan_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -528,6 +570,7 @@ class ChampionChallengerProtocol:
         return expected
 
     def canonical_dict(self) -> dict[str, Any]:
+        self.__post_init__()
         return {
             "protocol_schema_version": self.protocol_schema_version,
             "experiment_id": self.experiment_id,
@@ -549,8 +592,12 @@ class ChampionChallengerProtocol:
 
     @property
     def protocol_sha256(self) -> str:
+        if type(self) is not ChampionChallengerProtocol:
+            raise ValueError(
+                "protocol identity requires an exact ChampionChallengerProtocol"
+            )
         canonical = json.dumps(
-            self.canonical_dict(),
+            ChampionChallengerProtocol.canonical_dict(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -952,6 +999,55 @@ def load_champion_challenger_protocol_json(
     return protocol
 
 
+def _validate_strategy_run_evidence_identity(evidence: object) -> StrategyRunEvidence:
+    """Fail closed before identity-bearing experiment evidence is dispatched."""
+    if type(evidence) is not StrategyRunEvidence:
+        raise ValueError("evidence must be an exact StrategyRunEvidence")
+    for field in (
+        "source_path",
+        "run_id",
+        "dataset_name",
+        "sport",
+        "strategy_id",
+        "canonical_strategy_id",
+        "price_semantics",
+    ):
+        _require_text(getattr(evidence, field), f"evidence.{field}")
+    for field in (
+        "source_sha256",
+        "market_sha256",
+        "sealed_results_sha256",
+        "replay_dataset_hash",
+        "agent_composition_sha256",
+    ):
+        _require_sha256(getattr(evidence, field), f"evidence.{field}")
+    if evidence.historical_import_identity is not None:
+        _require_sha256(
+            evidence.historical_import_identity,
+            "evidence.historical_import_identity",
+        )
+    if evidence.research_plan_sha256 is not None:
+        _require_sha256(
+            evidence.research_plan_sha256,
+            "evidence.research_plan_sha256",
+        )
+    if type(evidence.dataset_schema_version) is not int or evidence.dataset_schema_version < 1:
+        raise ValueError("evidence.dataset_schema_version must be an integer >= 1")
+    if type(evidence.event_count) is not int or evidence.event_count < 1:
+        raise ValueError("evidence.event_count must be an integer >= 1")
+    _require_text_tuple(evidence.agent_names, "evidence.agent_names")
+    _require_text_tuple(evidence.price_source_ids, "evidence.price_source_ids")
+    _require_bool(
+        evidence.executable_quote_verified,
+        "evidence.executable_quote_verified",
+    )
+    _require_bool(
+        evidence.paper_fill_fidelity_verified,
+        "evidence.paper_fill_fidelity_verified",
+    )
+    return evidence
+
+
 @dataclass(frozen=True, slots=True)
 class ExperimentRunCell:
     case_id: str
@@ -961,8 +1057,7 @@ class ExperimentRunCell:
     def __post_init__(self) -> None:
         _require_text(self.case_id, "case_id")
         _require_text(self.candidate_id, "candidate_id")
-        if not isinstance(self.evidence, StrategyRunEvidence):
-            raise ValueError("evidence must be StrategyRunEvidence")
+        _validate_strategy_run_evidence_identity(self.evidence)
         if self.evidence.strategy_id != self.candidate_id:
             raise ValueError(
                 "strategy run evidence candidate mismatch: "

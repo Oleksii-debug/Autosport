@@ -64,14 +64,16 @@ class ResearchDecisionAlreadyCommitted(RuntimeError):
         self.ticket_id = ticket_id
 
 
-def _validate_sha256(value: str, label: str) -> str:
-    if not isinstance(value, str) or len(value) != 64:
-        raise ValueError(f"{label} must be a 64-character SHA-256 hex string")
-    try:
-        int(value, 16)
-    except ValueError as exc:
-        raise ValueError(f"{label} must be hexadecimal") from exc
-    return value.lower()
+def _validate_sha256(value: object, label: str) -> str:
+    if (
+        type(value) is not str
+        or len(value) != 64
+        or any(character not in "0123456789abcdef" for character in value)
+    ):
+        raise ValueError(
+            f"{label} must be a canonical lowercase SHA-256 hex string"
+        )
+    return value
 
 
 def _validate_canonical_string(
@@ -478,6 +480,36 @@ class ResearchEvidence:
         object.__setattr__(self, "quality_flags", flags)
 
 
+def _validate_research_evidence_causal_use(
+    item: object,
+    *,
+    decision_time,
+) -> None:
+    """Re-prove causal evidence chronology immediately before decision use."""
+
+    if type(item) is not ResearchEvidence:
+        raise TypeError("research evidence use requires exact ResearchEvidence values")
+    for label, value in (
+        ("evidence_id", item.evidence_id),
+        ("quote_key", item.quote_key),
+        ("source_id", item.source_id),
+        ("observed_at", item.observed_at),
+        ("available_at", item.available_at),
+    ):
+        _validate_canonical_string(value, label)
+    # Frozen dataclasses can still be mutated via object.__setattr__; never
+    # trust construction-time hash checks when consuming decision evidence.
+    _validate_sha256(item.content_sha256, "content_sha256")
+    if item.market_snapshot_hash is not None:
+        _validate_sha256(item.market_snapshot_hash, "market_snapshot_hash")
+    observed = parse_iso_timestamp(item.observed_at)
+    available = parse_iso_timestamp(item.available_at)
+    if available < observed:
+        raise ValueError("research evidence cannot be available before it was observed")
+    if available > decision_time:
+        raise ValueError("research evidence was not available by decision time")
+
+
 @dataclass(frozen=True, slots=True)
 class ResearchDecisionPolicy:
     """Deterministic critic/data-quality policy. No LLM or network call is made here."""
@@ -596,8 +628,11 @@ class DeterministicResearchCritic:
         decision_time = parse_iso_timestamp(decision_ts)
         by_quote: dict[str, list[ResearchEvidence]] = {}
         for item in evidence:
-            if parse_iso_timestamp(item.available_at) <= decision_time:
-                by_quote.setdefault(item.quote_key, []).append(item)
+            _validate_research_evidence_causal_use(
+                item,
+                decision_time=decision_time,
+            )
+            by_quote.setdefault(item.quote_key, []).append(item)
 
         leg_reviews: list[ResearchLegReview] = []
         all_reasons: list[str] = []
@@ -614,6 +649,9 @@ class DeterministicResearchCritic:
             if forecast is None:
                 reasons.append("missing ForecastRecord")
             else:
+                if type(forecast) is not ForecastRecord:
+                    raise ValueError("forecasts must contain exact ForecastRecord values")
+                ForecastRecord.to_dict(forecast)
                 if forecast.quote_key != leg.quote_key:
                     reasons.append("forecast quote_key mismatch")
                 if parse_iso_timestamp(forecast.generated_at) > decision_time:
@@ -625,9 +663,7 @@ class DeterministicResearchCritic:
                 if forecast.uncertainty > self.policy.max_forecast_uncertainty:
                     reasons.append("forecast uncertainty exceeds policy")
 
-                forecast_evidence_hashes = {
-                    str(value).lower() for value in forecast.evidence_hashes
-                }
+                forecast_evidence_hashes = set(forecast.evidence_hashes)
                 included = [
                     item
                     for item in available
@@ -667,8 +703,8 @@ class DeterministicResearchCritic:
                         elif latest.market_snapshot_hash is None:
                             reasons.append("latest evidence lacks market snapshot hash")
                         elif (
-                            forecast.market_snapshot_hash.lower()
-                            != latest.market_snapshot_hash.lower()
+                            forecast.market_snapshot_hash
+                            != latest.market_snapshot_hash
                         ):
                             reasons.append("market snapshot hash mismatch")
 
@@ -727,8 +763,13 @@ class ResearchDecisionPipeline:
     ) -> ResearchDecision:
         _validate_canonical_string(replay_run_id, "replay_run_id")
         _validate_canonical_string(decision_ts, "decision_ts")
-        parse_iso_timestamp(decision_ts)
+        decision_time = parse_iso_timestamp(decision_ts)
         evidence_items = tuple(evidence)
+        for item in evidence_items:
+            _validate_research_evidence_causal_use(
+                item,
+                decision_time=decision_time,
+            )
         goal = self.risk_policy.economic_goal
         quote_items = tuple(market_quotes or ())
         proposal_context: ProposedTicketRiskContext | None = None

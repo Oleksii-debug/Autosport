@@ -334,54 +334,75 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
         )
 
     def test_legacy_unknown_settlement_time_remains_conservatively_in_window_after_restart(self) -> None:
-        book = PaperBook("100")
-        lost = book.open_ticket(
+        # Historical schema migration is a structural-parser contract. Rewriting
+        # witnessed path bytes must not mint trusted economic authority.
+        legacy_source = PaperBook("100")
+        legacy_lost = legacy_source.open_ticket(
             [self._leg()],
             Decimal("4"),
             placed_at="2026-09-16T12:00:00+00:00",
         )
-        book.settle(
-            lost.ticket_id,
+        legacy_source.settle(
+            legacy_lost.ticket_id,
             set(),
             settled_at="2026-09-16T12:30:00+00:00",
         )
-
         with tempfile.TemporaryDirectory() as tmp:
-            path = Path(tmp) / "paper.json"
-            book.save(path)
-            payload = json.loads(path.read_text(encoding="utf-8"))
+            legacy_path = Path(tmp) / "legacy-paper.json"
+            legacy_source.save(legacy_path)
+            payload = json.loads(legacy_path.read_text(encoding="utf-8"))
             payload["schema_version"] = 4
             for ticket in payload["tickets"]:
                 ticket.pop("settled_at")
             for entry in payload["lifecycle"]:
                 if entry["action"] == "settle":
                     entry.pop("settled_at")
-            path.write_text(json.dumps(payload), encoding="utf-8")
+            structural_legacy = PaperBook.load_bytes(
+                json.dumps(payload).encode("utf-8")
+            )
+
+        self.assertIsNone(
+            structural_legacy.tickets[legacy_lost.ticket_id].settled_at
+        )
+
+        # Executable conservative-risk behavior requires a trusted, witnessed
+        # PaperBook. A current snapshot can legitimately carry an unknown
+        # settlement time, and that uncertainty must survive restart.
+        book = PaperBook("100")
+        lost = book.open_ticket(
+            [self._leg()],
+            Decimal("4"),
+            placed_at="2026-09-16T12:00:00+00:00",
+        )
+        book.settle(lost.ticket_id, set(), settled_at=None)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "paper.json"
+            book.save(path)
             restarted = PaperBook.load(path)
 
-        self.assertIsNone(restarted.tickets[lost.ticket_id].settled_at)
-        policy = self._policy(
-            self._goal(max_day_loss_fraction=Decimal("0.05"))
-        )
-        context = replace(
-            self._context(),
-            measurement_window_start="2026-09-16T14:00:00+00:00",
-            measurement_window_end="2026-09-16T15:00:00+00:00",
-        )
+            self.assertIsNone(restarted.tickets[lost.ticket_id].settled_at)
+            policy = self._policy(
+                self._goal(max_day_loss_fraction=Decimal("0.05"))
+            )
+            context = replace(
+                self._context(),
+                measurement_window_start="2026-09-16T14:00:00+00:00",
+                measurement_window_end="2026-09-16T15:00:00+00:00",
+            )
 
-        self.assertTrue(
-            policy.evaluate(restarted, Decimal("1"), context=context).allowed
-        )
-        blocked = policy.evaluate(
-            restarted,
-            Decimal("1.01"),
-            context=context,
-        )
-        self.assertFalse(blocked.allowed)
-        self.assertEqual(
-            blocked.reason,
-            "economic goal conservative day loss limit exceeded",
-        )
+            self.assertTrue(
+                policy.evaluate(restarted, Decimal("1"), context=context).allowed
+            )
+            blocked = policy.evaluate(
+                restarted,
+                Decimal("1.01"),
+                context=context,
+            )
+            self.assertFalse(blocked.allowed)
+            self.assertEqual(
+                blocked.reason,
+                "economic goal conservative day loss limit exceeded",
+            )
 
     def test_unanchored_measurement_window_cannot_narrow_historical_loss(self) -> None:
         book = PaperBook("100")
@@ -618,8 +639,8 @@ class EconomicGoalRiskBindingTests(unittest.TestCase):
             book.save(path)
             restarted = PaperBook.load(path)
 
-        decision = policy.evaluate(restarted, Decimal("1"), context=bound)
-        self.assertTrue(decision.allowed)
+            decision = policy.evaluate(restarted, Decimal("1"), context=bound)
+            self.assertTrue(decision.allowed)
 
     def test_owner_concurrent_position_limit_counts_only_canonical_open_tickets(self) -> None:
         book = PaperBook("100")

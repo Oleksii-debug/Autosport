@@ -6,11 +6,12 @@ import math
 from dataclasses import dataclass
 from decimal import Decimal
 from pathlib import Path
+from collections.abc import Mapping
 from typing import Any, Iterable
 
 from .agents import AgentContext
 from .candidate_search import CandidateLeg, ParlayCandidate
-from .domain import MarketEvent
+from .domain import MarketEvent, _quote_identity, _quote_identity_components
 from .forecasting import ForecastRecord, parse_iso_timestamp
 from .research_pipeline import (
     ResearchDecisionAlreadyCommitted,
@@ -18,7 +19,11 @@ from .research_pipeline import (
     ResearchEvidence,
 )
 from .risk import RiskOfRuinEvidence
-from .scenario_search import ScenarioGroup, ScenarioOutcome
+from .scenario_search import (
+    ScenarioGroup,
+    ScenarioOutcome,
+    _validate_scenario_group_identity,
+)
 
 
 RESEARCH_STRATEGY_ID = "research-replay-v1"
@@ -43,6 +48,79 @@ def _validate_json_text(value: str) -> None:
         value.encode("utf-8")
     except UnicodeEncodeError as exc:
         raise ValueError("research strategy plan contains non-UTF-8 JSON text") from exc
+
+
+def _exact_plan_text(value: object, *, field: str) -> str:
+    """Reject raw JSON type drift before identity/time/hash validation can be laundered."""
+
+    if type(value) is not str or not value or value.strip() != value:
+        raise ValueError(
+            f"research {field} must be exact non-empty canonical text"
+        )
+    _validate_json_text(value)
+    return value
+
+
+def _validate_replay_candidate(candidate: object) -> tuple[str, ...]:
+    """Re-prove one research candidate before any identity hash/mapping use."""
+
+    if type(candidate) is not ParlayCandidate:
+        raise TypeError("research decision candidate must be exact ParlayCandidate")
+    if type(candidate.legs) is not tuple or not candidate.legs:
+        raise ValueError("research decision candidate legs must be a non-empty exact tuple")
+    quote_keys: list[str] = []
+    for leg in candidate.legs:
+        if type(leg) is not CandidateLeg:
+            raise TypeError(
+                "research decision candidate legs must contain exact CandidateLeg values"
+            )
+        CandidateLeg.__post_init__(leg)
+        leg.ticket_identity()
+        quote_keys.append(_exact_plan_text(leg.quote_key, field="candidate quote_key"))
+    if len(quote_keys) != len(set(quote_keys)):
+        raise ValueError("research decision candidate contains duplicate quote_key")
+    return tuple(quote_keys)
+
+
+def _validate_research_evidence_identity(
+    evidence: tuple[ResearchEvidence, ...],
+) -> None:
+    if type(evidence) is not tuple or not evidence:
+        raise ValueError("research decision evidence must be a non-empty exact tuple")
+    evidence_ids: list[str] = []
+    for item in evidence:
+        if type(item) is not ResearchEvidence:
+            raise TypeError(
+                "research decision evidence must contain exact ResearchEvidence values"
+            )
+        for field_name in (
+            "evidence_id", "quote_key", "source_id", "observed_at", "available_at"
+        ):
+            _exact_plan_text(getattr(item, field_name), field=f"evidence {field_name}")
+        for field_name in ("content_sha256", "market_snapshot_hash"):
+            value = getattr(item, field_name)
+            if value is None and field_name == "market_snapshot_hash":
+                continue
+            digest = _exact_plan_text(value, field=f"evidence {field_name}")
+            if len(digest) != 64 or any(
+                character not in "0123456789abcdef" for character in digest
+            ):
+                raise ValueError(
+                    f"research evidence {field_name} must be canonical lowercase SHA-256"
+                )
+        if type(item.quality_flags) is not tuple:
+            raise ValueError(
+                "research decision evidence quality_flags must remain an exact tuple"
+            )
+        flags = tuple(
+            _exact_plan_text(flag, field="evidence quality flag")
+            for flag in item.quality_flags
+        )
+        if len(flags) != len(set(flags)):
+            raise ValueError("research decision evidence has duplicate quality flag")
+        evidence_ids.append(item.evidence_id)
+    if len(evidence_ids) != len(set(evidence_ids)):
+        raise ValueError("research decision has duplicate ResearchEvidence evidence_id")
 
 
 def _validate_strict_json_domain(raw: Any) -> None:
@@ -92,20 +170,40 @@ def _canonical_plan_json(raw: Any) -> str:
 def _stable_event_projection(event: MarketEvent) -> dict[str, Any]:
     """Stable causal quote projection used to bind offline research evidence to replay state."""
 
-    return {
-        "event_id": event.event_id,
-        "market_id": event.market_id,
-        "selection_id": event.selection_id,
-        "decimal_odds": str(event.decimal_odds),
-        "observed_ts": event.observed_ts,
-        "source_id": event.source_id,
-        "sequence": event.sequence,
-        "market_type": event.market_type.value,
-        "status": event.status,
-        "source_ts": event.source_ts,
-        "score_state": event.score_state,
-        "metadata": event.metadata,
+    if type(event) is not MarketEvent:
+        raise TypeError("research evidence requires exact MarketEvent")
+    # Reuse the canonical durable serialization boundary before reading fields for
+    # an evidence digest. This catches post-construction identity/schema drift and
+    # detaches metadata from caller-owned containers.
+    canonical = MarketEvent.from_dict(MarketEvent.to_dict(event))
+    payload = MarketEvent.to_dict(canonical)
+    projection: dict[str, Any] = {
+        "event_id": payload["event_id"],
+        "market_id": payload["market_id"],
+        "selection_id": payload["selection_id"],
+        "decimal_odds": payload["decimal_odds"],
+        "observed_ts": payload["observed_ts"],
+        "source_id": payload["source_id"],
+        "sport": payload.get("sport"),
+        "sequence": payload["sequence"],
+        "market_type": payload["market_type"],
+        "status": payload["status"],
+        "source_ts": payload["source_ts"],
+        "score_state": payload["score_state"],
+        "metadata": payload["metadata"],
     }
+    # Preserve the exact legacy/None research projection while making concrete
+    # canonical market/provenance semantics identity-bearing.
+    for field_name in (
+        "competition_id",
+        "market_semantics_id",
+        "provider_source_class",
+        "exchange_side",
+    ):
+        value = payload.get(field_name)
+        if value is not None:
+            projection[field_name] = value
+    return projection
 
 
 def market_event_evidence_hash(event: MarketEvent) -> str:
@@ -119,16 +217,41 @@ def market_event_evidence_hash(event: MarketEvent) -> str:
 
 
 def research_market_snapshot_hash(
-    latest_quotes: dict[str, MarketEvent],
+    latest_quotes: Mapping[object, MarketEvent],
     quote_keys: Iterable[str],
 ) -> str:
-    keys = tuple(sorted(set(quote_keys)))
+    if isinstance(latest_quotes, dict) and type(latest_quotes) is not dict:
+        raise TypeError("research latest_quotes dict must be exact")
+    if not isinstance(latest_quotes, Mapping):
+        raise TypeError("research latest_quotes must be a mapping")
+
+    if type(latest_quotes) is dict:
+        mapping_keys = tuple(dict.keys(latest_quotes))
+        for key in mapping_keys:
+            _exact_plan_text(key, field="latest quote mapping key")
+
+    requested = tuple(quote_keys)
+    canonical_requested = tuple(
+        _exact_plan_text(key, field="snapshot quote_key")
+        for key in requested
+    )
+    keys = tuple(sorted(set(canonical_requested)))
     projection: dict[str, dict[str, Any]] = {}
     for key in keys:
-        event = latest_quotes.get(key)
-        if event is None:
-            raise ValueError(f"research snapshot missing replay quote: {key}")
-        projection[key] = _stable_event_projection(event)
+        try:
+            event = (
+                dict.__getitem__(latest_quotes, key)
+                if type(latest_quotes) is dict
+                else latest_quotes[key]
+            )
+        except KeyError as exc:
+            raise ValueError(f"research snapshot missing replay quote: {key}") from exc
+        event_projection = _stable_event_projection(event)
+        if event.quote_key != key:
+            raise ValueError(
+                "research snapshot mapping key does not match canonical MarketEvent quote_key"
+            )
+        projection[key] = event_projection
     canonical = json.dumps(
         projection,
         ensure_ascii=False,
@@ -151,19 +274,34 @@ class ResearchReplayInstruction:
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None
 
     def __post_init__(self) -> None:
-        if not self.decision_id or not self.trigger_quote_key:
-            raise ValueError("research decision identity fields are required")
+        _exact_plan_text(self.decision_id, field="decision_id")
+        _exact_plan_text(self.trigger_quote_key, field="trigger_quote_key")
+        _exact_plan_text(self.decision_ts, field="decision_ts")
         parse_iso_timestamp(self.decision_ts)
         amount = Decimal(str(self.stake))
         if amount <= 0:
             raise ValueError("research decision stake must be positive")
         object.__setattr__(self, "stake", amount)
-        candidate_keys = {leg.quote_key for leg in self.candidate.legs}
-        if not candidate_keys:
-            raise ValueError("research decision candidate requires at least one leg")
+
+        candidate_keys = set(_validate_replay_candidate(self.candidate))
         if self.trigger_quote_key not in candidate_keys:
             raise ValueError("research trigger_quote_key must be one of the candidate legs")
-        forecast_keys = [record.quote_key for record in self.forecasts]
+
+        if type(self.groups) is not tuple or not self.groups:
+            raise ValueError("research decision scenario groups must be a non-empty exact tuple")
+        for group in self.groups:
+            _validate_scenario_group_identity(group)
+
+        if type(self.forecasts) is not tuple or not self.forecasts:
+            raise ValueError("research decision forecasts must be a non-empty exact tuple")
+        forecast_keys: list[str] = []
+        for record in self.forecasts:
+            if type(record) is not ForecastRecord:
+                raise TypeError(
+                    "research decision forecasts must contain exact ForecastRecord values"
+                )
+            ForecastRecord.to_dict(record)
+            forecast_keys.append(record.quote_key)
         if len(forecast_keys) != len(set(forecast_keys)):
             raise ValueError("research decision has duplicate ForecastRecord quote_key")
         missing = candidate_keys.difference(forecast_keys)
@@ -172,13 +310,15 @@ class ResearchReplayInstruction:
                 "research decision lacks ForecastRecord for candidate quote(s): "
                 + ",".join(sorted(missing))
             )
-        if not self.groups:
-            raise ValueError("research decision scenario groups are required")
+
+        _validate_research_evidence_identity(self.evidence)
+
         if self.risk_of_ruin_evidence is not None:
-            if not isinstance(self.risk_of_ruin_evidence, RiskOfRuinEvidence):
+            if type(self.risk_of_ruin_evidence) is not RiskOfRuinEvidence:
                 raise TypeError(
-                    "research decision risk_of_ruin_evidence must be RiskOfRuinEvidence or None"
+                    "research decision risk_of_ruin_evidence must be exact RiskOfRuinEvidence or None"
                 )
+            RiskOfRuinEvidence.__post_init__(self.risk_of_ruin_evidence)
             decision_time = parse_iso_timestamp(self.decision_ts)
             causal_cutoff = parse_iso_timestamp(self.risk_of_ruin_evidence.causal_cutoff)
             evaluated_at = parse_iso_timestamp(self.risk_of_ruin_evidence.evaluated_at)
@@ -189,6 +329,7 @@ class ResearchReplayInstruction:
 
     @property
     def forecasts_by_quote(self) -> dict[str, ForecastRecord]:
+        ResearchReplayInstruction.__post_init__(self)
         return {record.quote_key: record for record in self.forecasts}
 
 
@@ -198,14 +339,23 @@ class ResearchStrategyPlan:
     source_sha256: str
 
     def __post_init__(self) -> None:
-        if not self.instructions:
-            raise ValueError("research strategy plan must contain at least one decision")
-        if len(self.source_sha256) != 64:
-            raise ValueError("research strategy plan source_sha256 must be SHA-256")
-        try:
-            int(self.source_sha256, 16)
-        except ValueError as exc:
-            raise ValueError("research strategy plan source_sha256 must be hexadecimal") from exc
+        if type(self.instructions) is not tuple or not self.instructions:
+            raise ValueError(
+                "research strategy plan instructions must be a non-empty exact tuple"
+            )
+        for instruction in self.instructions:
+            if type(instruction) is not ResearchReplayInstruction:
+                raise TypeError(
+                    "research strategy plan instructions must contain exact ResearchReplayInstruction values"
+                )
+            ResearchReplayInstruction.__post_init__(instruction)
+        source_sha256 = _exact_plan_text(self.source_sha256, field="source_sha256")
+        if len(source_sha256) != 64 or any(
+            character not in "0123456789abcdef" for character in source_sha256
+        ):
+            raise ValueError(
+                "research strategy plan source_sha256 must be canonical lowercase SHA-256"
+            )
         ids = [item.decision_id for item in self.instructions]
         if len(ids) != len(set(ids)):
             raise ValueError("duplicate research decision_id")
@@ -254,11 +404,12 @@ class ResearchStrategyPlan:
         if source_sha256 is None:
             canonical = _canonical_plan_json(raw)
             source_sha256 = hashlib.sha256(canonical.encode("utf-8")).hexdigest()
-        return cls(instructions, source_sha256.lower())
+        return cls(instructions, source_sha256)
 
     def preflight(self, events: Iterable[MarketEvent]) -> None:
         """Bind every planned decision to the same causal replay state before economic mutation."""
 
+        ResearchStrategyPlan.__post_init__(self)
         by_trigger = {
             (instruction.decision_ts, instruction.trigger_quote_key): instruction
             for instruction in self.instructions
@@ -274,14 +425,19 @@ class ResearchStrategyPlan:
             ),
         )
         first_observed_quote_times: dict[str, Any] = {}
-        first_observed_event_times: dict[str, Any] = {}
-        first_observed_market_times: dict[tuple[str, str], Any] = {}
+        first_observed_event_times: dict[tuple[str | None, str], Any] = {}
+        first_observed_market_times: dict[
+            tuple[str | None, str, str], Any
+        ] = {}
         for event in ordered:
             observed_time = parse_iso_timestamp(event.observed_ts)
             first_observed_quote_times.setdefault(event.quote_key, observed_time)
-            first_observed_event_times.setdefault(event.event_id, observed_time)
+            first_observed_event_times.setdefault(
+                (event.sport, event.event_id),
+                observed_time,
+            )
             first_observed_market_times.setdefault(
-                (event.event_id, event.market_id),
+                (event.sport, event.event_id, event.market_id),
                 observed_time,
             )
         for event in ordered:
@@ -320,6 +476,9 @@ class ResearchReplayAgent:
         plan: ResearchStrategyPlan,
         pipeline: ResearchDecisionPipeline | None = None,
     ) -> None:
+        if type(plan) is not ResearchStrategyPlan:
+            raise TypeError("research replay agent requires exact ResearchStrategyPlan")
+        ResearchStrategyPlan.__post_init__(plan)
         self.plan = plan
         self.pipeline = pipeline or ResearchDecisionPipeline()
         self._by_trigger = {
@@ -378,6 +537,9 @@ def _validate_market_binding(
     instruction: ResearchReplayInstruction,
     latest_quotes: dict[str, MarketEvent],
 ) -> None:
+    if type(instruction) is not ResearchReplayInstruction:
+        raise TypeError("market binding requires exact ResearchReplayInstruction")
+    ResearchReplayInstruction.__post_init__(instruction)
     decision_time = parse_iso_timestamp(instruction.decision_ts)
     _validate_scenario_space_binding(instruction.groups, latest_quotes, decision_time)
     candidate_keys = tuple(leg.quote_key for leg in instruction.candidate.legs)
@@ -433,16 +595,26 @@ def _validate_market_binding(
             raise ValueError(f"ForecastRecord snapshot hash does not match replay state: {leg.quote_key}")
 
 
+def _scenario_quote_event_market(
+    quote_key: str,
+) -> tuple[str | None, str, str]:
+    sport, event_id, market_id, _selection_id, _exchange_side = (
+        _quote_identity_components(quote_key)
+    )
+    return sport, event_id, market_id
+
+
 def _validate_scenario_future_identity(
     groups: tuple[ScenarioGroup, ...],
     first_observed_quote_times: dict[str, Any],
-    first_observed_event_times: dict[str, Any],
-    first_observed_market_times: dict[tuple[str, str], Any],
+    first_observed_event_times: dict[tuple[str | None, str], Any],
+    first_observed_market_times: dict[tuple[str | None, str, str], Any],
     decision_time,
 ) -> None:
     """Reject replay quote, event, or market identities not yet knowable at decision time."""
 
-    for group in groups:
+    for raw_group in groups:
+        group = _validate_scenario_group_identity(raw_group)
         for outcome in group.outcomes:
             first_observed = first_observed_quote_times.get(outcome.quote_key)
             if first_observed is not None and first_observed > decision_time:
@@ -450,32 +622,49 @@ def _validate_scenario_future_identity(
                     "research scenario outcome identity first appears after decision: "
                     f"{outcome.quote_key}"
                 )
+            scenario_identity = _scenario_quote_event_market(outcome.quote_key)
+            if scenario_identity is None:
+                continue
+            scenario_sport, scenario_event_id, scenario_market_id = scenario_identity
+            scenario_event_identity = (scenario_sport, scenario_event_id)
             future_event_matches = sorted(
-                event_id
-                for event_id, first_event_observed in first_observed_event_times.items()
+                event_identity
+                for event_identity, first_event_observed in first_observed_event_times.items()
                 if first_event_observed > decision_time
-                and outcome.quote_key.startswith(f"{event_id}|")
+                and event_identity == scenario_event_identity
             )
             if future_event_matches:
-                event_id = future_event_matches[0]
+                sport, event_id = future_event_matches[0]
+                sport_prefix = "" if sport is None else f"{sport}:"
                 raise ValueError(
                     "research scenario event identity first appears after decision: "
-                    f"{event_id}"
+                    f"{sport_prefix}{event_id}"
                 )
+            scenario_market_identity = (
+                scenario_sport,
+                scenario_event_id,
+                scenario_market_id,
+            )
             future_market_matches = sorted(
                 (
-                    (event_id, market_id)
-                    for (event_id, market_id), first_market_observed in first_observed_market_times.items()
+                    market_identity
+                    for market_identity, first_market_observed
+                    in first_observed_market_times.items()
                     if first_market_observed > decision_time
-                    and outcome.quote_key.startswith(f"{event_id}|{market_id}|")
+                    and market_identity == scenario_market_identity
                 ),
-                key=lambda item: (item[0], item[1]),
+                key=lambda item: (
+                    "" if item[0] is None else item[0],
+                    item[1],
+                    item[2],
+                ),
             )
             if future_market_matches:
-                event_id, market_id = future_market_matches[0]
+                sport, event_id, market_id = future_market_matches[0]
+                sport_prefix = "" if sport is None else f"{sport}:"
                 raise ValueError(
                     "research scenario market identity first appears after decision: "
-                    f"{event_id}|{market_id}"
+                    f"{sport_prefix}{event_id}|{market_id}"
                 )
 
 
@@ -486,7 +675,8 @@ def _validate_scenario_space_binding(
 ) -> None:
     """Bind observed replay-market outcomes without banning abstract complement scenarios."""
 
-    for group in groups:
+    for raw_group in groups:
+        group = _validate_scenario_group_identity(raw_group)
         outcome_keys = {outcome.quote_key for outcome in group.outcomes}
         observed_outcomes: list[MarketEvent] = []
         for quote_key in sorted(outcome_keys):
@@ -503,17 +693,19 @@ def _validate_scenario_space_binding(
             continue
 
         market_identities = {
-            (event.event_id, event.market_id) for event in observed_outcomes
+            (event.sport, event.event_id, event.market_id)
+            for event in observed_outcomes
         }
         if len(market_identities) != 1:
             raise ValueError(
                 f"research scenario group must bind one replay event/market: {group.group_id}"
             )
-        event_id, market_id = next(iter(market_identities))
+        sport, event_id, market_id = next(iter(market_identities))
         replay_market_keys = {
             event.quote_key
             for event in latest_quotes.values()
-            if event.event_id == event_id
+            if event.sport == sport
+            and event.event_id == event_id
             and event.market_id == market_id
             and parse_iso_timestamp(event.observed_ts) <= decision_time
         }
@@ -524,29 +716,28 @@ def _validate_scenario_space_binding(
                 f"{event_id}|{market_id}: missing={','.join(missing)}"
             )
 
-        market_prefix = f"{event_id}|{market_id}|"
         for quote_key in sorted(outcome_keys - replay_market_keys):
-            if quote_key.startswith(market_prefix) and quote_key[len(market_prefix) :]:
+            scenario_identity = _scenario_quote_event_market(quote_key)
+            if scenario_identity == (sport, event_id, market_id):
                 raise ValueError(
                     f"research scenario outcome absent from replay state: {quote_key}"
                 )
 
 
 def _canonical_identity_field(raw: dict[str, Any], field_name: str) -> str:
-    value = raw.get(field_name)
-    if not isinstance(value, str) or not value or value.strip() != value:
-        raise ValueError(
-            f"research candidate {field_name} must be a non-empty canonical string"
-        )
-    return value
+    return _exact_plan_text(
+        raw.get(field_name),
+        field=f"candidate {field_name}",
+    )
 
 
 def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
     if not isinstance(raw, dict):
         raise ValueError("research candidate leg must be an object")
-    quote_key = raw.get("quote_key")
-    if not isinstance(quote_key, str) or not quote_key or quote_key.strip() != quote_key:
-        raise ValueError("research candidate quote_key must be a non-empty canonical string")
+    quote_key = _exact_plan_text(
+        raw.get("quote_key"),
+        field="candidate quote_key",
+    )
 
     present = [field in raw for field in ("event_id", "market_id", "selection_id")]
     if any(present) and not all(present):
@@ -557,10 +748,20 @@ def _candidate_leg_from_dict(raw: Any) -> CandidateLeg:
         event_id = _canonical_identity_field(raw, "event_id")
         market_id = _canonical_identity_field(raw, "market_id")
         selection_id = _canonical_identity_field(raw, "selection_id")
-        if quote_key != f"{event_id}|{market_id}|{selection_id}":
+        canonical_quote_key = _quote_identity(
+            event_id,
+            market_id,
+            selection_id,
+            None,
+        )
+        legacy_quote_key = f"{event_id}|{market_id}|{selection_id}"
+        if quote_key not in {canonical_quote_key, legacy_quote_key}:
             raise ValueError(
                 "research candidate structured event/market/selection identity does not match quote_key"
             )
+        # Exact structured components are sufficient evidence to migrate the former
+        # ambiguous pipe serialization into the current injective identity.
+        quote_key = canonical_quote_key
     else:
         parts = quote_key.split("|")
         if len(parts) != 3 or not all(parts):
@@ -591,10 +792,23 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
     if not isinstance(legs_raw, list) or not legs_raw:
         raise ValueError("research decision candidate legs must be a non-empty list")
     legs: list[CandidateLeg] = []
+    quote_aliases: dict[str, str] = {}
     combined_odds = Decimal("1")
     combined_probability = Decimal("1")
     for item in legs_raw:
+        raw_quote_key = (
+            _exact_plan_text(item.get("quote_key"), field="candidate quote_key")
+            if type(item) is dict
+            else None
+        )
         leg = _candidate_leg_from_dict(item)
+        if raw_quote_key is not None:
+            existing_alias = quote_aliases.get(raw_quote_key)
+            if existing_alias is not None and existing_alias != leg.quote_key:
+                raise ValueError(
+                    "research candidate legacy quote_key alias is ambiguous across structured identities"
+                )
+            quote_aliases[raw_quote_key] = leg.quote_key
         legs.append(leg)
         combined_odds *= leg.decimal_odds
         combined_probability *= leg.probability
@@ -615,36 +829,91 @@ def _instruction_from_dict(raw: Any) -> ResearchReplayInstruction:
         outcomes_raw = group_raw.get("outcomes")
         if not isinstance(outcomes_raw, list):
             raise ValueError("research scenario group outcomes must be a list")
-        outcomes = tuple(
-            ScenarioOutcome(
-                str(outcome["quote_key"]),
-                Decimal(str(outcome["probability"]))
-                if outcome.get("probability") is not None
-                else None,
+        parsed_outcomes: list[ScenarioOutcome] = []
+        for outcome in outcomes_raw:
+            if type(outcome) is not dict:
+                raise ValueError("research scenario outcome must be an object")
+            raw_outcome_quote_key = _exact_plan_text(
+                outcome["quote_key"],
+                field="scenario outcome quote_key",
             )
-            for outcome in outcomes_raw
+            parsed_outcomes.append(
+                ScenarioOutcome(
+                    quote_aliases.get(
+                        raw_outcome_quote_key,
+                        raw_outcome_quote_key,
+                    ),
+                    Decimal(str(outcome["probability"]))
+                    if outcome.get("probability") is not None
+                    else None,
+                )
+            )
+        groups.append(
+            ScenarioGroup(
+                _exact_plan_text(
+                    group_raw["group_id"],
+                    field="scenario group_id",
+                ),
+                tuple(parsed_outcomes),
+            )
         )
-        groups.append(ScenarioGroup(str(group_raw["group_id"]), outcomes))
 
     forecasts_raw = raw.get("forecasts")
     if not isinstance(forecasts_raw, list) or not forecasts_raw:
         raise ValueError("research decision forecasts must be a non-empty list")
-    forecasts = tuple(_forecast_from_dict(item) for item in forecasts_raw)
+    normalized_forecasts: list[Any] = []
+    for item in forecasts_raw:
+        if type(item) is dict:
+            normalized_item = dict(item)
+            raw_quote_key = _exact_plan_text(
+                normalized_item.get("quote_key"),
+                field="forecast quote_key",
+            )
+            normalized_item["quote_key"] = quote_aliases.get(
+                raw_quote_key,
+                raw_quote_key,
+            )
+            normalized_forecasts.append(normalized_item)
+        else:
+            normalized_forecasts.append(item)
+    forecasts = tuple(_forecast_from_dict(item) for item in normalized_forecasts)
 
     evidence_raw = raw.get("evidence")
     if not isinstance(evidence_raw, list) or not evidence_raw:
         raise ValueError("research decision evidence must be a non-empty list")
-    evidence = tuple(_evidence_from_dict(item) for item in evidence_raw)
+    normalized_evidence: list[Any] = []
+    for item in evidence_raw:
+        if type(item) is dict:
+            normalized_item = dict(item)
+            raw_quote_key = _exact_plan_text(
+                normalized_item.get("quote_key"),
+                field="evidence quote_key",
+            )
+            normalized_item["quote_key"] = quote_aliases.get(
+                raw_quote_key,
+                raw_quote_key,
+            )
+            normalized_evidence.append(normalized_item)
+        else:
+            normalized_evidence.append(item)
+    evidence = tuple(_evidence_from_dict(item) for item in normalized_evidence)
     risk_of_ruin_raw = raw.get("risk_of_ruin_evidence")
     risk_of_ruin_evidence = (
         None
         if risk_of_ruin_raw is None
         else _risk_of_ruin_evidence_from_dict(risk_of_ruin_raw)
     )
+    raw_trigger_quote_key = _exact_plan_text(
+        raw.get("trigger_quote_key"),
+        field="trigger_quote_key",
+    )
     return ResearchReplayInstruction(
-        decision_id=str(raw["decision_id"]),
-        trigger_quote_key=str(raw["trigger_quote_key"]),
-        decision_ts=str(raw["decision_ts"]),
+        decision_id=_exact_plan_text(raw["decision_id"], field="decision_id"),
+        trigger_quote_key=quote_aliases.get(
+            raw_trigger_quote_key,
+            raw_trigger_quote_key,
+        ),
+        decision_ts=_exact_plan_text(raw["decision_ts"], field="decision_ts"),
         stake=Decimal(str(raw["stake"])),
         candidate=candidate,
         groups=tuple(groups),
@@ -659,16 +928,40 @@ def _risk_of_ruin_evidence_from_dict(raw: Any) -> RiskOfRuinEvidence:
         raise ValueError("research risk_of_ruin_evidence must be an object")
     try:
         return RiskOfRuinEvidence(
-            evidence_id=str(raw["evidence_id"]),
-            research_protocol_sha256=str(raw["research_protocol_sha256"]),
-            reproducibility_bundle_sha256=str(raw["reproducibility_bundle_sha256"]),
-            producer_identity=str(raw["producer_identity"]),
-            causal_cutoff=str(raw["causal_cutoff"]),
-            evaluated_at=str(raw["evaluated_at"]),
-            bankroll_id=str(raw["bankroll_id"]),
-            currency=str(raw["currency"]),
-            base_portfolio_sha256=str(raw["base_portfolio_sha256"]),
-            candidate_sha256=str(raw["candidate_sha256"]),
+            evidence_id=_exact_plan_text(raw["evidence_id"], field="risk evidence_id"),
+            research_protocol_sha256=_exact_plan_text(
+                raw.get("research_protocol_sha256"),
+                field="risk research_protocol_sha256",
+            ),
+            reproducibility_bundle_sha256=_exact_plan_text(
+                raw.get("reproducibility_bundle_sha256"),
+                field="risk reproducibility_bundle_sha256",
+            ),
+            producer_identity=_exact_plan_text(
+                raw.get("producer_identity"),
+                field="risk producer_identity",
+            ),
+            causal_cutoff=_exact_plan_text(
+                raw.get("causal_cutoff"),
+                field="risk causal_cutoff",
+            ),
+            evaluated_at=_exact_plan_text(
+                raw.get("evaluated_at"),
+                field="risk evaluated_at",
+            ),
+            bankroll_id=_exact_plan_text(
+                raw.get("bankroll_id"),
+                field="risk bankroll_id",
+            ),
+            currency=_exact_plan_text(raw["currency"], field="risk currency"),
+            base_portfolio_sha256=_exact_plan_text(
+                raw.get("base_portfolio_sha256"),
+                field="risk base_portfolio_sha256",
+            ),
+            candidate_sha256=_exact_plan_text(
+                raw.get("candidate_sha256"),
+                field="risk candidate_sha256",
+            ),
             evaluated_stake=Decimal(str(raw["evaluated_stake"])),
             upper_bound=Decimal(str(raw["upper_bound"])),
         )
@@ -685,26 +978,47 @@ def _forecast_from_dict(raw: Any) -> ForecastRecord:
     evidence_hashes_raw = raw.get("evidence_hashes", [])
     if not isinstance(evidence_hashes_raw, list):
         raise ValueError("ForecastRecord evidence_hashes must be a JSON array")
-    if any(not isinstance(item, str) for item in evidence_hashes_raw):
-        raise ValueError("ForecastRecord evidence_hashes must contain strings")
+    if any(type(item) is not str for item in evidence_hashes_raw):
+        raise ValueError("ForecastRecord evidence_hashes must contain exact strings")
     return ForecastRecord(
-        quote_key=str(raw["quote_key"]),
+        quote_key=_exact_plan_text(raw["quote_key"], field="forecast quote_key"),
         probability=Decimal(str(raw["probability"])),
-        model_id=str(raw["model_id"]),
-        model_version=str(raw["model_version"]),
-        strategy_version=str(raw["strategy_version"]),
-        model_training_cutoff_ts=str(raw["model_training_cutoff_ts"]),
-        input_cutoff_ts=str(raw["input_cutoff_ts"]),
-        generated_at=str(raw["generated_at"]),
+        model_id=_exact_plan_text(raw["model_id"], field="forecast model_id"),
+        model_version=_exact_plan_text(
+            raw.get("model_version"),
+            field="forecast model_version",
+        ),
+        strategy_version=_exact_plan_text(
+            raw.get("strategy_version"),
+            field="forecast strategy_version",
+        ),
+        model_training_cutoff_ts=_exact_plan_text(
+            raw.get("model_training_cutoff_ts"),
+            field="forecast model_training_cutoff_ts",
+        ),
+        input_cutoff_ts=_exact_plan_text(
+            raw.get("input_cutoff_ts"),
+            field="forecast input_cutoff_ts",
+        ),
+        generated_at=_exact_plan_text(
+            raw.get("generated_at"),
+            field="forecast generated_at",
+        ),
         uncertainty=Decimal(str(raw.get("uncertainty", "0"))),
         evidence_hashes=tuple(evidence_hashes_raw),
         market_snapshot_hash=(
-            raw["market_snapshot_hash"]
+            _exact_plan_text(
+                raw.get("market_snapshot_hash"),
+                field="forecast market_snapshot_hash",
+            )
             if raw.get("market_snapshot_hash") is not None
             else None
         ),
         provenance=dict(raw.get("provenance", {})),
-        forecast_id=str(raw["forecast_id"]),
+        forecast_id=_exact_plan_text(
+            raw.get("forecast_id"),
+            field="forecast forecast_id",
+        ),
     )
 
 
@@ -715,23 +1029,29 @@ def _evidence_from_dict(raw: Any) -> ResearchEvidence:
     if not isinstance(quality_flags_raw, list):
         raise ValueError("ResearchEvidence quality_flags must be a JSON array")
     if any(
-        not isinstance(item, str) or not item.strip() or item != item.strip()
+        type(item) is not str or not item.strip() or item != item.strip()
         for item in quality_flags_raw
     ):
         raise ValueError(
             "ResearchEvidence quality_flags must contain non-empty canonical strings"
         )
     return ResearchEvidence(
-        evidence_id=str(raw["evidence_id"]),
-        quote_key=str(raw["quote_key"]),
-        source_id=str(raw["source_id"]),
-        observed_at=str(raw["observed_at"]),
-        available_at=str(raw["available_at"]),
+        evidence_id=_exact_plan_text(raw["evidence_id"], field="evidence evidence_id"),
+        quote_key=_exact_plan_text(raw["quote_key"], field="evidence quote_key"),
+        source_id=_exact_plan_text(raw["source_id"], field="evidence source_id"),
+        observed_at=_exact_plan_text(raw["observed_at"], field="evidence observed_at"),
+        available_at=_exact_plan_text(raw["available_at"], field="evidence available_at"),
         decimal_odds=Decimal(str(raw["decimal_odds"])),
-        content_sha256=str(raw["content_sha256"]),
+        content_sha256=_exact_plan_text(
+            raw.get("content_sha256"),
+            field="evidence content_sha256",
+        ),
         quality_flags=tuple(quality_flags_raw),
         market_snapshot_hash=(
-            str(raw["market_snapshot_hash"])
+            _exact_plan_text(
+                raw.get("market_snapshot_hash"),
+                field="evidence market_snapshot_hash",
+            )
             if raw.get("market_snapshot_hash") is not None
             else None
         ),

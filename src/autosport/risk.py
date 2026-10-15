@@ -33,6 +33,49 @@ def _canonical_context_text(name: str, value: object) -> str:
     return value
 
 
+def _validate_proposed_ticket_leg(leg: object) -> TicketLeg:
+    """Validate proposal identity without applying PaperBook materialization policy."""
+
+    if type(leg) is not TicketLeg:
+        raise ValueError("proposal leg must be an exact TicketLeg")
+
+    for name, value in (
+        ("leg event_id", leg.event_id),
+        ("leg market_id", leg.market_id),
+        ("leg selection_id", leg.selection_id),
+    ):
+        text = _canonical_context_text(name, value)
+        if "|" in text:
+            raise ValueError(f"{name} must not contain quote-key delimiter '|'")
+
+    if leg.sport is not None:
+        sport = _canonical_context_text("leg sport", leg.sport)
+        if (
+            sport != sport.lower()
+            or "|" in sport
+            or any(
+                character not in "abcdefghijklmnopqrstuvwxyz0123456789_-"
+                for character in sport
+            )
+            or sport in {"unknown", "mixed"}
+        ):
+            raise ValueError("leg sport must be a canonical sport identity")
+
+    if leg.exchange_side is not None:
+        side = _canonical_context_text("leg exchange_side", leg.exchange_side)
+        if side not in {"back", "lay"}:
+            raise ValueError("leg exchange_side must be canonical 'back' or 'lay'")
+
+    if (
+        type(leg.locked_odds) is not Decimal
+        or not leg.locked_odds.is_finite()
+        or leg.locked_odds <= Decimal("1")
+    ):
+        raise ValueError("leg locked_odds must be a finite exact Decimal greater than 1")
+
+    return leg
+
+
 def _canonical_context_timestamp(name: str, value: object) -> tuple[str, datetime]:
     timestamp = _canonical_context_text(name, value)
     try:
@@ -266,14 +309,11 @@ class ProposedTicketRiskContext:
     market deny-list, and provider deny-list enforcement. Canonical sport identity
     is deliberately absent until the upstream #339 identity authority exists, so
     any non-empty owner sport deny-list must fail closed instead of being guessed.
-    Session/day loss, drawdown and turnover are conservatively bounded from the
-    validated PaperBook lifecycle: all-history gross realized loss upper-bounds
-    any bounded loss window, stake-basis equity preserves open stake at cost until
-    settlement, and turnover counts every durable ticket stake. A probabilistic
-    risk-of-ruin ceiling requires an explicit canonical upper-bound witness in this
-    context; it is never inferred from PaperBook balances. Event/market concentration
-    is derived exactly from canonical open PaperBook stake plus the proposed stake.
-    Provider concentration additionally requires source-scoped bookmaker account
+    Session/day loss, drawdown and turnover are enforced conservatively from the
+    canonical PaperBook lifecycle and therefore survive snapshot restart without a
+    second state authority. Risk-of-ruin remains evidence-gated because a balance
+    history is not a probability model. Event/market concentration is enforced
+    against the whole open stake set. Provider concentration additionally requires source-scoped bookmaker account
     identity for every relevant proposal/open ticket; provider-only history is not
     sufficient account-scoped exposure proof. Sport concentration remains fail-closed
     until canonical sport identity has a durable authority.
@@ -299,7 +339,7 @@ class ProposedTicketRiskContext:
         leg_keys: set[str] = set()
         for leg in self.legs:
             try:
-                PaperBook._validate_ticket_leg(leg)
+                _validate_proposed_ticket_leg(leg)
             except (AttributeError, TypeError, ValueError) as exc:
                 raise ValueError("proposed ticket context contains an invalid leg") from exc
             if leg.quote_key in leg_keys:
@@ -488,8 +528,12 @@ class _HistoricalRiskMetrics:
     turnover: Decimal
 
 
+class _PaperRiskPolicyMeta(type):
+    """Composition point for final owner-facing risk-root data descriptors."""
+
+
 @dataclass(frozen=True, slots=True)
-class PaperRiskPolicy:
+class PaperRiskPolicy(metaclass=_PaperRiskPolicyMeta):
     """Paper-lab guardrails. Limits are explicit and deterministic, never inferred by an LLM.
 
     ``economic_goal`` can only tighten the locally proven executable limits in
@@ -1420,6 +1464,27 @@ class PaperRiskPolicy:
         returns ZERO semantics as None rather than inventing a stake.
         """
 
+        for (
+            helper_name,
+            expected_descriptor,
+            expected_function,
+            expected_code,
+            descriptor_wrapped,
+        ) in _PAPER_RISK_DERIVE_GOAL_STAKE_HELPER_WITNESSES:
+            current_descriptor = PaperRiskPolicy.__dict__.get(helper_name)
+            if current_descriptor is not expected_descriptor:
+                return None
+            current_function = (
+                current_descriptor.__func__
+                if descriptor_wrapped
+                else current_descriptor
+            )
+            if (
+                current_function is not expected_function
+                or current_function.__code__ is not expected_code
+            ):
+                return None
+
         goal = self.economic_goal
         if goal is None:
             return None
@@ -1482,6 +1547,14 @@ class PaperRiskPolicy:
                 book, amount, goal, context
             ) is not None:
                 return None
+
+        # The canonical public wrapper normally holds one generation-stable read
+        # scope around this derivation. Reconstructed historical delegate specs
+        # must still fail closed: re-resolve the same canonical book state before
+        # returning positive sizing authority. A concurrent durable publication
+        # makes a path-bound stale book fail the generation-aware _book_state read.
+        if self._book_state(book) != state:
+            return None
         return amount
 
     @staticmethod
@@ -1538,6 +1611,35 @@ class PaperRiskPolicy:
 
         context_count = len(contexts) if type(contexts) is tuple else 0
         zero_vector = tuple(Decimal("0") for _ in range(context_count))
+        for (
+            helper_name,
+            expected_descriptor,
+            expected_function,
+            expected_code,
+            descriptor_wrapped,
+        ) in _PAPER_RISK_DERIVE_GOAL_STAKE_VECTOR_HELPER_WITNESSES:
+            current_descriptor = PaperRiskPolicy.__dict__.get(helper_name)
+            if current_descriptor is not expected_descriptor:
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "virtual bankroll risk helper authority is invalid",
+                )
+            current_function = (
+                current_descriptor.__func__
+                if descriptor_wrapped
+                else current_descriptor
+            )
+            if (
+                current_function is not expected_function
+                or current_function.__code__ is not expected_code
+            ):
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "virtual bankroll risk helper authority is invalid",
+                )
+
         goal = self.economic_goal
         if goal is None:
             return StakeVectorDecision(
@@ -1664,6 +1766,17 @@ class PaperRiskPolicy:
                 economic_goal=replace(goal, max_risk_of_ruin=Decimal("1")),
             )
 
+        # Capture a generation-validated live state before detached allocation.
+        # This gives even a reconstructible pre-wrapper delegate a linearization
+        # point that can be revalidated before it returns positive portfolio sizing.
+        authority_state = self._book_state(book)
+        if authority_state is None:
+            return StakeVectorDecision(
+                "WAIT",
+                zero_vector,
+                "virtual bankroll allocation authority is invalid",
+            )
+
         shadow = allocation_policy._shadow_book_for_allocation(book)
         if shadow is None:
             return StakeVectorDecision(
@@ -1737,6 +1850,12 @@ class PaperRiskPolicy:
                         zero_vector,
                         vector_ruin_decision.reason,
                     )
+            if self._book_state(book) != authority_state:
+                return StakeVectorDecision(
+                    "WAIT",
+                    zero_vector,
+                    "virtual bankroll changed during stake-vector allocation",
+                )
             return StakeVectorDecision(
                 "STAKE_VECTOR",
                 result,
@@ -1787,6 +1906,39 @@ class PaperRiskPolicy:
         *,
         context: ProposedTicketRiskContext | None = None,
     ) -> RiskDecision:
+        # Older executable specs remain reconstructible from Python-visible wrapper
+        # state, so the raw canonical evaluator must itself fail closed if any helper
+        # it dispatches through the class has been replaced or had its code mutated.
+        # _book_state is deliberately excluded because composition replaces it with
+        # the generation/private-authority wrapper; that wrapper is independently
+        # sealed. The witnesses below cover the remaining raw helper dispatch.
+        for (
+            helper_name,
+            expected_descriptor,
+            expected_function,
+            expected_code,
+            descriptor_wrapped,
+        ) in _PAPER_RISK_EVALUATE_HELPER_WITNESSES:
+            current_descriptor = PaperRiskPolicy.__dict__.get(helper_name)
+            if current_descriptor is not expected_descriptor:
+                return RiskDecision(
+                    False,
+                    "virtual bankroll risk helper authority is invalid",
+                )
+            current_function = (
+                current_descriptor.__func__
+                if descriptor_wrapped
+                else current_descriptor
+            )
+            if (
+                current_function is not expected_function
+                or current_function.__code__ is not expected_code
+            ):
+                return RiskDecision(
+                    False,
+                    "virtual bankroll risk helper authority is invalid",
+                )
+
         if context is not None and not isinstance(context, ProposedTicketRiskContext):
             return RiskDecision(False, "proposed ticket risk context is invalid")
 
@@ -1883,4 +2035,55 @@ class PaperRiskPolicy:
             return RiskDecision(False, "aggregate committed stake limit exceeded")
         if remaining_balance < reserve_limit:
             return RiskDecision(False, "minimum virtual cash reserve would be violated")
+
+        # Positive authority must linearize against one durable PaperBook generation
+        # even when an older executable spec is reconstructed from Python-visible
+        # wrapper state. The generation-aware _book_state check rejects a stale
+        # path-bound object after any concurrent canonical publication.
+        if self._book_state(book) != state:
+            return RiskDecision(False, "virtual bankroll changed during risk evaluation")
         return RiskDecision(True, "allowed")
+
+# Raw risk executable specs are intentionally reconstructible evidence. Preserve
+# fail-closed semantics by binding exact class descriptors/functions for every helper
+# they may dispatch to outside the separately wrapped generation/private roots.
+# Reconstructed delegates carry these immutable witness tuples in captured globals.
+_eval_proposal = PaperRiskPolicy.__dict__["_proposal_restriction_decision"]
+_eval_history = PaperRiskPolicy.__dict__["_goal_history_rooms"]
+_eval_quote = PaperRiskPolicy.__dict__["_quote_risk_decision"]
+_eval_ruin = PaperRiskPolicy.__dict__["_risk_of_ruin_evidence_decision"]
+_eval_derived = PaperRiskPolicy.__dict__["_derived_risk_values"]
+_stake_limits = PaperRiskPolicy.__dict__["_effective_fraction_limits"]
+_stake_decimal_context = PaperRiskPolicy.__dict__["_decimal_context"]
+_vector_wait = PaperRiskPolicy.__dict__["_risk_rejection_requires_wait"]
+_vector_ruin = PaperRiskPolicy.__dict__["_risk_of_ruin_vector_evidence_decision"]
+
+_PAPER_RISK_EVALUATE_HELPER_WITNESSES = (
+    ("_proposal_restriction_decision", _eval_proposal, _eval_proposal.__func__, _eval_proposal.__func__.__code__, True),
+    ("_goal_history_rooms", _eval_history, _eval_history.__func__, _eval_history.__func__.__code__, True),
+    ("_quote_risk_decision", _eval_quote, _eval_quote.__func__, _eval_quote.__func__.__code__, True),
+    ("_risk_of_ruin_evidence_decision", _eval_ruin, _eval_ruin.__func__, _eval_ruin.__func__.__code__, True),
+    ("_derived_risk_values", _eval_derived, _eval_derived, _eval_derived.__code__, False),
+)
+
+_PAPER_RISK_DERIVE_GOAL_STAKE_HELPER_WITNESSES = (
+    ("_goal_history_rooms", _eval_history, _eval_history.__func__, _eval_history.__func__.__code__, True),
+    ("_effective_fraction_limits", _stake_limits, _stake_limits, _stake_limits.__code__, False),
+    ("_decimal_context", _stake_decimal_context, _stake_decimal_context.__func__, _stake_decimal_context.__func__.__code__, True),
+    ("_risk_of_ruin_evidence_decision", _eval_ruin, _eval_ruin.__func__, _eval_ruin.__func__.__code__, True),
+)
+
+_PAPER_RISK_DERIVE_GOAL_STAKE_VECTOR_HELPER_WITNESSES = (
+    ("_risk_rejection_requires_wait", _vector_wait, _vector_wait.__func__, _vector_wait.__func__.__code__, True),
+    ("_risk_of_ruin_vector_evidence_decision", _vector_ruin, _vector_ruin.__func__, _vector_ruin.__func__.__code__, True),
+)
+
+del _eval_proposal
+del _eval_history
+del _eval_quote
+del _eval_ruin
+del _eval_derived
+del _stake_limits
+del _stake_decimal_context
+del _vector_wait
+del _vector_ruin

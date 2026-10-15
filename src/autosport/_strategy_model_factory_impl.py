@@ -72,9 +72,11 @@ def _text(value: object, name: str) -> str:
 
 
 def _sha256(value: object, name: str) -> str:
-    text = _text(value, name).lower()
+    text = _text(value, name)
     if len(text) != 64 or any(char not in "0123456789abcdef" for char in text):
-        raise ValueError(f"{name} must be a SHA-256 hex digest")
+        raise ValueError(
+            f"{name} must be a canonical lowercase SHA-256 hex digest"
+        )
     return text
 
 
@@ -229,6 +231,8 @@ class WalkForwardEvaluationConfig:
             _sha256(self.feature_source_sha256, "feature_source_sha256")
 
     def canonical_payload(self) -> dict[str, object]:
+        if type(self) is not WalkForwardEvaluationConfig:
+            raise ValueError("evaluation config must be an exact WalkForwardEvaluationConfig")
         payload: dict[str, object] = {
             "kind": "autosport-causal-walk-forward-v1",
             "minimum_causal_train_size": self.minimum_causal_train_size,
@@ -251,8 +255,10 @@ class WalkForwardEvaluationConfig:
 
     @property
     def frozen_text(self) -> str:
+        if type(self) is not WalkForwardEvaluationConfig:
+            raise ValueError("evaluation config must be an exact WalkForwardEvaluationConfig")
         return json.dumps(
-            self.canonical_payload(),
+            WalkForwardEvaluationConfig.canonical_payload(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -261,7 +267,9 @@ class WalkForwardEvaluationConfig:
 
     @property
     def config_sha256(self) -> str:
-        return _canonical_digest(self.canonical_payload())
+        if type(self) is not WalkForwardEvaluationConfig:
+            raise ValueError("evaluation config must be an exact WalkForwardEvaluationConfig")
+        return _canonical_digest(WalkForwardEvaluationConfig.canonical_payload(self))
 
     @classmethod
     def from_frozen_text(cls, value: object) -> "WalkForwardEvaluationConfig":
@@ -422,6 +430,8 @@ class WalkForwardResult:
     primary_value: float
 
     def to_payload(self) -> dict[str, object]:
+        if type(self) is not WalkForwardResult:
+            raise ValueError("walk-forward result must be an exact WalkForwardResult")
         return {
             "model_family": self.model_family,
             "primary_metric": self.primary_metric,
@@ -443,7 +453,9 @@ class WalkForwardResult:
 
     @property
     def result_sha256(self) -> str:
-        return _canonical_digest(self.to_payload())
+        if type(self) is not WalkForwardResult:
+            raise ValueError("walk-forward result must be an exact WalkForwardResult")
+        return _canonical_digest(WalkForwardResult.to_payload(self))
 
     def promotion_metrics(self) -> dict[str, float]:
         """Metrics derived only from this causal walk-forward result.
@@ -557,6 +569,8 @@ class PromotionRule:
             _finite(maximum, f"protective maximum {name}")
 
     def canonical_payload(self) -> dict[str, object]:
+        if type(self) is not PromotionRule:
+            raise ValueError("promotion rule must be an exact PromotionRule")
         return {
             "kind": "autosport-promotion-rule-v1",
             "primary_metric": self.primary_metric,
@@ -573,8 +587,10 @@ class PromotionRule:
 
     @property
     def frozen_text(self) -> str:
+        if type(self) is not PromotionRule:
+            raise ValueError("promotion rule must be an exact PromotionRule")
         return json.dumps(
-            self.canonical_payload(),
+            PromotionRule.canonical_payload(self),
             ensure_ascii=False,
             sort_keys=True,
             separators=(",", ":"),
@@ -583,7 +599,9 @@ class PromotionRule:
 
     @property
     def rule_sha256(self) -> str:
-        return _canonical_digest(self.canonical_payload())
+        if type(self) is not PromotionRule:
+            raise ValueError("promotion rule must be an exact PromotionRule")
+        return _canonical_digest(PromotionRule.canonical_payload(self))
 
 
 @dataclass(frozen=True, slots=True)

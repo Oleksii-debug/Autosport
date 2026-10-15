@@ -68,7 +68,7 @@ class StoragePartialHistoryLossTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "projection event is missing from authoritative history",
+                "market event append-generation authority does not exactly cover history",
             ):
                 SQLiteMarketStore(db_path)
 
@@ -136,7 +136,7 @@ class StoragePartialHistoryLossTests(unittest.TestCase):
 
             with self.assertRaisesRegex(
                 ValueError,
-                "projection event is missing from authoritative history",
+                "market event append-generation authority does not exactly cover history",
             ):
                 SQLiteMarketStore(db_path)
 

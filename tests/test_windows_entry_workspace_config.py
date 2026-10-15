@@ -7,6 +7,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 from autosport import windows_entry
+from autosport.localization import text
 
 
 def test_invalid_workspace_configuration_is_reported_before_gui_import(tmp_path: Path) -> None:
@@ -100,6 +101,6 @@ def test_native_workspace_error_dialog_is_actionable_and_accessible_boundary() -
     assert hwnd is None
     assert "AUTOSPORT_WORKSPACE must be an absolute path" in message
     assert "потім перезапустіть Автоспорт" in message
-    assert "Economic і live state не змінено" in message
-    assert "помилка конфігурації workspace" in title
+    assert "Економічний стан і стан спостереження не змінено." in message
+    assert title == text("ui.windows.workspace_configuration.title")
     assert flags & 0x00000010

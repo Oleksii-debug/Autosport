@@ -46,7 +46,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
                     setattr(book, field_name, value)
                     decision = policy.evaluate(book, "1")
                     self.assertFalse(decision.allowed)
-                    self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+                    self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_noncanonical_or_negative_book_state_is_denied(self) -> None:
         policy = self._permissive_policy()
@@ -62,7 +62,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
                 setattr(book, field_name, value)
                 decision = policy.evaluate(book, "1")
                 self.assertFalse(decision.allowed)
-                self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+                self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_corrupt_open_ticket_stake_is_denied_without_committed_stake_exception(self) -> None:
         book = PaperBook("100")
@@ -72,7 +72,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = self._permissive_policy().evaluate(book, "1")
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_corrupt_ticket_status_cannot_silently_remove_committed_exposure(self) -> None:
         book = PaperBook("100")
@@ -87,7 +87,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = policy.evaluate(book, "20")
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_negative_ticket_stake_cannot_reduce_committed_exposure(self) -> None:
         book = PaperBook("100")
@@ -97,7 +97,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = self._permissive_policy().evaluate(book, "10")
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_malformed_ticket_object_is_denied_without_attribute_error(self) -> None:
         book = PaperBook("100")
@@ -106,7 +106,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = self._permissive_policy().evaluate(book, "1")
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_aliased_ticket_identity_cannot_fabricate_valid_ledger_state(self) -> None:
         book = PaperBook("100")
@@ -119,7 +119,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = self._permissive_policy().evaluate(book, "1")
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_inflated_balance_breaking_ledger_equation_is_denied(self) -> None:
         book = PaperBook("100")
@@ -134,7 +134,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = policy.evaluate(book, "20")
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_sub_precision_ledger_corruption_cannot_round_back_to_stored_balance(self) -> None:
         book = PaperBook("100")
@@ -144,7 +144,7 @@ class PaperRiskFiniteIntegrityTests(unittest.TestCase):
         decision = self._permissive_policy().evaluate(book, "1")
 
         self.assertFalse(decision.allowed)
-        self.assertEqual(decision.reason, "virtual bankroll state is invalid")
+        self.assertEqual(decision.reason, "virtual bankroll private economic authority is invalid")
 
     def test_canonical_open_exposure_beyond_risk_precision_reaches_configured_limits(self) -> None:
         book = PaperBook("10")

@@ -10,6 +10,39 @@ import pytest
 ROOT = Path(__file__).resolve().parents[1]
 
 
+def _assert_exact_source_materializer(candidate: str) -> None:
+    """Permit one scriptblock only after a Git-pinned materializer is read as bytes.
+
+    The earlier blanket syntax ban rejected the safe exact-SHA materializer in the
+    canonical #1606 lineage, even though a separate source-contract test requires it.
+    Keep a *stronger* provenance and execution-order gate instead of dropping the gate.
+    """
+    markers = (
+        "Invoke-WindowsCandidateCoreText -CoreText $candidateText",
+        "ls-tree $sourceSha -- $materializerRepoPath",
+        "if (-not $materializerMatch.Success)",
+        "ArgumentList.Add('cat-file')",
+        "ArgumentList.Add($materializerBlobSha)",
+        "StandardOutput.BaseStream.CopyTo($materializerBuffer)",
+        "if ($materializerBytes.Length -eq 0)",
+        "$strictUtf8.GetString($materializerBytes)",
+        "[scriptblock]::Create($materializerText)",
+        "& $materializerScript -SourceSha $sourceSha -RepoRoot $repoRoot",
+    )
+    positions = [candidate.find(marker) for marker in markers]
+    assert all(position >= 0 for position in positions)
+    assert positions == sorted(positions)
+    assert len(set(positions)) == len(positions)
+
+    # Untrusted/dynamic execution outside this one exact-source handoff is forbidden.
+    assert candidate.count("[scriptblock]::Create(") == 1
+    assert "[scriptblock]::Create" not in candidate[: positions[1]]
+    assert "Stage-neutral release source SHA does not match checkout HEAD" in candidate
+    assert "GIT_NO_REPLACE_OBJECTS" in candidate
+    assert "^(100644|100755) blob ([0-9a-f]{40})" in candidate
+    assert "[System.Text.UTF8Encoding]::new($false, $true)" in candidate
+
+
 def test_windows_builder_stays_canonical_and_candidate_skip_is_separate() -> None:
     builder = (ROOT / "scripts" / "build_windows.ps1").read_text(encoding="utf-8")
     candidate = (ROOT / "scripts" / "build_windows_candidate.ps1").read_text(
@@ -30,7 +63,31 @@ def test_windows_builder_stays_canonical_and_candidate_skip_is_separate() -> Non
     assert "windows_build_skip_gate.ps1" in candidate
     assert "ConvertTo-WindowsCandidateCoreText" in candidate
     assert "Invoke-WindowsCandidateCoreText -CoreText $candidateText" in candidate
-    assert "[scriptblock]::Create" not in candidate
+    _assert_exact_source_materializer(candidate)
+
+
+@pytest.mark.parametrize(
+    ("trusted", "mutated"),
+    (
+        ("ls-tree $sourceSha -- $materializerRepoPath", "ls-tree HEAD -- $materializerRepoPath"),
+        ("ArgumentList.Add($materializerBlobSha)", "ArgumentList.Add('HEAD')"),
+        ("GIT_NO_REPLACE_OBJECTS", "GIT_REPLACE_OBJECTS_ALLOWED"),
+        (
+            "[System.Text.UTF8Encoding]::new($false, $true)",
+            "[System.Text.UTF8Encoding]::new($false, $false)",
+        ),
+        ("[scriptblock]::Create($materializerText)", "[scriptblock]::Create($builderText)"),
+    ),
+)
+def test_windows_candidate_materializer_trust_boundary_rejects_tampering(
+    trusted: str, mutated: str
+) -> None:
+    candidate = (ROOT / "scripts" / "build_windows_candidate.ps1").read_text(
+        encoding="utf-8"
+    )
+    assert candidate.count(trusted) == 1
+    with pytest.raises(AssertionError):
+        _assert_exact_source_materializer(candidate.replace(trusted, mutated, 1))
 
 
 def test_windows_candidate_opts_into_only_builder_local_skip() -> None:

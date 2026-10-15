@@ -84,6 +84,57 @@ def test_required_list_whitespace_only_aria_label_fails(tmp_path: Path) -> None:
     _assert_machine_fail(report, "dynamic list has no aria-label")
 
 
+@pytest.mark.parametrize("keyboard", [False, True])
+@pytest.mark.parametrize(
+    ("old", "new", "diagnostic"),
+    [
+        (
+            'for="301"',
+            'for="missing-navigation"',
+            "for references missing id=missing-navigation",
+        ),
+        (
+            'aria-labelledby="overview-heading"',
+            'aria-labelledby="missing-overview-heading"',
+            "aria-labelledby references missing id=missing-overview-heading",
+        ),
+        (
+            'aria-describedby="dataset-summary"',
+            'aria-describedby="missing-dataset-summary"',
+            "aria-describedby references missing id=missing-dataset-summary",
+        ),
+        (
+            'aria-controls="owner-panel"',
+            'aria-controls="missing-owner-panel"',
+            "aria-controls references missing id=missing-owner-panel",
+        ),
+        (
+            'aria-describedby="dataset-summary"',
+            'aria-describedby="dataset-summary missing-help"',
+            "aria-describedby references missing id=missing-help",
+        ),
+        (
+            'aria-controls="owner-panel"',
+            'aria-controls=" "',
+            "malformed html id reference",
+        ),
+        (
+            'for="301"',
+            'for="301 302"',
+            "malformed html id reference",
+        ),
+    ],
+)
+def test_broken_id_references_fail_both_audits(
+    tmp_path: Path, keyboard: bool, old: str, new: str, diagnostic: str
+) -> None:
+    index, _ = audit._asset_paths()
+    html = index.read_text(encoding="utf-8")
+    assert html.count(old) == 1
+    report = _run_mutated(tmp_path, html.replace(old, new, 1), keyboard=keyboard)
+    _assert_machine_fail(report, diagnostic)
+
+
 def test_unmodified_shell_keeps_machine_only_truth_boundary() -> None:
     report = audit.inspect_semantic_shell()
     assert report["status"] == "PASS", report

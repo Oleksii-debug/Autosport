@@ -142,6 +142,8 @@ class _SemanticShellParser(HTMLParser):
         self.elements: dict[str, tuple[str, dict[str, str | None]]] = {}
         self.duplicate_ids: set[str] = set()
         self.duplicate_id_attributes: set[str] = set()
+        self.id_references: list[tuple[str, str, str]] = []
+        self.malformed_id_references: set[str] = set()
         self.labels_for: set[str] = set()
         self.landmarks: set[str] = set()
         self.h1_count = 0
@@ -165,6 +167,18 @@ class _SemanticShellParser(HTMLParser):
             if element_id in self.elements:
                 self.duplicate_ids.add(element_id)
             self.elements[element_id] = (tag, values)
+        # Validate static HTML IDREF destinations after the entire document is parsed.
+        reference_attrs = ("aria-labelledby", "aria-describedby", "aria-controls")
+        if tag == "label" and "for" in values:
+            reference_attrs = (*reference_attrs, "for")
+        for attribute in reference_attrs:
+            if attribute not in values:
+                continue
+            targets = str(values[attribute] or "").split()
+            if not targets or (attribute == "for" and len(targets) != 1):
+                self.malformed_id_references.add(f"{element_id or tag}: {attribute}")
+            for target in targets:
+                self.id_references.append((element_id or tag, attribute, target))
         if tag in _REQUIRED_LANDMARKS:
             self.landmarks.add(tag)
         if tag == "h1":
@@ -190,6 +204,16 @@ def _reject_duplicate_html_identities(parser: _SemanticShellParser, failures: li
         failures.append("duplicate HTML id values: " + ", ".join(sorted(parser.duplicate_ids)))
     if parser.duplicate_id_attributes:
         failures.append("duplicate HTML id attributes: " + ", ".join(sorted(parser.duplicate_id_attributes)))
+
+
+def _reject_broken_html_id_references(
+    parser: _SemanticShellParser, failures: list[str]
+) -> None:
+    for reference in sorted(parser.malformed_id_references):
+        failures.append(f"malformed HTML id reference: {reference}")
+    for source, attribute, target in parser.id_references:
+        if target not in parser.elements:
+            failures.append(f"id={source}: {attribute} references missing id={target}")
 
 
 def _asset_paths() -> tuple[Path, Path]:
@@ -222,6 +246,7 @@ def inspect_semantic_shell() -> dict[str, Any]:
         parser.feed(html)
         parser.close()
         _reject_duplicate_html_identities(parser, failures)
+        _reject_broken_html_id_references(parser, failures)
     except Exception as exc:
         failures.append(f"semantic shell HTML parse failed: {type(exc).__name__}: {exc}")
 
@@ -382,6 +407,7 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     parser.feed(html)
     parser.close()
     _reject_duplicate_html_identities(parser, failures)
+    _reject_broken_html_id_references(parser, failures)
     for marker in _REQUIRED_SHORTCUT_MARKERS:
         if marker not in javascript:
             failures.append(f"keyboard marker missing: {marker}")

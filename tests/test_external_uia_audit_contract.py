@@ -1309,7 +1309,8 @@ def test_external_uia_monotonic_worker_wait_fails_closed() -> None:
     assert "if (-not $workerTerminal)" in wrapper
     timeout_clause = wrapper.split("if (-not $workerTerminal) {", 1)[1].split("\n    }", 1)[0]
     assert "$script:semanticWorkerTimedOut = $true" in timeout_clause
-    assert "throw 'External UIA semantic worker timed out" in timeout_clause
+    assert 'throw "External UIA semantic worker timed out' in timeout_clause
+    assert "last_worker_stage=$lastWorkerStage" in timeout_clause
     assert "return $null" not in timeout_clause
     assert "Wait-Job -Job $job" not in wrapper
     assert "Stop-Job -Job $job" not in wrapper
@@ -1328,7 +1329,8 @@ def test_stalled_uia_worker_aborts_provider_reentry_and_cleanup_probe() -> None:
     timeout = wrapper.split("if (-not $workerTerminal) {", 1)[1].split("\n    }", 1)[0]
     assert "SEMANTIC_WORKER_TIMEOUT_PROBE" in timeout
     assert "$script:semanticWorkerTimedOut = $true" in timeout
-    assert "throw 'External UIA semantic worker timed out" in timeout
+    assert 'throw "External UIA semantic worker timed out' in timeout
+    assert "last_worker_stage=$lastWorkerStage" in timeout
     assert "Stop-Job -Job" not in timeout and "Remove-Job -Job" not in timeout
     native = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
         "function Wait-ForUiaElement {", 1

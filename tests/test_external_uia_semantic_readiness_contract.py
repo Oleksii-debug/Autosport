@@ -249,9 +249,10 @@ def test_native_semantic_helper_never_binds_com_root_before_mta_job() -> None:
     assert "$job.State" not in helper
     assert "$workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()" in helper
     assert "if (-not $workerTerminal)" in helper
-    timeout_path = helper.split("if (-not $workerTerminal) {", 1)[1].split("}", 1)[0]
+    timeout_path = helper.split("if (-not $workerTerminal) {", 1)[1].split("\n    }", 1)[0]
     assert "$script:semanticWorkerTimedOut = $true" in timeout_path
-    assert "throw 'External UIA semantic worker timed out" in timeout_path
+    assert 'throw "External UIA semantic worker timed out' in timeout_path
+    assert "last_worker_stage=$lastWorkerStage" in timeout_path
     assert "return $null" not in timeout_path
     assert "Receive-Job" not in timeout_path
     assert "Remove-Job -Job" not in timeout_path

@@ -30,7 +30,7 @@ def test_actual_uia_calls_have_fixed_pre_call_diagnostic_stages() -> None:
     ):
         assert worker.index(token) < worker.index(call)
     assert "$CompletionSignal.Set()" in worker
-    stages = re.findall(r"\\$ProgressQueue\\.Enqueue\\('([^']+)'\\)", worker)
+    stages = re.findall(r"\$ProgressQueue\.Enqueue\('([^']+)'\)", worker)
     assert set(stages) == {
         "WORKER_ENTER", "MTA_APARTMENT_CHECK", "FROM_HANDLE_ENTER",
         "FROM_HANDLE_RETURNED", "NATIVE_PID_READ_ENTER", "NATIVE_PID_VALIDATED",
@@ -47,7 +47,7 @@ def test_timeout_reports_last_stage_without_reentering_poisoned_provider() -> No
     assert "$workerCompleted.Wait($budgetSeconds * 1000)" in bounded
     assert "if (-not $workerTerminal)" in bounded
     assert "throw \"External UIA semantic worker timed out" in bounded
-    assert not re.search(r"(?m)^\\s*(Wait-Job|Stop-Job|Receive-Job|Remove-Job)\\b", bounded)
+    assert not re.search(r"(?m)^\s*(Wait-Job|Stop-Job|Receive-Job|Remove-Job)\b", bounded)
 
 
 def test_stages_do_not_replace_real_semantic_or_process_witness() -> None:

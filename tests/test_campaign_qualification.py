@@ -32,6 +32,7 @@ SHA_6 = "6" * 64
 SHA_7 = "7" * 64
 SHA_8 = "8" * 64
 SHA_9 = "9" * 64
+SHA_0 = "0" * 64  # Unique structural STOP evidence bytes.
 
 
 def anchor(
@@ -137,7 +138,7 @@ class CampaignQualificationTests(unittest.TestCase):
     def complete(self) -> CampaignQualificationEvidence:
         identity = self.identity()
         episodes = self.episodes(identity)
-        stop = anchor("stop", SHA_4, "2026-09-21T02:07:00Z")
+        stop = anchor("stop", SHA_0, "2026-09-21T02:07:00Z")
         digest = structural_terminal_bundle_sha256(identity, episodes, stop)
         bundle = anchor(
             "terminal-bundle",
@@ -167,6 +168,38 @@ class CampaignQualificationTests(unittest.TestCase):
         return replace(
             evidence,
             terminal_bundle=replace(evidence.terminal_bundle, sha256=digest),
+        )
+
+
+    def test_durable_stop_reusing_paper_action_bytes_is_blocked(self):
+        evidence = self.complete()
+        self.assertEqual(
+            assess_campaign_qualification(evidence).state,
+            QualificationState.COMPLETE_FOR_CANONICAL_RESOLUTION,
+        )
+        paper_action = evidence.episodes[0].paper_action
+        self.assertIsNotNone(paper_action)
+        relabelled = replace(
+            evidence,
+            stop=replace(evidence.stop, sha256=paper_action.sha256),
+        )
+        self.assert_blocked(
+            self.rebind_bundle(relabelled),
+            "durable STOP reuses prior episode evidence bytes",
+        )
+
+    def test_durable_stop_reusing_checkpoint_bytes_is_blocked(self):
+        evidence = self.complete()
+        relabelled = replace(
+            evidence,
+            stop=replace(
+                evidence.stop,
+                sha256=evidence.episodes[-1].checkpoint.sha256,
+            ),
+        )
+        self.assert_blocked(
+            self.rebind_bundle(relabelled),
+            "durable STOP reuses prior episode evidence bytes",
         )
 
     def test_complete_multiday_chain_is_only_ready_for_canonical_resolution(self):

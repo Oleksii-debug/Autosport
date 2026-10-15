@@ -418,6 +418,7 @@ def assess_campaign_qualification(
         blockers.append("episode decisions must bind distinct evidence bytes")
 
     used_anchor_identities: dict[tuple[str, str], tuple[str, str]] = {}
+    episode_anchor_sha256s: set[str] = set()
 
     def record_anchor(label: str, anchor: EvidenceAnchor) -> None:
         key = (anchor.authority_family, anchor.evidence_id)
@@ -454,6 +455,7 @@ def assess_campaign_qualification(
             anchor = getattr(item, role)
             if anchor is not None:
                 record_anchor(prefix + role, anchor)
+                episode_anchor_sha256s.add(anchor.sha256)
         if item.campaign_identity_sha256.lower() != identity_sha:
             blockers.append(prefix + "campaign identity drift")
 
@@ -585,6 +587,10 @@ def assess_campaign_qualification(
 
         previous_checkpoint = item.checkpoint
 
+    # STOP must be an independently issued durable event, not relabelled bytes
+    # from the campaign. This remains structural evidence, not source authority.
+    if evidence.stop.sha256 in episode_anchor_sha256s:
+        blockers.append("durable STOP reuses prior episode evidence bytes")
     record_anchor("campaign stop", evidence.stop)
     record_anchor("terminal bundle", evidence.terminal_bundle)
 

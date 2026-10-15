@@ -100,7 +100,17 @@ class OneShotObservationWorker:
             # never publish/release a slot while a prior non-daemon helper is alive.
             cancelled.set()
             start_gate.set()
-            self._reap_ambiguous_start(thread)
+            try:
+                self._reap_ambiguous_start(thread)
+            except BaseException:
+                # Ambiguous-start cleanup can itself be interrupted after the helper
+                # has been cancelled but before it is reaped. Publish the original
+                # setup disposition while retaining _thread/_busy ownership so a
+                # later poll can finish the reap instead of stranding the slot.
+                self._messages.put_nowait(
+                    ObservationWorkerMessage(error="BaseException: exception details unavailable")
+                )
+                raise
             if isinstance(exc, Exception):
                 self._publish_setup_failure(exc)
                 return True
@@ -122,7 +132,7 @@ class OneShotObservationWorker:
         # an ordinary setup failure returns True and publishes one terminal error.
         self._thread = None
         self._messages.put(
-            ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            ObservationWorkerMessage(error="BaseException: exception details unavailable")
         )
 
     def _release_unstarted_slot(self) -> None:
@@ -149,7 +159,7 @@ class OneShotObservationWorker:
             # not terminate the GUI process. Publish a terminal failure so poll()
             # clears the single-flight state instead of leaving live observation
             # permanently busy after the worker thread has already died.
-            message = ObservationWorkerMessage(error=f"{type(exc).__name__}: {exc}")
+            message = ObservationWorkerMessage(error="BaseException: exception details unavailable")
         self._messages.put(message)
 
     def poll(self) -> ObservationWorkerMessage | None:
@@ -169,7 +179,15 @@ class OneShotObservationWorker:
                 # terminal disposition from an unsupported self-poll.
                 self._messages.put_nowait(message)
                 raise RuntimeError("observation worker cannot poll itself")
-            thread.join()
+            try:
+                thread.join()
+            except BaseException:
+                # The terminal disposition was removed from the single-slot queue
+                # before reaping. If the caller's join is interrupted, preserve that
+                # disposition and retain single-flight ownership so a later poll can
+                # retry the reap instead of stranding the worker permanently busy.
+                self._messages.put_nowait(message)
+                raise
 
         with self._lock:
             if self._thread is thread:

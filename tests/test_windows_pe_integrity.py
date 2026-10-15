@@ -307,6 +307,43 @@ def test_malformed_certificate_record_chain_rejected():
     assert_rejected(bytes(b), "WIN_CERTIFICATE length")
 
 
+@pytest.mark.parametrize("revision", [0x0000, 0x0300, 0xFFFF])
+def test_unsupported_certificate_record_revisions_fail_closed(revision: int) -> None:
+    base = build_valid_pe()
+    _, _, opt, _ = offsets(base)
+    cert_offset = len(base)
+    blob = bytearray(base + b"\0" * 16)
+    struct.pack_into("<IHH", blob, cert_offset, 9, revision, 0x0002)
+    blob[cert_offset + 8] = 0x30
+    struct.pack_into("<II", blob, opt + 112 + 4 * 8, cert_offset, 16)
+    assert_rejected(bytes(blob), "unsupported WIN_CERTIFICATE revision")
+
+
+@pytest.mark.parametrize("revision", [0x0100, 0x0200])
+def test_known_certificate_record_revisions_preserve_structural_acceptance(revision: int) -> None:
+    base = build_valid_pe()
+    _, _, opt, _ = offsets(base)
+    cert_offset = len(base)
+    blob = bytearray(base + b"\0" * 16)
+    struct.pack_into("<IHH", blob, cert_offset, 9, revision, 0x0002)
+    blob[cert_offset + 8] = 0x30
+    struct.pack_into("<II", blob, opt + 112 + 4 * 8, cert_offset, 16)
+    validate_pe32plus_amd64(bytes(blob))
+
+
+def test_certificate_record_alignment_padding_must_be_zero() -> None:
+    base = build_valid_pe()
+    _, _, opt, _ = offsets(base)
+    cert_offset = len(base)
+    blob = bytearray(base + b"\0" * 16)
+    struct.pack_into("<IHH", blob, cert_offset, 9, 0x0200, 0x0002)
+    blob[cert_offset + 8] = 0x30
+    struct.pack_into("<II", blob, opt + 112 + 4 * 8, cert_offset, 16)
+    validate_pe32plus_amd64(bytes(blob))
+    blob[cert_offset + 15] = 0x7E
+    assert_rejected(bytes(blob), "WIN_CERTIFICATE alignment padding")
+
+
 def test_non_bytes_input_rejected():
     with pytest.raises(PEValidationError, match="immutable bytes"):
         validate_pe32plus_amd64(bytearray(build_valid_pe()))  # type: ignore[arg-type]

@@ -132,10 +132,16 @@ def _validate_certificate_table_records(data: bytes, offset: int, size: int) -> 
         length = _u32(data, cursor, "WIN_CERTIFICATE.dwLength")
         if length < 8:
             _fail("WIN_CERTIFICATE length is smaller than header")
+        # Structural validation is not Authenticode signer verification.
+        revision = _u16(data, cursor + 4, "WIN_CERTIFICATE.wRevision")
+        if revision not in {0x0100, 0x0200}:
+            _fail("unsupported WIN_CERTIFICATE revision")
         rounded = (length + 7) // 8 * 8
         next_cursor = cursor + rounded
         if next_cursor <= cursor or next_cursor > end:
             _fail("WIN_CERTIFICATE records exceed certificate table size")
+        if any(data[cursor + length : next_cursor]):
+            _fail("WIN_CERTIFICATE alignment padding must be zero")
         cursor = next_cursor
     if cursor != end:
         _fail("WIN_CERTIFICATE records do not fill certificate table size")

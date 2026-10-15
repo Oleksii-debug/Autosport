@@ -149,7 +149,11 @@ class _SemanticShellParser(HTMLParser):
         self.h1_count = 0
         self.positive_tabindex: list[str] = []
         self.status_regions: list[dict[str, str | None]] = []
-        self.alert_regions: list[dict[str, str | None]] = []
+       self.alert_regions: list[dict[str, str | None]] = []
+        # Static name evidence, distinct from the mere existence of a label/IDREF.
+        self.element_text: dict[str, list[str]] = {}
+        self.label_text: dict[str, list[str]] = {}
+        self._open_tag_stack: list[tuple[str, str | None, str | None]] = []
 
     def handle_starttag(
         self,
@@ -197,6 +201,26 @@ class _SemanticShellParser(HTMLParser):
             self.status_regions.append(values)
         if values.get("role") == "alert":
             self.alert_regions.append(values)
+        # HTML void elements must not retain spurious name-text scope.
+        if tag not in {
+            "area", "base", "br", "col", "embed", "hr", "img", "input",
+            "link", "meta", "param", "source", "track", "wbr",
+        }:
+            label_target = str(values["for"]) if tag == "label" and values.get("for") else None
+            self._open_tag_stack.append((tag, element_id, label_target))
+
+    def handle_data(self, data: str) -> None:
+        for _, element_id, label_target in self._open_tag_stack:
+            if element_id:
+                self.element_text.setdefault(element_id, []).append(data)
+            if label_target:
+                self.label_text.setdefault(label_target, []).append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        for index in range(len(self._open_tag_stack) - 1, -1, -1):
+            if self._open_tag_stack[index][0] == tag:
+                del self._open_tag_stack[index:]
+                return
 
 
 def _reject_duplicate_html_identities(parser: _SemanticShellParser, failures: list[str]) -> None:
@@ -214,6 +238,45 @@ def _reject_broken_html_id_references(
     for source, attribute, target in parser.id_references:
         if target not in parser.elements:
             failures.append(f"id={source}: {attribute} references missing id={target}")
+
+
+def _reject_missing_accessible_names(
+    parser: _SemanticShellParser, failures: list[str]
+) -> None:
+    """Fail closed when critical controls have only structural/blank name evidence.
+
+    This is a bounded static HTML-source contract, not physical NVDA testing
+    or a claim to implement the entire browser accessible-name algorithm.
+    """
+    for automation_id, expected_tag in _REQUIRED_CONTROLS.items():
+        if expected_tag not in {"button", "input", "select", "textarea"}:
+            continue
+        element = parser.elements.get(automation_id)
+        if element is None:
+            continue  # Missing mandatory IDs are reported by the caller.
+        tag, attrs = element
+        if tag != expected_tag:
+            continue  # Wrong native role is reported by the caller.
+        referenced = attrs.get("aria-labelledby")
+        if referenced is not None:
+            # aria-labelledby outranks an element's own text and other labels:
+            # a blank reference must not be rescued by incidental button text.
+            ids = referenced.split()
+            named = bool(ids) and all(
+                "".join(parser.element_text.get(ref, [])).strip() for ref in ids
+            )
+        elif (attrs.get("aria-label") or "").strip():
+            named = True
+        elif "".join(parser.label_text.get(automation_id, [])).strip():
+            named = True
+        else:
+            named = tag == "button" and bool(
+                "".join(parser.element_text.get(automation_id, [])).strip()
+            )
+        if not named:
+            failures.append(
+                f"id={automation_id}: missing nonblank accessible name/label"
+            )
 
 
 def _asset_paths() -> tuple[Path, Path]:
@@ -247,6 +310,7 @@ def inspect_semantic_shell() -> dict[str, Any]:
         parser.close()
         _reject_duplicate_html_identities(parser, failures)
         _reject_broken_html_id_references(parser, failures)
+        _reject_missing_accessible_names(parser, failures)
     except Exception as exc:
         failures.append(f"semantic shell HTML parse failed: {type(exc).__name__}: {exc}")
 
@@ -408,6 +472,7 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     parser.close()
     _reject_duplicate_html_identities(parser, failures)
     _reject_broken_html_id_references(parser, failures)
+    _reject_missing_accessible_names(parser, failures)
     for marker in _REQUIRED_SHORTCUT_MARKERS:
         if marker not in javascript:
             failures.append(f"keyboard marker missing: {marker}")

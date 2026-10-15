@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import hashlib
+import os
 import json
 from pathlib import Path
 import zipfile
@@ -457,3 +458,76 @@ def test_stage_neutral_failed_atomic_promotion_preserves_previous_zip(
         )
     assert output.read_bytes() == previous_verified_zip
     assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
+
+
+@pytest.mark.parametrize("protected", ["input", "output"])
+def test_cli_rejects_evidence_aliasing_package_before_any_mutation(
+    tmp_path: Path, protected: str,
+) -> None:
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy)
+    prior_input = legacy.read_bytes()
+    aliased_receipt = legacy if protected == "input" else output
+    with pytest.raises(ValueError, match="release evidence must not alias"):
+        stage_release.main([
+            "--input", str(legacy), "--output", str(output),
+            "--source-sha", SOURCE_SHA, "--evidence", str(aliased_receipt),
+        ])
+    assert legacy.read_bytes() == prior_input
+    assert not output.exists()
+
+
+def test_cli_rejects_existing_output_hardlink_evidence_before_mutation(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    receipt = tmp_path / "receipt.json"
+    _write_legacy_package(legacy)
+    output.write_bytes(b"previous-verified-output")
+    try:
+        os.link(output, receipt)
+    except OSError as exc:
+        pytest.skip(f"hardlinks are not available in this environment: {exc}")
+    with pytest.raises(ValueError, match="release evidence must not alias"):
+        stage_release.main([
+            "--input", str(legacy), "--output", str(output),
+            "--source-sha", SOURCE_SHA, "--evidence", str(receipt),
+        ])
+    assert output.read_bytes() == b"previous-verified-output"
+
+
+def test_cli_rejects_dangling_unicode_symlink_receipt_to_future_output(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    receipt = tmp_path / "звіт з пробілами.json"
+    _write_legacy_package(legacy)
+    try:
+        receipt.symlink_to(output)
+    except OSError as exc:
+        pytest.skip(f"symlinks are not available in this environment: {exc}")
+    with pytest.raises(ValueError, match="release evidence must not alias"):
+        stage_release.main([
+            "--input", str(legacy), "--output", str(output),
+            "--source-sha", SOURCE_SHA, "--evidence", str(receipt),
+        ])
+    assert not output.exists()
+
+
+@pytest.mark.skipif(os.name != "nt", reason="Windows case-insensitive filesystem")
+def test_cli_rejects_windows_casefold_receipt_alias(
+    tmp_path: Path,
+) -> None:
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    receipt = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME.upper()
+    _write_legacy_package(legacy)
+    with pytest.raises(ValueError, match="release evidence must not alias"):
+        stage_release.main([
+            "--input", str(legacy), "--output", str(output),
+            "--source-sha", SOURCE_SHA, "--evidence", str(receipt),
+        ])
+    assert not output.exists()

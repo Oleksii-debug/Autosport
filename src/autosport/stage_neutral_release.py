@@ -485,6 +485,24 @@ def _write_evidence(path: Path, evidence: dict[str, object]) -> None:
             temporary.unlink(missing_ok=True)
 
 
+def _reject_evidence_package_alias(
+    legacy_package: Path,
+    output_package: Path,
+    evidence_path: Path | None,
+) -> None:
+    """Prevent a JSON receipt from replacing an input or verified output ZIP."""
+    if evidence_path is None:
+        return
+    resolved_receipt = os.path.normcase(str(evidence_path.resolve()))
+    for protected in (legacy_package, output_package):
+        if resolved_receipt == os.path.normcase(str(protected.resolve())):
+            raise ValueError("release evidence must not alias input or output package")
+        if evidence_path.exists() and protected.exists() and os.path.samefile(
+            evidence_path, protected
+        ):
+            raise ValueError("release evidence must not alias input or output package")
+
+
 def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
         description=(
@@ -497,6 +515,9 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--source-sha", required=True)
     parser.add_argument("--evidence", type=Path)
     args = parser.parse_args(argv)
+
+    # Fail before writing anything if the JSON receipt aliases a package.
+    _reject_evidence_package_alias(args.input, args.output, args.evidence)
 
     evidence = repackage_stage_neutral_windows_release(
         args.input,

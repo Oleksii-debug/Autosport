@@ -10,7 +10,7 @@ from .endurance import EnduranceConfig, run_endurance
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
 from .run_registry import RunRegistry
-from .run_transaction import RunTransaction
+from .run_transaction import RunTransaction, RunTransactionError
 from .session import AutosportSession
 
 
@@ -41,7 +41,7 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _safe_exception_detail(exc: Exception) -> str:
+def _safe_exception_detail(exc: BaseException) -> str:
     """Render semantic-audit failure evidence without trusting exception formatting."""
 
     try:
@@ -53,6 +53,61 @@ def _safe_exception_detail(exc: Exception) -> str:
     except BaseException:
         rendered = "exception details unavailable"
     return f"{exception_type}: {rendered}"
+
+
+def _safe_exception_site(exc: Exception) -> str:
+    """Return a bounded code location without exposing filesystem paths or locals."""
+
+    try:
+        traceback = BaseException.__getattribute__(exc, "__traceback__")
+        if traceback is None:
+            return "unknown"
+        while traceback.tb_next is not None:
+            traceback = traceback.tb_next
+        frame = traceback.tb_frame
+        module_name = frame.f_globals.get("__name__", "unknown")
+        function_name = frame.f_code.co_name
+        line_number = traceback.tb_lineno
+        if type(module_name) is not str or type(function_name) is not str:
+            return "unknown"
+        return f"{module_name}:{function_name}:{line_number}"
+    except BaseException:
+        return "unknown"
+
+
+def _safe_exception_trace(exc: Exception, *, limit: int = 8) -> list[str]:
+    """Return the bounded innermost call chain without paths, locals, or source text."""
+
+    if type(limit) is not int or limit <= 0:
+        return []
+    try:
+        traceback = BaseException.__getattribute__(exc, "__traceback__")
+        frames: list[str] = []
+        while traceback is not None:
+            frame = traceback.tb_frame
+            module_name = frame.f_globals.get("__name__", "unknown")
+            function_name = frame.f_code.co_name
+            line_number = traceback.tb_lineno
+            if type(module_name) is not str or type(function_name) is not str:
+                return ["unknown"]
+            frames.append(f"{module_name}:{function_name}:{line_number}")
+            traceback = traceback.tb_next
+        if not frames:
+            return ["unknown"]
+        return frames[-limit:]
+    except BaseException:
+        return ["unknown"]
+
+
+def _phase_call(phase: str, callable_, *args, **kwargs):
+    try:
+        return callable_(*args, **kwargs)
+    except Exception as exc:
+        try:
+            exc.__dict__["_autosport_restart_phase"] = phase
+        except BaseException:
+            pass
+        raise
 
 
 def _fixture_dataset(root: Path) -> ReplayDataset:
@@ -76,9 +131,15 @@ def _audit_session_restart(root: Path) -> dict[str, object]:
     dataset = _fixture_dataset(root / "dataset")
     workspace = root / "session-workspace"
 
-    first = AutosportSession(workspace, initial_bankroll="100", strategy_id="baseline-v1")
+    first = _phase_call(
+        "session_restart:first_construct",
+        AutosportSession,
+        workspace,
+        initial_bankroll="100",
+        strategy_id="baseline-v1",
+    )
     try:
-        result = first.run_dataset(dataset)
+        result = _phase_call("session_restart:first_run", first.run_dataset, dataset)
         if not result.settled_ticket_ids:
             raise RuntimeError("restart audit did not produce a settled paper ticket")
         balance = result.balance
@@ -93,7 +154,13 @@ def _audit_session_restart(root: Path) -> dict[str, object]:
     book_hash_before = sha256_file(paper_path)
     ledger_hash_before = sha256_file(ledger_path)
 
-    reopened = AutosportSession(workspace, initial_bankroll="1", strategy_id="baseline-v1")
+    reopened = _phase_call(
+        "session_restart:reopen_construct",
+        AutosportSession,
+        workspace,
+        initial_bankroll="1",
+        strategy_id="baseline-v1",
+    )
     try:
         if reopened.book.balance != balance:
             raise RuntimeError("PaperBook balance changed across restart")
@@ -119,6 +186,77 @@ def _audit_session_restart(root: Path) -> dict[str, object]:
         "ticket_count": len(ticket_ids),
         "paper_book_sha256": book_hash_after,
         "decision_ledger_sha256": ledger_hash_after,
+    }
+
+
+def _audit_corrupt_manifest_rejection(root: Path) -> dict[str, object]:
+    """Prove malformed transaction metadata cannot mutate or resolve economic BASE state."""
+
+    workspace = root / "corrupt-manifest-workspace"
+    workspace.mkdir(parents=True, exist_ok=True)
+    registry = RunRegistry.initialize_pristine(workspace / "run_registry.json")
+    paper_path = workspace / "paper_book.json"
+    ledger_path = workspace / "decisions.jsonl"
+
+    PaperBook("100").save(paper_path)
+    ensure_durable_file(ledger_path)
+    paper_before = paper_path.read_bytes()
+    ledger_before = ledger_path.read_bytes()
+    book_hash = sha256_file(paper_path)
+    ledger_hash = sha256_file(ledger_path)
+
+    run_id = "packaged-restart-corrupt-manifest-audit"
+    market_sha = "c" * 64
+    results_sha = "d" * 64
+    strategy_id = "baseline-v1"
+    experiment_key = registry.begin(
+        market_sha,
+        results_sha,
+        strategy_id,
+        run_id,
+        base_paper_book_sha256=book_hash,
+        base_decision_ledger_sha256=ledger_hash,
+    )
+    tx = RunTransaction.start(
+        workspace,
+        run_id=run_id,
+        experiment_key=experiment_key,
+        market_sha256=market_sha,
+        results_sha256=results_sha,
+        strategy_id=strategy_id,
+        base_paper_book_sha256=book_hash,
+        base_decision_ledger_sha256=ledger_hash,
+    )
+
+    # A deliberately truncated manifest must fail before recovery can make any
+    # economic or registry disposition authoritative.
+    tx.manifest_path.write_bytes(b'{"schema_version":1,"phase":"staging"')
+    try:
+        RunTransaction.recover(
+            workspace,
+            run_id=run_id,
+            registry_item=registry.get(experiment_key),
+            experiment_key=experiment_key,
+        )
+    except RunTransactionError as exc:
+        if "transaction manifest contains invalid JSON" not in str(exc):
+            raise RuntimeError(
+                "corrupt transaction manifest failed for an unexpected reason"
+            ) from exc
+    else:
+        raise RuntimeError("corrupt transaction manifest was accepted during recovery")
+
+    if paper_path.read_bytes() != paper_before or ledger_path.read_bytes() != ledger_before:
+        raise RuntimeError("corrupt-manifest recovery changed canonical economic BASE bytes")
+    if not registry.in_progress():
+        raise RuntimeError("corrupt-manifest recovery silently resolved registry ownership")
+    if registry.get(experiment_key).get("status") != "in_progress":
+        raise RuntimeError("corrupt-manifest recovery changed registry disposition")
+
+    return {
+        "corrupt_manifest_rejected": True,
+        "corrupt_manifest_base_unchanged": True,
+        "corrupt_manifest_registry_unresolved": True,
     }
 
 
@@ -182,11 +320,13 @@ def _audit_uncommitted_recovery(root: Path) -> dict[str, object]:
     if sha256_file(paper_path) != book_hash or sha256_file(ledger_path) != ledger_hash:
         raise RuntimeError("recovery changed canonical economic BASE state")
 
+    corrupt_manifest = _audit_corrupt_manifest_rejection(root)
     return {
         "status": "PASS",
         "disposition": recovered.disposition,
         "paper_book_sha256": book_hash,
         "decision_ledger_sha256": ledger_hash,
+        **corrupt_manifest,
     }
 
 
@@ -219,17 +359,28 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
     destination = Path(output_path)
     destination.parent.mkdir(parents=True, exist_ok=True)
     exit_code = 0
+    phase = "session_restart"
     try:
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             restart = _audit_session_restart(root)
+            phase = "transaction_recovery"
             recovery = _audit_uncommitted_recovery(root)
+            phase = "bounded_endurance"
             endurance = _audit_bounded_endurance(root)
+            phase = "evidence_assembly"
         payload = {
             "status": "PASS",
             "session_restart_status": restart["status"],
             "transaction_recovery_status": recovery["status"],
             "recovery_disposition": recovery["disposition"],
+            "transaction_corrupt_manifest_rejected": recovery["corrupt_manifest_rejected"],
+            "transaction_corrupt_manifest_base_unchanged": recovery[
+                "corrupt_manifest_base_unchanged"
+            ],
+            "transaction_corrupt_manifest_registry_unresolved": recovery[
+                "corrupt_manifest_registry_unresolved"
+            ],
             "persistent_balance": restart["balance"],
             "ticket_count": restart["ticket_count"],
             "paper_book_sha256": restart["paper_book_sha256"],
@@ -252,9 +403,16 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "nvda_verified": False,
         }
     except Exception as exc:
+        try:
+            failure_phase = exc.__dict__.get("_autosport_restart_phase", phase)
+        except BaseException:
+            failure_phase = phase
         payload = {
             "status": "FAIL",
+            "phase": failure_phase,
             "error": _safe_exception_detail(exc),
+            "failure_site": _safe_exception_site(exc),
+            "failure_trace": _safe_exception_trace(exc),
             "real_money_execution": False,
             "human_tested": False,
             "nvda_verified": False,

@@ -67,18 +67,22 @@ def test_canonical_snapshot_rejects_redirected_verification_open(
     source.write_bytes(b"same-size-old")
     replacement.write_bytes(b"same-size-new")
 
-    real_open = Path.open
+    real_open_descriptor = run_transaction._open_read_only_descriptor
     source_open_count = 0
 
-    def redirected_open(self: Path, *args, **kwargs):
+    def redirected_open(path: Path):
         nonlocal source_open_count
-        if self == source:
+        if Path(path) == source:
             source_open_count += 1
             if source_open_count >= 2:
-                return real_open(replacement, *args, **kwargs)
-        return real_open(self, *args, **kwargs)
+                return real_open_descriptor(replacement)
+        return real_open_descriptor(path)
 
-    monkeypatch.setattr(Path, "open", redirected_open)
+    monkeypatch.setattr(
+        run_transaction,
+        "_open_read_only_descriptor",
+        redirected_open,
+    )
 
     with pytest.raises(
         run_transaction.RunTransactionError,

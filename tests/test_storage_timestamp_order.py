@@ -74,7 +74,17 @@ class StoragePhysicalTimeTests(unittest.TestCase):
                 ),
             )
             store.connection.commit()
-            self.assertEqual(store.current()[earlier.quote_key].decimal_odds, Decimal("2.0"))
+            # A corrupt derived projection must not be consumed as current truth.
+            # The canonical append-only history remains unchanged and can repair
+            # the projection on restart only after independent history validation.
+            with self.assertRaisesRegex(
+                ValueError, "current quote projection diverges from canonical market history"
+            ):
+                store.current()
+            self.assertEqual(
+                [event.decimal_odds for event in store.events()],
+                [Decimal("1.8"), Decimal("2.0")],
+            )
             store.close()
 
             reopened = SQLiteMarketStore(path)
@@ -102,9 +112,10 @@ class StoragePhysicalTimeTests(unittest.TestCase):
     def test_naive_timestamp_fails_closed_before_persistence(self):
         naive = self._event(
             odds="1.8",
-            observed_ts="2026-01-01T00:00:00",
+            observed_ts="2026-01-01T00:00:00+00:00",
             sequence=1,
         )
+        object.__setattr__(naive, "observed_ts", "2026-01-01T00:00:00")
         with tempfile.TemporaryDirectory() as tmp:
             store = SQLiteMarketStore(Path(tmp) / "market.db")
             with self.assertRaisesRegex(ValueError, "timezone-aware"):

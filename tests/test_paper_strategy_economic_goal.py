@@ -115,7 +115,6 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ledger_path = root / "decisions.jsonl"
-            book_path = root / "paper.json"
             book = PaperBook("100")
             context = AgentContext(
                 book,
@@ -124,7 +123,9 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
                 decision_ledger=JsonlDecisionLedger(ledger_path),
             )
             self._agent(event, goal).on_market_event(event, context)
-            book.save(book_path)
+            self.assertIsNotNone(context.paper_execution)
+            book_path = context.paper_execution.paper_book_path
+            self.assertTrue(book_path.exists())
 
             first_ticket_id = next(iter(book.tickets))
             first_action_id = context.decision_ledger.verified_records()[0].payload[
@@ -154,10 +155,11 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
             root = Path(tmp)
             ledger_path = root / "decisions.jsonl"
             pristine_book_path = root / "paper-before-action.json"
-            pristine = PaperBook("100")
-            pristine.save(pristine_book_path)
+            pristine_fixture = PaperBook("100")
+            pristine_fixture.save(pristine_book_path)
+            live_book = PaperBook("100")
             live_context = AgentContext(
-                pristine,
+                live_book,
                 latest_quotes={event.quote_key: event},
                 replay_run_id="run-1",
                 decision_ledger=JsonlDecisionLedger(ledger_path),
@@ -192,7 +194,6 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             ledger_path = root / "decisions.jsonl"
-            book_path = root / "paper-after-action.json"
             book = PaperBook("100")
             context = AgentContext(
                 book,
@@ -201,7 +202,9 @@ class PaperValueEconomicGoalIntegrationTests(unittest.TestCase):
                 decision_ledger=JsonlDecisionLedger(ledger_path),
             )
             self._agent(event, goal).on_market_event(event, context)
-            book.save(book_path)
+            self.assertIsNotNone(context.paper_execution)
+            book_path = context.paper_execution.paper_book_path
+            self.assertTrue(book_path.exists())
             ledger_path.unlink()
 
             # Simulate the converse split boundary: #623 attempt/exposure truth and

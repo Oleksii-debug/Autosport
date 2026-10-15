@@ -68,6 +68,29 @@ class SportDomainFitnessTests(unittest.TestCase):
                 RouteStatus.ROUTE_BASELINE,
             )
 
+    def test_duplicate_json_keys_fail_closed_before_last_wins_normalization(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "fitness.json"
+            store = SportDomainFitnessStore(path)
+            store.add(make_observation(observation_id="duplicate-key"))
+
+            original = path.read_text(encoding="utf-8")
+            canonical = '  "schema": "autosport.sport_domain_fitness",'
+            tampered = original.replace(
+                canonical,
+                '  "schema": "attacker-controlled",\n' + canonical,
+                1,
+            )
+            self.assertNotEqual(tampered, original)
+            path.write_text(tampered, encoding="utf-8")
+
+            with self.assertRaisesRegex(
+                SportDomainFitnessError,
+                "cannot load fitness evidence store",
+            ):
+                SportDomainFitnessStore(path)
+
+
     def test_failed_publication_does_not_expose_live_uncommitted_state(self):
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "fitness.json"

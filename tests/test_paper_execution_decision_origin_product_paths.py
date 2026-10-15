@@ -151,11 +151,15 @@ def test_live_product_callsite_rejects_nested_hook_and_binds_exact_origin(
 
     events = execution_ledger.events(result.paper_execution_run_id)
     event_types = [item["event_type"] for item in events]
-    assert event_types[0] == "RUN_RESERVED"
+    assert event_types[0] == "PAPER_EXPOSURE_SCOPE_BOUND"
+    assert "RUN_RESERVED" in event_types
     assert "ATTEMPT_RECORDED" in event_types
+    assert event_types.index("PAPER_EXPOSURE_SCOPE_BOUND") < event_types.index("RUN_RESERVED")
     assert event_types.index("RUN_RESERVED") < event_types.index("ATTEMPT_RECORDED")
 
-    reservation = events[0]["payload"]
+    reservation = next(
+        item["payload"] for item in events if item["event_type"] == "RUN_RESERVED"
+    )
     assert captured_execution_plan
     with pytest.raises(
         PaperExecutionStateError,
@@ -325,8 +329,10 @@ def test_paper_value_fresh_and_durable_recovery_keep_exact_origin(
     assert runtime.ledger.reservation_decision_origin(run_id) == exact_origin
     fresh_events = runtime.ledger.events(run_id)
     fresh_types = [item["event_type"] for item in fresh_events]
-    assert fresh_types[0] == "RUN_RESERVED"
+    assert fresh_types[0] == "PAPER_EXPOSURE_SCOPE_BOUND"
+    assert "RUN_RESERVED" in fresh_types
     assert "ATTEMPT_RECORDED" in fresh_types
+    assert fresh_types.index("PAPER_EXPOSURE_SCOPE_BOUND") < fresh_types.index("RUN_RESERVED")
     assert fresh_types.index("RUN_RESERVED") < fresh_types.index("ATTEMPT_RECORDED")
 
     book.save(book_path)

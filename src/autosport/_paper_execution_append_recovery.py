@@ -1,14 +1,22 @@
 from __future__ import annotations
 
+import copy
+from collections.abc import Mapping
 from pathlib import Path
 
+from . import _paper_execution_reality_legacy as _paper_reality
+from . import paper as _paper
 from .paper import PaperBook
 from .paper_execution_adoption import (
     PaperExecutionAdoptionError,
     PaperExecutionAdoptionRuntime,
     PreparedPaperExecution,
 )
-from .paper_execution_reality import PaperAttemptOutcome
+from .paper_execution_reality import (
+    PaperAttemptOutcome,
+    PaperExecutionEvidenceRegistry,
+    PaperExecutionStateError,
+)
 
 
 _ORIGINAL_PREPARE = PaperExecutionAdoptionRuntime.prepare
@@ -35,6 +43,130 @@ def _load_live_pre_action_book(runtime: PaperExecutionAdoptionRuntime) -> PaperB
     return _load_pre_action_path(path, label="live recovery")
 
 
+def _validated_observation_evidence_ids(
+    runtime: PaperExecutionAdoptionRuntime,
+    *,
+    prepared: PreparedPaperExecution,
+    observations,
+    evidence_registry,
+) -> dict[str, str]:
+    """Resolve the exact evidence identity that canonical execution will reserve.
+
+    Recovery must load the same durable #623 run identity that execute_paper_plan
+    reserves.  In particular, empirical/configured observations are part of that
+    identity and may not be replaced with an empty mapping on restart.
+    """
+    if not isinstance(prepared, PreparedPaperExecution):
+        raise TypeError("prepared must be PreparedPaperExecution")
+    runtime._require_minted(prepared)
+    if observations is None:
+        observations = {}
+    if not isinstance(observations, Mapping):
+        raise TypeError("observations must be a mapping")
+
+    action_by_id = {
+        action.action_id: action for action in prepared.execution_plan.actions
+    }
+    if set(observations) - set(action_by_id):
+        raise PaperExecutionStateError(
+            "observations contain action outside execution plan"
+        )
+    if observations and not isinstance(
+        evidence_registry,
+        PaperExecutionEvidenceRegistry,
+    ):
+        raise PaperExecutionStateError(
+            "configured/empirical observations require a durable evidence registry"
+        )
+
+    observation_evidence_ids: dict[str, str] = {}
+    for action_id, observation in observations.items():
+        assert evidence_registry is not None
+        _paper_reality._verify_observation_authority(
+            action=action_by_id[action_id],
+            observation=observation,
+            registry=evidence_registry,
+        )
+        observation_evidence_ids[action_id] = observation.evidence_id
+    return observation_evidence_ids
+
+
+def _detached_exact_snapshot(book: PaperBook) -> PaperBook:
+    """Clone exact PAPER state with canonical product-issued in-memory authorities.
+
+    A path-bound live PaperBook may not be rebound to a recovery path.  Build a fresh
+    canonical PaperBook, copy only its already-validated economic state, and install
+    the existing opening/causal registries for that detached object.  Its first save
+    can then establish a dedicated witnessed snapshot lineage without widening the
+    live book's generation/path authority.
+    """
+    PaperBook._validate_loaded_state(book)
+    snapshot = PaperBook(book.initial_bankroll)
+    snapshot.balance = book.balance
+    snapshot.tickets = copy.deepcopy(book.tickets)
+    snapshot._lifecycle = list(book._lifecycle)
+    snapshot._settlement_times = dict(book._settlement_times)
+    PaperBook._validate_loaded_state(snapshot)
+    _paper._install_validated_ticket_opening_authority(snapshot)
+    _paper._install_validated_paperbook_causal_history_authority(snapshot)
+    PaperBook._validate_loaded_state(snapshot)
+    return snapshot
+
+
+def _ensure_live_pre_action_book(
+    runtime: PaperExecutionAdoptionRuntime,
+    *,
+    prepared: PreparedPaperExecution,
+    trigger_id: str,
+    started_at: str,
+    observation_evidence_ids: Mapping[str, str],
+) -> PaperBook:
+    """Publish the pre-action witness exactly once, before a first live run.
+
+    Missing witness is only admissible when the canonical #623 run does not yet
+    exist.  A restart/retry can never manufacture authority from its current book.
+    """
+    path = Path(runtime.paper_book_path).parent / _PRE_ACTION_BOOK_FILE_NAME
+    persisted = _load_pre_action_path(path, label="live recovery")
+    if persisted is not None:
+        return persisted
+
+    run_id = runtime.expected_run_id(prepared, trigger_id)
+    existing = runtime.ledger.load_run(
+        run_id=run_id,
+        trigger_id=trigger_id,
+        plan=prepared.execution_plan,
+        config=runtime.config,
+        started_at=started_at,
+        observation_evidence_ids=observation_evidence_ids,
+    )
+    if existing is not None:
+        raise PaperExecutionAdoptionError(
+            "live recovery requires exact pre-action PaperBook witness"
+        )
+
+    try:
+        snapshot = _detached_exact_snapshot(runtime.book)
+        if not runtime._same_book_state(runtime.book, snapshot):
+            raise PaperExecutionAdoptionError(
+                "live pre-action PaperBook changed while detaching recovery witness"
+            )
+        snapshot.save(path)
+        persisted = PaperBook.load(path)
+    except PaperExecutionAdoptionError:
+        raise
+    except (OSError, TypeError, ValueError) as exc:
+        raise PaperExecutionAdoptionError(
+            "live pre-action PaperBook witness could not be persisted"
+        ) from exc
+
+    if not runtime._same_book_state(runtime.book, persisted):
+        raise PaperExecutionAdoptionError(
+            "live pre-action PaperBook witness did not persist exact state"
+        )
+    return persisted
+
+
 def _exact_assert_recoverable_book_state(
     self: PaperExecutionAdoptionRuntime,
     *,
@@ -43,6 +175,7 @@ def _exact_assert_recoverable_book_state(
     trigger_id: str,
     started_at: str,
     materialize_exposure: bool,
+    observation_evidence_ids: Mapping[str, str] | None = None,
 ) -> None:
     """Accept only baseline or the exact #623-authorized durable exposure delta.
 
@@ -58,6 +191,10 @@ def _exact_assert_recoverable_book_state(
     self._require_minted(prepared)
     if type(materialize_exposure) is not bool:
         raise TypeError("materialize_exposure must be bool")
+    if observation_evidence_ids is None:
+        observation_evidence_ids = {}
+    elif not isinstance(observation_evidence_ids, Mapping):
+        raise TypeError("observation_evidence_ids must be a mapping")
 
     if self._same_book_state(self.book, pre_action_book):
         return
@@ -73,7 +210,7 @@ def _exact_assert_recoverable_book_state(
         plan=prepared.execution_plan,
         config=self.config,
         started_at=started_at,
-        observation_evidence_ids={},
+        observation_evidence_ids=observation_evidence_ids,
     )
     if run is None:
         raise PaperExecutionAdoptionError(
@@ -217,14 +354,40 @@ def _guarded_execute(
 ):
     """Fence live replay against unrelated durable PaperBook drift before resume."""
     if type(trigger_id) is str and trigger_id.startswith(_LIVE_DECISION_PREFIX):
-        pre_action_book = _load_live_pre_action_book(self)
-        if pre_action_book is not None:
+        observation_evidence_ids = _validated_observation_evidence_ids(
+            self,
+            prepared=prepared,
+            observations=observations,
+            evidence_registry=evidence_registry,
+        )
+        # Serialize first-witness publication with the same canonical runtime lock
+        # that protects execution/materialization.  _ORIGINAL_EXECUTE re-enters this
+        # RLock, so no second PaperBook state can interleave between witness and run.
+        with self._execution_lock:
+            pre_action_book = _ensure_live_pre_action_book(
+                self,
+                prepared=prepared,
+                trigger_id=trigger_id,
+                started_at=started_at,
+                observation_evidence_ids=observation_evidence_ids,
+            )
             self.assert_recoverable_book_state(
                 pre_action_book=pre_action_book,
                 prepared=prepared,
                 trigger_id=trigger_id,
                 started_at=started_at,
                 materialize_exposure=materialize_exposure,
+                observation_evidence_ids=observation_evidence_ids,
+            )
+            return _ORIGINAL_EXECUTE(
+                self,
+                prepared=prepared,
+                trigger_id=trigger_id,
+                started_at=started_at,
+                materialize_exposure=materialize_exposure,
+                observations=observations,
+                evidence_registry=evidence_registry,
+                suspended_action_ids=suspended_action_ids,
             )
 
     return _ORIGINAL_EXECUTE(

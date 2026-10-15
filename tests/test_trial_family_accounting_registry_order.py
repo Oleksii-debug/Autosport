@@ -114,7 +114,7 @@ def _foundation(tmp_path):
         "lawful-provider:fixture",
         "license-evidence:v1",
         T1,
-        T0,
+        T1,
         outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
@@ -177,7 +177,7 @@ def _foundation(tmp_path):
         registry,
         plan,
         workspace_root=workspace,
-        authority_root=tmp_path / "machine-authority",
+        authority_root=tmp_path.parent / f"{tmp_path.name}-machine-authority",
     )
     return registry, protocol, candidate, member, store
 

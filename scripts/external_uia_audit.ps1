@@ -569,23 +569,30 @@ function Find-UiaSemanticViaChildren {
         [IntPtr]$NativeWindowHandle = [IntPtr]::Zero,
         [int]$ExpectedProcessId = 0,
         [object]$ResultQueue = $null,
-        [object]$CompletionSignal = $null
+        [object]$CompletionSignal = $null,
+        [object]$ProgressQueue = $null
     )
     try {
+    if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('WORKER_ENTER') }
     # UI Automation elements must be created in the MTA worker that queries
     # their descendants. Passing the parent-runspace COM element across the
     # ThreadJob boundary can deadlock or invalidate its COM apartment.
     if ($NativeWindowHandle -ne [IntPtr]::Zero) {
+        if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('MTA_APARTMENT_CHECK') }
         if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
             throw 'External UIA semantic worker requires MTA'
         }
         if ($ExpectedProcessId -le 0) {
             throw 'External UIA semantic worker requires a verified process'
         }
+        if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('FROM_HANDLE_ENTER') }
         $Root = [System.Windows.Automation.AutomationElement]::FromHandle($NativeWindowHandle)
+        if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('FROM_HANDLE_RETURNED') }
+        if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('NATIVE_PID_READ_ENTER') }
         if ($null -eq $Root -or [int]$Root.Current.ProcessId -ne $ExpectedProcessId) {
             throw 'External UIA semantic worker window identity changed'
         }
+        if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('NATIVE_PID_VALIDATED') }
     }
     if ($null -eq $Root) { return $null }
     $walker = [System.Windows.Automation.TreeWalker]::RawViewWalker
@@ -599,7 +606,9 @@ function Find-UiaSemanticViaChildren {
         $node = $pending.Dequeue()
         $visited += 1
         try {
+            if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('NODE_ID_READ_ENTER') }
             if ([string]$node.Current.AutomationId -ceq $AutomationId) {
+                if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('NODE_ID_MATCH') }
                 # Return both native elements from the same bounded MTA apartment.
                 if ($NativeWindowHandle -ne [IntPtr]::Zero) {
                     if ($null -ne $ResultQueue) {
@@ -616,7 +625,9 @@ function Find-UiaSemanticViaChildren {
             }
             # A single provider GetFirstChild/GetNextSibling call may itself
             # block, so only the bounded worker may execute this traversal.
+            if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('FIRST_CHILD_ENTER') }
             $child = $walker.GetFirstChild($node)
+            if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('FIRST_CHILD_RETURNED') }
             $siblingProbes = 0
             while ($null -ne $child -and [DateTime]::UtcNow -lt $Deadline) {
                 if ($siblingProbes -ge 4096) {
@@ -627,7 +638,9 @@ function Find-UiaSemanticViaChildren {
                 }
                 $siblingProbes += 1
                 $pending.Enqueue($child)
+                if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('NEXT_SIBLING_ENTER') }
                 $child = $walker.GetNextSibling($child)
+                if ($null -ne $ProgressQueue) { $ProgressQueue.Enqueue('NEXT_SIBLING_RETURNED') }
             }
         } catch [System.Windows.Automation.ElementNotAvailableException] {
             # A stale provider subtree cannot confer semantic readiness.
@@ -736,9 +749,11 @@ function Find-BoundedUiaSemanticViaChildren {
     # bounded wait when the UIA COM provider holds a ThreadJob internal lock.
     $workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
     $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
+    # Fixed stage codes only: never queue window names, paths, or user data.
+    $workerProgress = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     $job = Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren} -ErrorAction Stop -ArgumentList @(
         $workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId,
-        $workerResults, $workerCompleted
+        $workerResults, $workerCompleted, $workerProgress
     )
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_WAIT_PROBE'
     # The kernel completion event never queries the ThreadJob state or
@@ -747,6 +762,13 @@ function Find-BoundedUiaSemanticViaChildren {
     # 120-second process watchdog.
     $workerTerminal = $workerCompleted.Wait($budgetSeconds * 1000)
     if (-not $workerTerminal) {
+        # Never reenter a stalled UIA provider or inspect ThreadJob state.
+        # The independent concurrent queue contains only fixed stage tokens.
+        $lastWorkerStage = 'NOT_ENTERED'
+        $workerStage = $null
+        while ($workerProgress.TryDequeue([ref]$workerStage)) {
+            $lastWorkerStage = [string]$workerStage
+        }
         Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_TIMEOUT_PROBE'
         # This is a proven provider stall, not a missing semantic node. Retrying
         # another HWND or entering the desktop fallback can reenter the same
@@ -754,7 +776,7 @@ function Find-BoundedUiaSemanticViaChildren {
         # Keep the hung ThreadJob owned by the isolated audit process; do not
         # synchronously Stop-Job/Remove-Job or treat the timeout as PASS.
         $script:semanticWorkerTimedOut = $true
-        throw 'External UIA semantic worker timed out without a real AutomationId witness'
+        throw "External UIA semantic worker timed out without a real AutomationId witness; last_worker_stage=$lastWorkerStage"
     }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'
     $result = $null

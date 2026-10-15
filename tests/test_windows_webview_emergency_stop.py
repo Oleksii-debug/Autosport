@@ -397,3 +397,40 @@ def test_webview_emergency_stop_bypasses_blocked_ordinary_bridge_dispatch(tmp_pa
     assert not emergency_thread.is_alive()
     assert errors == []
     assert ordinary_results[0]["status"] == "completed"
+
+
+def test_windows_stop_failure_uncertainty_copy_and_secret_redaction():
+    """No durable confirmation means neither success nor admission BLOCK proof."""
+    from autosport.windows_emergency_stop import WindowsEmergencyStopBridge
+
+    class BrokenStopAuthority:
+        def current(self):
+            raise OSError("CREDENTIAL=synthetic-private-token")
+
+    failure = WindowsEmergencyStopBridge(BrokenStopAuthority()).activate()
+    assert failure.stopped is False
+    assert failure.revision is None
+    assert failure.command_id is None
+    assert "НЕ ПІДТВЕРДЖЕНО" in failure.message_uk
+    assert "Не вважайте нові виконання заблокованими без підтвердження" in failure.message_uk
+    assert "Do not assume new execution is blocked" in failure.message_en
+    assert failure.error == "STOP_AUTHORITY_OPERATION_UNCONFIRMED"
+    assert "synthetic-private-token" not in repr(failure)
+
+
+def test_webview_emergency_stop_fault_uses_uncertainty_copy_without_secret(tmp_path):
+    """The bridge error path does not invent a confirmed durable STOP."""
+    controller = EmergencyStopWebController(tmp_path)
+
+    def broken_dispatch():
+        raise OSError("CREDENTIAL=synthetic-private-token")
+
+    controller._activate_emergency_stop = broken_dispatch
+    try:
+        result = controller.dispatch(_command("stop-internal-fault"))
+    finally:
+        controller.close()
+    assert result["status"] == "rejected"
+    assert "НЕ ПІДТВЕРДЖЕНО" in result["message"]
+    assert "Не вважайте нові виконання заблокованими без підтвердження" in result["message"]
+    assert "synthetic-private-token" not in str(result)

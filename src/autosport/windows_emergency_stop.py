@@ -76,11 +76,13 @@ class WindowsEmergencyStopBridge:
             command_id=None,
             message_uk=(
                 "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
-                "Нові виконання мають залишатися заблокованими; перевірте журнал STOP."
+                "Не вважайте нові виконання заблокованими без підтвердження; "
+                "перевірте стійкий журнал STOP."
             ),
             message_en=(
                 "EMERGENCY STOP WAS NOT CONFIRMED. "
-                "New execution must remain blocked; inspect the STOP journal."
+                "Do not assume new execution is blocked without confirmation; "
+                "inspect the durable STOP journal."
             ),
             error=detail,
         )
@@ -111,11 +113,9 @@ class WindowsEmergencyStopBridge:
 
     @staticmethod
     def _safe_error(exc: Exception) -> str:
-        try:
-            detail = str(exc)
-        except Exception:
-            detail = "message unavailable"
-        return f"{type(exc).__name__}: {detail}"
+        # Filesystem/provider exceptions may contain credentials, paths or
+        # private account state. Return a bounded diagnostic code only.
+        return "STOP_AUTHORITY_OPERATION_UNCONFIRMED"
 
     @staticmethod
     def _status_from_state(state: ExecutionAuthorityState) -> EmergencyStopStatus:

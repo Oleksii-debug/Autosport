@@ -163,7 +163,7 @@ class EmergencyStopWebController(AutosportWebController):
                 "message": (
                     "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
                     "Локальну authority підмінено або пошкоджено; "
-                    "нові виконання мають залишатися заблокованими."
+                    "не вважайте нові виконання заблокованими без підтвердження."
                 ),
             }
         result = authority.activate()
@@ -239,7 +239,8 @@ class EmergencyStopWebController(AutosportWebController):
                         "status": "rejected",
                         "message": (
                             "АВАРІЙНИЙ STOP НЕ ПІДТВЕРДЖЕНО. "
-                            "Нові виконання мають залишатися заблокованими; перевірте журнал STOP."
+                            "Не вважайте нові виконання заблокованими без підтвердження; "
+                            "перевірте стійкий журнал STOP."
                         ),
                     }
 

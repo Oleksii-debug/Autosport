@@ -13,8 +13,11 @@ from enum import Enum
 from hashlib import sha256
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
+
+from .json_integrity import strict_json_loads
 
 
 SCHEMA_VERSION = 1
@@ -487,26 +490,68 @@ class PreEvaluationEvidenceStore:
         return self._path
 
     def save(self, evidence: PreEvaluationSessionEvidence) -> None:
+        if type(evidence) is not PreEvaluationSessionEvidence:
+            raise TypeError("evidence must be exact PreEvaluationSessionEvidence")
+        # Reconstruct the complete authority object before opening a publication
+        # temporary. Frozen dataclasses are not a trust boundary: low-level mutation
+        # or a stale caller reference must fail before replacing last-good evidence.
+        payload = evidence.to_payload()
+        replayed = self._from_payload(payload)
+        if _canonical_json(replayed.to_payload()) != _canonical_json(payload):
+            raise ValueError("pre-evaluation evidence failed pre-publication replay")
         envelope = {
             "schema_version": SCHEMA_VERSION,
             "authority_family": AUTHORITY_FAMILY,
-            "authority_id": evidence.authority_id,
-            "authority_digest": evidence.authority_digest,
-            "payload": evidence.to_payload(),
+            "authority_id": replayed.authority_id,
+            "authority_digest": replayed.authority_digest,
+            "payload": replayed.to_payload(),
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._path.with_name(f".{self._path.name}.tmp")
         data = _canonical_json(envelope) + b"\n"
-        with temporary.open("wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self._path)
+        temporary: Path | None = None
+        primary_error: BaseException | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                "wb",
+                dir=self._path.parent,
+                prefix=f".{self._path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._path)
+            temporary = None
+        except BaseException as exc:
+            primary_error = exc
+            raise
+        finally:
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except FileNotFoundError:
+                    pass
+                except BaseException as cleanup_exc:
+                    if primary_error is None:
+                        raise
+                    if (
+                        not isinstance(cleanup_exc, Exception)
+                        and isinstance(primary_error, Exception)
+                    ):
+                        raise
+                    add_note = getattr(primary_error, "add_note", None)
+                    if callable(add_note):
+                        add_note(
+                            "pre-evaluation temporary cleanup failed: "
+                            f"{cleanup_exc.__class__.__name__}: {cleanup_exc}"
+                        )
 
     def load(self) -> PreEvaluationSessionEvidence:
         try:
-            envelope = json.loads(self._path.read_text(encoding="utf-8"))
-        except (OSError, json.JSONDecodeError) as exc:
+            envelope = strict_json_loads(self._path.read_text(encoding="utf-8"))
+        except (OSError, ValueError, TypeError, RecursionError) as exc:
             raise ValueError("invalid pre-evaluation evidence file") from exc
         if not isinstance(envelope, dict):
             raise ValueError("pre-evaluation evidence envelope must be an object")
@@ -519,7 +564,10 @@ class PreEvaluationEvidenceStore:
         }
         if set(envelope) != expected:
             raise ValueError("pre-evaluation evidence envelope has unexpected fields")
-        if envelope["schema_version"] != SCHEMA_VERSION:
+        if (
+            type(envelope["schema_version"]) is not int
+            or envelope["schema_version"] != SCHEMA_VERSION
+        ):
             raise ValueError("unsupported pre-evaluation evidence schema")
         if envelope["authority_family"] != AUTHORITY_FAMILY:
             raise ValueError("unexpected pre-evaluation authority family")
@@ -527,7 +575,7 @@ class PreEvaluationEvidenceStore:
         if not isinstance(payload, dict):
             raise ValueError("pre-evaluation evidence payload must be an object")
         evidence = self._from_payload(payload)
-        if evidence.to_payload() != payload:
+        if _canonical_json(evidence.to_payload()) != _canonical_json(payload):
             raise ValueError("pre-evaluation evidence semantic replay mismatch")
         if envelope["authority_digest"] != evidence.authority_digest:
             raise ValueError("pre-evaluation authority digest mismatch")
@@ -549,7 +597,10 @@ class PreEvaluationEvidenceStore:
         }
         if set(payload) != expected:
             raise ValueError("pre-evaluation session payload has unexpected fields")
-        if payload["schema_version"] != SCHEMA_VERSION:
+        if (
+            type(payload["schema_version"]) is not int
+            or payload["schema_version"] != SCHEMA_VERSION
+        ):
             raise ValueError("unsupported pre-evaluation session schema")
         if payload["authority_family"] != AUTHORITY_FAMILY:
             raise ValueError("unexpected pre-evaluation session authority family")
@@ -585,7 +636,7 @@ class PreEvaluationEvidenceStore:
                 policy_digest=str(stored.get("policy_digest")),
                 facts=facts,
             )
-            if slot.to_payload() != stored:
+            if _canonical_json(slot.to_payload()) != _canonical_json(stored):
                 raise ValueError("slot semantic replay mismatch")
             if stored_digest != slot.evidence_digest:
                 raise ValueError("slot evidence digest mismatch")
@@ -598,6 +649,6 @@ class PreEvaluationEvidenceStore:
             policy_digest=policy_digest,
             slots=tuple(slots),
         )
-        if payload["summary"] != evidence._summary():
+        if _canonical_json(payload["summary"]) != _canonical_json(evidence._summary()):
             raise ValueError("session summary does not replay exactly")
         return evidence

@@ -201,6 +201,9 @@ class WindowsAutosportApp(AutosportApp):
             strategy_id, research_plan = self._selected_replay_configuration()
             replay_workspace = workspace_for_strategy(self.workspace, strategy_id, research_plan)
         except Exception as exc:
+            message_text = text("ui.status.recovery.configuration_rejected")
+            self.status.set(message_text)
+            self._append_log(message_text)
             messagebox.showerror(
                 text("ui.dialog.title"),
                 text(
@@ -208,7 +211,6 @@ class WindowsAutosportApp(AutosportApp):
                     detail=_safe_exception_detail(exc),
                 ),
             )
-            self.status.set(text("ui.status.recovery.configuration_rejected"))
             return
 
         prior_workspace = self.__dict__.get("_active_workspace")

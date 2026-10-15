@@ -171,6 +171,39 @@ class CampaignQualificationTests(unittest.TestCase):
         )
 
 
+    def test_denominator_cannot_relabel_decision_bytes_with_another_id(self):
+        evidence = self.complete()
+        first, second = evidence.episodes
+        relabelled = replace(
+            first,
+            denominator_member=replace(
+                first.denominator_member,
+                sha256=first.decision.sha256,
+            ),
+        )
+        changed = replace(evidence, episodes=(relabelled, second))
+        self.assert_blocked(
+            self.rebind_bundle(changed),
+            "decision reuses episode evidence bytes from denominator_member",
+        )
+
+    def test_learning_cannot_relabel_utility_bytes_with_another_id(self):
+        evidence = self.complete()
+        first, second = evidence.episodes
+        utility = first.utility_evidence
+        learning = first.learning_evidence
+        self.assertIsNotNone(utility)
+        self.assertIsNotNone(learning)
+        relabelled = replace(
+            first,
+            learning_evidence=replace(learning, sha256=utility.sha256),
+        )
+        changed = replace(evidence, episodes=(relabelled, second))
+        self.assert_blocked(
+            self.rebind_bundle(changed),
+            "learning_evidence reuses episode evidence bytes from utility_evidence",
+        )
+
     def test_durable_stop_reusing_paper_action_bytes_is_blocked(self):
         evidence = self.complete()
         self.assertEqual(

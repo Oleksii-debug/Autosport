@@ -440,6 +440,9 @@ def assess_campaign_qualification(
     previous_checkpoint: EvidenceAnchor | None = None
     for item in episodes:
         prefix = f"episode {item.episode_index}: "
+        # Different causal stages require independently issued evidence bytes.
+        # Distinct IDs or timestamps must not relabel one receipt as another.
+        episode_roles_by_sha256: dict[str, str] = {}
         for role in (
             "restart_handoff",
             "observation",
@@ -454,6 +457,14 @@ def assess_campaign_qualification(
         ):
             anchor = getattr(item, role)
             if anchor is not None:
+                previous_role = episode_roles_by_sha256.get(anchor.sha256)
+                if previous_role is not None:
+                    blockers.append(
+                        prefix
+                        + f"{role} reuses episode evidence bytes from {previous_role}"
+                    )
+                else:
+                    episode_roles_by_sha256[anchor.sha256] = role
                 record_anchor(prefix + role, anchor)
                 episode_anchor_sha256s.add(anchor.sha256)
         if item.campaign_identity_sha256.lower() != identity_sha:

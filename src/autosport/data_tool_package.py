@@ -111,8 +111,24 @@ def _verified_base_members(
         dir=package.parent,
     )
     snapshot = Path(tmp_name)
+    primary_error: BaseException | None = None
     try:
-        with os.fdopen(fd, "wb") as handle:
+        try:
+            handle = os.fdopen(fd, "wb")
+        except BaseException as exc:
+            try:
+                os.close(fd)
+            except OSError as cleanup_error:
+                try:
+                    BaseException.add_note(
+                        exc,
+                        "data-tool verification descriptor cleanup also failed: "
+                        f"{cleanup_error}",
+                    )
+                except BaseException:
+                    pass
+            raise
+        with handle:
             handle.write(base_bytes)
             handle.flush()
             os.fsync(handle.fileno())
@@ -126,9 +142,25 @@ def _verified_base_members(
                 "release package verification snapshot does not match captured package bytes"
             )
         return members, build_info, verification
+    except BaseException as exc:
+        primary_error = exc
+        raise
     finally:
-        if snapshot.exists():
+        try:
             snapshot.unlink()
+        except FileNotFoundError:
+            pass
+        except OSError as cleanup_error:
+            if primary_error is None:
+                raise
+            try:
+                BaseException.add_note(
+                    primary_error,
+                    "data-tool verification snapshot cleanup also failed: "
+                    f"{cleanup_error}",
+                )
+            except BaseException:
+                pass
 
 
 def bind_portable_data_tool(

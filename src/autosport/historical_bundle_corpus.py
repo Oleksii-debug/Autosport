@@ -619,18 +619,58 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="autosport-build-historical-corpus-from-bundle",
         description=(
-            "Verify one immutable historical acquisition bundle end to end, then reuse the canonical "
-            "governed corpus assembler with separate sealed outcomes and governance proof."
+            "Перевіряє один незмінний bundle історичного придбання від початку до кінця, "
+            "а потім використовує канонічний керований збирач корпусу з окремими "
+            "запечатаними результатами та governance proof."
         ),
     )
-    parser.add_argument("--bundle-dir", type=Path, required=True)
-    parser.add_argument("--expected-bundle-sha256", required=True)
-    parser.add_argument("--results", type=Path, required=True, help="separate sealed quote-outcome JSON")
-    parser.add_argument("--governance-proof", type=Path, required=True)
-    parser.add_argument("--output-dir", type=Path, required=True)
-    parser.add_argument("--name", required=True)
-    parser.add_argument("--outcome-reveal-after", required=True)
-    parser.add_argument("--imported-at", required=True)
+    parser.add_argument(
+        "--bundle-dir",
+        type=Path,
+        required=True,
+        metavar="КАТАЛОГ_BUNDLE",
+        help="каталог незмінного bundle історичного придбання",
+    )
+    parser.add_argument(
+        "--expected-bundle-sha256",
+        required=True,
+        metavar="SHA256",
+        help="очікуваний SHA-256 усього bundle",
+    )
+    parser.add_argument(
+        "--results",
+        type=Path,
+        required=True,
+        metavar="РЕЗУЛЬТАТИ_JSON",
+        help="окремий запечатаний JSON результатів для quote outcomes",
+    )
+    parser.add_argument(
+        "--governance-proof",
+        type=Path,
+        required=True,
+        metavar="GOVERNANCE_JSON",
+        help="JSON без секретів із перевіркою прав і строків зберігання",
+    )
+    parser.add_argument(
+        "--output-dir",
+        type=Path,
+        required=True,
+        metavar="КАТАЛОГ",
+        help="новий каталог вихідного керованого корпусу",
+    )
+    parser.add_argument("--name", required=True, metavar="НАЗВА", help="людинозрозуміла назва корпусу")
+    parser.add_argument(
+        "--outcome-reveal-after",
+        required=True,
+        metavar="ISO_8601",
+        help="каузальний момент розкриття результату у форматі ISO-8601",
+    )
+    parser.add_argument(
+        "--imported-at",
+        required=True,
+        metavar="ISO_8601",
+        help="явний момент імпорту у форматі ISO-8601",
+    )
     return parser
 
 

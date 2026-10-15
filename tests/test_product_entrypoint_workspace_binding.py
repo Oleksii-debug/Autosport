@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import tempfile
 import unittest
@@ -17,8 +18,34 @@ _SOURCE_FACTORY = "autosport.product_source:create_parlay_product_source"
 
 
 def _source_environment(workspace: Path) -> dict[str, str]:
+    # The real product still requires explicit owner-approved source-rights
+    # evidence.  This local fixture only exercises its workspace binding.
+    rights_path = workspace.parent / "qualification-source-rights.json"
+    rights_path.write_text(
+        json.dumps(
+            {
+                "schema_version": 1,
+                "kind": "autosport_source_rights_manifest",
+                "source_identity": "parlayapi:table_tennis",
+                "authorized_scopes": ["provider.market_data.read"],
+                "privacy_classification": "NON_PERSONAL_DATA",
+                "evidence_class": "HUMAN_APPROVED_SOURCE_RIGHTS",
+                "terms_reference": "qualification-terms-v1",
+                "retention_authority_reference": "qualification-retention-v1",
+                "effective_at": "2026-09-01T00:00:00Z",
+                "expires_at": "2030-01-01T00:00:00Z",
+                "human_approved": True,
+                "approved_by": "synthetic-test-owner",
+                "approval_reference": "fixture:workspace-binding",
+                "approved_at": "2026-08-31T00:00:00Z",
+            },
+            sort_keys=True,
+        ),
+        encoding="utf-8",
+    )
     return {
         "AUTOSPORT_PARLAY_API_KEY": "qualification-only-key",
+        "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights_path),
         "AUTOSPORT_PRODUCT_WORKSPACE": str(workspace),
         "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "qualification-terms-v1",
         "AUTOSPORT_PARLAY_RETENTION_REF": "qualification-retention-v1",

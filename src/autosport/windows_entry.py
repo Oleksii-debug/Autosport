@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import os
 import sys
 from pathlib import Path
+from typing import Any
 
 
 _MACHINE_MODE_ARITY = {
@@ -13,6 +15,8 @@ _MACHINE_MODE_ARITY = {
     "--restart-recovery-recover-child": 3,
     "--research-demo-audit-output": 3,
 }
+_STARTUP_FOCUS_CONTROL = "shell_navigation"
+_STARTUP_FOCUS_WRAPPER_MARKER = "_autosport_startup_focus_v1"
 
 
 def _show_workspace_configuration_error(detail: str) -> None:
@@ -20,44 +24,129 @@ def _show_workspace_configuration_error(detail: str) -> None:
 
     import ctypes
 
-    title = "Автоспорт — помилка конфігурації workspace"
-    message = (
-        "Автоспорт не відкрив interactive workspace через недійсну конфігурацію.\n\n"
-        f"{detail}\n\n"
-        "Вкажіть абсолютний шлях у AUTOSPORT_WORKSPACE або виправте LOCALAPPDATA, "
-        "потім перезапустіть Автоспорт. Economic і live state не змінено."
-    )
+    from autosport.localization import text
+
+    title = text("ui.windows.workspace_configuration.title")
+    from autosport.secret_redaction import redact_operator_text
+
+    message = text("ui.windows.workspace_configuration.message", detail=redact_operator_text(detail))
     # MB_OK | MB_ICONERROR. Native MessageBox is keyboard-operable and exposed
     # through standard Windows accessibility rather than a custom visual surface.
     ctypes.windll.user32.MessageBoxW(None, message, title, 0x00000010)
 
 
+def _schedule_startup_focus(app: Any) -> None:
+    """Schedule one non-forced focus transfer after the complete app constructor returns."""
+
+    target = getattr(app, _STARTUP_FOCUS_CONTROL, None)
+    if target is None or not callable(getattr(target, "focus_set", None)):
+        raise RuntimeError(
+            f"canonical Windows startup focus target {_STARTUP_FOCUS_CONTROL!r} is unavailable"
+        )
+    after_idle = getattr(app, "after_idle", None)
+    if not callable(after_idle):
+        raise RuntimeError("Windows app cannot schedule deterministic startup focus")
+    after_idle(target.focus_set)
+
+
+def _install_deterministic_startup_focus(app_class: type[Any] | None = None) -> None:
+    """Make packaged Autosport schedule canonical shell focus exactly once per construction.
+
+    Compact layout installation runs first and guarantees ``shell_navigation`` exists. The
+    callback is queued with ``after_idle`` rather than ``focus_force`` so native Windows focus
+    ownership is respected while the first event-loop turn still has a deterministic target.
+    ``app_class`` is injectable only so the contract can be tested without constructing Tk.
+    """
+
+    if app_class is None:
+        from autosport.gui import AutosportApp
+
+        app_class = AutosportApp
+    current_init = app_class.__init__
+    if getattr(current_init, _STARTUP_FOCUS_WRAPPER_MARKER, False):
+        return
+
+    def init_with_startup_focus(self: Any, *args: Any, **kwargs: Any) -> None:
+        current_init(self, *args, **kwargs)
+        _schedule_startup_focus(self)
+
+    setattr(init_with_startup_focus, _STARTUP_FOCUS_WRAPPER_MARKER, True)
+    setattr(app_class, "__init__", init_with_startup_focus)
+
+
 def _probe_workspace_writable(workspace: Path) -> None:
-    """Fail before GUI construction when durable workspace storage is not writable."""
+    """Fail before GUI construction when canonical durable publication is unavailable."""
 
     import tempfile
 
+    from autosport.integrity import durable_path_lock
+
+    payload = b"autosport workspace atomic publish probe\n"
+    source: Path | None = None
+    destination: Path | None = None
+    lock_path: Path | None = None
+
     workspace.mkdir(parents=True, exist_ok=True)
-    with tempfile.NamedTemporaryFile(
-        mode="wb",
-        dir=workspace,
-        prefix=".autosport-write-probe-",
-        suffix=".tmp",
-        delete=True,
-    ) as probe:
-        probe.write(b"autosport workspace write probe\n")
-        probe.flush()
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=workspace,
+            prefix=".autosport-write-probe-source-",
+            suffix=".tmp",
+            delete=False,
+        ) as probe:
+            source = Path(probe.name)
+            probe.write(payload)
+            probe.flush()
+            os.fsync(probe.fileno())
+
+        # Replace an already-existing disposable sibling while holding the same
+        # per-destination durable path fence used by canonical durable writers.
+        # The probe lock is unique and disposable; canonical state lock files
+        # remain persistent by design and are never removed here.
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            dir=workspace,
+            prefix=".autosport-write-probe-destination-",
+            suffix=".tmp",
+            delete=False,
+        ) as published_probe:
+            destination = Path(published_probe.name)
+        lock_path = destination.with_name(f".{destination.name}.lock")
+
+        with durable_path_lock(destination):
+            os.replace(source, destination)
+            source = None
+
+        if destination.read_bytes() != payload:
+            raise OSError("workspace atomic replace did not publish expected probe bytes")
+    finally:
+        # durable_path_lock intentionally persists sidecars for canonical state,
+        # but this preflight target is uniquely disposable. Clean every probe
+        # artifact only after lock release, including acquisition-failure cases.
+        for candidate in (source, destination, lock_path):
+            if candidate is None:
+                continue
+            try:
+                candidate.unlink()
+            except FileNotFoundError:
+                pass
 
 
 def _workspace_access_error_message(workspace: Path, exc: OSError) -> str:
-    detail = " ".join(str(exc).splitlines()).strip() or "невідома помилка файлової системи"
-    return (
-        "Автоспорт не може підготувати workspace для запису.\n\n"
-        f"Workspace: {workspace}\n"
-        f"Помилка: {type(exc).__name__}: {detail}\n\n"
-        "Вкажіть AUTOSPORT_WORKSPACE як абсолютний шлях до папки вашого користувача, "
-        "доступної для запису, і перезапустіть Автоспорт. "
-        "Права адміністратора не потрібні. Economic і live state не змінено."
+    from autosport.localization import text
+    from autosport.secret_redaction import redact_operator_text, safe_exception_detail
+
+    detail = " ".join(safe_exception_detail(
+        exc, unavailable_detail=text("ui.windows.workspace_access.unknown_error")
+    ).splitlines()).strip() or text(
+        "ui.windows.workspace_access.unknown_error"
+    )
+    return text(
+        "ui.windows.workspace_access.message",
+        workspace=redact_operator_text(str(workspace)),
+        error_type=OSError.__name__,
+        error_detail=detail,
     )
 
 
@@ -66,7 +155,9 @@ def _show_workspace_access_error(workspace: Path, exc: OSError) -> None:
 
     import ctypes
 
-    title = "Автоспорт — workspace недоступний для запису"
+    from autosport.localization import text
+
+    title = text("ui.windows.workspace_access.title")
     ctypes.windll.user32.MessageBoxW(
         None,
         _workspace_access_error_message(workspace, exc),
@@ -121,6 +212,7 @@ def main(argv: list[str] | None = None) -> int:
     from autosport.windows_layout import install_compact_windows_layout
 
     install_compact_windows_layout()
+    _install_deterministic_startup_focus()
     if args and args[0] == "--diagnostic-output":
         from autosport.diagnostic import run_machine_diagnostic
 

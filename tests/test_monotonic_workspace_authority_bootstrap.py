@@ -30,3 +30,5 @@ def test_repeated_pristine_recovery_does_not_initialize_authority_namespace(
     assert second.disposition is RecoveryDisposition.PRISTINE
     assert not authority.namespace_marker_path.exists()
     assert not authority.records_dir.exists()
+    assert not authority.authority_root_binding_path.exists()
+    assert not authority.authority_root_activation_path.exists()

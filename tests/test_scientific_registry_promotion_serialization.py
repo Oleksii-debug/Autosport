@@ -92,7 +92,7 @@ def _seed_promotion_evidence(
         "lawful-provider:fixture",
         "license-evidence:v1",
         dataset_causal_cutoff,
-        T0,
+        dataset_causal_cutoff,
         outcome_reveal_after=T1,
     )
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)

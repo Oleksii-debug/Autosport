@@ -133,6 +133,15 @@ class PaperBookSerializedIngressIntegrityTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "valid UTF-8 text"):
             PaperBook.load_bytes(encoded)
 
+    def test_snapshot_ticket_identity_rejects_interior_control_aliases(self) -> None:
+        for malformed in ("ticket-\n1", "ticket-\x7f1"):
+            with self.subTest(malformed=repr(malformed)):
+                payload = self._payload()
+                payload["tickets"][0]["ticket_id"] = malformed
+                payload["lifecycle"][0]["ticket_id"] = malformed
+                with self.assertRaisesRegex(ValueError, "control characters"):
+                    PaperBook.load_bytes(self._encoded(payload))
+
     def test_lifecycle_keys_must_be_utf8_round_trip_safe(self) -> None:
         payload = self._payload()
         payload["lifecycle"][0]["ticket_id"] = "\ud800"
@@ -151,7 +160,10 @@ class PaperBookSerializedIngressIntegrityTests(unittest.TestCase):
         ticket.strategy_reason = "\ud800"
         temporary = self.path.with_suffix(self.path.suffix + ".tmp")
 
-        with self.assertRaisesRegex(ValueError, "valid UTF-8 text"):
+        with self.assertRaisesRegex(
+            ValueError,
+            "opening economic identity changed after admission",
+        ):
             book.save(self.path)
 
         self.assertFalse(self.path.exists())

@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 from pathlib import Path
+from threading import RLock
 from typing import Mapping
 
 from . import _paper_execution_reality_legacy as _paper_impl
@@ -140,6 +141,8 @@ class PaperExecutionAdoptionRuntime:
     """
 
     _TICKET_MARKER = "paper_execution_attempt_id="
+    _EXPOSURE_SCOPE_EVENT_TYPE = "PAPER_EXPOSURE_SCOPE_BOUND"
+    _EXPOSURE_SCOPE_SCHEMA = "autosport.paper_execution.exposure_scope_binding"
 
     def __init__(
         self,
@@ -161,6 +164,11 @@ class PaperExecutionAdoptionRuntime:
         self.book = book
         self.ledger = ledger
         self.config = config
+        # Serialize every canonical execution on this runtime. The PaperValue
+        # authority holds this same re-entrant lock across risk admission and
+        # execution so a second canonical allocation cannot change PaperBook
+        # between the bound risk witness and materialization.
+        self._execution_lock = RLock()
         # In-process capability registry. Object identity is intentional: serialized,
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
@@ -173,6 +181,20 @@ class PaperExecutionAdoptionRuntime:
                 self.book,
                 "configured PaperBook does not match durable snapshot",
             )
+            # Existing durable state must be read-only at construction. Requiring
+            # the canonical generation binding proves that this exact caller object
+            # was loaded/adopted through the existing PaperBook authority without
+            # minting a no-op PREPARE/COMMIT generation. A merely structurally-equal
+            # caller is rejected rather than gaining path authority through save().
+            try:
+                _REQUIRE_CURRENT_BINDING(
+                    self.book,
+                    self.paper_book_path,
+                )
+            except (TypeError, ValueError) as exc:
+                raise PaperExecutionAdoptionError(
+                    "configured PaperBook lacks current durable snapshot authority"
+                ) from exc
         else:
             self.book.save(self.paper_book_path)
             durable_book = PaperBook.load(self.paper_book_path)
@@ -268,10 +290,12 @@ class PaperExecutionAdoptionRuntime:
                 or leg.market_id != event.market_id
                 or leg.selection_id != event.selection_id
                 or leg.sport != event.sport
+                or leg.exchange_side != event.exchange_side
             ):
                 raise PaperExecutionAdoptionError(
                     "ticket leg identity does not match canonical execution quote"
                 )
+            self._require_back_compatible_exchange_side(event.exchange_side)
 
             account_by_source = dict(context.provider_accounts)
             if set(account_by_source) != {event.source_id}:
@@ -352,6 +376,18 @@ class PaperExecutionAdoptionRuntime:
             )
         )
 
+    @staticmethod
+    def _require_back_compatible_exchange_side(exchange_side: str | None) -> None:
+        if exchange_side == "lay":
+            raise PaperExecutionAdoptionError(
+                "LAY PAPER adoption is unavailable until canonical liability "
+                "and settlement semantics are integrated"
+            )
+        if exchange_side not in {None, "back"}:
+            raise PaperExecutionAdoptionError(
+                "PAPER adoption exchange side is not supported"
+            )
+
     def prepare_paper_value_action(
         self,
         *,
@@ -379,6 +415,7 @@ class PaperExecutionAdoptionRuntime:
             raise ValueError("account_id must be non-empty canonical text")
         if (bankroll_id is None) != (currency is None):
             raise ValueError("bankroll_id and currency must be supplied together")
+        self._require_back_compatible_exchange_side(event.exchange_side)
 
         quote_time = _utc_timestamp(
             event.source_ts or event.observed_ts,
@@ -469,6 +506,74 @@ class PaperExecutionAdoptionRuntime:
             self.config,
         )
 
+    @classmethod
+    def _exposure_scope_payload(
+        cls,
+        prepared: PreparedPaperExecution,
+    ) -> dict[str, object]:
+        body: dict[str, object] = {
+            "schema": cls._EXPOSURE_SCOPE_SCHEMA,
+            "schema_version": 1,
+            "plan_id": prepared.execution_plan.plan_id,
+            "plan_fingerprint": prepared.execution_plan.fingerprint,
+            "intent_evidence_sha256": hashlib.sha256(
+                prepared.intent_evidence_json.encode("utf-8")
+            ).hexdigest(),
+            "bindings": [
+                {
+                    "action_id": binding.action_id,
+                    "sport": binding.sport,
+                    "bankroll_id": binding.bankroll_id,
+                    "currency": binding.currency,
+                }
+                for binding in prepared.exposure_bindings
+            ],
+        }
+        return {**body, "binding_sha256": _digest(body)}
+
+    def _publish_exposure_scope(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        run_id: str,
+    ) -> None:
+        """Persist the already-minted #646 scope into the canonical #623 ledger.
+
+        This is not a second scope authority. The in-process minted capability is
+        checked first, then the exact immutable binding is copied into the same
+        hash-chained execution ledger before any attempt can be recorded. A restart
+        re-mints from canonical inputs and can only reproduce the same event payload;
+        any substituted sport/bankroll/currency conflicts on the stable event key.
+        """
+        self._require_minted(prepared)
+        self.ledger._append_event(
+            event_type=self._EXPOSURE_SCOPE_EVENT_TYPE,
+            run_id=run_id,
+            key=f"{run_id}:exposure-scope",
+            payload=self._exposure_scope_payload(prepared),
+        )
+
+    @staticmethod
+    def _require_attempt_action_identity(attempt, action: ExecutionAction) -> None:
+        if attempt.side != action.side:
+            raise PaperExecutionAdoptionError(
+                "durable execution attempt side must match prepared action side"
+            )
+        if (
+            attempt.action_id != action.action_id
+            or attempt.bookmaker_id != action.bookmaker_id
+            or attempt.account_id != action.account_id
+            or attempt.event_id != action.event_id
+            or attempt.market_id != action.market_id
+            or attempt.selection_id != action.selection_id
+            or attempt.decision_quote_id != action.quote_id
+            or attempt.decision_odds != action.requested_odds
+            or attempt.requested_stake != action.requested_stake
+        ):
+            raise PaperExecutionAdoptionError(
+                "durable execution attempt identity does not match prepared action"
+            )
+
     def assert_recoverable_book_state(
         self,
         *,
@@ -527,6 +632,11 @@ class PaperExecutionAdoptionRuntime:
                 raise PaperExecutionAdoptionError(
                     "durable attempt is not bound to prepared execution action"
                 )
+            self._require_attempt_action_identity(attempt, action)
+            if action.side != "BACK":
+                raise PaperExecutionAdoptionError(
+                    "PaperBook recovery materialization requires matching BACK attempt side"
+                )
             if attempt.execution_odds is None or attempt.execution_stake is None:
                 raise PaperExecutionAdoptionError(
                     "accepted-equivalent durable attempt lacks execution truth"
@@ -539,6 +649,7 @@ class PaperExecutionAdoptionRuntime:
                         selection_id=attempt.selection_id,
                         locked_odds=attempt.execution_odds,
                         sport=binding.sport,
+                        exchange_side="back",
                     )
                 ],
                 attempt.execution_stake,
@@ -572,11 +683,38 @@ class PaperExecutionAdoptionRuntime:
         evidence_registry: PaperExecutionEvidenceRegistry | None = None,
         suspended_action_ids: frozenset[str] = frozenset(),
     ) -> PaperExecutionAdoptionResult:
+        with self._execution_lock:
+            return self._execute_unlocked(
+                prepared=prepared,
+                trigger_id=trigger_id,
+                started_at=started_at,
+                materialize_exposure=materialize_exposure,
+                observations=observations,
+                evidence_registry=evidence_registry,
+                suspended_action_ids=suspended_action_ids,
+            )
+
+    def _execute_unlocked(
+        self,
+        *,
+        prepared: PreparedPaperExecution,
+        trigger_id: str,
+        started_at: str,
+        materialize_exposure: bool,
+        observations: Mapping[str, ObservedPaperExecution] | None = None,
+        evidence_registry: PaperExecutionEvidenceRegistry | None = None,
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> PaperExecutionAdoptionResult:
         if not isinstance(prepared, PreparedPaperExecution):
             raise TypeError("prepared must be PreparedPaperExecution")
         self._require_minted(prepared)
         if type(materialize_exposure) is not bool:
             raise TypeError("materialize_exposure must be bool")
+        expected_run_id = self.expected_run_id(prepared, trigger_id)
+        self._publish_exposure_scope(
+            prepared=prepared,
+            run_id=expected_run_id,
+        )
         run = execute_paper_plan(
             plan=prepared.execution_plan,
             trigger_id=trigger_id,
@@ -587,6 +725,10 @@ class PaperExecutionAdoptionRuntime:
             evidence_registry=evidence_registry,
             suspended_action_ids=suspended_action_ids,
         )
+        if run.run_id != expected_run_id:
+            raise PaperExecutionAdoptionError(
+                "canonical execution returned unexpected run identity"
+            )
         if not materialize_exposure:
             return PaperExecutionAdoptionResult(run=run, ticket_ids=())
 
@@ -672,6 +814,11 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
         decision_id: str,
     ) -> PaperTicket:
+        if action.side != "BACK":
+            raise PaperExecutionAdoptionError(
+                "PaperBook materialization supports BACK execution only"
+            )
+        self._require_attempt_action_identity(attempt, action)
         if attempt.execution_odds is None or attempt.execution_stake is None:
             raise PaperExecutionAdoptionError(
                 "accepted-equivalent attempt lacks execution odds/stake"
@@ -707,6 +854,7 @@ class PaperExecutionAdoptionRuntime:
                     selection_id=attempt.selection_id,
                     locked_odds=attempt.execution_odds,
                     sport=binding.sport,
+                    exchange_side="back",
                 )
             ],
             attempt.execution_stake,
@@ -731,7 +879,15 @@ class PaperExecutionAdoptionRuntime:
         binding: PaperExposureBinding,
     ) -> bool:
         if (
-            ticket.stake != attempt.execution_stake
+            attempt.action_id != action.action_id
+            or action.side != "BACK"
+            or attempt.side != action.side
+            or attempt.bookmaker_id != action.bookmaker_id
+            or attempt.account_id != action.account_id
+            or attempt.event_id != action.event_id
+            or attempt.market_id != action.market_id
+            or attempt.selection_id != action.selection_id
+            or ticket.stake != attempt.execution_stake
             or ticket.placed_at != attempt.execution_observed_at
             or len(ticket.legs) != 1
             or ticket.provider_source_ids != (attempt.bookmaker_id,)
@@ -751,4 +907,17 @@ class PaperExecutionAdoptionRuntime:
             and leg.selection_id == attempt.selection_id
             and leg.locked_odds == attempt.execution_odds
             and leg.sport == binding.sport
+            and leg.exchange_side == "back"
         )
+
+
+# Seal existing-path admission behind an inert-globals trampoline. Binding authority
+# is resolved from the sealed PaperBook persistence graph per invocation.
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
+
+PaperExecutionAdoptionRuntime.__init__ = _seal_current_binding_consumer(
+    PaperExecutionAdoptionRuntime.__init__
+)
+del _seal_current_binding_consumer

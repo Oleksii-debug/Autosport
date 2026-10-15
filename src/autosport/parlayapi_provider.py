@@ -413,6 +413,19 @@ class ParlayApiTableTennisProvider:
         else:
             raise ProviderPayloadError("event is missing id")
         event_id = _provider_identity(raw_event_id, field="event id", allow_colon=False)
+        raw_sport_key = event.get("sport_key")
+        if raw_sport_key is None:
+            event_sport_key = self.sport_key
+        else:
+            event_sport_key = _provider_identity(
+                raw_sport_key,
+                field="event sport_key",
+                allow_colon=False,
+            )
+            if event_sport_key != self.sport_key:
+                raise ProviderPayloadError(
+                    "provider event sport_key does not match configured provider sport"
+                )
         bookmakers = event.get("bookmakers", [])
         if not isinstance(bookmakers, list):
             raise ProviderPayloadError("event bookmakers must be a list")
@@ -475,7 +488,7 @@ class ParlayApiTableTennisProvider:
                             source_ts=source_ts,
                             metadata={
                                 "provider": "parlayapi",
-                                "sport_key": event.get("sport_key", "table_tennis"),
+                                "sport_key": event_sport_key,
                                 "sport_title": event.get("sport_title"),
                                 "commence_time": event.get("commence_time"),
                                 "home_team": event.get("home_team"),

@@ -11,6 +11,7 @@ from __future__ import annotations
 from pathlib import Path
 
 from .champion_agent_episode import ChampionAgentEpisode, ChampionAgentEpisodeError
+from .champion_eligibility import ChampionEligibilityDecision
 from .deployment_runtime_authority import DeploymentRuntimeAuthorityStore
 from .learning_environment import EnvironmentCheckpoint, EnvironmentIdentity
 from .policy_deployment import ActivationBinding
@@ -32,6 +33,7 @@ def initialize_canonical_champion_episode(
     identity: EnvironmentIdentity,
     training_identity: EnvironmentIdentity,
     activation_binding: ActivationBinding,
+    eligibility_decision: ChampionEligibilityDecision,
     semantic_inputs: CrossSessionSemanticInputs,
     market_store: SQLiteMarketStore,
     runtime_authority_store: DeploymentRuntimeAuthorityStore,
@@ -72,6 +74,7 @@ def initialize_canonical_champion_episode(
             at=at,
             training_identity=training_identity,
             activation_binding=activation_binding,
+            eligibility_decision=eligibility_decision,
             semantic_inputs=semantic_inputs,
             market_store=market_store,
             runtime_authority_store=runtime_authority_store,
@@ -89,6 +92,7 @@ def resume_canonical_champion_episode(
     *,
     identity: EnvironmentIdentity,
     checkpoint: EnvironmentCheckpoint,
+    eligibility_decision: ChampionEligibilityDecision,
     as_of: str,
     canonical_strategy_id: str,
     config_sha256: str,
@@ -112,6 +116,7 @@ def resume_canonical_champion_episode(
             artifact_store,
             identity=identity,
             checkpoint=checkpoint,
+            eligibility_decision=eligibility_decision,
             as_of=as_of,
             canonical_strategy_id=canonical_strategy_id,
             config_sha256=config_sha256,

@@ -518,7 +518,8 @@ def test_manual_calculation_cancel_clear_and_error_have_no_result_authority():
     assert "set_result(None)" in source
     assert "messagebox.ask" not in source
     assert "messagebox.askokcancel" not in source
-    assert 'command=dialog.destroy' in source
+    assert 'command=close_dialog' in source
+    assert 'command=dialog.destroy' not in source
     assert '"ui.windows.manual_calculation.status.error"' in source
 
 

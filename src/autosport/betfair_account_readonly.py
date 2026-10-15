@@ -11,7 +11,7 @@ from datetime import datetime, timezone
 from decimal import Decimal
 from hashlib import sha256
 import json
-from threading import Lock
+from threading import Lock, RLock
 from types import MappingProxyType
 from typing import Callable, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
@@ -22,11 +22,14 @@ ACCOUNT_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/account/json-rpc/v
 BETTING_JSON_RPC_ENDPOINT = "https://api.betfair.com/exchange/betting/json-rpc/v1"
 ADAPTER_ID = "betfair-exchange-jsonrpc-readonly"
 ADAPTER_VERSION = "1"
+MARKET_BOOK_AUTHORITY_TRUST_BOUNDARY = "trusted-process-api-provenance-v1"
+MARKET_PRICE_LADDER_AUTHORITY_TRUST_BOUNDARY = "trusted-process-api-provenance-v1"
 _GET_ACCOUNT_FUNDS = "AccountAPING/v1.0/getAccountFunds"
 _GET_ACCOUNT_DETAILS = "AccountAPING/v1.0/getAccountDetails"
 _LIST_CURRENT_ORDERS = "SportsAPING/v1.0/listCurrentOrders"
 _LIST_CLEARED_ORDERS = "SportsAPING/v1.0/listClearedOrders"
 _LIST_MARKET_CATALOGUE = "SportsAPING/v1.0/listMarketCatalogue"
+_LIST_MARKET_BOOK = "SportsAPING/v1.0/listMarketBook"
 _EXECUTION_CLEARED_STATUSES = ("SETTLED", "VOIDED", "LAPSED", "CANCELLED")
 _READ_METHOD_ENDPOINT = MappingProxyType({
     _GET_ACCOUNT_FUNDS: ACCOUNT_JSON_RPC_ENDPOINT,
@@ -34,6 +37,7 @@ _READ_METHOD_ENDPOINT = MappingProxyType({
     _LIST_CURRENT_ORDERS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_CLEARED_ORDERS: BETTING_JSON_RPC_ENDPOINT,
     _LIST_MARKET_CATALOGUE: BETTING_JSON_RPC_ENDPOINT,
+    _LIST_MARKET_BOOK: BETTING_JSON_RPC_ENDPOINT,
 })
 
 
@@ -121,10 +125,10 @@ class UrllibBetfairHttpTransport:
             raise ValueError("max_response_bytes must be a positive integer")
         self._max_response_bytes = max_response_bytes
 
-    def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float) -> bytes:
+    def post(self, url: str, *, headers: Mapping[str, str], body: bytes, timeout_seconds: float, _urlopen=urlopen) -> bytes:
         request = Request(url, data=body, headers=dict(headers), method="POST")
         try:
-            with urlopen(request, timeout=timeout_seconds) as response:
+            with _urlopen(request, timeout=timeout_seconds) as response:
                 payload = response.read(self._max_response_bytes + 1)
         except HTTPError as exc:
             raise BetfairReadOnlyError(f"Betfair HTTP request failed with status {exc.code}") from None
@@ -135,6 +139,17 @@ class UrllibBetfairHttpTransport:
         return payload
 
 
+def _system_utc_now(_datetime=datetime, _timezone=timezone) -> datetime:
+    # Capture the standard-library clock dependencies at definition time. This
+    # prevents later module-global rebinding from silently changing the evidence
+    # clock while the function object's identity remains unchanged.
+    return _datetime.now(_timezone.utc)
+
+
+_CANONICAL_URLLIB_POST = UrllibBetfairHttpTransport.post
+_CANONICAL_MARKET_BOOK_CLOCK = _system_utc_now
+
+
 @dataclass(frozen=True, slots=True)
 class BetfairEvidence:
     observed_at: str
@@ -143,6 +158,230 @@ class BetfairEvidence:
     def __post_init__(self) -> None:
         _iso_timestamp(self.observed_at, "observed_at")
         _sha256_hex(self.source_payload_sha256, "source_payload_sha256")
+
+
+@dataclass(frozen=True, slots=True)
+class BetfairMarketBookPriceSize:
+    price: Decimal
+    size: Decimal
+
+    def __post_init__(self) -> None:
+        _positive_decimal(self.price, "market_book price")
+        _nonnegative_decimal(self.size, "market_book size")
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class BetfairMarketBookDepthObservation:
+    """Authenticated decision-time displayed-depth receipt from listMarketBook.
+
+    This is provider-response evidence only. It is not a reservation, fill,
+    acceptance, or guarantee that displayed liquidity will remain available.
+    """
+
+    venue_id: str
+    account_id: str
+    market_id: str
+    selection_id: int
+    status: str
+    selection_status: str
+    is_market_data_delayed: bool
+    market_version: int
+    inplay: bool
+    bet_delay_seconds: int
+    projection_kind: str
+    virtualise: bool
+    available_to_back: tuple[BetfairMarketBookPriceSize, ...]
+    request_scope_sha256: str
+    evidence: BetfairEvidence
+
+    def __post_init__(self) -> None:
+        _required_text(self.venue_id, "venue_id")
+        _required_text(self.account_id, "account_id")
+        _required_text(self.market_id, "market_id")
+        _positive_int(self.selection_id, "selection_id")
+        _required_text(self.status, "status")
+        _required_text(self.selection_status, "selection_status")
+        if type(self.is_market_data_delayed) is not bool:
+            raise BetfairReadOnlyError("is_market_data_delayed must be bool")
+        _nonnegative_int(self.market_version, "market_version")
+        if type(self.inplay) is not bool:
+            raise BetfairReadOnlyError("inplay must be bool")
+        _nonnegative_int(self.bet_delay_seconds, "bet_delay_seconds")
+        if self.projection_kind != "EX_ALL_OFFERS":
+            raise BetfairReadOnlyError(
+                "market-book depth receipt currently requires EX_ALL_OFFERS"
+            )
+        if type(self.virtualise) is not bool:
+            raise BetfairReadOnlyError("virtualise must be bool")
+        if self.virtualise:
+            raise BetfairReadOnlyError(
+                "market-book depth receipt forbids virtualised liquidity"
+            )
+        if type(self.available_to_back) is not tuple:
+            raise BetfairReadOnlyError("available_to_back must be a tuple")
+        if any(
+            not isinstance(item, BetfairMarketBookPriceSize)
+            for item in self.available_to_back
+        ):
+            raise BetfairReadOnlyError(
+                "available_to_back must contain BetfairMarketBookPriceSize"
+            )
+        prices = tuple(item.price for item in self.available_to_back)
+        if len(set(prices)) != len(prices):
+            raise BetfairReadOnlyError(
+                "available_to_back contains duplicate provider price levels"
+            )
+        _sha256_hex(self.request_scope_sha256, "request_scope_sha256")
+        if not isinstance(self.evidence, BetfairEvidence):
+            raise BetfairReadOnlyError("market-book receipt requires BetfairEvidence")
+
+
+# Receipt identity alone is not enough for positive decision-time authority:
+# callers may instantiate BetfairReadOnlyClient with an injected transport/clock
+# for parsing or deterministic tests. Keep the exact issuing client origin beside
+# the receipt so positive consumers can require the direct production IO path.
+def _market_book_depth_fingerprint(
+    observation: BetfairMarketBookDepthObservation,
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": "autosport.betfair.market-book-depth-receipt.v1",
+            "venue_id": observation.venue_id,
+            "account_id": observation.account_id,
+            "market_id": observation.market_id,
+            "selection_id": observation.selection_id,
+            "status": observation.status,
+            "selection_status": observation.selection_status,
+            "is_market_data_delayed": observation.is_market_data_delayed,
+            "market_version": observation.market_version,
+            "inplay": observation.inplay,
+            "bet_delay_seconds": observation.bet_delay_seconds,
+            "projection_kind": observation.projection_kind,
+            "virtualise": observation.virtualise,
+            "available_to_back": [
+                {"price": str(item.price), "size": str(item.size)}
+                for item in observation.available_to_back
+            ],
+            "request_scope_sha256": observation.request_scope_sha256,
+            "observed_at": observation.evidence.observed_at,
+            "source_payload_sha256": observation.evidence.source_payload_sha256,
+        }
+    )
+
+
+def _market_book_source_origin_authoritative(source: object) -> bool:
+    """Return True only for the unchanged direct production read origin."""
+
+    if type(source) is not BetfairReadOnlyClient:
+        return False
+    transport = getattr(source, "_transport", None)
+    if type(transport) is not UrllibBetfairHttpTransport:
+        return False
+    if getattr(source, "_market_book_origin_transport", None) is not transport:
+        return False
+    if getattr(source, "_clock", None) is not _CANONICAL_MARKET_BOOK_CLOCK:
+        return False
+    if getattr(source, "_market_book_origin_clock", None) is not _CANONICAL_MARKET_BOOK_CLOCK:
+        return False
+    if "post" in vars(transport):
+        return False
+    canonical_kwdefaults = _CANONICAL_URLLIB_POST.__kwdefaults__ or {}
+    canonical_urlopen = canonical_kwdefaults.get("_urlopen")
+    return (
+        type(transport).post is _CANONICAL_URLLIB_POST
+        and canonical_urlopen is not None
+        and urlopen is canonical_urlopen
+    )
+
+
+@dataclass(frozen=True, slots=True, weakref_slot=True)
+class BetfairMarketPriceLadderObservation:
+    """Authenticated MarketDescription price-ladder receipt.
+
+    This proves only provider-origin market ladder metadata for one exact market.
+    It does not prove stake/funds/headroom, liquidity, acceptance, or execution.
+    """
+
+    venue_id: str
+    account_id: str
+    market_id: str
+    ladder_type: str
+    line_range_min: Decimal | None
+    line_range_max: Decimal | None
+    line_range_interval: Decimal | None
+    line_range_unit: str | None
+    request_scope_sha256: str
+    evidence: BetfairEvidence
+
+    def __post_init__(self) -> None:
+        _required_text(self.venue_id, "venue_id")
+        _required_text(self.account_id, "account_id")
+        _required_text(self.market_id, "market_id")
+        _required_text(self.ladder_type, "ladder_type")
+        _sha256_hex(self.request_scope_sha256, "request_scope_sha256")
+        if not isinstance(self.evidence, BetfairEvidence):
+            raise BetfairReadOnlyError(
+                "price-ladder receipt requires BetfairEvidence"
+            )
+        line_values = (
+            self.line_range_min,
+            self.line_range_max,
+            self.line_range_interval,
+            self.line_range_unit,
+        )
+        if any(value is not None for value in line_values):
+            if not all(value is not None for value in line_values):
+                raise BetfairReadOnlyError(
+                    "line-range metadata must be complete when supplied"
+                )
+            minimum = _decimal(self.line_range_min, "line_range_min")
+            maximum = _decimal(self.line_range_max, "line_range_max")
+            interval = _positive_decimal(
+                self.line_range_interval,
+                "line_range_interval",
+            )
+            _required_text(self.line_range_unit, "line_range_unit")
+            if maximum < minimum:
+                raise BetfairReadOnlyError(
+                    "line_range_max cannot be below line_range_min"
+                )
+            if interval <= 0:
+                raise BetfairReadOnlyError(
+                    "line_range_interval must be positive"
+                )
+
+
+def _market_price_ladder_fingerprint(
+    observation: BetfairMarketPriceLadderObservation,
+) -> str:
+    return _canonical_sha256(
+        {
+            "schema": "autosport.betfair.market-price-ladder-receipt.v1",
+            "venue_id": observation.venue_id,
+            "account_id": observation.account_id,
+            "market_id": observation.market_id,
+            "ladder_type": observation.ladder_type,
+            "line_range_min": (
+                None
+                if observation.line_range_min is None
+                else str(observation.line_range_min)
+            ),
+            "line_range_max": (
+                None
+                if observation.line_range_max is None
+                else str(observation.line_range_max)
+            ),
+            "line_range_interval": (
+                None
+                if observation.line_range_interval is None
+                else str(observation.line_range_interval)
+            ),
+            "line_range_unit": observation.line_range_unit,
+            "request_scope_sha256": observation.request_scope_sha256,
+            "observed_at": observation.evidence.observed_at,
+            "source_payload_sha256": observation.evidence.source_payload_sha256,
+        }
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -515,7 +754,9 @@ class BetfairReadOnlyClient:
         self._credentials = credentials
         self._transport = transport or UrllibBetfairHttpTransport()
         self._timeout_seconds = float(timeout_seconds)
-        self._clock = clock or (lambda: datetime.now(timezone.utc))
+        self._clock = clock or _CANONICAL_MARKET_BOOK_CLOCK
+        self._market_book_origin_transport = self._transport if transport is None else None
+        self._market_book_origin_clock = self._clock if clock is None else None
         self._request_id = 0
         self._request_lock = Lock()
         self._venue_id = _required_text(venue_id, "venue_id")
@@ -609,6 +850,164 @@ class BetfairReadOnlyClient:
         )
         _unique_bet_ids(orders, "clearedOrders")
         return BetfairClearedOrderPage(orders, _provider_bool(report, "moreAvailable"), from_record, record_count, response.evidence)
+
+    def read_market_book_depth(
+        self,
+        market_id: str,
+        selection_id: int,
+    ) -> BetfairMarketBookDepthObservation:
+        """Read exact non-virtualised EX_ALL_OFFERS BACK-executable depth.
+
+        Betfair names availableToBack from the customer action perspective:
+        this is displayed liquidity available to a customer placing BACK.
+        """
+        market = _required_text(market_id, "market_id")
+        selection = _positive_int(selection_id, "selection_id")
+        params: dict[str, object] = {
+            "marketIds": [market],
+            "priceProjection": {
+                "priceData": ["EX_ALL_OFFERS"],
+                "virtualise": False,
+            },
+        }
+        response = self._rpc(_LIST_MARKET_BOOK, params)
+        rows = _sequence(response.result, "listMarketBook result")
+        if len(rows) != 1:
+            raise BetfairReadOnlyError(
+                "listMarketBook must return exactly one requested market"
+            )
+        book = _mapping(rows[0], "marketBook[0]")
+        returned_market = _provider_text(book, "marketId", "market_id")
+        if returned_market != market:
+            raise BetfairReadOnlyError("listMarketBook returned a different market")
+
+        runners = _sequence(book.get("runners"), "marketBook[0].runners")
+        matches = [
+            _mapping(item, "marketBook runner")
+            for item in runners
+            if isinstance(item, Mapping) and item.get("selectionId") == selection
+        ]
+        if len(matches) != 1:
+            raise BetfairReadOnlyError(
+                "listMarketBook lacks one exact requested selection"
+            )
+        runner = matches[0]
+        ex = _mapping(runner.get("ex"), "marketBook runner.ex")
+        raw_back = _sequence(
+            ex.get("availableToBack"),
+            "marketBook runner.ex.availableToBack",
+        )
+        available_to_back = tuple(
+            BetfairMarketBookPriceSize(
+                _number(
+                    _mapping(item, "availableToBack priceSize"),
+                    "price",
+                    "price",
+                ),
+                _number(
+                    _mapping(item, "availableToBack priceSize"),
+                    "size",
+                    "size",
+                ),
+            )
+            for item in raw_back
+        )
+        observation = BetfairMarketBookDepthObservation(
+            venue_id=self._venue_id,
+            account_id=self._account_id,
+            market_id=returned_market,
+            selection_id=selection,
+            status=_provider_text(book, "status", "status"),
+            selection_status=_provider_text(runner, "status", "runner status"),
+            is_market_data_delayed=_provider_bool(book, "isMarketDataDelayed"),
+            market_version=_provider_int(book, "version", "version"),
+            inplay=_provider_bool(book, "inplay"),
+            bet_delay_seconds=_provider_int(book, "betDelay", "betDelay"),
+            projection_kind="EX_ALL_OFFERS",
+            virtualise=False,
+            available_to_back=available_to_back,
+            request_scope_sha256=_canonical_sha256(params),
+            evidence=response.evidence,
+        )
+        return observation
+
+    def read_market_price_ladder(
+        self,
+        market_id: str,
+    ) -> BetfairMarketPriceLadderObservation:
+        """Read the exact market-specific Betfair PriceLadderDescription."""
+
+        market = _required_text(market_id, "market_id")
+        params: dict[str, object] = {
+            "filter": {"marketIds": [market]},
+            "marketProjection": ["MARKET_DESCRIPTION"],
+            "maxResults": 1,
+        }
+        response = self._rpc(_LIST_MARKET_CATALOGUE, params)
+        rows = _sequence(response.result, "listMarketCatalogue result")
+        if len(rows) != 1:
+            raise BetfairReadOnlyError(
+                "exact market price-ladder identity is unavailable"
+            )
+        row = _mapping(rows[0], "marketCatalogue[0]")
+        returned_market = _provider_text(row, "marketId", "market_id")
+        if returned_market != market:
+            raise BetfairReadOnlyError(
+                "marketCatalogue returned a different market"
+            )
+        description = _mapping(
+            row.get("description"),
+            "marketCatalogue[0].description",
+        )
+        ladder = _mapping(
+            description.get("priceLadderDescription"),
+            "marketCatalogue[0].description.priceLadderDescription",
+        )
+        ladder_type = _provider_text(ladder, "type", "price_ladder_type")
+
+        line_min: Decimal | None = None
+        line_max: Decimal | None = None
+        line_interval: Decimal | None = None
+        line_unit: str | None = None
+        raw_line_range = description.get("lineRangeInfo")
+        if raw_line_range is not None:
+            line_range = _mapping(
+                raw_line_range,
+                "marketCatalogue[0].description.lineRangeInfo",
+            )
+            line_min = _number(
+                line_range,
+                "minUnitValue",
+                "line_range_min",
+            )
+            line_max = _number(
+                line_range,
+                "maxUnitValue",
+                "line_range_max",
+            )
+            line_interval = _number(
+                line_range,
+                "interval",
+                "line_range_interval",
+            )
+            line_unit = _provider_text(
+                line_range,
+                "marketUnit",
+                "line_range_unit",
+            )
+
+        return BetfairMarketPriceLadderObservation(
+            venue_id=self._venue_id,
+            account_id=self._account_id,
+            market_id=returned_market,
+            ladder_type=ladder_type,
+            line_range_min=line_min,
+            line_range_max=line_max,
+            line_range_interval=line_interval,
+            line_range_unit=line_unit,
+            request_scope_sha256=_canonical_sha256(params),
+            evidence=response.evidence,
+        )
 
     def read_market_event(self, market_id: str) -> BetfairMarketEventObservation:
         market = _required_text(market_id, "market_id")
@@ -982,6 +1381,7 @@ def _provider_error_code(data: object, *, method: str) -> str | None:
         _LIST_CURRENT_ORDERS,
         _LIST_CLEARED_ORDERS,
         _LIST_MARKET_CATALOGUE,
+        _LIST_MARKET_BOOK,
     }:
         expected_exception = "APINGException"
     else:
@@ -1233,6 +1633,531 @@ def _extend_unique(target: list[object], seen: set[str], orders: Sequence[object
             raise BetfairReadOnlyError(f"{field} pagination returned duplicate bet_id")
         seen.add(bet_id)
         target.append(order)
+
+# Bind MarketBook depth authority to receipts actually emitted by the canonical
+# adapter. The ordinary module API exposes no callable receipt mint or module-level
+# writable authority registry for caller-constructed depth DTOs. This is an
+# in-process provenance fence inside a trusted Python process, not cryptographic
+# isolation: arbitrary same-interpreter reflection/object-graph/code mutation is
+# explicitly outside MARKET_BOOK_AUTHORITY_TRUST_BOUNDARY.
+def _install_market_book_depth_authority():
+    issued: dict[int, tuple[object, str, object, datetime]] = {}
+    raw_read = BetfairReadOnlyClient.read_market_book_depth
+    fingerprint = _market_book_depth_fingerprint
+
+    # Capture the exact production-origin objects inside the non-exported
+    # authority closure. Function identity alone is insufficient because Python
+    # function __kwdefaults__ and __code__ are mutable at runtime; a caller that
+    # rewrites the captured _urlopen default and the module alias together could
+    # otherwise redirect the canonical transport while preserving identity.
+    canonical_client_type = BetfairReadOnlyClient
+    canonical_transport_type = UrllibBetfairHttpTransport
+    canonical_clock = _CANONICAL_MARKET_BOOK_CLOCK
+    canonical_clock_code = canonical_clock.__code__
+    canonical_clock_defaults = canonical_clock.__defaults__
+    canonical_datetime_type = datetime
+    canonical_utc = timezone.utc
+    canonical_post = canonical_transport_type.post
+    canonical_post_code = canonical_post.__code__
+    canonical_urlopen = (canonical_post.__kwdefaults__ or {}).get("_urlopen")
+    canonical_rpc = canonical_client_type._rpc
+    canonical_rpc_code = canonical_rpc.__code__
+    # Authority decisions must not resolve mutable builtins dynamically. A caller
+    # can otherwise shadow the canonical transport at instance level while
+    # rebinding builtins.vars/type/getattr around acquisition.
+    canonical_type = type
+    canonical_getattr = getattr
+    canonical_vars = vars
+    if canonical_urlopen is None or canonical_urlopen is not urlopen:
+        raise RuntimeError("canonical Betfair urlopen origin is unavailable")
+
+    def canonical_rpc_dispatch(source: object) -> bool:
+        if "_rpc" in canonical_vars(source):
+            return False
+        bound_rpc = canonical_getattr(source, "_rpc", None)
+        return (
+            canonical_client_type._rpc is canonical_rpc
+            and canonical_rpc.__code__ is canonical_rpc_code
+            and canonical_getattr(bound_rpc, "__self__", None) is source
+            and canonical_getattr(bound_rpc, "__func__", None) is canonical_rpc
+        )
+
+    def source_origin_authoritative(source: object) -> bool:
+        if canonical_type(source) is not canonical_client_type:
+            return False
+        transport = canonical_getattr(source, "_transport", None)
+        if canonical_type(transport) is not canonical_transport_type:
+            return False
+        if canonical_getattr(source, "_market_book_origin_transport", None) is not transport:
+            return False
+        if canonical_getattr(source, "_clock", None) is not canonical_clock:
+            return False
+        if canonical_getattr(source, "_market_book_origin_clock", None) is not canonical_clock:
+            return False
+        if "post" in canonical_vars(transport):
+            return False
+        return (
+            canonical_clock.__code__ is canonical_clock_code
+            and canonical_clock.__defaults__ == canonical_clock_defaults
+            and canonical_rpc_dispatch(source)
+            and canonical_type(transport).post is canonical_post
+            and canonical_post.__code__ is canonical_post_code
+            and (canonical_post.__kwdefaults__ or {}).get("_urlopen")
+            is canonical_urlopen
+            and urlopen is canonical_urlopen
+        )
+
+    def canonical_now(label: str) -> datetime:
+        value = canonical_clock()
+        if (
+            not isinstance(value, canonical_datetime_type)
+            or value.tzinfo is None
+            or value.utcoffset() is None
+        ):
+            raise BetfairReadOnlyError(
+                f"canonical MarketBook product clock returned an invalid {label}"
+            )
+        return value.astimezone(canonical_utc)
+
+    def authoritative_read(
+        self: BetfairReadOnlyClient,
+        market_id: str,
+        selection_id: int,
+    ) -> BetfairMarketBookDepthObservation:
+        # raw_read resolves self._rpc dynamically. Seal that dispatch before any
+        # authority-bearing read so an instance/class replacement cannot turn a
+        # caller-supplied payload into a canonically issued MarketBook receipt.
+        if not canonical_rpc_dispatch(self):
+            raise BetfairReadOnlyError(
+                "canonical MarketBook RPC dispatch changed"
+            )
+        # Snapshot whether this read begins on the canonical production origin.
+        # Parser/test reads with injected transport/clock remain usable but are
+        # deliberately not entered into the positive-authority issuance registry.
+        origin_at_read_start = source_origin_authoritative(self)
+        # listMarketBook does not carry an authoritative provider publish instant.
+        # Capture the local request-start boundary before network IO so downstream
+        # freshness can conservatively include the entire REST acquisition interval
+        # rather than treating response receipt as if it were source observation.
+        acquisition_started_at = canonical_now("acquisition-start instant")
+        observation = raw_read(self, market_id, selection_id)
+        if not origin_at_read_start or not source_origin_authoritative(self):
+            return observation
+        observation_id = id(observation)
+
+        def forget(current: object, *, key: int = observation_id) -> None:
+            existing = issued.get(key)
+            if existing is not None and existing[0] is current:
+                issued.pop(key, None)
+
+        issued[observation_id] = (
+            ref(observation, forget),
+            fingerprint(observation),
+            ref(self),
+            acquisition_started_at,
+        )
+        return observation
+
+    def require_authoritative(
+        observation: BetfairMarketBookDepthObservation,
+    ) -> tuple[object, str, object, datetime]:
+        if type(observation) is not BetfairMarketBookDepthObservation:
+            raise BetfairReadOnlyError(
+                "market-book depth authority requires exact BetfairMarketBookDepthObservation"
+            )
+        current = issued.get(id(observation))
+        source = None if current is None else current[2]()
+        if (
+            current is None
+            or current[0]() is not observation
+            or current[1] != fingerprint(observation)
+            or not source_origin_authoritative(source)
+        ):
+            raise BetfairReadOnlyError(
+                "market-book depth observation lacks canonical direct Betfair provider IO origin"
+            )
+        return current
+
+    def assert_authoritative(
+        observation: BetfairMarketBookDepthObservation,
+    ) -> datetime:
+        """Enforce provenance and return the current product decision instant.
+
+        This pure-Python fence detects supported API/object substitution and
+        post-issuance tamper. It does not claim resistance to arbitrary hostile
+        reflection or memory/code mutation inside the same interpreter.
+        """
+
+        require_authoritative(observation)
+        return canonical_now("decision instant")
+
+    def acquisition_started_at(
+        observation: BetfairMarketBookDepthObservation,
+    ) -> datetime:
+        """Return the sealed local lower bound of the REST acquisition interval."""
+
+        current = require_authoritative(observation)
+        return current[3]
+
+    BetfairReadOnlyClient.read_market_book_depth = authoritative_read
+    return assert_authoritative, acquisition_started_at
+
+
+(
+    assert_market_book_depth_authoritative,
+    market_book_depth_acquisition_started_at,
+) = _install_market_book_depth_authority()
+del _install_market_book_depth_authority
+
+
+# Bind MarketDescription price-ladder authority to receipts emitted by the
+# unchanged canonical adapter. This is the same trusted-process API provenance
+# boundary as MarketBook depth; it is not hostile-process isolation.
+def _install_market_price_ladder_authority():
+    issued: dict[
+        int,
+        tuple[object, str, object, datetime, int, tuple[str, str]],
+    ] = {}
+    latest_definitions: dict[
+        tuple[str, str],
+        tuple[
+            int,
+            tuple[object, object, object, object, object] | None,
+            int,
+            int | None,
+            tuple[object, object, object, object, object] | None,
+        ],
+    ] = {}
+    # Weakref cleanup callbacks can run synchronously while an authority check
+    # or issuance mutation still owns this lock.  Re-entry from the same thread
+    # must therefore be safe; cross-thread exclusion remains unchanged.
+    generation_lock = RLock()
+    read_sequence = 0
+    raw_read = BetfairReadOnlyClient.read_market_price_ladder
+    raw_read_code = raw_read.__code__
+    fingerprint = _market_price_ladder_fingerprint
+    fingerprint_code = fingerprint.__code__
+
+    # The raw MarketDescription reader resolves these helpers through module
+    # globals on every call. Freeze that parser/hash graph so a temporary helper
+    # substitution during provider I/O cannot mint a trusted receipt, and a
+    # later hash-helper substitution cannot preserve authority for a tampered
+    # receipt.
+    canonical_required_text = _required_text
+    canonical_required_text_code = canonical_required_text.__code__
+    canonical_sequence = _sequence
+    canonical_sequence_code = canonical_sequence.__code__
+    canonical_mapping = _mapping
+    canonical_mapping_code = canonical_mapping.__code__
+    canonical_provider_text = _provider_text
+    canonical_provider_text_code = canonical_provider_text.__code__
+    canonical_number = _number
+    canonical_number_code = canonical_number.__code__
+    canonical_decimal = _decimal
+    canonical_decimal_code = canonical_decimal.__code__
+    canonical_hash = _canonical_sha256
+    canonical_hash_code = canonical_hash.__code__
+    canonical_mapping_type = Mapping
+    canonical_decimal_type = Decimal
+    canonical_json_module = json
+    canonical_sha256_function = sha256
+    canonical_error_type = BetfairReadOnlyError
+    canonical_observation_type = BetfairMarketPriceLadderObservation
+    canonical_catalogue_method = _LIST_MARKET_CATALOGUE
+
+    canonical_client_type = BetfairReadOnlyClient
+    canonical_transport_type = UrllibBetfairHttpTransport
+    canonical_clock = _CANONICAL_MARKET_BOOK_CLOCK
+    canonical_clock_code = canonical_clock.__code__
+    canonical_clock_defaults = canonical_clock.__defaults__
+    canonical_datetime_type = datetime
+    canonical_utc = timezone.utc
+    canonical_post = canonical_transport_type.post
+    canonical_post_code = canonical_post.__code__
+    canonical_urlopen = (canonical_post.__kwdefaults__ or {}).get("_urlopen")
+    canonical_rpc = canonical_client_type._rpc
+    canonical_rpc_code = canonical_rpc.__code__
+    # Authority decisions must not resolve mutable builtins dynamically. A caller
+    # can otherwise shadow the canonical transport at instance level while
+    # rebinding builtins.vars/type/getattr around acquisition.
+    canonical_type = type
+    canonical_getattr = getattr
+    canonical_vars = vars
+    if canonical_urlopen is None or canonical_urlopen is not urlopen:
+        raise RuntimeError("canonical Betfair urlopen origin is unavailable")
+
+    def canonical_rpc_dispatch(source: object) -> bool:
+        if "_rpc" in canonical_vars(source):
+            return False
+        bound_rpc = canonical_getattr(source, "_rpc", None)
+        return (
+            canonical_client_type._rpc is canonical_rpc
+            and canonical_rpc.__code__ is canonical_rpc_code
+            and canonical_getattr(bound_rpc, "__self__", None) is source
+            and canonical_getattr(bound_rpc, "__func__", None) is canonical_rpc
+        )
+
+    def source_origin_authoritative(source: object) -> bool:
+        if canonical_type(source) is not canonical_client_type:
+            return False
+        transport = canonical_getattr(source, "_transport", None)
+        if canonical_type(transport) is not canonical_transport_type:
+            return False
+        if canonical_getattr(source, "_market_book_origin_transport", None) is not transport:
+            return False
+        if canonical_getattr(source, "_clock", None) is not canonical_clock:
+            return False
+        if canonical_getattr(source, "_market_book_origin_clock", None) is not canonical_clock:
+            return False
+        if "post" in canonical_vars(transport):
+            return False
+        return (
+            canonical_clock.__code__ is canonical_clock_code
+            and canonical_clock.__defaults__ == canonical_clock_defaults
+            and canonical_rpc_dispatch(source)
+            and canonical_type(transport).post is canonical_post
+            and canonical_post.__code__ is canonical_post_code
+            and (canonical_post.__kwdefaults__ or {}).get("_urlopen")
+            is canonical_urlopen
+            and urlopen is canonical_urlopen
+        )
+
+    def ladder_read_dispatch_intact() -> bool:
+        return (
+            raw_read.__code__ is raw_read_code
+            and _market_price_ladder_fingerprint is fingerprint
+            and fingerprint.__code__ is fingerprint_code
+            and _required_text is canonical_required_text
+            and canonical_required_text.__code__ is canonical_required_text_code
+            and _sequence is canonical_sequence
+            and canonical_sequence.__code__ is canonical_sequence_code
+            and _mapping is canonical_mapping
+            and canonical_mapping.__code__ is canonical_mapping_code
+            and _provider_text is canonical_provider_text
+            and canonical_provider_text.__code__ is canonical_provider_text_code
+            and _number is canonical_number
+            and canonical_number.__code__ is canonical_number_code
+            and _decimal is canonical_decimal
+            and canonical_decimal.__code__ is canonical_decimal_code
+            and _canonical_sha256 is canonical_hash
+            and canonical_hash.__code__ is canonical_hash_code
+            and Mapping is canonical_mapping_type
+            and Decimal is canonical_decimal_type
+            and json is canonical_json_module
+            and sha256 is canonical_sha256_function
+            and BetfairReadOnlyError is canonical_error_type
+            and BetfairMarketPriceLadderObservation is canonical_observation_type
+            and _LIST_MARKET_CATALOGUE == canonical_catalogue_method
+        )
+
+    def canonical_now(label: str) -> datetime:
+        value = canonical_clock()
+        if (
+            type(value) is not canonical_datetime_type
+            or value.tzinfo is None
+            or value.utcoffset() is None
+        ):
+            raise BetfairReadOnlyError(
+                f"canonical price-ladder product clock returned invalid {label}"
+            )
+        return value.astimezone(canonical_utc)
+
+    def authoritative_read(
+        self: BetfairReadOnlyClient,
+        market_id: str,
+    ) -> BetfairMarketPriceLadderObservation:
+        nonlocal read_sequence
+        if not canonical_rpc_dispatch(self):
+            raise BetfairReadOnlyError(
+                "canonical price-ladder RPC dispatch changed"
+            )
+        if not ladder_read_dispatch_intact():
+            raise BetfairReadOnlyError(
+                "canonical price-ladder parser/hash authority changed"
+            )
+        origin_at_read_start = source_origin_authoritative(self)
+        market = canonical_required_text(market_id, "market_id")
+        market_key_at_start = (
+            canonical_required_text(
+                getattr(self, "_venue_id", None),
+                "venue_id",
+            ),
+            market,
+        )
+        with generation_lock:
+            read_sequence += 1
+            acquisition_sequence = read_sequence
+            if origin_at_read_start:
+                previous = latest_definitions.get(market_key_at_start)
+                pending_generation = (
+                    0 if previous is None else previous[0] + 1
+                )
+                # A canonical refresh attempt immediately revokes the prior
+                # current generation for this exact market. If provider I/O
+                # fails or the authority graph changes mid-read, the market
+                # remains unresolved until a later fresh canonical read.
+                prior_stable_generation = (
+                    None if previous is None or previous[1] is None else previous[0]
+                )
+                prior_stable_definition = (
+                    None if previous is None or previous[1] is None else previous[1]
+                )
+                latest_definitions[market_key_at_start] = (
+                    pending_generation,
+                    None,
+                    acquisition_sequence,
+                    prior_stable_generation,
+                    prior_stable_definition,
+                )
+        acquisition_started_at = canonical_now("acquisition-start instant")
+        observation = raw_read(self, market)
+        if (
+            not origin_at_read_start
+            or not source_origin_authoritative(self)
+            or not ladder_read_dispatch_intact()
+            or (
+                observation.venue_id,
+                observation.market_id,
+            )
+            != market_key_at_start
+        ):
+            return observation
+
+        observation_id = id(observation)
+        market_key = market_key_at_start
+        definition = (
+            observation.ladder_type,
+            observation.line_range_min,
+            observation.line_range_max,
+            observation.line_range_interval,
+            observation.line_range_unit,
+        )
+
+        def forget(current: object, *, key: int = observation_id) -> None:
+            with generation_lock:
+                existing = issued.get(key)
+                if existing is not None and existing[0] is current:
+                    issued.pop(key, None)
+
+        # listMarketCatalogue does not expose a monotonic MarketDescription
+        # version. Each trusted refresh start already moved this market to a new
+        # unresolved generation, so a failed refresh cannot leave a prior positive
+        # receipt consumable. Completion establishes a fresh generation only when
+        # this exact acquisition is still causally current. If an older request
+        # completes after a newer request, neither response may win by network
+        # timing: keep the definition unresolved until a later fresh read.
+        with generation_lock:
+            previous = latest_definitions.get(market_key)
+            if previous is None:
+                generation = 0
+                latest_definitions[market_key] = (
+                    generation,
+                    definition,
+                    acquisition_sequence,
+                    None,
+                    None,
+                )
+            elif acquisition_sequence < previous[2]:
+                # A newer acquisition started before this older response returned.
+                # Without a provider revision token, even byte/semantic equality of
+                # the two MarketDescription payloads cannot prove which response is
+                # causally current. Poison the market until a later fresh read.
+                generation = -1
+                latest_definitions[market_key] = (
+                    previous[0] + 1,
+                    None,
+                    previous[2],
+                    None,
+                    None,
+                )
+            elif previous[4] is not None and previous[4] == definition:
+                # A non-overlapping successful refresh that confirms the same exact
+                # definition may restore the prior stable generation. The start of
+                # the refresh revoked it while I/O was unresolved; successful causal
+                # confirmation makes both identical receipts current again.
+                assert previous[3] is not None
+                generation = previous[3]
+                latest_definitions[market_key] = (
+                    generation,
+                    definition,
+                    acquisition_sequence,
+                    None,
+                    None,
+                )
+            else:
+                # New definition, first successful definition, or recovery after a
+                # failed/poisoned refresh: establish the pending generation rather
+                # than resurrecting any older receipt (ABA-safe).
+                generation = previous[0]
+                latest_definitions[market_key] = (
+                    generation,
+                    definition,
+                    acquisition_sequence,
+                    None,
+                    None,
+                )
+            issued[observation_id] = (
+                ref(observation, forget),
+                fingerprint(observation),
+                ref(self),
+                acquisition_started_at,
+                generation,
+                market_key,
+            )
+        return observation
+
+    def require_authoritative(
+        observation: BetfairMarketPriceLadderObservation,
+    ) -> tuple[object, str, object, datetime, int, tuple[str, str]]:
+        if type(observation) is not BetfairMarketPriceLadderObservation:
+            raise BetfairReadOnlyError(
+                "price-ladder authority requires exact observation"
+            )
+        with generation_lock:
+            current = issued.get(id(observation))
+            source = None if current is None else current[2]()
+            latest = (
+                None
+                if current is None
+                else latest_definitions.get(current[5])
+            )
+            if (
+                current is None
+                or current[0]() is not observation
+                or current[1] != fingerprint(observation)
+                or latest is None
+                or latest[1] is None
+                or current[4] != latest[0]
+                or not source_origin_authoritative(source)
+                or not ladder_read_dispatch_intact()
+            ):
+                raise BetfairReadOnlyError(
+                    "price-ladder observation lacks canonical direct Betfair provider IO origin"
+                )
+            return current
+
+    def assert_authoritative(
+        observation: BetfairMarketPriceLadderObservation,
+    ) -> datetime:
+        require_authoritative(observation)
+        return canonical_now("decision instant")
+
+    def acquisition_started_at(
+        observation: BetfairMarketPriceLadderObservation,
+    ) -> datetime:
+        current = require_authoritative(observation)
+        return current[3]
+
+    BetfairReadOnlyClient.read_market_price_ladder = authoritative_read
+    return assert_authoritative, acquisition_started_at
+
+
+(
+    assert_market_price_ladder_authoritative,
+    market_price_ladder_acquisition_started_at,
+) = _install_market_price_ladder_authority()
+del _install_market_price_ladder_authority
+
 
 # Bind execution-readback authority to captures actually emitted by the canonical
 # adapter.  The registration closure is deliberately not exported: importing this

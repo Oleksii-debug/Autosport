@@ -1,0 +1,156 @@
+import hashlib
+import json
+import tempfile
+import unittest
+import zipfile
+from pathlib import Path
+
+from autosport.release_package import (
+    _canonical_json_bytes,
+    _write_canonical_zip,
+    build_windows_package,
+    verify_windows_package,
+)
+
+
+class WholeProductCompleteReleaseTruthTests(unittest.TestCase):
+    SOURCE_SHA = "a" * 40
+
+    @staticmethod
+    def _write_json(path: Path, payload: dict) -> None:
+        path.write_text(json.dumps(payload) + "\n", encoding="utf-8")
+
+    def _build_valid_package(self, root: Path) -> Path:
+        executable = root / "Autosport.exe"
+        start = root / "WINDOWS_START_HERE.txt"
+        example = root / "example"
+        diagnostic = root / "diagnostic.json"
+        accessibility = root / "accessibility.json"
+        keyboard = root / "keyboard.json"
+        restart = root / "restart.json"
+        package = root / "candidate.zip"
+
+        executable.write_bytes(b"autosport-executable")
+        start.write_text("start\n", encoding="utf-8")
+        example.mkdir()
+        (example / "market.jsonl").write_text("{}\n", encoding="utf-8")
+
+        common = {
+            "status": "PASS",
+            "real_money_execution": False,
+            "human_tested": False,
+            "nvda_verified": False,
+        }
+        for path in (diagnostic, accessibility, keyboard):
+            self._write_json(path, common)
+        self._write_json(
+            restart,
+            {
+                **common,
+                "session_restart_status": "PASS",
+                "transaction_recovery_status": "PASS",
+                "recovery_disposition": "aborted_uncommitted",
+                "process_kill_relaunch_status": "PASS",
+                "process_kill_stage_pid": 101,
+                "process_kill_return_code": -15,
+                "process_recovery_pid": 202,
+                "process_recovery_run_id": "process-recovery-audit-run",
+                "process_recovery_disposition": "committed",
+                "process_recovery_registry_status": "completed",
+                "process_recovery_manifest_phase": "completed",
+                "process_recovery_base_paper_book_sha256": "1" * 64,
+                "process_recovery_base_decision_ledger_sha256": "2" * 64,
+                "process_recovery_new_paper_book_sha256": "3" * 64,
+                "process_recovery_new_decision_ledger_sha256": "4" * 64,
+            },
+        )
+
+        build_windows_package(
+            executable,
+            start,
+            example,
+            diagnostic,
+            accessibility,
+            keyboard,
+            restart,
+            package,
+            self.SOURCE_SHA,
+        )
+        return package
+
+    @staticmethod
+    def _rewrite_whole_product_complete(
+        package: Path,
+        *,
+        value: bool | None,
+    ) -> None:
+        prefix = "Autosport-V1/"
+        build_info_name = prefix + "BUILD_INFO.json"
+        manifest_name = prefix + "PACKAGE_MANIFEST.json"
+        sums_name = prefix + "SHA256SUMS.txt"
+
+        with zipfile.ZipFile(package, "r") as archive:
+            members = {
+                item.filename: archive.read(item.filename)
+                for item in archive.infolist()
+            }
+
+        build_info = json.loads(members[build_info_name].decode("utf-8"))
+        if value is None:
+            build_info.pop("whole_product_complete", None)
+        else:
+            build_info["whole_product_complete"] = value
+        members[build_info_name] = _canonical_json_bytes(build_info)
+
+        manifest = json.loads(members[manifest_name].decode("utf-8"))
+        manifest["files"]["BUILD_INFO.json"] = hashlib.sha256(
+            members[build_info_name]
+        ).hexdigest()
+        members[manifest_name] = _canonical_json_bytes(manifest)
+
+        sums = []
+        for name, payload in sorted(members.items()):
+            if name == sums_name:
+                continue
+            relative = name[len(prefix):]
+            sums.append(f"{hashlib.sha256(payload).hexdigest()}  {relative}")
+        members[sums_name] = ("\n".join(sums) + "\n").encode("utf-8")
+        _write_canonical_zip(package, members)
+
+    def test_generated_prehuman_package_records_whole_product_complete_false(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_valid_package(Path(temporary))
+            result = verify_windows_package(
+                package,
+                expected_source_sha=self.SOURCE_SHA,
+            )
+            self.assertIs(result["whole_product_complete"], False)
+            with zipfile.ZipFile(package, "r") as archive:
+                build_info = json.loads(
+                    archive.read("Autosport-V1/BUILD_INFO.json").decode("utf-8")
+                )
+            self.assertIs(build_info["whole_product_complete"], False)
+
+    def test_verifier_rejects_true_whole_product_complete_after_reseal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_valid_package(Path(temporary))
+            self._rewrite_whole_product_complete(package, value=True)
+            with self.assertRaisesRegex(
+                ValueError,
+                "whole_product_complete=false",
+            ):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_verifier_rejects_missing_whole_product_complete_after_reseal(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_valid_package(Path(temporary))
+            self._rewrite_whole_product_complete(package, value=None)
+            with self.assertRaisesRegex(
+                ValueError,
+                "whole_product_complete=false",
+            ):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+
+if __name__ == "__main__":
+    unittest.main()

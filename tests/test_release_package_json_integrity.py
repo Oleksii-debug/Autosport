@@ -8,7 +8,9 @@ import zipfile
 from pathlib import Path
 
 from autosport.release_package import (
+    _canonical_json_bytes,
     _decode_json_object,
+    _write_canonical_zip,
     build_windows_package,
     verify_windows_package,
 )
@@ -155,6 +157,44 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
         ).encode("utf-8")
         cls._replace_manifest_and_rehash_sums(package, invalid_manifest)
 
+    @staticmethod
+    def _rewrite_build_info_v1_ready(
+        package: Path,
+        *,
+        v1_ready: bool | None,
+    ) -> None:
+        prefix = "Autosport-V1/"
+        build_info_name = prefix + "BUILD_INFO.json"
+        manifest_name = prefix + "PACKAGE_MANIFEST.json"
+        sums_name = prefix + "SHA256SUMS.txt"
+        with zipfile.ZipFile(package, "r") as archive:
+            members = {
+                item.filename: archive.read(item.filename)
+                for item in archive.infolist()
+            }
+
+        build_info = json.loads(members[build_info_name].decode("utf-8"))
+        if v1_ready is None:
+            build_info.pop("v1_ready", None)
+        else:
+            build_info["v1_ready"] = v1_ready
+        members[build_info_name] = _canonical_json_bytes(build_info)
+
+        manifest = json.loads(members[manifest_name].decode("utf-8"))
+        manifest["files"]["BUILD_INFO.json"] = hashlib.sha256(
+            members[build_info_name]
+        ).hexdigest()
+        members[manifest_name] = _canonical_json_bytes(manifest)
+
+        sums = []
+        for name, payload in sorted(members.items()):
+            if name == sums_name:
+                continue
+            relative = name[len(prefix):]
+            sums.append(f"{hashlib.sha256(payload).hexdigest()}  {relative}")
+        members[sums_name] = ("\n".join(sums) + "\n").encode("utf-8")
+        _write_canonical_zip(package, members)
+
     def test_json_decoder_rejects_duplicate_keys_recursively(self) -> None:
         for payload, duplicate in (
             (b'{"status":"PASS","status":"PASS"}', "status"),
@@ -176,6 +216,40 @@ class ReleasePackageJsonIntegrityTests(unittest.TestCase):
                     rf"non-standard JSON constant: {constant}",
                 ):
                     _decode_json_object(payload, "evidence.json")
+
+    def test_generated_package_records_v1_ready_false(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_valid_package(Path(temporary))
+            result = verify_windows_package(
+                package,
+                expected_source_sha=self.SOURCE_SHA,
+            )
+            self.assertFalse(result["v1_ready"])
+            with zipfile.ZipFile(package, "r") as archive:
+                build_info = json.loads(
+                    archive.read("Autosport-V1/BUILD_INFO.json").decode("utf-8")
+                )
+            self.assertIs(build_info["v1_ready"], False)
+
+    def test_verifier_rejects_true_v1_ready_even_when_package_is_resealed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_valid_package(Path(temporary))
+            self._rewrite_build_info_v1_ready(package, v1_ready=True)
+            with self.assertRaisesRegex(
+                ValueError,
+                "BUILD_INFO.json must record v1_ready=false",
+            ):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
+
+    def test_verifier_rejects_missing_v1_ready_even_when_package_is_resealed(self) -> None:
+        with tempfile.TemporaryDirectory() as temporary:
+            package = self._build_valid_package(Path(temporary))
+            self._rewrite_build_info_v1_ready(package, v1_ready=None)
+            with self.assertRaisesRegex(
+                ValueError,
+                "BUILD_INFO.json must record v1_ready=false",
+            ):
+                verify_windows_package(package, expected_source_sha=self.SOURCE_SHA)
 
     def test_verifier_rejects_legacy_restart_evidence_without_process_boundary_proof(self) -> None:
         with tempfile.TemporaryDirectory() as temporary:

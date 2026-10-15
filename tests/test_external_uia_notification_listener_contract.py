@@ -1,0 +1,238 @@
+from __future__ import annotations
+
+from pathlib import Path
+import re
+
+
+SCRIPT = Path(__file__).parents[1] / "scripts" / "external_uia_notification_listener.ps1"
+TEXT = SCRIPT.read_text(encoding="utf-8")
+
+
+def test_listener_uses_public_managed_uia_notification_surface() -> None:
+    assert "AutomationElement]::NotificationEvent" in TEXT
+    assert "Automation]::AddAutomationEventHandler" in TEXT
+    assert "NotificationEventArgs" in TEXT
+    assert "Automation]::RemoveAutomationEventHandler" in TEXT
+
+
+def test_listener_never_reaches_into_provider_private_state_or_raises_events() -> None:
+    forbidden = (
+        "tk_uia._uiacore",
+        "_BY_HWND",
+        "UiaHostProviderFromHwnd",
+        "UiaRaiseNotificationEvent",
+    )
+    for token in forbidden:
+        assert token not in TEXT
+
+
+def test_listener_defaults_to_digest_only_display_evidence() -> None:
+    assert "[switch]$IncludeDisplayString" in TEXT
+    assert "display_string_sha256" in TEXT
+    assert "display_string_utf8_length" in TEXT
+    assert re.search(
+        r"if \(\$IncludeDisplayString\)\s*\{\s*\$record\.display_string",
+        TEXT,
+    )
+
+
+def test_listener_binds_sender_and_notification_semantics() -> None:
+    required = (
+        "sender_process_id",
+        "sender_automation_id",
+        "notification_kind",
+        "notification_processing",
+        "activity_id",
+        "process_family_ids",
+    )
+    for field in required:
+        assert field in TEXT
+
+
+def test_listener_records_focus_without_requesting_focus() -> None:
+    assert "focus_before" in TEXT
+    assert "focus_after" in TEXT
+    assert "focus_changed" in TEXT
+    assert ".SetFocus(" not in TEXT
+    assert "SetFocus()" not in TEXT
+    assert "focus_force" not in TEXT
+
+
+def test_listener_has_bounded_waits_and_no_unbounded_event_loop() -> None:
+    assert "TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 300" in TEXT
+    assert "MinimumEvents -lt 0 -or $MinimumEvents -gt 10000" in TEXT
+    assert "AddSeconds($TimeoutSeconds)" in TEXT
+    assert "while ($true)" not in TEXT
+
+
+def test_listener_capability_probe_does_not_claim_runtime_event_proof() -> None:
+    assert "status = 'CAPABILITY_READY'" in TEXT
+    assert "minimum_events = 0" in TEXT
+    assert "CapabilityProbeOnly" in TEXT
+
+
+def test_listener_hard_codes_prehuman_truth_false() -> None:
+    for field in (
+        "real_money_execution = $false",
+        "human_tested = $false",
+        "nvda_verified = $false",
+        "whole_product_complete = $false",
+    ):
+        assert field in TEXT
+
+
+def test_listener_uses_thread_safe_csharp_callback_recorder() -> None:
+    assert "ConcurrentQueue<AutosportUiaNotificationRecord>" in TEXT
+    assert "AutomationEventHandler Handler" in TEXT
+    assert "private void OnEvent" in TEXT
+    assert "Records.Enqueue" in TEXT
+
+
+def test_listener_unsubscribes_in_finally() -> None:
+    finally_index = TEXT.index("} finally {")
+    remove_index = TEXT.index("RemoveAutomationEventHandler")
+    assert remove_index > finally_index
+
+
+def test_capability_probe_executes_on_windows(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+    import sys
+
+    if sys.platform != "win32":
+        import pytest
+
+        pytest.skip("UI Automation capability probe is Windows-only")
+
+    pwsh = shutil.which("pwsh")
+    assert pwsh is not None
+    output = tmp_path / "uia-notification-capability.json"
+    completed = subprocess.run(
+        [
+            pwsh,
+            "-NoProfile",
+            "-File",
+            str(SCRIPT),
+            "-Output",
+            str(output),
+            "-CapabilityProbeOnly",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode == 0, completed.stdout + completed.stderr
+    report = json.loads(output.read_text(encoding="utf-8-sig"))
+    assert report["status"] == "CAPABILITY_READY"
+    assert report["notification_event_args_type"] == (
+        "System.Windows.Automation.NotificationEventArgs"
+    )
+    assert report["real_money_execution"] is False
+    assert report["human_tested"] is False
+    assert report["nvda_verified"] is False
+    assert report["whole_product_complete"] is False
+
+def test_zero_event_runtime_threshold_is_not_a_passing_uia_observation() -> None:
+    # The independent capability-only probe stays CAPABILITY_READY; a live
+    # subscription must demand at least one real, process-bound notification.
+    guard = "if (-not $CapabilityProbeOnly -and $MinimumEvents -eq 0) {"
+    assert guard in TEXT
+    assert "MinimumEvents must be at least 1 for runtime notification evidence" in TEXT
+    assert TEXT.index(guard) < TEXT.index("if ($CapabilityProbeOnly) {")
+    assert "if ($report.event_count -lt $MinimumEvents)" in TEXT
+
+
+def test_zero_event_runtime_threshold_is_rejected_on_windows(tmp_path: Path) -> None:
+    import shutil
+    import subprocess
+    import sys
+    import pytest
+
+    if sys.platform != "win32":
+        pytest.skip("Runtime notification threshold probe requires Windows UIA")
+    pwsh = shutil.which("pwsh")
+    assert pwsh is not None
+    output = tmp_path / "uia-zero-event-rejection.json"
+    completed = subprocess.run(
+        [
+            pwsh, "-NoProfile", "-File", str(SCRIPT),
+            "-Output", str(output), "-RootProcessId", "1",
+            "-MinimumEvents", "0",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert completed.returncode != 0
+    assert "MinimumEvents must be at least 1 for runtime notification evidence" in (
+        completed.stdout + completed.stderr
+    )
+    assert not output.exists()
+
+
+def test_process_family_discovery_uses_one_bounded_identity_snapshot() -> None:
+    section = TEXT.split("function Get-ProcessFamilyIds {", 1)[1].split(
+        "function Find-UiaRootForProcessFamily {", 1
+    )[0]
+    assert section.count("Get-CimInstance") == 1
+    assert "-Property ProcessId, ParentProcessId" in section
+    assert "-OperationTimeoutSec 5" in section
+    assert "$inventory.Count -gt 8192" in section
+    assert "$seen.Count -gt 512" in section
+    assert "ParentProcessId = $currentId" not in section
+    assert "CommandLine" not in section
+
+
+def test_listener_does_not_serialize_untrusted_exception_messages() -> None:
+    assert "$_.Exception.Message" not in TEXT
+    assert "External UIA notification listener failed at stage=$listenStage" in TEXT
+    assert "External UIA notification listener unsubscribe failed" in TEXT
+    for stage in ("DISCOVER", "SUBSCRIBE", "LISTEN", "COLLECT", "VERIFY"):
+        assert f"$listenStage = '{stage}'" in TEXT
+
+
+def test_listener_hard_deadline_is_out_of_process_and_fail_closed() -> None:
+    # In-process timeout polling cannot interrupt blocked COM/UIA calls.
+    assert "[switch]$ListenerWorker" in TEXT
+    assert "if (-not $CapabilityProbeOnly -and -not $ListenerWorker)" in TEXT
+    assert "System.Diagnostics.Process" in TEXT
+    assert "RedirectStandardOutput = $true" in TEXT
+    assert "RedirectStandardError = $true" in TEXT
+    assert "BeginOutputReadLine()" in TEXT
+    assert "BeginErrorReadLine()" in TEXT
+    assert "$proc.WaitForExit($budgetMs)" in TEXT
+    assert "$proc.Kill($true)" in TEXT
+    assert "$outputPath.worker." in TEXT
+    assert "@($candidate.events).Count" in TEXT
+    assert "candidate.real_money_execution -ne $false" in TEXT
+    assert "Remove-Item -LiteralPath $workerOutputPath" in TEXT
+
+
+def test_listener_invalid_root_fails_on_real_windows_without_claiming_events(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+    import sys
+    import pytest
+
+    if sys.platform != "win32":
+        pytest.skip("Requires a real Windows UI Automation runtime")
+    pwsh = shutil.which("pwsh")
+    assert pwsh is not None
+    output = tmp_path / "uia-invalid-root.json"
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-File", str(SCRIPT), "-Output", str(output),
+         "-RootProcessId", str(2**31 - 1), "-TimeoutSeconds", "1",
+         "-MinimumEvents", "1"],
+        check=False, capture_output=True, text=True, timeout=45,
+    )
+    assert result.returncode != 0
+    report = json.loads(output.read_text(encoding="utf-8-sig"))
+    assert report["status"] == "FAIL"
+    assert report["event_count"] == 0
+    assert report["human_tested"] is False
+    assert report["nvda_verified"] is False
+    assert report["real_money_execution"] is False

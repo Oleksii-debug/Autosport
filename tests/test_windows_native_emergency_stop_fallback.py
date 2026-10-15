@@ -210,3 +210,94 @@ def test_broken_packaged_shell_keeps_native_stop_choice_without_secret_leak(
     )
     assert offered == [(tmp_path, windows_entry._WEBVIEW2_STARTUP_ERROR)]
     assert secret not in offered[0][1]
+
+
+def test_independent_native_stop_works_with_webview_unavailable_and_unicode_workspace(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    """An independently launched executable must STOP while the GUI is unusable."""
+    from autosport import paths, webview2_runtime_deployment
+
+    workspace = tmp_path / "Профіль з пробілами"
+    workspace.mkdir()
+    monkeypatch.setattr(paths, "default_workspace", lambda: workspace)
+    monkeypatch.setattr(
+        windows_entry,
+        "_run_interactive_gui",
+        lambda: pytest.fail("independent native STOP must not open or lock the GUI"),
+    )
+    monkeypatch.setattr(
+        webview2_runtime_deployment,
+        "ensure_webview2_runtime",
+        lambda: pytest.fail("independent native STOP must not require WebView2"),
+    )
+    native = _dialogs(monkeypatch, 6, 1)  # keyboard-operable native Yes, then OK
+    assert windows_entry.main(["--native-emergency-stop"]) == 0
+    assert len(native.calls) == 2
+    prompt, _title, flags = native.calls[0]
+    assert "без браузера та WebView2" in prompt
+    assert "WebView2 недоступний" not in prompt
+    assert flags & 0x00000004
+    assert flags & 0x00000100  # No remains the default
+    assert "підтверджено" in native.calls[1][0]
+    assert WindowsEmergencyStopBridge.for_workspace(workspace).status().execution_blocked
+    assert (workspace / "execution-stop.jsonl").is_file()
+
+
+@pytest.mark.parametrize("non_yes", [0, 2, 7, -1])
+def test_independent_native_stop_no_cancel_and_unknown_do_not_mutate(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, non_yes: int
+) -> None:
+    from autosport import paths
+
+    monkeypatch.setattr(paths, "default_workspace", lambda: tmp_path)
+    native = _dialogs(monkeypatch, non_yes)
+    monkeypatch.setattr(
+        WindowsEmergencyStopBridge,
+        "for_workspace",
+        classmethod(lambda _cls, _path: pytest.fail("NO must not open STOP authority")),
+    )
+    assert windows_entry.main(["--native-emergency-stop"]) == 3
+    assert len(native.calls) == 1
+    assert not (tmp_path / "execution-stop.jsonl").exists()
+
+
+@pytest.mark.parametrize("failure", ["uncertain", "exception"])
+def test_independent_native_stop_never_reports_unconfirmed_write_as_success(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, failure: str
+) -> None:
+    from autosport import paths
+
+    monkeypatch.setattr(paths, "default_workspace", lambda: tmp_path)
+    native = _dialogs(monkeypatch, 6, 1)
+
+    class FailedBridge:
+        def activate(self) -> SimpleNamespace:
+            if failure == "exception":
+                raise OSError("secret=unsafe diagnostic text")
+            return SimpleNamespace(stopped=False, message_uk="непідтверджено")
+
+    monkeypatch.setattr(
+        WindowsEmergencyStopBridge,
+        "for_workspace",
+        classmethod(lambda _cls, _path: FailedBridge()),
+    )
+    assert windows_entry.main(["--native-emergency-stop"]) == 3
+    assert len(native.calls) == 2
+    assert "НЕ ПІДТВЕРДЖЕНО" in native.calls[1][0]
+    assert "secret=unsafe" not in native.calls[1][0]
+    assert native.calls[1][2] == 0x00000010
+
+
+def test_independent_native_stop_rejects_invalid_workspace_and_arity(
+    monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from autosport import paths
+
+    monkeypatch.setattr(paths, "default_workspace", lambda: Path("relative"))
+    errors: list[str] = []
+    monkeypatch.setattr(windows_entry, "_show_workspace_configuration_error", errors.append)
+    assert windows_entry.main(["--native-emergency-stop", "unexpected"]) == 2
+    assert errors == []
+    assert windows_entry.main(["--native-emergency-stop"]) == 2
+    assert errors == [""]

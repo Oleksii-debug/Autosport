@@ -14,6 +14,7 @@ _MACHINE_MODE_ARITY = {
     "--restart-recovery-stage-child": 3,
     "--restart-recovery-recover-child": 3,
     "--research-demo-audit-output": 3,
+    "--native-emergency-stop": 1,
 }
 _WEBVIEW2_STARTUP_ERROR = (
     "Автоспорт не може відкрити доступний інтерфейс WebView2. "
@@ -100,14 +101,21 @@ def _show_startup_error(message: str) -> None:
 
 
 
-def _offer_native_emergency_stop(workspace: Path, failure_message: str) -> None:
-    """Keep an explicit, keyboard-accessible STOP choice after WebView2 startup fails.
+def _offer_native_emergency_stop(
+    workspace: Path, failure_message: str, *, startup_failure: bool = True
+) -> bool:
+    """Offer a native, keyboard-accessible STOP after startup failure or on demand.
 
     This is not an automatic execution STOP. The native Windows dialog defaults to
     No, and a Yes response attempts only the canonical durable admission STOP.
     A failed or uncertain journal write must never be announced as confirmed.
     """
 
+    context = (
+        "WebView2 недоступний."
+        if startup_failure
+        else "Незалежне аварійне керування працює без браузера та WebView2."
+    )
     try:
         import ctypes
 
@@ -115,7 +123,7 @@ def _offer_native_emergency_stop(workspace: Path, failure_message: str) -> None:
         choice = message_box(
             None,
             failure_message
-            + "\n\nWebView2 недоступний. Чи активувати аварійний STOP через "
+            + f"\n\n{context} Чи активувати аварійний STOP через "
             "стійкий журнал заборони нових виконань?\n"
             "Це не доводить завершення вже запущених процесів. "
             "Кнопка «Ні» вибрана за замовчуванням.",
@@ -124,10 +132,10 @@ def _offer_native_emergency_stop(workspace: Path, failure_message: str) -> None:
         )
     except Exception:
         _show_startup_error(failure_message)
-        return
+        return False
 
     if choice != 6:  # IDYES; No, Escape, close and unexpected results are inert.
-        return
+        return False
 
     try:
         from autosport.windows_emergency_stop import WindowsEmergencyStopBridge
@@ -158,6 +166,33 @@ def _offer_native_emergency_stop(workspace: Path, failure_message: str) -> None:
         )
     except Exception:
         pass
+    return confirmed
+
+
+def _run_native_emergency_stop() -> int:
+    """Run independent STOP without WebView2 or the interactive workspace lock.
+
+    Uses only the existing canonical durable execution-admission STOP bridge;
+    it does not stop already-in-flight providers or grant financial permission.
+    A native Yes/No dialog defaults to No; success requires durable reread.
+    """
+
+    from autosport.paths import default_workspace
+
+    try:
+        workspace = Path(default_workspace())
+        if not workspace.is_absolute():
+            raise ValueError("STOP workspace must be absolute")
+    except (OSError, RuntimeError, TypeError, ValueError):
+        _show_workspace_configuration_error("")
+        return 2
+
+    confirmed = _offer_native_emergency_stop(
+        workspace,
+        "Незалежне аварійне керування Автоспортом.",
+        startup_failure=False,
+    )
+    return 0 if confirmed else 3
 
 
 def _run_owned_interactive_gui(workspace: Path, webview_storage: Path) -> int:
@@ -276,6 +311,8 @@ def main(argv: list[str] | None = None) -> int:
         if expected_arity is None or len(args) != expected_arity:
             return 2
 
+    if args and args[0] == "--native-emergency-stop":
+        return _run_native_emergency_stop()
     if args and args[0] == "--diagnostic-output":
         from autosport.diagnostic import run_machine_diagnostic
 

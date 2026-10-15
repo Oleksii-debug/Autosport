@@ -423,17 +423,42 @@ def repackage_stage_neutral_windows_release(
         f"{STAGE_NEUTRAL_PREFIX}{relative}": payload
         for relative, payload in transformed.items()
     }
+    # The writer itself publishes atomically, but verify the new archive before
+    # replacing a previously verified ZIP. An interrupted/corrupt candidate must
+    # not destroy the last usable release package.
     output.parent.mkdir(parents=True, exist_ok=True)
-    writer_sha = canonical_release._write_canonical_zip(output, archive_members)
+    pending: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{output.name}.",
+            suffix=".tmp",
+            dir=output.parent,
+            delete=False,
+        ) as staging:
+            pending = Path(staging.name)
 
-    evidence = _verify_stage_neutral_output(
-        output,
-        expected_source_sha=expected_source_sha,
-        expected_members=transformed,
-        expected_writer_sha=writer_sha,
-    )
-    evidence["legacy_package_sha256"] = legacy_snapshot_sha
-    return evidence
+        writer_sha = canonical_release._write_canonical_zip(
+            pending, archive_members
+        )
+        evidence = _verify_stage_neutral_output(
+            pending,
+            expected_source_sha=expected_source_sha,
+            expected_members=transformed,
+            expected_writer_sha=writer_sha,
+        )
+        evidence["legacy_package_sha256"] = legacy_snapshot_sha
+
+        # One same-directory atomic promotion after successful verification.
+        os.replace(pending, output)
+        if canonical_release.sha256_file(output) != evidence["package_sha256"]:
+            raise ValueError(
+                "stage-neutral release package changed during publication"
+            )
+        return evidence
+    finally:
+        if pending is not None:
+            pending.unlink(missing_ok=True)
 
 
 def _write_evidence(path: Path, evidence: dict[str, object]) -> None:

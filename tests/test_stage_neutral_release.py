@@ -376,3 +376,84 @@ def test_transform_windows_start_guide_accepts_stage_neutral_source() -> None:
     assert stage_release.LEGACY_READY_LABEL not in transformed
     assert stage_release.STAGE_NEUTRAL_READY_LABEL in transformed
 
+def test_stage_neutral_publish_does_not_destroy_previous_zip_on_verifier_failure(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_deep_verifier(monkeypatch)
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / "Ужгород з пробілами" / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy)
+    stage_release.repackage_stage_neutral_windows_release(
+        legacy, output, expected_source_sha=SOURCE_SHA
+    )
+    previous_verified_zip = output.read_bytes()
+    original_writer = canonical_release._write_canonical_zip
+
+    def interrupted_writer(target: Path, members: dict[str, bytes]) -> str:
+        writer_sha = original_writer(target, members)
+        Path(target).write_bytes(b"truncated-unverified-candidate")
+        return writer_sha
+
+    monkeypatch.setattr(canonical_release, "_write_canonical_zip", interrupted_writer)
+    with pytest.raises(ValueError, match="changed after canonical publication"):
+        stage_release.repackage_stage_neutral_windows_release(
+            legacy, output, expected_source_sha=SOURCE_SHA
+        )
+    assert output.read_bytes() == previous_verified_zip
+    assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
+
+
+def test_stage_neutral_candidate_is_verified_before_replacing_prior_zip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_deep_verifier(monkeypatch)
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy)
+    stage_release.repackage_stage_neutral_windows_release(
+        legacy, output, expected_source_sha=SOURCE_SHA
+    )
+    previous_verified_zip = output.read_bytes()
+    verify_original = stage_release._verify_stage_neutral_output
+
+    def verify_before_publish(package_zip: Path, **kwargs: object) -> dict[str, object]:
+        assert Path(package_zip) != output
+        assert output.read_bytes() == previous_verified_zip
+        return verify_original(package_zip, **kwargs)
+
+    monkeypatch.setattr(stage_release, "_verify_stage_neutral_output", verify_before_publish)
+    evidence = stage_release.repackage_stage_neutral_windows_release(
+        legacy, output, expected_source_sha=SOURCE_SHA
+    )
+    assert evidence["package_sha256"] == _sha256(output.read_bytes())
+    assert list(output.parent.glob(f".{output.name}.*.tmp")) == []
+
+
+def test_stage_neutral_failed_atomic_promotion_preserves_previous_zip(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_deep_verifier(monkeypatch)
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy)
+    stage_release.repackage_stage_neutral_windows_release(
+        legacy, output, expected_source_sha=SOURCE_SHA
+    )
+    previous_verified_zip = output.read_bytes()
+    actual_replace = stage_release.os.replace
+
+    def fail_final_promotion(source: Path, destination: Path) -> None:
+        if Path(destination) == output:
+            raise OSError("injected final ZIP promotion interruption")
+        actual_replace(source, destination)
+
+    monkeypatch.setattr(stage_release.os, "replace", fail_final_promotion)
+    with pytest.raises(OSError, match="injected final ZIP promotion interruption"):
+        stage_release.repackage_stage_neutral_windows_release(
+            legacy, output, expected_source_sha=SOURCE_SHA
+        )
+    assert output.read_bytes() == previous_verified_zip
+    assert list(output.parent.glob(f".{output.name}.*.tmp")) == []

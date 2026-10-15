@@ -113,7 +113,7 @@ def test_windows_build_uses_independent_oracle_for_build_and_package_snapshots()
     )
     package_archive = (
         "& $gitExecutable archive --format=zip \"--output=$trustedPackageArchive\" $sourceSha -- "
-        "scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py"
+        "scripts/package_windows.py src/autosport/workspace_lock.py src/autosport/release_package.py src/autosport/data_tool_package.py"
     )
     snapshot_gate = (
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "

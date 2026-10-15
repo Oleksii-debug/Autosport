@@ -3,7 +3,6 @@ from __future__ import annotations
 from typing import NoReturn
 
 from autosport.replay_worker import OneShotReplayWorker, _terminal_error
-from autosport.secret_redaction import REDACTED
 
 
 _SECRET = "sk_live_do_not_leak_953"
@@ -23,7 +22,7 @@ class _UnrenderableReplayError(RuntimeError):
 def test_terminal_error_uses_builtin_type_and_redacts_exception_message() -> None:
     rendered = _terminal_error(_SecretBearingReplayError())
 
-    assert rendered == "RuntimeError: api_key=" + REDACTED
+    assert rendered == "RuntimeError: exception details unavailable"
     assert _SECRET not in rendered
 
 
@@ -54,7 +53,7 @@ def test_replay_worker_error_redacts_secret_and_custom_type_name() -> None:
 
     assert message is not None
     assert message.result is None
-    assert message.error == "RuntimeError: api_key=" + REDACTED
+    assert message.error == "RuntimeError: exception details unavailable"
     assert _SECRET not in message.error
     assert "_SecretBearingReplayError" not in message.error
 
@@ -69,6 +68,5 @@ def test_replay_terminal_redacts_short_escaped_credential_key() -> None:
     rendered = _terminal_error(ShortEscapedCredentialError())
 
     assert short_escape_secret not in rendered
-    assert REDACTED in rendered
-    assert r"api\\tkey" in rendered
+    assert rendered == "RuntimeError: exception details unavailable"
     assert "ShortEscapedCredentialError" not in rendered

@@ -28,6 +28,10 @@ class DatasetSessionTests(unittest.TestCase):
             self.assertEqual(result.evaluation.net_profit, Decimal("31.00"))
             summary = json.loads(Path(result.result_path).read_text(encoding="utf-8"))
             self.assertEqual(summary["schema_version"], 2)
+            self.assertEqual(
+                summary["dataset_manifest_file_sha256"],
+                sha256_file(Path("examples/tt_demo/manifest.json")),
+            )
             self.assertEqual(summary["strategy_id"], "baseline-v1")
             self.assertEqual(
                 summary["strategy_runtime"]["agent_names"],

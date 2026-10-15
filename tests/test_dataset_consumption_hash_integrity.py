@@ -126,6 +126,48 @@ def _write_historical_snapshot_attack_fixture(root: Path) -> tuple[Path, str]:
 
 
 class DatasetConsumptionHashIntegrityTests(unittest.TestCase):
+    def test_manifest_bytes_changed_after_load_fail_closed_at_market_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_dataset(root)
+            manifest_path = root / "manifest.json"
+            dataset = load_dataset(root)
+            self.assertEqual(dataset.manifest_file_sha256, _sha256(manifest_path))
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["name"] = "rewritten dataset identity"
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "dataset manifest hash changed after verification",
+            ):
+                dataset.load_market_events()
+
+    def test_manifest_bytes_changed_after_market_load_fail_closed_at_results_access(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            _write_dataset(root)
+            manifest_path = root / "manifest.json"
+            dataset = load_dataset(root)
+            self.assertTrue(dataset.load_market_events())
+
+            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+            manifest["name"] = "rewritten before outcome reveal"
+            manifest_path.write_text(
+                json.dumps(manifest, sort_keys=True) + "\n",
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "dataset manifest hash changed after verification",
+            ):
+                dataset.load_results_after_replay()
+
     def test_market_bytes_changed_after_load_fail_closed_at_replay_access(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

@@ -16,6 +16,10 @@
   let refreshPending = false;
   let refreshClosed = false;
   let stateProjectionEpoch = 0;
+  // The backend may accept an operation before WebView loses the response.
+  // Only explicit operator acknowledgment dismisses the UNKNOWN warning.
+  let unconfirmedDispatchResult = false;
+  const dispatchUncertainAck = byId("dispatch-uncertain-ack");
 
   function setTextIfChanged(node, value) {
     const text = String(value ?? "");
@@ -192,6 +196,11 @@
 
   function projectLiveState(status, error) {
     const errorValue = error || "";
+    if (unconfirmedDispatchResult) {
+      // A routine poll must not imply that an uncertain operation was undone.
+      setTextIfChanged(statusNode, errorValue || status || "Готово.");
+      return;
+    }
     if (errorValue) {
       setHiddenIfChanged(errorNode, false);
       setTextIfChanged(errorNode, errorValue);
@@ -333,10 +342,14 @@
       invalidateStateProjection();
       const rejected = !result || result.status !== "completed";
       if (useGlobalAnnouncement) {
-        announce(
-          result && result.message ? result.message : (rejected ? "Дію відхилено." : "Готово."),
-          rejected,
-        );
+        const message = result && result.message
+          ? result.message : (rejected ? "Дію відхилено." : "Готово.");
+        if (unconfirmedDispatchResult) {
+          // Unrelated successful commands must not erase an earlier UNKNOWN.
+          setTextIfChanged(statusNode, message);
+        } else {
+          announce(message, rejected);
+        }
       }
       if (useResultFocus) focusResult(result);
       if (usePostRefresh) await refreshState();
@@ -344,13 +357,33 @@
     } catch (_error) {
       invalidateStateProjection();
       if (useGlobalAnnouncement) {
-        announce("Помилка зв’язку із застосунком. Перевірте стан і повторіть дію.", true);
+        unconfirmedDispatchResult = true;
+        announce(
+          "Результат дії НЕ ПІДТВЕРДЖЕНО через збій зв’язку. "
+          + "Дія могла вже виконатися. Звірте стан і журнал застосунку; "
+          + "не повторюйте команду всліпу.",
+          true,
+        );
+        setHiddenIfChanged(dispatchUncertainAck, false);
+        focusOperatorTarget(errorNode);
       }
       return null;
     }
   }
 
   globalThis.autosportDispatch = dispatch;
+
+  dispatchUncertainAck.addEventListener("click", () => {
+    // Acknowledgment dismisses presentation, not the unverified effect.
+    unconfirmedDispatchResult = false;
+    focusOperatorTarget(statusNode);
+    setHiddenIfChanged(dispatchUncertainAck, true);
+    clearErrorStatusWithFocusHandoff();
+    setTextIfChanged(
+      statusNode,
+      "Попередня дія залишається непідтвердженою. Перед повтором звірте журнал.",
+    );
+  });
 
   function renderState(state) {
     latestState = state;
@@ -512,7 +545,11 @@
         } catch (_error) {
           if (refreshClosed) break;
           if (requestEpoch === stateProjectionEpoch) {
-            announce("Не вдалося оновити стан застосунку.", true);
+            if (unconfirmedDispatchResult) {
+              setTextIfChanged(statusNode, "Не вдалося оновити стан застосунку.");
+            } else {
+              announce("Не вдалося оновити стан застосунку.", true);
+            }
           } else {
             refreshPending = true;
           }

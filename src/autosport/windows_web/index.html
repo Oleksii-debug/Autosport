@@ -12,7 +12,8 @@
   <header class="app-header">
     <h1>Автоспорт</h1>
     <p id="app-status" role="status" aria-live="polite" aria-atomic="true">Запуск інтерфейсу…</p>
-    <p id="error-status" role="alert" aria-live="assertive" aria-atomic="true" hidden></p>
+    <p id="error-status" role="alert" aria-live="assertive" aria-atomic="true" tabindex="-1" hidden></p>
+    <button id="dispatch-uncertain-ack" type="button" aria-describedby="error-status" hidden>Прочитано: закрити попередження (результат дії залишається невідомим)</button>
   </header>
 
   <nav aria-label="Навігація продукту">

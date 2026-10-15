@@ -414,6 +414,8 @@ def assess_campaign_qualification(
         blockers.append("episode checkpoints must be unique")
     if len({item.observation.sha256 for item in episodes}) != len(episodes):
         blockers.append("episode observations must bind distinct evidence bytes")
+    if len({item.decision.sha256 for item in episodes}) != len(episodes):
+        blockers.append("episode decisions must bind distinct evidence bytes")
 
     used_anchor_identities: dict[tuple[str, str], tuple[str, str]] = {}
 

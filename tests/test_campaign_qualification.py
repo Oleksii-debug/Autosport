@@ -356,6 +356,24 @@ class CampaignQualificationTests(unittest.TestCase):
         changed = replace(evidence, episodes=(evidence.episodes[0], broken))
         self.assert_blocked(self.rebind_bundle(changed), "episode indexes")
 
+    def test_relabelled_identical_decision_bytes_do_not_count_as_two_episodes(self):
+        evidence = self.complete()
+        first, second = evidence.episodes
+        repeated_decision_bytes = "0" * 64
+        first = replace(
+            first,
+            decision=replace(first.decision, sha256=repeated_decision_bytes),
+        )
+        second = replace(
+            second,
+            decision=replace(second.decision, sha256=repeated_decision_bytes),
+        )
+        changed = replace(evidence, episodes=(first, second))
+        self.assert_blocked(
+            self.rebind_bundle(changed),
+            "episode decisions must bind distinct evidence bytes",
+        )
+
     def test_duplicate_episode_identity_blocks(self):
         evidence = self.complete()
         broken = replace(

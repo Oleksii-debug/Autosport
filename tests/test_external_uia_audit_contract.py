@@ -1051,6 +1051,40 @@ def test_external_uia_os_child_hwnd_candidates_are_bounded_and_never_replace_sem
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
 
 
+def test_external_uia_prioritizes_visible_webview_hwnds_without_forging_semantic_pass() -> None:
+    """The first blocked HWND may consume the only bounded real UIA worker.
+
+    Prefer visible Chromium/WebView2 candidates but neither prune HWNDs nor
+    replace genuine UIA ProcessId/AutomationId, keyboard, live-region and STOP.
+    """
+    audit = _audit()
+    native = audit.split("public static class AutosportNativeWindows", 1)[1].split(
+        "public sealed class AutosportExternalLiveRegionProbe", 1
+    )[0]
+    family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "private static extern bool IsWindowVisible(IntPtr window);" in native
+    assert "private static extern int GetClassName(IntPtr window, System.Text.StringBuilder className, int maxCount);" in native
+    assert 'name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)' in native
+    assert 'name.Equals("Chrome_RenderWidgetHostHWND", StringComparison.Ordinal)' in native
+    assert "var priority = new int[count];" in native
+    assert "priority[i] = visible ? (webview ? 0 : 1) : (webview ? 2 : 3);" in native
+    assert "var ordered = new IntPtr[count];" in native
+    assert "for (var bucket = 0; bucket < 4; bucket++)" in native
+    assert "if (priority[i] == bucket) ordered[write++] = result[i];" in native
+    assert "if (write != count)" in native
+    assert 'throw new InvalidOperationException("Native HWND candidate order incomplete")' in native
+    assert "return ordered;" in native
+    assert "Array.Reverse(result);" in native
+    assert "if (count >= windows.Length)" in native
+    assert "-ExpectedProcessId $nativeProcessId" in family
+    assert "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId" in family
+    assert "if ($null -ne $nativeSemantic)" in family
+    assert "return $nativeSemantic" in family
+    assert "$report.status = 'PASS'" not in family
+
+
 def test_external_uia_native_hwnd_walk_fails_closed_on_cycle_or_unbounded_churn() -> None:
     """Native GetWindow child/sibling discovery must not hang or certify readiness.
 

@@ -85,6 +85,11 @@ public static class AutosportNativeWindows
     [DllImport("user32.dll")]
     private static extern IntPtr GetWindow(IntPtr window, uint command);
     [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool IsWindowVisible(IntPtr window);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetClassName(IntPtr window, System.Text.StringBuilder className, int maxCount);
+    [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
     public static int ProcessIdForHandle(IntPtr window)
     {
@@ -156,7 +161,35 @@ public static class AutosportNativeWindows
         var result = new IntPtr[count];
         Array.Copy(windows, result, count);
         Array.Reverse(result); // descendants first, native top-level hosts last
-        return result;
+        // An unrelated or hidden native HWND can hang the first real UIA COM
+        // provider and make the external semantic gate fail before examining
+        // the WebView2 provider. OS-only priority never substitutes for UIA:
+        // preserve all discovered candidates, the cap and their stable order
+        // within each visibility/class bucket. The MTA still requires a real
+        // PID + AutomationId and all keyboard/STOP/live-region evidence.
+        var priority = new int[count];
+        for (var i = 0; i < count; i++)
+        {
+            var className = new System.Text.StringBuilder(128);
+            var classLength = GetClassName(result[i], className, className.Capacity);
+            var name = classLength > 0 ? className.ToString() : "";
+            var webview = name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal) ||
+                          name.Equals("Chrome_RenderWidgetHostHWND", StringComparison.Ordinal);
+            var visible = IsWindowVisible(result[i]);
+            priority[i] = visible ? (webview ? 0 : 1) : (webview ? 2 : 3);
+        }
+        var ordered = new IntPtr[count];
+        var write = 0;
+        for (var bucket = 0; bucket < 4; bucket++)
+        {
+            for (var i = 0; i < count; i++)
+            {
+                if (priority[i] == bucket) ordered[write++] = result[i];
+            }
+        }
+        if (write != count)
+            throw new InvalidOperationException("Native HWND candidate order incomplete");
+        return ordered;
     }
 }
 

@@ -1,0 +1,32 @@
+name: Windows UIA environment control (diagnostic only)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/windows_uia_environment_control.ps1'
+      - 'tests/test_windows_uia_environment_control_contract.py'
+      - '.github/workflows/windows-uia-environment-control.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  disposable-winforms-uia-control:
+    name: Native Windows UIA control (NOT Autosport acceptance)
+    runs-on: windows-latest
+    timeout-minutes: 5
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+      - name: Probe independent STA WinForms HWND from killable MTA UIA child
+        shell: pwsh
+        run: |
+          & ./scripts/windows_uia_environment_control.ps1 -ReportPath ./uia-control.json
+          exit $LASTEXITCODE
+      - name: Preserve machine-readable control classification even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: windows-uia-environment-control
+          path: uia-control.json
+          if-no-files-found: warn

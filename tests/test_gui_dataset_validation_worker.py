@@ -158,6 +158,7 @@ def test_terminal_validation_failure_preserves_last_known_good_dataset(
     showerror.assert_called_once_with(
         "Автоспорт",
         "Набір даних відхилено: ValueError: market dataset hash mismatch",
+        parent=app,
     )
 
 

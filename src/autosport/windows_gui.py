@@ -207,6 +207,7 @@ class WindowsAutosportApp(AutosportApp):
                     "ui.error.recovery.configuration",
                     detail=_safe_exception_detail(exc),
                 ),
+                parent=self,
             )
             self.status.set(text("ui.status.recovery.configuration_rejected"))
             return
@@ -250,7 +251,7 @@ class WindowsAutosportApp(AutosportApp):
                 )
                 self.status.set(text("ui.status.recovery.teardown_blocked"))
                 self._append_log(detail)
-                messagebox.showerror(text("ui.dialog.title"), detail)
+                messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
                 return
 
         def task():
@@ -313,7 +314,7 @@ class WindowsAutosportApp(AutosportApp):
             detail = text("ui.error.recovery.worker", detail=message.error)
             self.status.set(text("ui.status.recovery.blocked"))
             self._append_log(detail)
-            messagebox.showerror(text("ui.dialog.title"), detail)
+            messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
             return
 
         result = message.result
@@ -351,7 +352,7 @@ class WindowsAutosportApp(AutosportApp):
             )
             self.status.set(text("ui.status.recovery.identity_mismatch"))
             self._append_log(detail)
-            messagebox.showerror(text("ui.dialog.title"), detail)
+            messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
             return
 
         report = result.report
@@ -373,6 +374,7 @@ class WindowsAutosportApp(AutosportApp):
             messagebox.showwarning(
                 text("ui.dialog.title"),
                 text("ui.warning.recovery.unresolved"),
+                parent=self,
             )
             return
 
@@ -381,7 +383,7 @@ class WindowsAutosportApp(AutosportApp):
         self._refresh_tickets()
         self._unblock_workspace_after_recovery(result.session_view.workspace)
         self.status.set(summary + text("ui.status.recovery.ready_suffix"))
-        messagebox.showinfo(text("ui.dialog.title"), text("ui.info.recovery.complete"))
+        messagebox.showinfo(text("ui.dialog.title"), text("ui.info.recovery.complete"), parent=self)
 
     def _poll_replay_worker(self) -> None:
         """Consume replay terminal state and quarantine uncertain economic state."""
@@ -403,7 +405,7 @@ class WindowsAutosportApp(AutosportApp):
                 self._append_log(replay_error)
                 self._set_evaluation_lines([text("ui.evaluation.replay_failed")])
                 self.status.set(text("ui.status.replay.failed_recovery"))
-                messagebox.showerror(text("ui.dialog.title"), replay_error)
+                messagebox.showerror(text("ui.dialog.title"), replay_error, parent=self)
                 return
 
             self._set_evaluation_lines([text("ui.evaluation.no_terminal_result")])
@@ -430,7 +432,7 @@ class WindowsAutosportApp(AutosportApp):
             )
             self.status.set(text("ui.status.replay.reopen_blocked"))
             self._append_log(detail)
-            messagebox.showerror(text("ui.dialog.title"), detail)
+            messagebox.showerror(text("ui.dialog.title"), detail, parent=self)
             return
 
         self.bank.set(self._bank_text())

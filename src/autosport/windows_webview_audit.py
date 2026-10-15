@@ -140,6 +140,8 @@ class _SemanticShellParser(HTMLParser):
     def __init__(self) -> None:
         super().__init__(convert_charrefs=True)
         self.elements: dict[str, tuple[str, dict[str, str | None]]] = {}
+        self.duplicate_ids: set[str] = set()
+        self.duplicate_id_attributes: set[str] = set()
         self.labels_for: set[str] = set()
         self.landmarks: set[str] = set()
         self.h1_count = 0
@@ -152,9 +154,16 @@ class _SemanticShellParser(HTMLParser):
         tag: str,
         attrs: list[tuple[str, str | None]],
     ) -> None:
+        # Preserve all id attributes before dict() erases duplicate keys.
+        # Both repeated attributes and repeated values make identity ambiguous.
+        id_attributes = [value for name, value in attrs if name == "id"]
         values = dict(attrs)
         element_id = values.get("id")
+        if len(id_attributes) > 1:
+            self.duplicate_id_attributes.add(element_id or tag)
         if element_id:
+            if element_id in self.elements:
+                self.duplicate_ids.add(element_id)
             self.elements[element_id] = (tag, values)
         if tag in _REQUIRED_LANDMARKS:
             self.landmarks.add(tag)
@@ -174,6 +183,13 @@ class _SemanticShellParser(HTMLParser):
             self.status_regions.append(values)
         if values.get("role") == "alert":
             self.alert_regions.append(values)
+
+
+def _reject_duplicate_html_identities(parser: _SemanticShellParser, failures: list[str]) -> None:
+    if parser.duplicate_ids:
+        failures.append("duplicate HTML id values: " + ", ".join(sorted(parser.duplicate_ids)))
+    if parser.duplicate_id_attributes:
+        failures.append("duplicate HTML id attributes: " + ", ".join(sorted(parser.duplicate_id_attributes)))
 
 
 def _asset_paths() -> tuple[Path, Path]:
@@ -205,6 +221,7 @@ def inspect_semantic_shell() -> dict[str, Any]:
     try:
         parser.feed(html)
         parser.close()
+        _reject_duplicate_html_identities(parser, failures)
     except Exception as exc:
         failures.append(f"semantic shell HTML parse failed: {type(exc).__name__}: {exc}")
 
@@ -276,9 +293,9 @@ def inspect_semantic_shell() -> dict[str, Any]:
                 f"id={automation_id}: expected native <{expected_tag}> got <{tag}>"
             )
         if tag in {"input", "select", "textarea"}:
-            if automation_id not in parser.labels_for and not attrs.get("aria-label"):
+            if automation_id not in parser.labels_for and not (attrs.get("aria-label") or "").strip():
                 failures.append(f"id={automation_id}: form control has no label")
-        if tag in {"button", "ul"} and not attrs.get("aria-label"):
+        if tag in {"button", "ul"} and not (attrs.get("aria-label") or "").strip():
             if tag == "ul":
                 failures.append(f"id={automation_id}: dynamic list has no aria-label")
         if automation_id in _READONLY_CONTROLS and "readonly" not in attrs:
@@ -364,6 +381,7 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     parser = _SemanticShellParser()
     parser.feed(html)
     parser.close()
+    _reject_duplicate_html_identities(parser, failures)
     for marker in _REQUIRED_SHORTCUT_MARKERS:
         if marker not in javascript:
             failures.append(f"keyboard marker missing: {marker}")

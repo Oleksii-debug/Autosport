@@ -315,6 +315,43 @@ def test_cli_writes_canonical_evidence(
     assert evidence_payload["status"] == "PASS"
     assert evidence_payload["whole_product_complete"] is False
 
+def test_evidence_publication_replaces_receipt_atomically_on_unicode_path(
+    tmp_path: Path,
+) -> None:
+    receipt = tmp_path / "збірка з пробілами" / "stage-neutral-evidence.json"
+    prior = {"status": "PASS", "whole_product_complete": False, "epoch": 1}
+    current = {"status": "PASS", "whole_product_complete": False, "epoch": 2}
+    stage_release._write_evidence(receipt, prior)
+    assert receipt.read_bytes() == _canonical_json(prior)
+    stage_release._write_evidence(receipt, current)
+    assert receipt.read_bytes() == _canonical_json(current)
+    assert list(receipt.parent.glob(f".{receipt.name}.*.tmp")) == []
+
+
+@pytest.mark.parametrize("failure", ["fsync", "replace"])
+def test_interrupted_evidence_publication_preserves_prior_receipt(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    failure: str,
+) -> None:
+    receipt = tmp_path / "verified-receipt.json"
+    prior = {"status": "PASS", "whole_product_complete": False, "epoch": 1}
+    stage_release._write_evidence(receipt, prior)
+    original_bytes = receipt.read_bytes()
+
+    def interrupted(*args: object, **kwargs: object) -> None:
+        raise OSError(f"synthetic {failure} interruption")
+
+    monkeypatch.setattr(stage_release.os, failure, interrupted)
+    with pytest.raises(OSError, match="synthetic .* interruption"):
+        stage_release._write_evidence(
+            receipt,
+            {"status": "PASS", "whole_product_complete": False, "epoch": 2},
+        )
+    assert receipt.read_bytes() == original_bytes
+    assert list(receipt.parent.glob(f".{receipt.name}.*.tmp")) == []
+
+
 def test_transform_windows_start_guide_rejects_unknown_product_identity() -> None:
     with pytest.raises(ValueError, match="unrecognized product identity"):
         stage_release._transform_windows_start_guide(

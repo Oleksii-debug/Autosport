@@ -4,6 +4,8 @@ import argparse
 import hashlib
 import io
 import json
+import os
+import tempfile
 from pathlib import Path, PurePosixPath
 import zipfile
 
@@ -435,8 +437,27 @@ def repackage_stage_neutral_windows_release(
 
 
 def _write_evidence(path: Path, evidence: dict[str, object]) -> None:
+    """Preserve the previous verified receipt across interrupted evidence writes."""
+
     path.parent.mkdir(parents=True, exist_ok=True)
-    path.write_bytes(_canonical_json_bytes(evidence))
+    payload = _canonical_json_bytes(evidence)
+    temporary: Path | None = None
+    try:
+        with tempfile.NamedTemporaryFile(
+            mode="wb",
+            prefix=f".{path.name}.",
+            suffix=".tmp",
+            dir=path.parent,
+            delete=False,
+        ) as staging:
+            temporary = Path(staging.name)
+            staging.write(payload)
+            staging.flush()
+            os.fsync(staging.fileno())
+        os.replace(temporary, path)
+    finally:
+        if temporary is not None:
+            temporary.unlink(missing_ok=True)
 
 
 def main(argv: list[str] | None = None) -> int:

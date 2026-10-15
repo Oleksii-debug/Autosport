@@ -17,4 +17,17 @@ if (-not (Test-Path -LiteralPath $skipGateHelper -PathType Leaf)) {
 
 $builderText = [System.IO.File]::ReadAllText($builderScript)
 $candidateText = ConvertTo-WindowsCandidateCoreText -CoreText $builderText
-Invoke-WindowsCandidateCoreText -CoreText $candidateText
+try {
+  Invoke-WindowsCandidateCoreText -CoreText $candidateText
+} catch {
+  # The canonical builder writes restart/recovery failure evidence before it returns a
+  # non-zero exit. Emit that bounded machine evidence before propagating the original
+  # failure so Actions can diagnose a packaged recovery gate without weakening it.
+  $restartRecoveryAudit = Join-Path (Get-Location).Path 'dist/restart-recovery-audit.json'
+  if (Test-Path -LiteralPath $restartRecoveryAudit -PathType Leaf) {
+    Write-Host '--- packaged restart/recovery audit evidence ---'
+    Write-Host ([System.IO.File]::ReadAllText($restartRecoveryAudit))
+    Write-Host '--- end packaged restart/recovery audit evidence ---'
+  }
+  throw
+}

@@ -98,15 +98,20 @@ class PaperPreActionWitnessCorruptionTests(unittest.TestCase):
             path = root / "live_decision_pre_action_book.json"
             expected = PaperBook("100.00")
             expected.save(path)
+            canonical_bytes = path.read_bytes()
             runtime = SimpleNamespace(paper_book_path=root / "paper_book.json")
 
             observed = _load_live_pre_action_book(runtime)
 
             self.assertIsNotNone(observed)
             assert observed is not None
-            roundtrip = root / "roundtrip_pre_action_book.json"
-            observed.save(roundtrip)
-            self.assertEqual(roundtrip.read_bytes(), path.read_bytes())
+            self.assertEqual(observed.initial_bankroll, expected.initial_bankroll)
+            self.assertEqual(observed.balance, expected.balance)
+            self.assertEqual(observed.tickets, expected.tickets)
+            self.assertEqual(observed._lifecycle, expected._lifecycle)
+            self.assertEqual(observed._settlement_times, expected._settlement_times)
+            self.assertEqual(observed.committed_stake, expected.committed_stake)
+            self.assertEqual(path.read_bytes(), canonical_bytes)
 
     def test_live_loader_returns_none_only_when_witness_is_absent(self):
         with tempfile.TemporaryDirectory() as tmp:

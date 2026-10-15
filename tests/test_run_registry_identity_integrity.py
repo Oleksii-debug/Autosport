@@ -1,3 +1,4 @@
+import hashlib
 import json
 import tempfile
 import unittest
@@ -62,11 +63,12 @@ class RunRegistryIdentityIntegrityTests(unittest.TestCase):
             raw = json.loads(path.read_text(encoding="utf-8"))
             item = raw["runs"].pop(key)
             item["market_sha256"] = "g" * 64
-            item["base_identity"] = registry.experiment_identity(
-                item["market_sha256"],
-                item["results_sha256"],
-                item["strategy_id"],
-            )
+            item["base_identity"] = hashlib.sha256(
+                (
+                    f"{item['market_sha256']}|{item['results_sha256']}|"
+                    f"{item['strategy_id']}"
+                ).encode("utf-8")
+            ).hexdigest()
             raw["runs"][item["base_identity"]] = item
             path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
 
@@ -83,11 +85,12 @@ class RunRegistryIdentityIntegrityTests(unittest.TestCase):
             raw = json.loads(path.read_text(encoding="utf-8"))
             item = raw["runs"].pop(key)
             item["results_sha256"] = "B" * 64
-            item["base_identity"] = registry.experiment_identity(
-                item["market_sha256"],
-                item["results_sha256"],
-                item["strategy_id"],
-            )
+            item["base_identity"] = hashlib.sha256(
+                (
+                    f"{item['market_sha256']}|{item['results_sha256']}|"
+                    f"{item['strategy_id']}"
+                ).encode("utf-8")
+            ).hexdigest()
             raw["runs"][item["base_identity"]] = item
             path.write_text(json.dumps(raw) + "\n", encoding="utf-8")
 

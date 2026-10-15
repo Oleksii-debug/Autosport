@@ -124,8 +124,41 @@ class CollectorDelta:
     gap_to_cursor: str | None = None
 
     def validate(self) -> None:
-        if self.schema_version != 1:
+        # Identity/version/correction fields are authority-bearing.  Fence their
+        # concrete scalar types before any virtual string/int/enum operation so
+        # hostile subclasses cannot execute while canonical identity is validated.
+        if type(self.schema_version) is not int or self.schema_version != 1:
             raise ValueError("unsupported collector delta schema_version")
+        for name in (
+            "delta_id",
+            "source_id",
+            "lawful_terms_ref",
+            "retention_ref",
+            "stream_epoch",
+            "source_cursor",
+            "event_dedupe_key",
+            "event_id",
+            "source_payload_digest",
+            "canonical_event_digest",
+        ):
+            if type(getattr(self, name)) is not str:
+                raise TypeError(f"{name} must be exact string identity text")
+        for name in ("cursor_position", "revision_number"):
+            if type(getattr(self, name)) is not int:
+                raise TypeError(f"{name} must be an exact integer")
+        for name in ("revision_of", "gap_from_cursor", "gap_to_cursor"):
+            value = getattr(self, name)
+            if value is not None and type(value) is not str:
+                raise TypeError(f"{name} must be exact string identity text or None")
+        if type(self.quality_flags) is not tuple or any(
+            type(flag) is not str for flag in self.quality_flags
+        ):
+            raise TypeError("quality_flags must be an exact tuple of exact strings")
+        if type(self.gap_state) is not GapState:
+            raise TypeError("gap_state must be exact GapState")
+        if type(self.sync_state) is not SyncState:
+            raise TypeError("sync_state must be exact SyncState")
+
         for name in (
             "delta_id", "source_id", "lawful_terms_ref", "retention_ref", "stream_epoch",
             "source_cursor", "event_dedupe_key", "event_id"
@@ -210,8 +243,12 @@ class StreamCheckpoint:
 
     def validate(self) -> None:
         for name in ("source_id", "stream_epoch", "last_cursor", "last_delta_id"):
+            if type(getattr(self, name)) is not str:
+                raise TypeError(f"{name} must be exact string identity text")
             _text(getattr(self, name), name)
-        if isinstance(self.last_position, bool) or not isinstance(self.last_position, int) or self.last_position < 0:
+        if type(self.last_position) is not int:
+            raise TypeError("last_position must be an exact integer")
+        if self.last_position < 0:
             raise ValueError("last_position must be a non-negative int")
 
 
@@ -230,8 +267,14 @@ class DesktopApplicationReceipt:
     applied_at: str
 
     def validate(self) -> None:
+        if type(self.delta_id) is not str:
+            raise TypeError("delta_id must be exact string identity text")
+        if type(self.canonical_event_digest) is not str:
+            raise TypeError("canonical_event_digest must be exact string identity text")
+        if type(self.receipt_id) is not str:
+            raise TypeError("receipt_id must be exact string identity text")
         _text(self.delta_id, "delta_id")
-        if not isinstance(self.canonical_event_digest, str) or len(self.canonical_event_digest) != 64:
+        if len(self.canonical_event_digest) != 64:
             raise ApplicationReceiptError("application receipt digest must be a sha256 hex digest")
         try:
             int(self.canonical_event_digest, 16)
@@ -276,7 +319,11 @@ class _JsonAtomicStore:
             )
         except (OSError, UnicodeError, json.JSONDecodeError, ValueError) as exc:
             raise ValueError("invalid causal collector store") from exc
-        if not isinstance(raw, dict) or raw.get("schema_version") != self.schema_version:
+        if (
+            type(raw) is not dict
+            or type(raw.get("schema_version")) is not int
+            or raw.get("schema_version") != self.schema_version
+        ):
             raise ValueError("unsupported causal collector store schema")
         return raw
 
@@ -451,6 +498,8 @@ class CanonicalDesktopApplication:
         self._state = _CanonicalDesktopApplicationStore(state_path)
 
     def lookup_receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         return self._state.receipt(delta)
 
     @staticmethod
@@ -477,6 +526,8 @@ class CanonicalDesktopApplication:
         )
 
     def apply(self, delta: CollectorDelta, event: Any) -> DesktopApplicationReceipt:
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         delta.validate()
         if getattr(event, "source_id", None) != delta.source_id:
             raise DeltaConflictError("canonical market event source_id conflicts with collector delta")
@@ -554,6 +605,8 @@ class CollectorDeltaStore(_JsonAtomicStore):
         return {"schema_version": 1, "deltas": [], "streams": {}}
 
     def get(self, delta_id: str) -> CollectorDelta | None:
+        if type(delta_id) is not str:
+            raise TypeError("delta_id must be exact string identity text")
         _text(delta_id, "delta_id")
         for raw in self._read()["deltas"]:
             if raw.get("delta_id") == delta_id:
@@ -564,6 +617,10 @@ class CollectorDeltaStore(_JsonAtomicStore):
         return [CollectorDelta.from_dict(raw) for raw in self._read()["deltas"]]
 
     def append(self, delta: CollectorDelta) -> bool:
+        # This is the durable identity ingress. Reject subclasses before invoking
+        # caller-controlled validation or reading authority-bearing identity fields.
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         delta.validate()
         raw = self._read()
         encoded = delta.to_dict()
@@ -676,7 +733,11 @@ class CollectorDeltaStore(_JsonAtomicStore):
         source position; append order ensures a desktop that already consumed newer
         source positions still receives that correction instead of silently skipping it.
         """
+        if type(source_id) is not str:
+            raise TypeError("source_id must be exact string identity text")
         _text(source_id, "source_id")
+        if after_delta_id is not None and type(after_delta_id) is not str:
+            raise TypeError("after_delta_id must be exact string identity text or None")
         if (
             isinstance(max_items, bool)
             or not isinstance(max_items, int)
@@ -702,6 +763,12 @@ class CollectorDeltaStore(_JsonAtomicStore):
         return tuple(items[start : start + max_items])
 
     def stream_checkpoint(self, source_id: str, stream_epoch: str) -> StreamCheckpoint | None:
+        if type(source_id) is not str:
+            raise TypeError("source_id must be exact string identity text")
+        if type(stream_epoch) is not str:
+            raise TypeError("stream_epoch must be exact string identity text")
+        _text(source_id, "source_id")
+        _text(stream_epoch, "stream_epoch")
         raw = self._read()["streams"].get(f"{source_id}|{stream_epoch}")
         return None if raw is None else StreamCheckpoint(**raw)
 
@@ -730,10 +797,14 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
         return WorkspaceEconomicLock(self.path.parent)
 
     def has_ack(self, delta_id: str) -> bool:
+        if type(delta_id) is not str:
+            raise TypeError("delta_id must be exact string identity text")
         _text(delta_id, "delta_id")
         return any(item.get("delta_id") == delta_id for item in self._read()["acks"])
 
     def application_receipt(self, delta: CollectorDelta) -> DesktopApplicationReceipt | None:
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         for item in self._read()["acks"]:
             if item.get("delta_id") != delta.delta_id:
                 continue
@@ -751,6 +822,10 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
         return None
 
     def ack(self, delta: CollectorDelta, *, application_receipt: DesktopApplicationReceipt, acknowledged_at: str) -> bool:
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
+        if type(application_receipt) is not DesktopApplicationReceipt:
+            raise TypeError("application_receipt must be exact DesktopApplicationReceipt")
         with self._workspace_lock():
             return self._ack_locked(
                 delta,
@@ -765,6 +840,10 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
         application_receipt: DesktopApplicationReceipt,
         acknowledged_at: str,
     ) -> bool:
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
+        if type(application_receipt) is not DesktopApplicationReceipt:
+            raise TypeError("application_receipt must be exact DesktopApplicationReceipt")
         delta.validate()
         application_receipt.validate()
         if application_receipt.delta_id != delta.delta_id:
@@ -804,6 +883,12 @@ class DesktopDeltaCheckpointStore(_JsonAtomicStore):
         return True
 
     def stream_checkpoint(self, source_id: str, stream_epoch: str) -> StreamCheckpoint | None:
+        if type(source_id) is not str:
+            raise TypeError("source_id must be exact string identity text")
+        if type(stream_epoch) is not str:
+            raise TypeError("stream_epoch must be exact string identity text")
+        _text(source_id, "source_id")
+        _text(stream_epoch, "stream_epoch")
         raw = self._read()["streams"].get(f"{source_id}|{stream_epoch}")
         return None if raw is None else StreamCheckpoint(**raw)
 
@@ -843,6 +928,9 @@ class DesktopDeltaConsumer:
         available = self.collector.deltas_available_through(as_of=as_of, view=view)
         delivered: list[str] = []
         for delta in available:
+            if type(delta) is not CollectorDelta:
+                raise TypeError("collector feed must contain exact CollectorDelta")
+            delta.validate()
             if delta.gap_state is GapState.DETECTED:
                 recovered = any(
                     item.gap_state is GapState.RECOVERED
@@ -870,6 +958,10 @@ class DesktopDeltaConsumer:
 
                 durable_receipt = self.lookup_application_receipt(delta)
                 if durable_receipt is not None:
+                    if type(durable_receipt) is not DesktopApplicationReceipt:
+                        raise ApplicationReceiptError(
+                            "lookup_application_receipt must return an exact durable DesktopApplicationReceipt"
+                        )
                     durable_receipt.validate()
                     if durable_receipt.canonical_event_digest != delta.canonical_event_digest:
                         raise ApplicationReceiptError(
@@ -888,8 +980,10 @@ class DesktopDeltaConsumer:
                 if digest != delta.canonical_event_digest:
                     raise DeltaConflictError(f"canonical event digest mismatch for delta {delta.delta_id}")
                 receipt = self.apply_event(delta, event)
-                if not isinstance(receipt, DesktopApplicationReceipt):
-                    raise ApplicationReceiptError("apply_event must return a durable DesktopApplicationReceipt")
+                if type(receipt) is not DesktopApplicationReceipt:
+                    raise ApplicationReceiptError(
+                        "apply_event must return an exact durable DesktopApplicationReceipt"
+                    )
                 receipt.validate()
                 if receipt.delta_id != delta.delta_id or receipt.canonical_event_digest != digest:
                     raise ApplicationReceiptError("application receipt is not bound to this delta/digest")
@@ -910,5 +1004,12 @@ class RemoteCollectorAdapter:
         self._commit_delta = commit_delta
 
     def submit_committed_delta(self, delta: CollectorDelta) -> bool:
+        if type(delta) is not CollectorDelta:
+            raise TypeError("delta must be exact CollectorDelta")
         delta.validate()
         return self._commit_delta(delta)
+
+
+# Stable migration/test reference captured before causal_collector.py intentionally
+# rebinds the legacy module's CollectorDeltaStore name to the canonical SQLite store.
+LegacyJsonCollectorDeltaStore = CollectorDeltaStore

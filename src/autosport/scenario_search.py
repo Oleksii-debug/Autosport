@@ -7,15 +7,22 @@ from dataclasses import dataclass
 from datetime import datetime
 from decimal import Decimal
 
-from .domain import PaperTicket, TicketStatus
+from .domain import PaperTicket, TicketLeg, TicketStatus, _canonical_string_value
 from .market_outcomes import MarketSettlementOutcomeAuthority
 from .portfolio import PortfolioEngine, _snapshot_open_tickets_for_analysis
+
+
+def _canonical_scenario_text(value: object, field: str) -> str:
+    return _canonical_string_value(value, f"scenario {field}")
 
 
 @dataclass(frozen=True, slots=True)
 class ScenarioOutcome:
     quote_key: str
     probability: Decimal | None = None
+
+    def __post_init__(self) -> None:
+        _canonical_scenario_text(self.quote_key, "outcome quote_key")
 
 
 @dataclass(frozen=True, slots=True)
@@ -24,9 +31,19 @@ class ScenarioGroup:
     outcomes: tuple[ScenarioOutcome, ...]
 
     def __post_init__(self) -> None:
+        _canonical_scenario_text(self.group_id, "group_id")
+        if type(self.outcomes) is not tuple:
+            raise ValueError("scenario group outcomes must be a canonical tuple")
         if len(self.outcomes) < 2:
             raise ValueError("scenario group requires at least two outcomes")
-        keys = [item.quote_key for item in self.outcomes]
+        keys: list[str] = []
+        for item in self.outcomes:
+            if type(item) is not ScenarioOutcome:
+                raise ValueError(
+                    "scenario group outcomes must contain exact ScenarioOutcome values"
+                )
+            ScenarioOutcome.__post_init__(item)
+            keys.append(item.quote_key)
         if len(keys) != len(set(keys)):
             raise ValueError("duplicate outcome quote_key")
         probabilities = [item.probability for item in self.outcomes]
@@ -38,6 +55,15 @@ class ScenarioGroup:
                 raise ValueError("scenario group probabilities must sum to 1")
             if any(value is not None and (value < 0 or value > 1) for value in probabilities):
                 raise ValueError("invalid outcome probability")
+
+
+def _validate_scenario_group_identity(group: object) -> ScenarioGroup:
+    """Re-prove scenario identity before any hash/mapping use boundary."""
+
+    if type(group) is not ScenarioGroup:
+        raise ValueError("scenario groups must contain exact ScenarioGroup values")
+    ScenarioGroup.__post_init__(group)
+    return group
 
 
 @dataclass(frozen=True, slots=True)
@@ -60,19 +86,63 @@ class ScenarioSearchReport:
 
 class PortfolioDependencyIndex:
     def __init__(self, tickets: list[PaperTicket]) -> None:
+        if type(tickets) is not list:
+            raise ValueError(
+                "portfolio dependency tickets must be an exact list"
+            )
         self.quote_to_tickets: dict[str, set[str]] = {}
         self.ticket_by_id: dict[str, PaperTicket] = {}
         for ticket in tickets:
+            if type(ticket) is not PaperTicket:
+                raise ValueError(
+                    "portfolio dependency index requires exact PaperTicket values"
+                )
+            ticket_id = _canonical_string_value(
+                ticket.ticket_id,
+                "portfolio dependency ticket_id",
+            )
             if ticket.status is not TicketStatus.OPEN:
                 continue
-            self.ticket_by_id[ticket.ticket_id] = ticket
+            if type(ticket.legs) is not tuple:
+                raise ValueError(
+                    "portfolio dependency ticket legs must remain an exact tuple"
+                )
+
+            quote_keys: list[str] = []
             for leg in ticket.legs:
-                self.quote_to_tickets.setdefault(leg.quote_key, set()).add(ticket.ticket_id)
+                if type(leg) is not TicketLeg:
+                    raise ValueError(
+                        "portfolio dependency ticket legs must remain exact TicketLeg values"
+                    )
+                # TicketLeg.quote_key re-proves every structured identity component
+                # before formatting/encoding, including post-construction mutation.
+                quote_keys.append(
+                    _canonical_string_value(
+                        leg.quote_key,
+                        "portfolio dependency quote_key",
+                    )
+                )
+
+            # Publish only after the complete ticket identity has been revalidated.
+            self.ticket_by_id[ticket_id] = ticket
+            for quote_key in quote_keys:
+                self.quote_to_tickets.setdefault(quote_key, set()).add(ticket_id)
 
     def affected_by(self, quote_keys: set[str]) -> set[str]:
+        if type(quote_keys) is not set:
+            raise ValueError(
+                "portfolio dependency quote_keys must be an exact set"
+            )
+        canonical_keys = [
+            _canonical_string_value(
+                key,
+                f"portfolio dependency quote_key[{index}]",
+            )
+            for index, key in enumerate(quote_keys)
+        ]
         affected: set[str] = set()
-        for key in quote_keys:
-            affected.update(self.quote_to_tickets.get(key, set()))
+        for canonical_key in canonical_keys:
+            affected.update(self.quote_to_tickets.get(canonical_key, set()))
         return affected
 
 
@@ -157,12 +227,14 @@ class ScenarioSearchEngine:
                 "authoritative outcome analysis requires market authorities"
             )
         if any(
-            not isinstance(authority, MarketSettlementOutcomeAuthority)
+            type(authority) is not MarketSettlementOutcomeAuthority
             for authority in authorities
         ):
             raise ValueError(
                 "authoritative outcome analysis requires canonical market authorities"
             )
+        for authority in authorities:
+            MarketSettlementOutcomeAuthority.__post_init__(authority)
 
         ordered = tuple(
             sorted(
@@ -358,10 +430,13 @@ class ScenarioSearchEngine:
         )
 
     def _validate_and_map(self, tickets: list[PaperTicket], groups: list[ScenarioGroup]) -> dict[str, int]:
+        if type(groups) is not list:
+            raise ValueError("scenario groups must be an exact list")
         if not groups:
             raise ValueError("scenario groups required")
         mapping: dict[str, int] = {}
-        for index, group in enumerate(groups):
+        for index, raw_group in enumerate(groups):
+            group = _validate_scenario_group_identity(raw_group)
             for outcome in group.outcomes:
                 if outcome.quote_key in mapping:
                     raise ValueError("quote_key appears in multiple scenario groups")

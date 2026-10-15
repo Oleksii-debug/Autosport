@@ -592,6 +592,60 @@ def _freshness_id_from_lineage(
             )
 
 
+def _require_disjoint_consumed_holdout_membership(
+    ledger: evidence.HoldoutConsumptionLedger,
+    canonical: DatasetSnapshot,
+) -> None:
+    """Falsify reused observations under the caller's existing holdout lock.
+
+    Manifest inequality alone is never evidence that confirmation populations
+    are disjoint. Reuse the *same* durable, registry-verified lineage that
+    authorized the snapshot; the ledger remains the only consumption store.
+    The caller must have loaded the authoritative ledger state under both the
+    instance lock and _HoldoutLedgerLock before calling this check.
+    """
+
+    lineage = _bound_lineage_authority(ledger)
+    # Verified records come from the exact canonical lineage implementation,
+    # not caller-supplied payloads or a second statistical authority.
+    proofs = DatasetSnapshotLineageAuthority._read_and_verify(lineage)
+    by_manifest: dict[str, frozenset[str]] = {}
+    current_members: frozenset[str] | None = None
+    for proof in proofs:
+        members = frozenset(proof.member_sha256)
+        prior = by_manifest.setdefault(proof.manifest_sha256, members)
+        if prior != members:
+            raise evidence.EvidenceLedgerCorruptError(
+                "canonical lineage has conflicting membership for one manifest"
+            )
+        if proof.snapshot_id == canonical.dataset_snapshot_id:
+            if proof.manifest_sha256 != canonical.manifest_sha256:
+                raise evidence.EvidenceLedgerCorruptError(
+                    "canonical holdout manifest changed during consumption"
+                )
+            current_members = members
+    if current_members is None:
+        raise evidence.EvidenceLedgerCorruptError(
+            "canonical holdout membership proof is missing"
+        )
+
+    for consumed in ledger._records.values():
+        # Same-manifest exact retry/reuse is handled by the existing
+        # idempotency/access-identity branch before reaching this helper.
+        if consumed.dataset_manifest_sha256 == canonical.manifest_sha256:
+            continue
+        previous_members = by_manifest.get(consumed.dataset_manifest_sha256)
+        if (
+            not current_members
+            or not previous_members
+            or not current_members.isdisjoint(previous_members)
+        ):
+            raise evidence.HoldoutAlreadyConsumedError(
+                "holdout observations overlap previously consumed evidence "
+                "or independent canonical membership cannot be proven"
+            )
+
+
 def _assert_unused_from_lineage(
     self: evidence.HoldoutConsumptionLedger,
     *,
@@ -614,6 +668,7 @@ def _assert_unused_from_lineage(
                     f"holdout {existing.holdout_access_id} was already consumed by "
                     f"{existing.consumer_identity}"
                 )
+            _require_disjoint_consumed_holdout_membership(self, canonical)
 
 
 def _consume_from_lineage(
@@ -683,6 +738,9 @@ def _consume_from_lineage(
                     f"{existing.consumer_identity}"
                 )
 
+            # The atomic check and ledger write share the same durable lock:
+            # two concurrent consumers cannot each admit overlapping manifests.
+            _require_disjoint_consumed_holdout_membership(self, canonical)
             previous_state_sha256 = self._state_sha256
             self._records[freshness_id] = record
             tx_id = self._next_transition_tx_id(record.consumption_id)

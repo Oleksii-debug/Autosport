@@ -2,6 +2,17 @@ from __future__ import annotations
 
 import sys
 
+import autosport.secret_redaction as _secret_redaction
+from autosport.secret_redaction import safe_exception_detail
+
+
+# Expected failures are an operator-presentation boundary, not an extensible exception
+# registry. Capture the concrete interpreter-owned classes used by the catch boundary so
+# later builtins rebinding cannot mint new expected-failure authority.
+_CANONICAL_VALUE_ERROR = ValueError
+_CANONICAL_OS_ERROR = OSError
+_EXPECTED_FAILURE_TYPES = (_CANONICAL_OS_ERROR, _CANONICAL_VALUE_ERROR)
+
 
 _USAGE = """Autosport-Data — portable Windows historical-data tools + research + recovery
 
@@ -111,46 +122,229 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
 
         return verify_main(forwarded)
 
-    print(f"Autosport-Data: unknown command {command!r}\n")
+    print("Autosport-Data: unknown command\n")
     print(_USAGE)
     return 2
 
 
-def _expected_failure_message(command: str, exc: OSError | ValueError) -> str:
-    # Formatting belongs to the same packaged fail-closed boundary as dispatch.
-    # Exception subclasses are caller/library supplied: neither custom type metadata,
-    # __str__(), nor methods on a returned str subclass may recreate a traceback.
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = exception_type
-    detail = " ".join(rendered.splitlines()).strip()
-    if not detail:
-        detail = exception_type
-    return f"Autosport-Data: {command}=FAIL_CLOSED error={exception_type}: {detail}"
+def _install_expected_failure_message():
+    """Seal the product-owned presentation authorities in a closure.
+
+    Function-object identity alone is insufficient in Python because ordinary caller
+    code can replace a function object's ``__code__`` in place. The canonical exception
+    renderer also dispatches through the secret-redaction module, so capture that direct
+    dependency chain and fail closed if any authority-sensitive hop changes.
+    """
+
+    canonical_value_error = ValueError
+    canonical_file_not_found_error = FileNotFoundError
+    redaction_module = _secret_redaction
+    canonical_redactor = safe_exception_detail
+    canonical_os = redaction_module.os
+    canonical_environ = canonical_os.environ
+    canonical_re = redaction_module.re
+    canonical_re_sub = canonical_re.sub
+    canonical_unquote_plus = redaction_module.unquote_plus
+    canonical_builtins = redaction_module.builtins
+    canonical_module_builtins = redaction_module.__dict__.get("__builtins__")
+    if canonical_module_builtins is None:
+        raise RuntimeError("secret redaction builtin dispatch is unavailable")
+
+    # These checks are themselves security authority. Capture their interpreter-owned
+    # helpers once so a later module-global shadow cannot give the guard a stale view
+    # while the canonical redactor dispatches through the real mutated objects.
+    exact_dict = dict
+    exact_getattr = getattr
+    exact_isinstance = isinstance
+    exact_sorted = sorted
+    exact_tuple = tuple
+    exact_type = type
+    module_builtins_is_dict = exact_type(canonical_module_builtins) is exact_dict
+
+    builtin_names = (
+        "BaseException",
+        "TypeError",
+        "ValueError",
+        "any",
+        "chr",
+        "dict",
+        "enumerate",
+        "int",
+        "isinstance",
+        "len",
+        "list",
+        "range",
+        "set",
+        "sorted",
+        "str",
+        "tuple",
+        "type",
+    )
+    builtin_witnesses = exact_tuple(
+        (name, exact_getattr(canonical_builtins, name)) for name in builtin_names
+    )
+    callable_names = (
+        "redact_operator_text",
+        "_secret_values",
+        "_environment_secret_values",
+        "is_sensitive_key",
+        "_normalized_key",
+        "_decode_escaped_key_for_classification",
+        "_redacted_value_literal",
+        "_key_value_match_key",
+        "_redact_overlapping_sensitive_key_values",
+    )
+    callable_witnesses = exact_tuple(
+        (
+            name,
+            exact_getattr(redaction_module, name),
+            exact_getattr(redaction_module, name).__code__,
+        )
+        for name in callable_names
+    )
+    object_names = (
+        "REDACTED",
+        "_SENSITIVE_NORMALIZED_KEYS",
+        "_SENSITIVE_SUFFIXES",
+        "_SENSITIVE_WRAPPER_SUFFIXES",
+        "_URL_USERINFO_RE",
+        "_QUERY_PARAM_RE",
+        "_AUTHORIZATION_COMMA_VALUE_RE",
+        "_AUTHORIZATION_VALUE_RE",
+        "_BEARER_RE",
+        "_KEY_VALUE_RE",
+        "_OVERLAPPING_KEY_VALUE_RE",
+        "_COOKIE_HEADER_RE",
+        "_SPACED_SENSITIVE_KEY_VALUE_RE",
+        "_KEY_ESCAPE_RE",
+        "_KEY_SIMPLE_ESCAPE_RE",
+        "_KEY_OCTAL_ESCAPE_RE",
+    )
+    object_witnesses = exact_tuple(
+        (name, exact_getattr(redaction_module, name)) for name in object_names
+    )
+    simple_escape_items = exact_tuple(
+        exact_sorted(redaction_module._KEY_SIMPLE_ESCAPES.items())
+    )
+    canonical_redactor_code = canonical_redactor.__code__
+
+    def builtin_dispatch_is_canonical() -> bool:
+        if (
+            redaction_module.builtins is not canonical_builtins
+            or redaction_module.__dict__.get("__builtins__") is not canonical_module_builtins
+        ):
+            return False
+        for name, expected in builtin_witnesses:
+            # A module global shadows Python's builtin fallback without changing any
+            # helper object/code witness. Reject that before rendering secrets.
+            if redaction_module.__dict__.get(name, expected) is not expected:
+                return False
+            if module_builtins_is_dict:
+                if canonical_module_builtins.get(name) is not expected:
+                    return False
+            elif exact_getattr(canonical_module_builtins, name, None) is not expected:
+                return False
+        return True
+
+    def redaction_dispatch_is_canonical() -> bool:
+        if (
+            _secret_redaction is not redaction_module
+            or safe_exception_detail is not canonical_redactor
+            or exact_getattr(canonical_redactor, "__code__", None)
+            is not canonical_redactor_code
+            or redaction_module.os is not canonical_os
+            or canonical_os.environ is not canonical_environ
+            or redaction_module.re is not canonical_re
+            or canonical_re.sub is not canonical_re_sub
+            or redaction_module.unquote_plus is not canonical_unquote_plus
+            or not builtin_dispatch_is_canonical()
+        ):
+            return False
+        for name, expected, expected_code in callable_witnesses:
+            current = exact_getattr(redaction_module, name, None)
+            if (
+                current is not expected
+                or exact_getattr(expected, "__code__", None) is not expected_code
+            ):
+                return False
+        for name, expected in object_witnesses:
+            if exact_getattr(redaction_module, name, None) is not expected:
+                return False
+        return exact_tuple(
+            exact_sorted(redaction_module._KEY_SIMPLE_ESCAPES.items())
+        ) == simple_escape_items
+
+    def expected_failure_message(command: str, exc: OSError | ValueError) -> str:
+        if exact_isinstance(exc, canonical_value_error):
+            error_label = "ValueError"
+        elif exact_isinstance(exc, canonical_file_not_found_error):
+            error_label = "FileNotFoundError"
+        else:
+            error_label = "OSError"
+
+        if not redaction_dispatch_is_canonical():
+            error_label = "ExpectedFailure"
+            detail = "exception details unavailable"
+        else:
+            detail = canonical_redactor(
+                exc,
+                unavailable_detail="exception details unavailable",
+            )
+            if not redaction_dispatch_is_canonical():
+                error_label = "ExpectedFailure"
+                detail = "exception details unavailable"
+
+        detail = " ".join(detail.splitlines()).strip()
+        suffix = "" if not detail else f": {detail}"
+        return f"Autosport-Data: {command}=FAIL_CLOSED error={error_label}{suffix}"
+
+    return expected_failure_message
 
 
-def main(argv: list[str] | None = None) -> int:
-    args = list(sys.argv[1:] if argv is None else argv)
-    if not args or args[0] in {"-h", "--help"}:
-        print(_USAGE)
-        return 0
+_expected_failure_message = _install_expected_failure_message()
+del _install_expected_failure_message
 
-    command, forwarded = args[0], args[1:]
-    try:
-        return _dispatch(command, forwarded)
-    except (OSError, ValueError) as exc:
-        # This executable is a packaged user-facing boundary. Expected malformed
-        # local input and filesystem failures must be recoverable without a Python
-        # traceback. Deliberately do not catch RuntimeError, SystemExit or
-        # BaseException so programming failures and argparse exit semantics remain
-        # visible to qualification instead of being mislabeled as user-input errors.
-        print(_expected_failure_message(command, exc), file=sys.stderr)
-        return 3
+
+def _install_main():
+    """Bind final expected-failure presentation to canonical sealed authorities."""
+
+    canonical_failure_renderer = _expected_failure_message
+    canonical_failure_renderer_code = canonical_failure_renderer.__code__
+    canonical_expected_failure_types = _EXPECTED_FAILURE_TYPES
+    exact_getattr = getattr
+
+    def main(argv: list[str] | None = None) -> int:
+        args = list(sys.argv[1:] if argv is None else argv)
+        if not args or args[0] in {"-h", "--help"}:
+            print(_USAGE)
+            return 0
+
+        command, forwarded = args[0], args[1:]
+        try:
+            return _dispatch(command, forwarded)
+        except canonical_expected_failure_types as exc:
+            # Both catch types and renderer are closure-owned security authority.
+            # Module-global rebinding must not expand expected failures to programming
+            # errors or bypass the redaction fences.
+            if (
+                _expected_failure_message is canonical_failure_renderer
+                and exact_getattr(canonical_failure_renderer, "__code__", None)
+                is canonical_failure_renderer_code
+            ):
+                message = canonical_failure_renderer(command, exc)
+            else:
+                message = (
+                    f"Autosport-Data: {command}=FAIL_CLOSED "
+                    "error=ExpectedFailure: exception details unavailable"
+                )
+            print(message, file=sys.stderr)
+            return 3
+
+    return main
+
+
+main = _install_main()
+del _install_main
 
 
 if __name__ == "__main__":

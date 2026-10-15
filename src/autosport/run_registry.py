@@ -5,6 +5,7 @@ import json
 import os
 import stat
 import time
+from datetime import datetime, timezone
 from pathlib import Path
 
 from .integrity import atomic_write_json, sha256_file
@@ -18,9 +19,14 @@ from .workspace_lock import (
 from .outcome_trust import (
     OutcomeLineageBinding,
     OutcomeLineageTrustError,
+    TrustedOutcomeRevision,
     assert_compatible_outcome_lineages,
+    assert_outcome_availability_not_downgraded,
+    bind_outcome_lineage_availability,
     outcome_lineage_binding_from_payload,
     outcome_lineage_payload,
+    resolve_outcome_revision_as_of,
+    _canonical_timestamp,
 )
 
 
@@ -70,9 +76,17 @@ _LINEAGE_TRUST_SCHEMA_VERSION = 2
 _LINEAGE_TRUST_FIELD = "outcome_lineage_trust"
 
 
+def _utc_now() -> str:
+    return (
+        datetime.now(timezone.utc)
+        .isoformat(timespec="microseconds")
+        .replace("+00:00", "Z")
+    )
+
+
 def _is_canonical_sha256(value: object) -> bool:
     return (
-        isinstance(value, str)
+        type(value) is str
         and len(value) == 64
         and all(character in _HEX_DIGITS for character in value)
     )
@@ -85,9 +99,60 @@ def _require_canonical_sha256(name: str, value: object) -> str:
 
 
 def _require_nonempty_string(name: str, value: object) -> str:
-    if not isinstance(value, str) or not value:
-        raise ValueError(f"{name} must be a non-empty string")
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
+        raise ValueError(f"{name} must be an exact non-empty string with canonical spelling")
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise ValueError(f"{name} must be an exact non-empty string with canonical UTF-8 spelling") from exc
     return value
+
+
+def _canonical_outcome_lineage_binding(
+    binding: object,
+    *,
+    context: str,
+) -> OutcomeLineageBinding:
+    if type(binding) is not OutcomeLineageBinding:
+        raise ValueError(f"{context} must be an exact OutcomeLineageBinding")
+    _require_nonempty_string(f"{context}.source_identity", binding.source_identity)
+    _require_nonempty_string(f"{context}.record_id", binding.record_id)
+    _require_nonempty_string(f"{context}.root_revision_id", binding.root_revision_id)
+    _require_canonical_sha256(
+        f"{context}.root_record_sha256",
+        binding.root_record_sha256,
+    )
+    revisions = binding.revisions
+    if type(revisions) is not tuple or not revisions:
+        raise ValueError(
+            f"{context}.revisions must be a non-empty exact tuple"
+        )
+    for index, revision in enumerate(revisions, start=1):
+        if type(revision) is not TrustedOutcomeRevision:
+            raise ValueError(
+                f"{context}.revisions[{index}] must be an exact TrustedOutcomeRevision"
+            )
+        if type(revision.revision) is not int or revision.revision <= 0:
+            raise ValueError(
+                f"{context}.revisions[{index}].revision must be an exact positive integer"
+            )
+        _require_nonempty_string(
+            f"{context}.revisions[{index}].revision_id",
+            revision.revision_id,
+        )
+        _require_canonical_sha256(
+            f"{context}.revisions[{index}].record_sha256",
+            revision.record_sha256,
+        )
+    return outcome_lineage_binding_from_payload(
+        outcome_lineage_payload(binding),
+        context=context,
+    )
 
 
 def _portable_basename(value: str) -> str:
@@ -927,6 +992,9 @@ class RunRegistry:
 
     @staticmethod
     def experiment_identity(market_sha256: str, results_sha256: str, strategy_id: str) -> str:
+        market_sha256 = _require_canonical_sha256("market_sha256", market_sha256)
+        results_sha256 = _require_canonical_sha256("results_sha256", results_sha256)
+        strategy_id = _require_nonempty_string("strategy_id", strategy_id)
         canonical = f"{market_sha256}|{results_sha256}|{strategy_id}".encode("utf-8")
         return hashlib.sha256(canonical).hexdigest()
 
@@ -940,9 +1008,31 @@ class RunRegistry:
 
     def assert_outcome_lineage_compatible(self, binding: OutcomeLineageBinding) -> None:
         """Reject a restart/fork before any new economic base is materialized."""
-        if not isinstance(binding, OutcomeLineageBinding):
-            raise ValueError("outcome lineage binding must be an OutcomeLineageBinding")
-        self._assert_outcome_lineage_compatible_state(self._read(), binding)
+        canonical = _canonical_outcome_lineage_binding(
+            binding,
+            context="outcome lineage binding",
+        )
+        self._assert_outcome_lineage_compatible_state(self._read(), canonical)
+
+    def outcome_revision_as_of(
+        self,
+        *,
+        source_identity: str,
+        record_id: str,
+        cutoff: str,
+    ) -> TrustedOutcomeRevision | None:
+        """Resolve only revision truth that this product had accepted by cutoff."""
+
+        source_identity = _require_nonempty_string("source_identity", source_identity)
+        record_id = _require_nonempty_string("record_id", record_id)
+        cutoff = _canonical_timestamp(cutoff, field="outcome as-of cutoff")
+        state = self._read()
+        trusted = self._outcome_lineage_trust_bindings(state).get(
+            (source_identity, record_id)
+        )
+        if trusted is None:
+            return None
+        return resolve_outcome_revision_as_of(trusted, cutoff)
 
     def begin(
         self,
@@ -967,8 +1057,11 @@ class RunRegistry:
         if base_paper_book_sha256 is not None:
             _require_canonical_sha256("base_paper_book_sha256", base_paper_book_sha256)
             _require_canonical_sha256("base_decision_ledger_sha256", base_decision_ledger_sha256)
-        if outcome_lineage is not None and not isinstance(outcome_lineage, OutcomeLineageBinding):
-            raise ValueError("outcome_lineage must be an OutcomeLineageBinding or null")
+        if outcome_lineage is not None:
+            outcome_lineage = _canonical_outcome_lineage_binding(
+                outcome_lineage,
+                context="outcome_lineage",
+            )
 
         state = self._read()
         if outcome_lineage is not None:
@@ -1023,8 +1116,14 @@ class RunRegistry:
             entry["base_paper_book_sha256"] = base_paper_book_sha256
             entry["base_decision_ledger_sha256"] = base_decision_ledger_sha256
         if outcome_lineage is not None:
-            self._record_outcome_lineage_trust_state(state, outcome_lineage)
-            entry["outcome_lineage"] = outcome_lineage_payload(outcome_lineage)
+            product_bound_lineage = self._record_outcome_lineage_trust_state(
+                state,
+                outcome_lineage,
+                accepted_at=_utc_now(),
+            )
+            entry["outcome_lineage"] = outcome_lineage_payload(
+                product_bound_lineage
+            )
         state["runs"][key] = entry
         self._validate_entry(key, entry)
         self._write(state)
@@ -1038,6 +1137,7 @@ class RunRegistry:
         paper_book_sha256: str | None = None,
         decision_ledger_sha256: str | None = None,
     ) -> None:
+        _require_nonempty_string("key", key)
         if result_path is not None and not isinstance(result_path, str):
             raise ValueError("result_path must be a string or null")
         if paper_book_sha256 is not None:
@@ -1068,6 +1168,7 @@ class RunRegistry:
         paper_book_sha256: str,
         decision_ledger_sha256: str,
     ) -> None:
+        _require_nonempty_string("key", key)
         if not isinstance(reason, str):
             raise ValueError("abort reason must be a string")
         _require_canonical_sha256("paper_book_sha256", paper_book_sha256)
@@ -1101,6 +1202,7 @@ class RunRegistry:
         )
 
     def get(self, key: str) -> dict:
+        _require_nonempty_string("key", key)
         item = self._read()["runs"].get(key)
         if item is None:
             raise KeyError(key)
@@ -1232,6 +1334,7 @@ class RunRegistry:
     ) -> None:
         """Complete only a run whose durable summary and current PaperBook prove the same commit."""
 
+        _require_nonempty_string("key", key)
         state = self._read()
         item = state["runs"].get(key)
         if item is None:
@@ -1493,7 +1596,9 @@ class RunRegistry:
         cls,
         state: dict,
         incoming: OutcomeLineageBinding,
-    ) -> None:
+        *,
+        accepted_at: str,
+    ) -> OutcomeLineageBinding:
         if state.get("schema_version") == _LEGACY_SCHEMA_VERSION:
             if any("outcome_lineage" in item for item in state["runs"].values()):
                 raise ValueError(
@@ -1509,10 +1614,13 @@ class RunRegistry:
         trusted = bindings.get(identity)
         if trusted is not None:
             assert_compatible_outcome_lineages(trusted, incoming)
-            if len(incoming.revisions) <= len(trusted.revisions):
-                return
 
-        payload = outcome_lineage_payload(incoming)
+        product_bound = bind_outcome_lineage_availability(
+            incoming,
+            accepted_at=accepted_at,
+            trusted=trusted,
+        )
+        payload = outcome_lineage_payload(product_bound)
         raw_trust = state[_LINEAGE_TRUST_FIELD]
         if trusted is None:
             raw_trust.append(payload)
@@ -1528,6 +1636,7 @@ class RunRegistry:
             else:
                 raise ValueError("run registry lost an accepted outcome lineage trust binding")
         raw_trust.sort(key=lambda value: (value["source_identity"], value["record_id"]))
+        return product_bound
 
     @classmethod
     def _assert_outcome_lineage_compatible_state(
@@ -1567,54 +1676,71 @@ class RunRegistry:
             )
 
     def _validate_entry(self, key: object, item: object) -> None:
-        if not isinstance(key, str) or not key:
-            raise ValueError("run registry contains an invalid experiment key")
-        if not isinstance(item, dict):
+        try:
+            key = _require_nonempty_string("run registry experiment key", key)
+        except ValueError as exc:
+            raise ValueError("run registry contains an invalid experiment key") from exc
+        if type(item) is not dict:
             raise ValueError("run registry contains an invalid run entry")
-        fields = set(item)
+        raw_keys = tuple(dict.keys(item))
+        if any(type(field) is not str for field in raw_keys):
+            raise ValueError("run registry entry keys must be exact strings")
+        fields = frozenset(raw_keys)
         if not _REQUIRED_ENTRY_FIELDS.issubset(fields) or not fields.issubset(
             _REQUIRED_ENTRY_FIELDS | _OPTIONAL_ENTRY_FIELDS
         ):
             raise ValueError("run registry contains invalid run entry fields")
 
-        status = item.get("status")
+        status = dict.__getitem__(item, "status")
         if status not in _ALLOWED_STATUSES:
             raise ValueError("run registry contains an invalid status")
-        market_sha256 = item.get("market_sha256")
-        results_sha256 = item.get("results_sha256")
-        strategy_id = item.get("strategy_id")
-        run_id = item.get("run_id")
+        market_sha256 = dict.__getitem__(item, "market_sha256")
+        results_sha256 = dict.__getitem__(item, "results_sha256")
+        strategy_id = dict.__getitem__(item, "strategy_id")
+        run_id = dict.__getitem__(item, "run_id")
         if not _is_canonical_sha256(market_sha256) or not _is_canonical_sha256(results_sha256):
             raise ValueError("run registry contains invalid canonical SHA-256 identity fields")
-        if (
-            not isinstance(strategy_id, str)
-            or not strategy_id
-            or not isinstance(run_id, str)
-            or not run_id
-        ):
-            raise ValueError("run registry contains invalid experiment identity fields")
+        try:
+            strategy_id = _require_nonempty_string(
+                "run registry strategy_id",
+                strategy_id,
+            )
+            run_id = _require_nonempty_string("run registry run_id", run_id)
+        except ValueError as exc:
+            raise ValueError(
+                "run registry contains invalid experiment identity fields"
+            ) from exc
 
-        base_book_present = "base_paper_book_sha256" in item
-        base_ledger_present = "base_decision_ledger_sha256" in item
+        base_book_present = "base_paper_book_sha256" in fields
+        base_ledger_present = "base_decision_ledger_sha256" in fields
         if base_book_present != base_ledger_present:
             raise ValueError("run registry contains incomplete base transaction evidence")
         for field_name in _HASH_EVIDENCE_FIELDS:
-            if field_name in item and not _is_canonical_sha256(item[field_name]):
+            if field_name in fields and not _is_canonical_sha256(
+                dict.__getitem__(item, field_name)
+            ):
                 raise ValueError(f"run registry contains invalid {field_name}")
 
-        if "outcome_lineage" in item:
+        if "outcome_lineage" in fields:
             try:
                 outcome_lineage_binding_from_payload(
-                    item["outcome_lineage"],
+                    dict.__getitem__(item, "outcome_lineage"),
                     context="run registry outcome_lineage",
                 )
             except OutcomeLineageTrustError as exc:
                 raise ValueError("run registry contains invalid outcome lineage evidence") from exc
-        if "result_path" in item and item["result_path"] is not None and not isinstance(item["result_path"], str):
-            raise ValueError("run registry contains an invalid result_path")
-        if "abort_reason" in item and not isinstance(item["abort_reason"], str):
+        if "result_path" in fields:
+            result_path = dict.__getitem__(item, "result_path")
+            if result_path is not None and type(result_path) is not str:
+                raise ValueError("run registry contains an invalid result_path")
+        if "abort_reason" in fields and type(
+            dict.__getitem__(item, "abort_reason")
+        ) is not str:
             raise ValueError("run registry contains an invalid abort_reason")
-        if "reconciled_from_summary" in item and item["reconciled_from_summary"] is not True:
+        if "reconciled_from_summary" in fields and dict.__getitem__(
+            item,
+            "reconciled_from_summary",
+        ) is not True:
             raise ValueError("run registry contains invalid reconciliation evidence")
 
         expected_base_identity = self.experiment_identity(
@@ -1622,7 +1748,7 @@ class RunRegistry:
             results_sha256,
             strategy_id,
         )
-        if item.get("base_identity") != expected_base_identity:
+        if dict.__getitem__(item, "base_identity") != expected_base_identity:
             raise ValueError("run registry contains an inconsistent base identity")
         expected_keys = {
             expected_base_identity,
@@ -1741,6 +1867,10 @@ class RunRegistry:
                     )
                 try:
                     assert_compatible_outcome_lineages(trusted, durable)
+                    assert_outcome_availability_not_downgraded(
+                        trusted,
+                        durable,
+                    )
                 except OutcomeLineageTrustError as exc:
                     raise ValueError(
                         "run registry conflicts with lineage trust preserved by durable run summary"
@@ -1775,6 +1905,10 @@ class RunRegistry:
                         "run registry outcome lineage lacks registry-level trust binding"
                     )
                 assert_compatible_outcome_lineages(durable_trust, lineage)
+                assert_outcome_availability_not_downgraded(
+                    durable_trust,
+                    lineage,
+                )
                 if len(lineage.revisions) > len(durable_trust.revisions):
                     raise ValueError(
                         "run registry outcome lineage exceeds registry-level trust history"

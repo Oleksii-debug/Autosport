@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Protocol
 
 from .integrity import atomic_write_json
+from .json_integrity import strict_json_loads
 from .opponent_intelligence import FeatureSnapshot, IdentityView, RatingSnapshot
 
 
@@ -1026,7 +1027,9 @@ class SportMemoryRuntime:
 
     def _load(self) -> None:
         try:
-            raw_payload = json.loads(self.path.read_text(encoding="utf-8"))
+            raw_payload = strict_json_loads(
+                self.path.read_text(encoding="utf-8")
+            )
             payload = _require_exact_keys("sport memory checkpoint", raw_payload, self._CHECKPOINT_KEYS)
             if type(payload["schema_version"]) is not int or payload["schema_version"] != self.SCHEMA_VERSION:
                 raise SportMemoryError("unsupported sport memory schema version")

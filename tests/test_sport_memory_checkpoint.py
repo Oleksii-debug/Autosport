@@ -2,9 +2,12 @@ from __future__ import annotations
 
 from hashlib import sha256
 import json
+import shutil
+from unittest.mock import patch
 
 import pytest
 
+import autosport.sport_memory_checkpoint as checkpoint_module
 from autosport.learning_environment import EvidenceTruth
 from autosport.opponent_intelligence import (
     ObservedPerformance,
@@ -19,10 +22,15 @@ from autosport.participant_identity import (
 from autosport.sport_memory_checkpoint import (
     SportMemoryCheckpointError,
     initialize_or_open_bound_sport_memory_runtime,
+    initialize_sport_memory_authority_checkpoint,
     load_verified_sport_memory_authority_checkpoint,
     open_bound_sport_memory_runtime,
 )
-from autosport.sport_memory_runtime import SportMemoryRuntime, SportMemoryScope
+from autosport.sport_memory_runtime import (
+    SportMemoryError,
+    SportMemoryRuntime,
+    SportMemoryScope,
+)
 
 
 SHA_A = "a" * 64
@@ -154,6 +162,303 @@ def test_bound_runtime_captures_exact_roots_and_reopens_same_generation(tmp_path
 
     assert reopened.authority_generation_sha256 == checkpoint.generation_sha256
     assert reopened.authority_generation_sha256 == runtime.authority_generation_sha256
+
+
+
+def test_existing_runtime_without_monotonic_history_requires_explicit_migration(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+
+    shutil.rmtree(authority_root)
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        reopened_identity,
+    )
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="lacks independent monotonic history",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            reopened_identity,
+            reopened_opponent,
+        )
+
+
+def test_pristine_checkpoint_free_legacy_prefix_establishes_monotonic_baseline(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    authority, verified_opponent = checkpoint_module._capture_checkpoint_and_opponent(
+        identity,
+        opponent,
+    )
+    legacy = SportMemoryRuntime(
+        runtime_path,
+        verified_opponent,
+        authority_generation_sha256=authority.generation_sha256,
+    )
+    legacy._persist()
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+    assert not checkpoint_module._read_runtime_authority_history(
+        checkpoint_module._runtime_monotonic_authority(runtime_path)
+    )
+
+    reopened = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    assert checkpoint_path.is_file()
+    assert reopened.participant_history("p-alex", _scope()) == ()
+    history = checkpoint_module._read_runtime_authority_history(
+        checkpoint_module._runtime_monotonic_authority(runtime_path)
+    )
+    assert history
+
+def test_valid_old_runtime_rollback_is_rejected_by_independent_monotonic_authority(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    pristine_bytes = runtime_path.read_bytes()
+    artifact = runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+    current_bytes = runtime_path.read_bytes()
+    assert current_bytes != pristine_bytes
+
+    runtime_path.write_bytes(pristine_bytes)
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        reopened_identity,
+    )
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="rollback/monotonic mismatch",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            reopened_identity,
+            reopened_opponent,
+        )
+
+    runtime_path.write_bytes(current_bytes)
+    reopened = open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        reopened_identity,
+        reopened_opponent,
+    )
+    assert reopened.get(artifact.memory_id) == artifact
+
+
+def test_runtime_publish_recovers_commit_after_local_bytes_were_published(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    original_commit = checkpoint_module.MonotonicWorkspaceAuthority.commit
+    failed = False
+
+    def fail_once_after_local_publish(self, **kwargs):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("injected monotonic commit failure")
+        return original_commit(self, **kwargs)
+
+    monkeypatch.setattr(
+        checkpoint_module.MonotonicWorkspaceAuthority,
+        "commit",
+        fail_once_after_local_publish,
+    )
+    with pytest.raises(RuntimeError, match="injected monotonic commit failure"):
+        runtime.materialize(
+            participant_entity_id="p-alex",
+            scope=_scope(),
+            causal_cutoff=T2,
+            published_at=T3,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=1,
+        )
+
+    monkeypatch.setattr(
+        checkpoint_module.MonotonicWorkspaceAuthority,
+        "commit",
+        original_commit,
+    )
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        reopened_identity,
+    )
+    reopened = open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        reopened_identity,
+        reopened_opponent,
+    )
+    history = reopened.participant_history("p-alex", _scope())
+    assert len(history) == 1
+    assert history[0].participant_entity_id == "p-alex"
+
+
+def test_missing_activated_runtime_history_cannot_be_rebaselined(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    authority = checkpoint_module._runtime_monotonic_authority(runtime_path)
+    records = tuple(authority.records_dir.glob("*.json"))
+    assert records
+    for record in records:
+        record.unlink()
+
+    reopened_identity = ParticipantIdentityRegistry(identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        opponent.path,
+        reopened_identity,
+    )
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="monotonic authority history is invalid",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            reopened_identity,
+            reopened_opponent,
+        )
+
+
+def test_runtime_publish_retries_with_new_generation_after_prepare_only_crash(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    authority_root = tmp_path.parent / f".{tmp_path.name}-sport-memory-authority"
+    monkeypatch.setenv("AUTOSPORT_MONOTONIC_AUTHORITY_ROOT", str(authority_root))
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    original_persist = SportMemoryRuntime._persist
+    failed = False
+
+    def fail_once_before_local_publish(self):
+        nonlocal failed
+        if not failed:
+            failed = True
+            raise RuntimeError("injected pre-publication failure")
+        return original_persist(self)
+
+    monkeypatch.setattr(
+        SportMemoryRuntime,
+        "_persist",
+        fail_once_before_local_publish,
+    )
+    with pytest.raises(RuntimeError, match="injected pre-publication failure"):
+        runtime.materialize(
+            participant_entity_id="p-alex",
+            scope=_scope(),
+            causal_cutoff=T2,
+            published_at=T3,
+            code_sha256=SHA_A,
+            dependency_sha256=SHA_B,
+            min_support=1,
+        )
+
+    monkeypatch.setattr(SportMemoryRuntime, "_persist", original_persist)
+    artifact = runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+    assert runtime.get(artifact.memory_id) == artifact
+
+    authority = checkpoint_module._runtime_monotonic_authority(runtime_path)
+    history = authority.read_history()
+    generations = [record.generation for record in history]
+    assert generations == sorted(generations)
+    assert max(generations) >= 3
 
 
 def test_bound_runtime_consumes_fresh_authority_after_canonical_files_change(tmp_path):
@@ -636,6 +941,378 @@ def test_bound_runtime_detects_direct_dict_and_selector_path_drift(tmp_path):
     refreshed = runtime._refresh_bound_authority()
     assert refreshed.path == opponent.path
     assert refreshed.identity_registry.path == identity.path
+
+
+def test_runtime_rejects_duplicate_top_level_keys_without_rewriting_corruption(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    raw = runtime_path.read_text(encoding="utf-8")
+    assert raw.count('"artifacts"') == 1
+    runtime_path.write_text(
+        raw.replace(
+            '"artifacts": [',
+            '"artifacts": [],\n  "artifacts": [',
+            1,
+        ),
+        encoding="utf-8",
+    )
+    corrupted = runtime_path.read_bytes()
+
+    for _attempt in range(2):
+        with pytest.raises(
+            SportMemoryError,
+            match="invalid sport memory checkpoint",
+        ):
+            open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+        assert runtime_path.read_bytes() == corrupted
+
+
+def test_runtime_rejects_duplicate_nested_artifact_key(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+    raw = runtime_path.read_text(encoding="utf-8")
+    assert raw.count('"memory_id"') == 1
+    runtime_path.write_text(
+        raw.replace(
+            '"memory_id": "',
+            f'"memory_id": "{SHA_A}",\n      "memory_id": "',
+            1,
+        ),
+        encoding="utf-8",
+    )
+
+    with pytest.raises(
+        SportMemoryError,
+        match="invalid sport memory checkpoint",
+    ):
+        open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+
+
+def test_runtime_deleted_during_open_cannot_become_empty_in_memory_authority(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    original_bound_runtime = checkpoint_module.BoundSportMemoryRuntime
+
+    def delete_then_construct(*args, **kwargs):
+        runtime_path.unlink()
+        return original_bound_runtime(*args, **kwargs)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.BoundSportMemoryRuntime",
+        side_effect=delete_then_construct,
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="runtime disappeared during open",
+        ):
+            open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert not runtime_path.exists()
+
+
+def test_committed_checkpoint_with_missing_runtime_fails_closed_without_reinitializing(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    checkpoint_bytes = checkpoint_path.read_bytes()
+
+    runtime_path.unlink()
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="canonical authority checkpoint exists without sport-memory runtime",
+    ):
+        initialize_or_open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+
+    assert checkpoint_path.read_bytes() == checkpoint_bytes
+    assert not runtime_path.exists()
+
+
+def test_checkpoint_publication_failure_leaves_recoverable_pristine_runtime_prefix(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.atomic_write_json",
+        side_effect=OSError("checkpoint publication failed"),
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="cannot persist sport-memory authority checkpoint",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+
+    recovered = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    checkpoint = load_verified_sport_memory_authority_checkpoint(
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    assert recovered.authority_generation_sha256 == checkpoint.generation_sha256
+
+
+def test_pristine_runtime_disappearing_during_recovery_does_not_commit_checkpoint(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.atomic_write_json",
+        side_effect=OSError("checkpoint publication failed"),
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="cannot persist sport-memory authority checkpoint",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+    original_runtime = checkpoint_module.SportMemoryRuntime
+
+    def delete_then_construct(*args, **kwargs):
+        runtime_path.unlink()
+        return original_runtime(*args, **kwargs)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.SportMemoryRuntime",
+        side_effect=delete_then_construct,
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="runtime disappeared during checkpoint recovery",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert not runtime_path.exists()
+    assert not checkpoint_path.exists()
+
+
+def test_verified_pristine_runtime_cannot_disappear_before_checkpoint_publication(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    with patch(
+        "autosport.sport_memory_checkpoint.atomic_write_json",
+        side_effect=OSError("checkpoint publication failed"),
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="cannot persist sport-memory authority checkpoint",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+    original_verify = checkpoint_module._verify_pristine_runtime_without_checkpoint
+
+    def verify_then_delete(*args, **kwargs):
+        original_verify(*args, **kwargs)
+        runtime_path.unlink()
+
+    with patch(
+        "autosport.sport_memory_checkpoint._verify_pristine_runtime_without_checkpoint",
+        side_effect=verify_then_delete,
+    ):
+        with pytest.raises(
+            SportMemoryCheckpointError,
+            match="runtime disappeared before authority checkpoint publication",
+        ):
+            initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+
+    assert not runtime_path.exists()
+    assert not checkpoint_path.exists()
+
+
+def test_non_pristine_runtime_without_checkpoint_cannot_reissue_authority(tmp_path):
+    identity, opponent = _canonical_stores(tmp_path, populated=True)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    runtime = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    runtime.materialize(
+        participant_entity_id="p-alex",
+        scope=_scope(),
+        causal_cutoff=T2,
+        published_at=T3,
+        code_sha256=SHA_A,
+        dependency_sha256=SHA_B,
+        min_support=1,
+    )
+
+    checkpoint_path.unlink()
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="non-pristine sport-memory runtime exists without canonical authority checkpoint",
+    ):
+        initialize_or_open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+
+    assert runtime_path.is_file()
+    assert not checkpoint_path.exists()
+
+
+def test_standalone_checkpoint_accepts_explicit_matching_pristine_runtime(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    checkpoint = initialize_sport_memory_authority_checkpoint(
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+    SportMemoryRuntime.initialize_pristine(
+        runtime_path,
+        opponent,
+        authority_generation_sha256=checkpoint.generation_sha256,
+    )
+
+    bound = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    assert bound.authority_generation_sha256 == checkpoint.generation_sha256
+    assert runtime_path.is_file()
+    assert checkpoint_path.is_file()
+
+
+def test_standalone_checkpoint_without_runtime_is_not_laundered_as_first_boot(
+    tmp_path,
+):
+    identity, opponent = _canonical_stores(tmp_path)
+    checkpoint_path, runtime_path = _paths(tmp_path)
+    checkpoint = initialize_sport_memory_authority_checkpoint(
+        checkpoint_path,
+        identity,
+        opponent,
+    )
+
+    with pytest.raises(
+        SportMemoryCheckpointError,
+        match="canonical authority checkpoint exists without sport-memory runtime",
+    ):
+        initialize_or_open_bound_sport_memory_runtime(
+            runtime_path,
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+
+    assert (
+        load_verified_sport_memory_authority_checkpoint(
+            checkpoint_path,
+            identity,
+            opponent,
+        )
+        == checkpoint
+    )
+    assert not runtime_path.exists()
 
 
 def test_existing_runtime_without_checkpoint_cannot_self_attest_generation(tmp_path):

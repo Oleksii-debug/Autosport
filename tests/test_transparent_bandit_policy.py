@@ -1,7 +1,11 @@
 import hashlib
 import unittest
+from dataclasses import replace
 from decimal import Decimal
+from unittest.mock import patch
+from fractions import Fraction
 
+import autosport.transparent_bandit_policy as policy_module
 from autosport.learning_environment import (
     CausalLearningEnvironment,
     EnvironmentIdentity,
@@ -11,10 +15,47 @@ from autosport.learning_environment import (
     Outcome,
     RewardEvidence,
 )
-from autosport.transparent_bandit_policy import BanditPolicyState
+from autosport.transparent_bandit_policy import ActionEstimate, BanditPolicyState
 
 
 class TransparentBanditPolicyTests(unittest.TestCase):
+    def test_action_estimate_rejects_rebound_decimal_root_before_dispatch(self) -> None:
+        hostile_calls: list[str] = []
+
+        class ForgedDecimal:
+            def is_finite(self):
+                hostile_calls.append("is_finite")
+                raise AssertionError("forged Decimal dispatch executed")
+
+        forged = object.__new__(ForgedDecimal)
+        with patch.object(policy_module, "Decimal", ForgedDecimal):
+            with self.assertRaisesRegex(
+                LearningEnvironmentError,
+                "finite exact Decimal",
+            ):
+                ActionEstimate("PAPER_PROPOSAL", 1, forged)
+
+        self.assertEqual(hostile_calls, [])
+
+    def test_policy_state_rejects_rebound_estimate_root_before_dispatch(self) -> None:
+        policy, _action, _reward, _transition = self._resolved_paper_step()
+        hostile_calls: list[str] = []
+
+        class ForgedEstimate:
+            def __getattribute__(self, name):
+                hostile_calls.append(name)
+                raise AssertionError("forged ActionEstimate dispatch executed")
+
+        forged = object.__new__(ForgedEstimate)
+        with patch.object(policy_module, "ActionEstimate", ForgedEstimate):
+            with self.assertRaisesRegex(
+                LearningEnvironmentError,
+                "exact ActionEstimate",
+            ):
+                replace(policy, estimates=(forged,))
+
+        self.assertEqual(hostile_calls, [])
+
     def _resolved_paper_step(self):
         identity = EnvironmentIdentity(
             source_id="paper-replay-source-v1",
@@ -155,6 +196,82 @@ class TransparentBanditPolicyTests(unittest.TestCase):
 
         self.assertNotEqual(policy.policy_id, changed_seed.policy_id)
         self.assertNotEqual(policy.policy_id, changed_config.policy_id)
+
+
+    def test_policy_rejects_estimate_subclass_that_can_change_selection_behavior(self) -> None:
+        class HostileEstimate(ActionEstimate):
+            @property
+            def selection_score(self) -> Fraction:
+                return Fraction(999)
+
+        canonical = ActionEstimate("WAIT", 0, Decimal("0"))
+        hostile = HostileEstimate("WAIT", 0, Decimal("0"))
+        self.assertEqual(hostile.to_payload(), canonical.to_payload())
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "exact ActionEstimate",
+        ):
+            BanditPolicyState(
+                environment_id="a" * 64,
+                protocol_id="policy-estimate-type-root-v1",
+                config_sha256="b" * 64,
+                seed=17,
+                generation=0,
+                estimates=(hostile,),
+            )
+
+    def test_action_estimate_rejects_decimal_subclass_before_virtual_dispatch(self) -> None:
+        class HostileDecimal(Decimal):
+            def is_finite(self):
+                raise AssertionError("Decimal subclass virtual dispatch executed")
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "finite exact Decimal",
+        ):
+            ActionEstimate("WAIT", 0, HostileDecimal("0"))
+
+    def test_action_estimate_rejects_integer_subclass_for_observation_identity(self) -> None:
+        class HostileInt(int):
+            def __add__(self, other):
+                raise AssertionError("integer subclass arithmetic executed")
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "observations must be an integer",
+        ):
+            ActionEstimate("WAIT", HostileInt(0), Decimal("0"))
+
+    def test_policy_rejects_frozenset_subclass_before_iteration_dispatch(self) -> None:
+        class HostileFrozenSet(frozenset):
+            def __iter__(self):
+                raise AssertionError("frozenset subclass iteration executed")
+
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "action_types must be a non-empty frozenset",
+        ):
+            BanditPolicyState.initial(
+                environment_id="a" * 64,
+                protocol_id="policy-action-type-root-v1",
+                config_sha256="b" * 64,
+                seed=17,
+                action_types=HostileFrozenSet({"WAIT"}),
+            )
+
+        policy = BanditPolicyState.initial(
+            environment_id="a" * 64,
+            protocol_id="policy-admissibility-root-v1",
+            config_sha256="b" * 64,
+            seed=17,
+            action_types=frozenset({"WAIT"}),
+        )
+        with self.assertRaisesRegex(
+            LearningEnvironmentError,
+            "admissible_actions must be a non-empty frozenset",
+        ):
+            policy.choose(admissible_actions=HostileFrozenSet({"WAIT"}))
 
 
 if __name__ == "__main__":

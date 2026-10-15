@@ -26,6 +26,12 @@ from .learning_environment import (
 POLICY_SCHEMA: Final = "autosport.transparent_bandit_policy"
 POLICY_SCHEMA_VERSION: Final = 1
 
+_CANONICAL_DECIMAL_TYPE = Decimal
+_CANONICAL_ACTION_TYPE = Action
+_CANONICAL_REWARD_EVIDENCE_TYPE = RewardEvidence
+_CANONICAL_TRANSITION_TYPE = Transition
+_CANONICAL_EVIDENCE_TRUTH_TYPE = EvidenceTruth
+
 
 def _text(name: str, value: object) -> str:
     if type(value) is not str or not value or value != value.strip() or "\x00" in value:
@@ -42,7 +48,9 @@ def _sha256(name: str, value: object) -> str:
 
 
 def _exact_decimal(name: str, value: object) -> Decimal:
-    if not isinstance(value, Decimal) or not value.is_finite():
+    if type(value) is not _CANONICAL_DECIMAL_TYPE:
+        raise LearningEnvironmentError(f"{name} must be a finite exact Decimal")
+    if not value.is_finite():
         raise LearningEnvironmentError(f"{name} must be a finite exact Decimal")
     return value
 
@@ -71,7 +79,7 @@ def _exact_decimal_add(left: Decimal, right: Decimal) -> Decimal:
     )
     sign = 1 if coefficient < 0 else 0
     digits = tuple(int(character) for character in str(abs(coefficient))) if coefficient else (0,)
-    return Decimal((sign, digits, exponent))
+    return _CANONICAL_DECIMAL_TYPE((sign, digits, exponent))
 
 
 def _stable_hash(payload: object) -> str:
@@ -97,25 +105,40 @@ class ActionEstimate:
 
     def __post_init__(self) -> None:
         _text("action_type", self.action_type)
-        if isinstance(self.observations, bool) or not isinstance(self.observations, int):
+        if type(self.observations) is not int:
             raise LearningEnvironmentError("observations must be an integer")
         if self.observations < 0:
             raise LearningEnvironmentError("observations must be non-negative")
         _exact_decimal("reward_sum", self.reward_sum)
-        if self.observations == 0 and self.reward_sum != Decimal("0"):
+        if (
+            self.observations == 0
+            and self.reward_sum != _CANONICAL_DECIMAL_TYPE("0")
+        ):
             raise LearningEnvironmentError("unobserved action estimate must have zero reward_sum")
 
     @property
     def mean_reward(self) -> Decimal:
         if self.observations == 0:
-            return Decimal("0")
-        return self.reward_sum / Decimal(self.observations)
+            raise LearningEnvironmentError(
+                "unobserved action has no empirical mean reward"
+            )
+        return self.reward_sum / _CANONICAL_DECIMAL_TYPE(self.observations)
 
     @property
     def exact_mean_reward(self) -> Fraction:
         if self.observations == 0:
-            return Fraction(0)
+            raise LearningEnvironmentError(
+                "unobserved action has no empirical mean reward"
+            )
         return Fraction(self.reward_sum) / self.observations
+
+    @property
+    def selection_score(self) -> Fraction:
+        """Deterministic bootstrap score; never evidence of an observed reward."""
+
+        if self.observations == 0:
+            return Fraction(0)
+        return self.exact_mean_reward
 
     def to_payload(self) -> dict[str, object]:
         return {
@@ -125,9 +148,12 @@ class ActionEstimate:
         }
 
 
+_CANONICAL_ACTION_ESTIMATE_TYPE = ActionEstimate
+
+
 @dataclass(frozen=True, slots=True)
 class BanditPolicyState:
-    """Immutable restart-safe policy state; selection is deterministic and bounded."""
+    """Immutable policy state; non-initial restart requires external identity authority."""
 
     environment_id: str
     protocol_id: str
@@ -151,16 +177,19 @@ class BanditPolicyState:
         _sha256("environment_id", self.environment_id)
         _text("protocol_id", self.protocol_id)
         _sha256("config_sha256", self.config_sha256)
-        if isinstance(self.seed, bool) or not isinstance(self.seed, int) or self.seed < 0:
+        if type(self.seed) is not int or self.seed < 0:
             raise LearningEnvironmentError("seed must be a non-negative integer")
-        if isinstance(self.generation, bool) or not isinstance(self.generation, int):
+        if type(self.generation) is not int:
             raise LearningEnvironmentError("generation must be an integer")
         if self.generation < 0:
             raise LearningEnvironmentError("generation must be non-negative")
         if type(self.estimates) is not tuple or not self.estimates:
             raise LearningEnvironmentError("estimates must be a non-empty tuple")
-        if any(not isinstance(item, ActionEstimate) for item in self.estimates):
-            raise LearningEnvironmentError("estimates must contain ActionEstimate values")
+        if any(
+            type(item) is not _CANONICAL_ACTION_ESTIMATE_TYPE
+            for item in self.estimates
+        ):
+            raise LearningEnvironmentError("estimates must contain exact ActionEstimate values")
         action_types = tuple(item.action_type for item in self.estimates)
         if action_types != tuple(sorted(action_types)) or len(action_types) != len(set(action_types)):
             raise LearningEnvironmentError("policy action types must be sorted and unique")
@@ -178,6 +207,10 @@ class BanditPolicyState:
             raise LearningEnvironmentError("applied action/reward histories must have equal length")
         if self.generation != len(self.applied_action_ids):
             raise LearningEnvironmentError("generation must equal applied update count")
+        if sum(item.observations for item in self.estimates) != self.generation:
+            raise LearningEnvironmentError(
+                "generation must equal accumulated policy observation count"
+            )
         if self.generation == 0:
             if self.predecessor_policy_id is not None:
                 raise LearningEnvironmentError("initial policy cannot have predecessor_policy_id")
@@ -194,7 +227,7 @@ class BanditPolicyState:
         seed: int,
         action_types: frozenset[str],
     ) -> "BanditPolicyState":
-        if not isinstance(action_types, frozenset) or not action_types:
+        if type(action_types) is not frozenset or not action_types:
             raise LearningEnvironmentError("action_types must be a non-empty frozenset")
         canonical = sorted(_text("action_type", value) for value in action_types)
         if len(canonical) != len(set(canonical)):
@@ -205,7 +238,14 @@ class BanditPolicyState:
             config_sha256=_sha256("config_sha256", config_sha256),
             seed=seed,
             generation=0,
-            estimates=tuple(ActionEstimate(name, 0, Decimal("0")) for name in canonical),
+            estimates=tuple(
+                _CANONICAL_ACTION_ESTIMATE_TYPE(
+                    name,
+                    0,
+                    _CANONICAL_DECIMAL_TYPE("0"),
+                )
+                for name in canonical
+            ),
         )
 
     @property
@@ -230,8 +270,20 @@ class BanditPolicyState:
         }
 
     @classmethod
-    def from_payload(cls, payload: object) -> "BanditPolicyState":
-        """Reconstruct one policy without accepting aliases or lossy numerics."""
+    def from_payload(
+        cls,
+        payload: object,
+        *,
+        expected_policy_id: str | None = None,
+    ) -> "BanditPolicyState":
+        """Reconstruct a policy and bind non-initial restart to external identity.
+
+        policy_id is derived from the payload itself, so a rewritten restart
+        artifact cannot authenticate its own accumulated history. Any non-initial
+        restart therefore requires an expected identity obtained from an authority
+        outside these caller-rewritable bytes. The product path uses the champion
+        identity already resolved from ScientificRegistry/promotion authority.
+        """
 
         expected = {
             "schema",
@@ -262,7 +314,7 @@ class BanditPolicyState:
             if type(reward_text) is not str:
                 raise LearningEnvironmentError("policy reward_sum must be Decimal text")
             try:
-                reward_sum = Decimal(reward_text)
+                reward_sum = _CANONICAL_DECIMAL_TYPE(reward_text)
             except InvalidOperation as exc:
                 raise LearningEnvironmentError(
                     "policy reward_sum must be finite canonical Decimal text"
@@ -272,7 +324,7 @@ class BanditPolicyState:
                     "policy reward_sum must be finite canonical Decimal text"
                 )
             estimates.append(
-                ActionEstimate(
+                _CANONICAL_ACTION_ESTIMATE_TYPE(
                     action_type=raw["action_type"],
                     observations=raw["observations"],
                     reward_sum=reward_sum,
@@ -281,7 +333,7 @@ class BanditPolicyState:
         for name in ("applied_action_ids", "applied_reward_ids"):
             if type(payload[name]) is not list:
                 raise LearningEnvironmentError(f"policy {name} must be a list")
-        return cls(
+        state = cls(
             environment_id=payload["environment_id"],
             protocol_id=payload["protocol_id"],
             config_sha256=payload["config_sha256"],
@@ -294,10 +346,22 @@ class BanditPolicyState:
             schema=payload["schema"],
             schema_version=payload["schema_version"],
         )
+        if expected_policy_id is None:
+            if state.generation > 0:
+                raise LearningEnvironmentError(
+                    "non-initial policy restart requires external history provenance"
+                )
+            return state
+        expected = _sha256("expected_policy_id", expected_policy_id)
+        if state.policy_id != expected:
+            raise LearningEnvironmentError(
+                "policy restart identity does not match external history provenance"
+            )
+        return state
 
     def choose(self, *, admissible_actions: frozenset[str]) -> str:
         """Choose only among owner-supplied actions; deterministic ties are lexical."""
-        if not isinstance(admissible_actions, frozenset) or not admissible_actions:
+        if type(admissible_actions) is not frozenset or not admissible_actions:
             raise LearningEnvironmentError("admissible_actions must be a non-empty frozenset")
         admitted = {_text("admissible action", value) for value in admissible_actions}
         estimates = {item.action_type: item for item in self.estimates}
@@ -308,7 +372,7 @@ class BanditPolicyState:
             )
         ranked = sorted(
             admitted,
-            key=lambda action_type: (-estimates[action_type].exact_mean_reward, action_type),
+            key=lambda action_type: (-estimates[action_type].selection_score, action_type),
         )
         return ranked[0]
 
@@ -319,12 +383,21 @@ class BanditPolicyState:
         reward: RewardEvidence,
         transition: Transition,
     ) -> tuple["BanditPolicyState", "PolicyUpdateEvidence"]:
-        if not isinstance(action, Action):
-            raise TypeError("action must be Action")
-        if not isinstance(reward, RewardEvidence):
-            raise TypeError("reward must be RewardEvidence")
-        if not isinstance(transition, Transition):
-            raise TypeError("transition must be Transition")
+        if (
+            Action is not _CANONICAL_ACTION_TYPE
+            or RewardEvidence is not _CANONICAL_REWARD_EVIDENCE_TYPE
+            or Transition is not _CANONICAL_TRANSITION_TYPE
+            or EvidenceTruth is not _CANONICAL_EVIDENCE_TRUTH_TYPE
+        ):
+            raise LearningEnvironmentError(
+                "policy causal witness type authority changed"
+            )
+        if type(action) is not _CANONICAL_ACTION_TYPE:
+            raise TypeError("action must be exact Action")
+        if type(reward) is not _CANONICAL_REWARD_EVIDENCE_TYPE:
+            raise TypeError("reward must be exact RewardEvidence")
+        if type(transition) is not _CANONICAL_TRANSITION_TYPE:
+            raise TypeError("transition must be exact Transition")
         if action.environment_id != self.environment_id:
             raise LearningEnvironmentError("action belongs to another policy environment")
         if reward.environment_id != self.environment_id or transition.environment_id != self.environment_id:
@@ -346,7 +419,7 @@ class BanditPolicyState:
         current = estimates.get(action.action_type)
         if current is None:
             raise LearningEnvironmentError("resolved action is outside immutable policy identity")
-        estimates[action.action_type] = ActionEstimate(
+        estimates[action.action_type] = _CANONICAL_ACTION_ESTIMATE_TYPE(
             action.action_type,
             current.observations + 1,
             _exact_decimal_add(current.reward_sum, reward.reward),
@@ -403,6 +476,15 @@ class PolicyUpdateEvidence:
     transition: Transition | None = None
 
     def __post_init__(self) -> None:
+        if (
+            Action is not _CANONICAL_ACTION_TYPE
+            or RewardEvidence is not _CANONICAL_REWARD_EVIDENCE_TYPE
+            or Transition is not _CANONICAL_TRANSITION_TYPE
+            or EvidenceTruth is not _CANONICAL_EVIDENCE_TRUTH_TYPE
+        ):
+            raise LearningEnvironmentError(
+                "policy causal witness type authority changed"
+            )
         _sha256("environment_id", self.environment_id)
         _text("protocol_id", self.protocol_id)
         _sha256("config_sha256", self.config_sha256)
@@ -420,39 +502,65 @@ class PolicyUpdateEvidence:
             "reward_id",
         ):
             _sha256(name, getattr(self, name))
-        if not isinstance(self.reward_truth, EvidenceTruth):
-            raise LearningEnvironmentError("reward_truth must be EvidenceTruth")
-        if self.reward_truth is EvidenceTruth.SIMULATED:
+        if type(self.reward_truth) is not _CANONICAL_EVIDENCE_TRUTH_TYPE:
+            raise LearningEnvironmentError("reward_truth must be exact EvidenceTruth")
+        if self.reward_truth is _CANONICAL_EVIDENCE_TRUTH_TYPE.SIMULATED:
             _text("simulation_model_id", self.simulation_model_id)
         elif self.simulation_model_id is not None:
             raise LearningEnvironmentError("observed policy update cannot carry simulation_model_id")
 
         witnesses = (self.action, self.reward, self.transition)
-        if any(item is not None for item in witnesses):
-            if not all(item is not None for item in witnesses):
-                raise LearningEnvironmentError("policy update causal witnesses must be complete")
-            if not isinstance(self.action, Action):
-                raise LearningEnvironmentError("policy update action witness must be Action")
-            if not isinstance(self.reward, RewardEvidence):
-                raise LearningEnvironmentError("policy update reward witness must be RewardEvidence")
-            if not isinstance(self.transition, Transition):
-                raise LearningEnvironmentError("policy update transition witness must be Transition")
-            if self.action.environment_id != self.environment_id:
-                raise LearningEnvironmentError("policy update action witness environment mismatch")
-            if self.reward.environment_id != self.environment_id:
-                raise LearningEnvironmentError("policy update reward witness environment mismatch")
-            if self.transition.environment_id != self.environment_id:
-                raise LearningEnvironmentError("policy update transition witness environment mismatch")
-            if self.action.action_id != self.action_id:
-                raise LearningEnvironmentError("policy update action witness identity mismatch")
-            if self.reward.reward_id != self.reward_id:
-                raise LearningEnvironmentError("policy update reward witness identity mismatch")
-            if self.transition.transition_id != self.transition_id:
-                raise LearningEnvironmentError("policy update transition witness identity mismatch")
-            if self.reward.truth is not self.reward_truth:
-                raise LearningEnvironmentError("policy update reward truth witness mismatch")
-            if self.reward.simulation_model_id != self.simulation_model_id:
-                raise LearningEnvironmentError("policy update simulation model witness mismatch")
+        if not all(item is not None for item in witnesses):
+            raise LearningEnvironmentError(
+                "policy update causal witnesses are required"
+            )
+        if type(self.action) is not _CANONICAL_ACTION_TYPE:
+            raise LearningEnvironmentError(
+                "policy update action witness must be exact Action"
+            )
+        if type(self.reward) is not _CANONICAL_REWARD_EVIDENCE_TYPE:
+            raise LearningEnvironmentError(
+                "policy update reward witness must be exact RewardEvidence"
+            )
+        if type(self.transition) is not _CANONICAL_TRANSITION_TYPE:
+            raise LearningEnvironmentError(
+                "policy update transition witness must be exact Transition"
+            )
+        if self.action.environment_id != self.environment_id:
+            raise LearningEnvironmentError("policy update action witness environment mismatch")
+        if self.reward.environment_id != self.environment_id:
+            raise LearningEnvironmentError("policy update reward witness environment mismatch")
+        if self.transition.environment_id != self.environment_id:
+            raise LearningEnvironmentError("policy update transition witness environment mismatch")
+        if self.action.action_id != self.action_id:
+            raise LearningEnvironmentError("policy update action witness identity mismatch")
+        if self.reward.reward_id != self.reward_id:
+            raise LearningEnvironmentError("policy update reward witness identity mismatch")
+        if self.transition.transition_id != self.transition_id:
+            raise LearningEnvironmentError("policy update transition witness identity mismatch")
+        if (
+            self.reward.action_id != self.action_id
+            or self.transition.action_id != self.action_id
+        ):
+            raise LearningEnvironmentError(
+                "policy update witnesses do not bind the exact action"
+            )
+        if self.transition.observation_id != self.action.observation_id:
+            raise LearningEnvironmentError(
+                "policy update witnesses do not bind the exact observation"
+            )
+        if self.transition.outcome_id != self.reward.outcome_id:
+            raise LearningEnvironmentError(
+                "policy update witnesses do not bind the exact outcome"
+            )
+        if self.transition.reward_id != self.reward_id:
+            raise LearningEnvironmentError(
+                "policy update witnesses do not bind the exact reward"
+            )
+        if self.reward.truth is not self.reward_truth:
+            raise LearningEnvironmentError("policy update reward truth witness mismatch")
+        if self.reward.simulation_model_id != self.simulation_model_id:
+            raise LearningEnvironmentError("policy update simulation model witness mismatch")
 
     @property
     def update_id(self) -> str:

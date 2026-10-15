@@ -189,14 +189,19 @@ public static class AutosportNativeWindows
             var className = new System.Text.StringBuilder(128);
             var classLength = GetClassName(result[i], className, className.Capacity);
             var name = classLength > 0 ? className.ToString() : "";
-            var webview = name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal) ||
-                          name.Equals("Chrome_RenderWidgetHostHWND", StringComparison.Ordinal);
+            // Windows Candidate 38776077488: a visible Chrome_WidgetWin_
+            // blocked real UIA FromHandle. Try the native render-content HWND
+            // before the wrapper when available; never prune candidates.
+            // Genuine UIA PID/AutomationId, F2/F8, live-region and STOP still gate.
+            var renderHost = name.Equals("Chrome_RenderWidgetHostHWND", StringComparison.Ordinal);
+            var chromeWidget = name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal);
             var visible = IsWindowVisible(result[i]);
-            priority[i] = visible ? (webview ? 0 : 1) : (webview ? 2 : 3);
+            priority[i] = renderHost ? 0 : chromeWidget ? (visible ? 1 : 2)
+                : (visible ? 3 : 4);
         }
         var ordered = new IntPtr[count];
         var write = 0;
-        for (var bucket = 0; bucket < 4; bucket++)
+        for (var bucket = 0; bucket < 5; bucket++)
         {
             for (var i = 0; i < count; i++)
             {

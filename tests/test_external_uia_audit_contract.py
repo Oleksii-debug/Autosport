@@ -1051,11 +1051,11 @@ def test_external_uia_os_child_hwnd_candidates_are_bounded_and_never_replace_sem
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in _windows_workflow()
 
 
-def test_external_uia_prioritizes_visible_webview_hwnds_without_forging_semantic_pass() -> None:
-    """The first blocked HWND may consume the only bounded real UIA worker.
+def test_external_uia_prioritizes_render_hwnds_without_forging_semantic_pass() -> None:
+    """The last real packaged audit hung on visible Chrome_WidgetWin_ FromHandle.
 
-    Prefer visible Chromium/WebView2 candidates but neither prune HWNDs nor
-    replace genuine UIA ProcessId/AutomationId, keyboard, live-region and STOP.
+    Prefer render-content HWND when available, retain all candidate windows,
+    and require genuine external UIA/keyboard/live-region/STOP evidence.
     """
     audit = _audit()
     native = audit.split("public static class AutosportNativeWindows", 1)[1].split(
@@ -1069,9 +1069,12 @@ def test_external_uia_prioritizes_visible_webview_hwnds_without_forging_semantic
     assert 'name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)' in native
     assert 'name.Equals("Chrome_RenderWidgetHostHWND", StringComparison.Ordinal)' in native
     assert "var priority = new int[count];" in native
-    assert "priority[i] = visible ? (webview ? 0 : 1) : (webview ? 2 : 3);" in native
+    assert 'var renderHost = name.Equals("Chrome_RenderWidgetHostHWND", StringComparison.Ordinal);' in native
+    assert 'var chromeWidget = name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal);' in native
+    assert "priority[i] = renderHost ? 0 : chromeWidget ? (visible ? 1 : 2)" in native
+    assert ": (visible ? 3 : 4);" in native
     assert "var ordered = new IntPtr[count];" in native
-    assert "for (var bucket = 0; bucket < 4; bucket++)" in native
+    assert "for (var bucket = 0; bucket < 5; bucket++)" in native
     assert "if (priority[i] == bucket) ordered[write++] = result[i];" in native
     assert "if (write != count)" in native
     assert 'throw new InvalidOperationException("Native HWND candidate order incomplete")' in native

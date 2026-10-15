@@ -436,6 +436,19 @@ def assess_campaign_qualification(
                 f"{label}: evidence identity already used by {previous_label} with different SHA-256"
             )
 
+    # Episode-local financial/learning receipts cannot be recycled across
+    # episodes merely by changing their anchor IDs or availability times.
+    # This is a structural replay fence, not an issuer/trust-root verification.
+    seen_episode_receipts: dict[str, set[str]] = {
+        role: set()
+        for role in (
+            "terminal_resolution",
+            "cost_evidence",
+            "utility_evidence",
+            "learning_evidence",
+        )
+    }
+
     start = _instant(identity.campaign_started_at, "campaign_started_at")
     previous_checkpoint: EvidenceAnchor | None = None
     for item in episodes:
@@ -465,6 +478,13 @@ def assess_campaign_qualification(
                     )
                 else:
                     episode_roles_by_sha256[anchor.sha256] = role
+                receipt_shas = seen_episode_receipts.get(role)
+                if receipt_shas is not None:
+                    if anchor.sha256 in receipt_shas:
+                        blockers.append(
+                            prefix + f"{role} reuses bytes from an earlier episode"
+                        )
+                    receipt_shas.add(anchor.sha256)
                 record_anchor(prefix + role, anchor)
                 episode_anchor_sha256s.add(anchor.sha256)
         if item.campaign_identity_sha256.lower() != identity_sha:

@@ -171,6 +171,32 @@ class CampaignQualificationTests(unittest.TestCase):
         )
 
 
+    def test_cross_episode_receipt_byte_replay_is_blocked(self):
+        evidence = self.complete()
+        first, second = evidence.episodes
+        for role in (
+            "terminal_resolution",
+            "cost_evidence",
+            "utility_evidence",
+            "learning_evidence",
+        ):
+            with self.subTest(role=role):
+                previous = getattr(first, role)
+                current = getattr(second, role)
+                self.assertIsNotNone(previous)
+                self.assertIsNotNone(current)
+                # A distinct evidence ID and recomputed bundle digest do not
+                # turn an earlier episode's receipt bytes into fresh evidence.
+                relabelled = replace(
+                    second,
+                    **{role: replace(current, sha256=previous.sha256)},
+                )
+                changed = replace(evidence, episodes=(first, relabelled))
+                self.assert_blocked(
+                    self.rebind_bundle(changed),
+                    f"{role} reuses bytes from an earlier episode",
+                )
+
     def test_denominator_cannot_relabel_decision_bytes_with_another_id(self):
         evidence = self.complete()
         first, second = evidence.episodes

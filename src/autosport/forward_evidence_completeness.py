@@ -600,6 +600,21 @@ class VerificationResult:
     candidate_count: int
     details: tuple[tuple[str, str], ...] = ()
 
+    @property
+    def verification_scope(self) -> str:
+        """Structural completeness only, not a promotion decision."""
+        return "STRUCTURAL_ONLY"
+
+    @property
+    def external_universe_authority_resolved(self) -> bool:
+        """Caller-supplied receipts cannot prove an exhaustive source universe."""
+        return False
+
+    @property
+    def promotion_ready(self) -> bool:
+        """Forward structural PASS cannot authorize economic promotion."""
+        return False
+
 
 def ordered_leaf_sha256(
     opportunities: Sequence[ForwardOpportunityEnvelope],
@@ -1011,11 +1026,23 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         ):
             codes.append(VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN)
 
-    denominator = tuple(sorted(evidence.denominator_sequences))
+    # Typed denominator identity must not inherit Python's coercive equality:
+    # True == 1, 1.0 == 1, Decimal("1") == 1. Reject mixed/incomparable
+    # values before sorting so malformed evidence yields a failed verdict.
+    denominator_is_exact = (
+        type(evidence.denominator_sequences) is tuple
+        and all(
+            type(sequence) is int and sequence > 0
+            for sequence in evidence.denominator_sequences
+        )
+    )
+    denominator = (
+        tuple(sorted(evidence.denominator_sequences)) if denominator_is_exact else ()
+    )
     expected_denominator = tuple(
         item.candidate_sequence for item in opportunities
     )
-    if denominator != expected_denominator:
+    if not denominator_is_exact or denominator != expected_denominator:
         codes.append(VerificationCode.DENOMINATOR_INCOMPLETE)
 
     costs: dict[int, bool] = {}

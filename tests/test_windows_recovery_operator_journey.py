@@ -246,7 +246,7 @@ class WindowsRecoveryOperatorJourneyTests(unittest.TestCase):
             self.assertTrue(app._workspace_requires_recovery(workspace))
             self.assertIsNone(app._recovery_view)
             self.assertIsNone(app.session)
-            self.assertIn("не збіга", app.status.value.lower())
+            self.assertIn("не відповідає", app.status.value.lower())
 
             with patch.object(AutosportApp, "run_dataset") as parent_run:
                 WindowsAutosportApp.run_dataset(app)

@@ -99,13 +99,17 @@ def _foundation(tmp_path):
     workspace = tmp_path / "workspace"
     workspace.mkdir(parents=True, exist_ok=True)
     TrialFamilyAccountingStore.initialize_workspace(workspace)
-    authority_root = tmp_path / "machine-authority"
+    # ScientificRegistry publication and trial-family accounting share one
+    # canonical workspace root-selection decision. The suite-wide fixture supplies
+    # an isolated default monotonic root, so do not introduce a second explicit
+    # root when this helper is nested inside the same test.
+    authority_root = None
     registry = ScientificRegistry.initialize_pristine(workspace / "scientific.json")
     question = _question()
     hypothesis = _hypothesis()
     binding = _binding(question, hypothesis)
     protocol = ResearchProtocol(binding, SHA_C, SHA_D, SHA_A, T0)
-    dataset = DatasetSnapshot("dataset-1", SHA_A, "lawful-provider:fixture", "license-evidence:v1", T1, T0, outcome_reveal_after=T1)
+    dataset = DatasetSnapshot("dataset-1", SHA_A, "lawful-provider:fixture", "license-evidence:v1", T1, T1, outcome_reveal_after=T1)
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
     model = ModelVersion("model-1", "fixture-model", SHA_A, SHA_C, SHA_D, "dataset-1", "features-1", "protocol-1", 7, SHA_B, T1)
     strategy = StrategyVersion("strategy-1", "canonical-strategy", SHA_C, SHA_D, SHA_B, T1, model_version_id="model-1")

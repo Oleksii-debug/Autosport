@@ -1,0 +1,197 @@
+from __future__ import annotations
+
+from pathlib import Path
+
+import pytest
+
+import autosport._paperbook_preload_authority_guard as guard
+import autosport._paperbook_preload_module_member_freeze as freeze
+import autosport.paper as paper
+
+
+_HOSTILE_GETATTR_CALLS: list[str] = []
+_HOSTILE_TUPLE_ITER_CALLS: list[object] = []
+
+
+def _hostile_surface_getattr(self, name: str):
+    del self
+    _HOSTILE_GETATTR_CALLS.append(name)
+    return object()
+
+
+class _HostileTupleAuthority:
+    @staticmethod
+    def __iter__(surface: object):
+        _HOSTILE_TUPLE_ITER_CALLS.append(surface)
+        return iter((("loads", lambda _raw: {"balance": "999999"}),))
+
+
+def _hostile_surface_iter(surface: object):
+    _HOSTILE_TUPLE_ITER_CALLS.append(surface)
+    return iter((("loads", lambda _raw: {"balance": "999999"}),))
+
+
+def _saved_book(tmp_path: Path) -> tuple[Path, paper.PaperBook]:
+    path = tmp_path / "paper-book.json"
+    book = paper.PaperBook("100")
+    book.save(path)
+    return path, book
+
+
+@pytest.mark.parametrize(
+    ("surface_name", "member_name"),
+    (("json", "loads"), ("hashlib", "sha256")),
+)
+def test_frozen_module_surface_backing_rejects_member_retarget(
+    tmp_path: Path,
+    surface_name: str,
+    member_name: str,
+) -> None:
+    """Frozen facade diagnostics cannot retarget the admitted member authority."""
+
+    path, book = _saved_book(tmp_path)
+    surface = getattr(guard, surface_name)
+    values = surface._values
+    original = getattr(surface, member_name)
+
+    with pytest.raises(TypeError):
+        values[member_name] = object()
+
+    detached = dict(values)
+    detached[member_name] = object()
+    assert getattr(surface, member_name) is original
+    loaded = paper.PaperBook.load(path)
+    assert loaded.balance == book.balance
+
+
+@pytest.mark.parametrize("surface_name", ("json", "hashlib", "os", "tempfile"))
+def test_frozen_module_surface_backing_binding_rejects_object_slot_bypass(
+    tmp_path: Path,
+    surface_name: str,
+) -> None:
+    """Explicit object slot operations cannot replace the facade authority payload."""
+
+    path, book = _saved_book(tmp_path)
+    surface = getattr(guard, surface_name)
+    original_values = dict(surface._values)
+
+    with pytest.raises(AttributeError):
+        object.__setattr__(surface, "_values", {"hostile": object()})
+    with pytest.raises(AttributeError):
+        object.__delattr__(surface, "_values")
+
+    assert dict(surface._values) == original_values
+    loaded = paper.PaperBook.load(path)
+    assert loaded.balance == book.balance
+
+
+def test_late_tuple_global_injection_cannot_retarget_frozen_surface_dispatch(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An absent-at-capture module global cannot become a later dispatch authority."""
+
+    path, book = _saved_book(tmp_path)
+    _HOSTILE_TUPLE_ITER_CALLS.clear()
+    monkeypatch.setattr(freeze, "tuple", _HostileTupleAuthority, raising=False)
+
+    loaded = paper.PaperBook.load(path)
+
+    assert loaded.balance == book.balance
+    assert _HOSTILE_TUPLE_ITER_CALLS == []
+
+
+@pytest.mark.parametrize(
+    ("root_name", "hostile"),
+    (("__getattr__", _hostile_surface_getattr), ("__iter__", _hostile_surface_iter)),
+)
+def test_frozen_surface_class_dispatch_rejects_post_composition_retarget(
+    tmp_path: Path,
+    root_name: str,
+    hostile: object,
+) -> None:
+    """Pre-existing facades cannot be retargeted by mutating their shared heap type."""
+
+    path, book = _saved_book(tmp_path)
+    surface_type = type(guard.json)
+    original = vars(surface_type)[root_name]
+    _HOSTILE_GETATTR_CALLS.clear()
+    _HOSTILE_TUPLE_ITER_CALLS.clear()
+
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        setattr(surface_type, root_name, hostile)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__setattr__(surface_type, root_name, hostile)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        delattr(surface_type, root_name)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__delattr__(surface_type, root_name)
+
+    assert vars(surface_type)[root_name] is original
+    loaded = paper.PaperBook.load(path)
+    assert loaded.balance == book.balance
+    assert _HOSTILE_GETATTR_CALLS == []
+    assert _HOSTILE_TUPLE_ITER_CALLS == []
+
+
+@pytest.mark.parametrize(
+    ("root_name", "hostile"),
+    (("__getattr__", _hostile_surface_getattr), ("__iter__", _hostile_surface_iter)),
+)
+def test_frozen_surface_metaclass_descriptor_cannot_be_removed_before_retarget(
+    tmp_path: Path,
+    root_name: str,
+    hostile: object,
+) -> None:
+    """Deleting the protecting metaclass root cannot unlock the facade class."""
+
+    path, book = _saved_book(tmp_path)
+    surface_type = type(guard.json)
+    surface_meta = type(surface_type)
+    original_meta_root = vars(surface_meta)[root_name]
+    original_surface_root = vars(surface_type)[root_name]
+    _HOSTILE_GETATTR_CALLS.clear()
+    _HOSTILE_TUPLE_ITER_CALLS.clear()
+
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        delattr(surface_meta, root_name)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__delattr__(surface_meta, root_name)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        setattr(surface_meta, root_name, hostile)
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__setattr__(surface_meta, root_name, hostile)
+
+    assert vars(surface_meta)[root_name] is original_meta_root
+    assert vars(surface_type)[root_name] is original_surface_root
+    with pytest.raises(TypeError, match="frozen-surface root is sealed"):
+        type.__setattr__(surface_type, root_name, hostile)
+
+    loaded = paper.PaperBook.load(path)
+    assert loaded.balance == book.balance
+    assert _HOSTILE_GETATTR_CALLS == []
+    assert _HOSTILE_TUPLE_ITER_CALLS == []
+
+
+def test_frozen_module_surface_getattr_code_substitution_fails_before_dispatch(
+    tmp_path: Path,
+) -> None:
+    """Facade class mutation must not become a new route to persistence authority."""
+
+    path, _book = _saved_book(tmp_path)
+    surface_type = type(guard.json)
+    original_getattr = surface_type.__getattr__
+    original_code = original_getattr.__code__
+    _HOSTILE_GETATTR_CALLS.clear()
+
+    original_getattr.__code__ = _hostile_surface_getattr.__code__
+    try:
+        with pytest.raises(
+            ValueError,
+            match="PaperBook persistence class executable authority changed",
+        ):
+            paper.PaperBook.load(path)
+    finally:
+        original_getattr.__code__ = original_code
+
+    assert _HOSTILE_GETATTR_CALLS == []

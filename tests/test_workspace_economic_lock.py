@@ -21,6 +21,22 @@ def _hold_workspace_lock(workspace: str, ready, release) -> None:
 
 
 class WorkspaceEconomicLockTests(unittest.TestCase):
+    def test_custom_ledger_writer_basename_is_confined_and_reusable(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            name = "real.jsonl.writer.lock"
+            first = WorkspaceEconomicLock(root, file_name=name)
+            self.assertEqual(first.path, root / name)
+            with first:
+                self.assertTrue((root / name).exists())
+            with WorkspaceEconomicLock(root, file_name=name):
+                self.assertTrue((root / name).exists())
+            for unsafe in ("", ".", "..", "../escape", "..\\escape", "x/y", "x\\y", "nul\x00byte"):
+                with self.subTest(unsafe=repr(unsafe)):
+                    with self.assertRaises(WorkspaceEconomicLockError):
+                        WorkspaceEconomicLock(root, file_name=unsafe)
+            self.assertFalse((root.parent / "escape").exists())
+
     def _start_holder(self, root: Path):
         context = multiprocessing.get_context("spawn")
         ready = context.Event()

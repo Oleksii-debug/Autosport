@@ -28,6 +28,7 @@ class ResearchFutureScenarioIdentityTests(unittest.TestCase):
             event_id="tt-future-1",
             selection_id="future-player",
             observed_ts="2026-09-12T10:00:02+00:00",
+            ingest_ts="2026-09-12T10:00:02+00:00",
             sequence=999,
         )
         plan = self._plan_with_extra_outcome(future.quote_key)
@@ -47,10 +48,11 @@ class ResearchFutureScenarioIdentityTests(unittest.TestCase):
             market_id="future-market-1",
             selection_id="future-player",
             observed_ts="2026-09-12T10:00:02+00:00",
+            ingest_ts="2026-09-12T10:00:02+00:00",
             sequence=999,
         )
         plan = self._plan_with_extra_outcome(
-            f"{future.event_id}|{future.market_id}|synthetic-selection"
+            replace(future, selection_id="synthetic-selection").quote_key
         )
 
         with self.assertRaisesRegex(
@@ -74,10 +76,11 @@ class ResearchFutureScenarioIdentityTests(unittest.TestCase):
             market_id="future-market",
             selection_id="future-player",
             observed_ts="2026-09-12T10:00:02+00:00",
+            ingest_ts="2026-09-12T10:00:02+00:00",
             sequence=1000,
         )
         plan = self._plan_with_extra_outcome(
-            f"{future.event_id}|{future.market_id}|synthetic-selection"
+            replace(future, selection_id="synthetic-selection").quote_key
         )
 
         with self.assertRaisesRegex(
@@ -95,10 +98,15 @@ class ResearchFutureScenarioIdentityTests(unittest.TestCase):
             market_id="future-observed-market",
             selection_id="future-player",
             observed_ts="2026-09-12T10:00:02+00:00",
+            ingest_ts="2026-09-12T10:00:02+00:00",
             sequence=1001,
         )
         plan = self._plan_with_extra_outcome(
-            f"{future.event_id}|synthetic-market|synthetic-selection"
+            replace(
+                future,
+                market_id="synthetic-market",
+                selection_id="synthetic-selection",
+            ).quote_key
         )
 
         with self.assertRaisesRegex(

@@ -15,6 +15,7 @@ from autosport.betfair_account_readonly import (
     BetfairSessionCredentials,
 )
 from autosport.betfair_supervised_execution import (
+    BetfairPlaceOrdersAmbiguous,
     BetfairSupervisedExecutionError,
     BetfairSupervisedExecutionGate,
     BetfairSupervisedPlaceOrdersClient,
@@ -448,6 +449,70 @@ def _prepared(
     reserve_supervised_plan(ledger, bound, approval)
     action = bound.execution_plan.actions[0]
     return profile, bound, approval, ledger, action, goal_store
+
+
+# Legacy provider-semantics tests issue a real durable *fixture* review/receipt.
+# They must not revive the retired unconfirmed production send path.
+_CANONICAL_EXECUTE_BETFAIR = execute_betfair_supervised_action
+_TEST_RECEIPTS: dict[tuple[str, str], tuple[str, str]] = {}
+
+
+def execute_betfair_supervised_action(*args, **kwargs):
+    """Keep legacy provider assertions behind the production one-shot gate."""
+    if "confirmation_receipt_id" not in kwargs:
+        ledger, bound, approval = args[:3]
+        attempt_id = kwargs["attempt_id"]
+        cache_key = (str(ledger.path.resolve()), attempt_id)
+        if cache_key not in _TEST_RECEIPTS:
+            from autosport.betfair_execution_confirmation import (
+                CONFIRMATION_FILENAME,
+                betfair_execution_confirmation_spec,
+            )
+            from autosport.supervised_confirmation import (
+                SupervisedConfirmationAuthority,
+            )
+            try:
+                action_id = kwargs["action_id"]
+                spec = betfair_execution_confirmation_spec(
+                    bound,
+                    approval,
+                    action_id=action_id,
+                    attempt_id=attempt_id,
+                    review_id="legacy-fixture-" + attempt_id,
+                    risk_evidence_sha256="f" * 64,
+                )
+                authority = SupervisedConfirmationAuthority(
+                    ledger.path.parent / CONFIRMATION_FILENAME,
+                    clock=lambda: datetime.fromisoformat(
+                        "2026-09-19T08:00:02.200000+00:00"
+                    ),
+                )
+                review = authority.prepare_review(
+                    review_id=spec.review_id,
+                    decision_id=spec.decision_id,
+                    bookmaker_id=spec.bookmaker_id,
+                    account_id=spec.account_id,
+                    decision_sha256=spec.decision_sha256,
+                    approval_evidence_sha256=spec.approval_evidence_sha256,
+                    risk_evidence_sha256=spec.risk_evidence_sha256,
+                    review_payload=spec.review_payload,
+                    ttl_seconds=30,
+                )
+                receipt = authority.confirm_review(
+                    review_id=review.review_id,
+                    expected_review_sha256=review.review_sha256,
+                )
+                _TEST_RECEIPTS[cache_key] = (
+                    receipt.receipt_id, review.review_sha256
+                )
+            except (ValueError, SupervisedExecutionError):
+                # A negative test with malformed plan/approval must still
+                # reach the canonical validator and fail before any effect.
+                _TEST_RECEIPTS[cache_key] = ("f" * 64, "f" * 64)
+        receipt_id, review_sha = _TEST_RECEIPTS[cache_key]
+        kwargs["confirmation_receipt_id"] = receipt_id
+        kwargs["confirmation_review_sha256"] = review_sha
+    return _CANONICAL_EXECUTE_BETFAIR(*args, **kwargs)
 
 
 def _assert_current_goal_denied_before_effect(
@@ -957,7 +1022,7 @@ def test_provider_failure_report_is_rejected_not_inferred_from_absence() -> None
         assert result.external_receipt_id == provider_ref
 
 
-def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
+def test_transport_timeout_readback_stays_non_authoritative_for_retry(
     monkeypatch,
 ) -> None:
     with tempfile.TemporaryDirectory() as tmp:
@@ -978,9 +1043,7 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
 
         assert result.outcome is PlaceOrdersOutcome.UNKNOWN
         assert result.attempt_state is AttemptState.UNKNOWN
-        restarted = RealExecutionLedger(
-            Path(tmp) / "real.jsonl"
-        )
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
         assert (
             restarted.attempt_state("attempt-timeout")
             is AttemptState.UNKNOWN
@@ -1035,14 +1098,11 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
             readback=verified_absence,
         )
         assert reconciliation.attempt_state is AttemptState.RECONCILED_NOT_FOUND
-        assert restarted.can_retry_action(
+        assert not restarted.can_retry_action(
             plan_id=bound.execution_plan.plan_id,
             action_id=action.action_id,
         )
 
-        first_customer_ref = transport.calls[0]["request"]["params"][
-            "customerRef"
-        ]
         monkeypatch.setattr(
             "autosport.supervised_execution._trusted_now",
             lambda: "2026-09-19T08:00:06+00:00",
@@ -1060,23 +1120,26 @@ def test_transport_timeout_becomes_unknown_and_blocks_retry_after_restart(
             store=goal_store,
             observed_at="2026-09-19T08:00:10+00:00",
         )
-        retry_result = execute_betfair_supervised_action(
-            restarted,
-            bound,
-            approval,
-            action_id=action.action_id,
-            attempt_id="attempt-timeout-retry",
-            profile=profile,
-            client=retry_client,
-            clock=lambda: "2026-09-19T08:00:09+00:00",
-        )
-        assert retry_result.outcome is PlaceOrdersOutcome.ACCEPTED
-        retry_request = retry_transport.calls[0]["request"]
-        assert retry_request["params"]["customerRef"] != first_customer_ref
-        assert (
-            retry_request["params"]["instructions"][0]["customerOrderRef"]
-            != provider_ref
-        )
+        with pytest.raises(
+            ExecutionStateError,
+            match="product-issued no-effect authority",
+        ):
+            execute_betfair_supervised_action(
+                restarted,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-timeout-retry",
+                profile=profile,
+                client=retry_client,
+                clock=lambda: "2026-09-19T08:00:09+00:00",
+                # Exercise the canonical no-effect/retry guard directly.
+                # Do not let the legacy fixture helper mint a second review
+                # for the same UNKNOWN provider decision at a stale clock.
+                confirmation_receipt_id="f" * 64,
+                confirmation_review_sha256="f" * 64,
+            )
+        assert retry_transport.calls == []
 
 
 def test_foreign_provider_order_ref_cannot_verify_or_reconcile_effect() -> None:
@@ -1345,3 +1408,99 @@ def test_client_repr_never_exposes_session_credentials() -> None:
     assert "super-secret-app" not in rendered
     assert "super-secret-session" not in rendered
     assert "enabled=False" in rendered
+
+
+@pytest.mark.parametrize("transport_error", (RuntimeError, OSError, BetfairReadOnlyError))
+def test_write_transport_failure_drops_secret_exception_context(transport_error) -> None:
+    # Synthetic values only; the actual provider-writing gate is exercised with
+    # a fake transport and never reaches a bookmaker or real account.
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def hostile_response(_request):
+            raise transport_error(
+                "X-Application=app-key X-Authentication=session-token"
+            )
+
+        transport = _Transport(hostile_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+        with pytest.raises(
+            BetfairSupervisedExecutionError,
+            match="direct placeOrders dispatch requires canonical confirmed executor",
+        ) as raised:
+            client.place_action(
+                action,
+                profile=profile,
+                bound=bound,
+                provider_order_ref="a" * 32,
+                execution_workspace=Path(tmp),
+            )
+
+        assert transport.calls == []
+        assert raised.value.__cause__ is None
+        assert raised.value.__context__ is None
+        assert "app-key" not in str(raised.value)
+        assert "session-token" not in str(raised.value)
+        assert "app-key" not in repr(raised.value)
+        assert "session-token" not in repr(raised.value)
+
+
+@pytest.mark.parametrize("transport_error", (RuntimeError, OSError, BetfairReadOnlyError))
+def test_write_transport_unexpected_exception_is_restart_durable_unknown(
+    transport_error,
+) -> None:
+    with tempfile.TemporaryDirectory() as tmp:
+        profile, bound, approval, ledger, action, goal_store = _prepared(tmp)
+
+        def hostile_response(_request):
+            raise transport_error(
+                "X-Application=app-key X-Authentication=session-token"
+            )
+
+        transport = _Transport(hostile_response)
+        client = _enabled_client(profile, transport, store=goal_store)
+        result = execute_betfair_supervised_action(
+            ledger,
+            bound,
+            approval,
+            action_id=action.action_id,
+            attempt_id="attempt-unexpected-transport-error",
+            profile=profile,
+            client=client,
+            clock=lambda: SUBMITTED_AT,
+        )
+        assert result.outcome is PlaceOrdersOutcome.UNKNOWN
+        assert result.attempt_state is AttemptState.UNKNOWN
+        assert result.evidence_id is None
+        assert len(transport.calls) == 1
+        assert "app-key" not in repr(result)
+        assert "session-token" not in repr(result)
+
+        restarted = RealExecutionLedger(Path(tmp) / "real.jsonl")
+        assert (
+            restarted.attempt_state("attempt-unexpected-transport-error")
+            is AttemptState.UNKNOWN
+        )
+        assert not restarted.can_retry_action(
+            plan_id=bound.execution_plan.plan_id,
+            action_id=action.action_id,
+        )
+        ref = restarted.provider_order_reference(
+            attempt_id="attempt-unexpected-transport-error",
+            provider_id="betfair",
+        )
+        assert ref is not None
+        assert len(ref) == 32
+
+        with pytest.raises(ExecutionStateError):
+            execute_betfair_supervised_action(
+                restarted,
+                bound,
+                approval,
+                action_id=action.action_id,
+                attempt_id="attempt-unexpected-transport-error",
+                profile=profile,
+                client=client,
+                clock=lambda: SUBMITTED_AT,
+            )
+        assert len(transport.calls) == 1

@@ -8,9 +8,10 @@ from datetime import datetime, timedelta, timezone
 from decimal import Decimal, ROUND_FLOOR
 from enum import Enum
 from pathlib import Path
-from time import monotonic
+from time import monotonic, perf_counter_ns
 from typing import Callable, Protocol
 
+from . import _paperbook_preload_authority_guard as _paperbook_authority
 from .decision_ledger import (
     ECONOMIC_DECISION_KIND,
     MATERIAL_ACTION_ID_PAYLOAD_KEY,
@@ -913,6 +914,7 @@ class PersistentLiveDecisionLoop:
         self._freshness_deadlines: dict[str, datetime | None] = {}
         self._freshness_generations: dict[str, int] = {}
         self._freshness_heap: list[tuple[datetime, str, int]] = []
+        self._last_cycle_stage_latencies_ns: tuple[tuple[str, int], ...] = ()
 
     def close(self) -> None:
         """Release the optional long-lived default market-store connection."""
@@ -1056,7 +1058,40 @@ class PersistentLiveDecisionLoop:
                 break
         return tuple(results)
 
+    @property
+    def last_cycle_stage_latencies_ns(self) -> tuple[tuple[str, int], ...]:
+        """Observer-only five-stage latencies; never execution authority."""
+        return self._last_cycle_stage_latencies_ns
+
     def run_cycle(self) -> LiveCycleResult:
+        self._last_cycle_stage_latencies_ns = ()
+        stage_measurements: list[tuple[str, int]] = []
+        timing_valid = True
+        try:
+            prior_tick_ns = perf_counter_ns()
+        except Exception:
+            prior_tick_ns = 0
+            timing_valid = False
+        if type(prior_tick_ns) is not int or prior_tick_ns < 0:
+            timing_valid = False
+
+        def record_stage(name: str) -> None:
+            nonlocal prior_tick_ns, timing_valid
+            if not timing_valid:
+                return
+            try:
+                tick_ns = perf_counter_ns()
+            except Exception:
+                timing_valid = False
+                stage_measurements.clear()
+                return
+            if type(tick_ns) is not int or tick_ns < prior_tick_ns:
+                timing_valid = False
+                stage_measurements.clear()
+                return
+            stage_measurements.append((name, tick_ns - prior_tick_ns))
+            prior_tick_ns = tick_ns
+
         if self.stopped:
             return LiveCycleResult(
                 LiveCycleStatus.STOPPED,
@@ -1085,6 +1120,7 @@ class PersistentLiveDecisionLoop:
                 _require_utc_clock(self.clock),
                 exc,
             )
+        record_stage("ingest")
 
         now = _require_utc_clock(self.clock)
         batch = self.mirror_updates.drain(
@@ -1130,6 +1166,7 @@ class PersistentLiveDecisionLoop:
         decision_time = now
         snapshots = self._capture_input_views(refresh_input_ids, decision_time)
         current_market_sha = self._market_state_sha256()
+        record_stage("mirror")
 
         clean_committed_restart = (
             self._needs_cache_rebuild
@@ -1162,6 +1199,7 @@ class PersistentLiveDecisionLoop:
             gate=_GATE_NORMAL,
         )
         self._refresh_intents_from_snapshots(snapshots)
+        record_stage("opportunity")
 
         intents = self._all_cached_intents()
         graph = (
@@ -1177,12 +1215,17 @@ class PersistentLiveDecisionLoop:
             dependency_graph=graph,
             market_outcome_authorities=(),
         )
+        record_stage("portfolio")
         result = self._persist_plan(
             plan=plan,
             intents=intents,
             market_state_sha256=current_market_sha,
             affected_input_ids=affected,
             gate=_GATE_NORMAL,
+        )
+        record_stage("decision")
+        self._last_cycle_stage_latencies_ns = (
+            tuple(stage_measurements) if timing_valid else ()
         )
         self._pending_affected.clear()
         self._needs_cache_rebuild = False
@@ -1924,9 +1967,54 @@ class PersistentLiveDecisionLoop:
             # The snapshot is written before the cursor: a crash before cursor
             # publication leaves only ignorable stale snapshot bytes, while every
             # visible PENDING cursor has an exact pre-action portfolio witness.
-            self.book.save(self.pre_action_book_path)
+            #
+            # The pre-action artifact is recovery evidence, not an alternate
+            # persistence path for the live PaperBook.  In PAPER mode #623 owns
+            # that exact live object at workspace/paper_book.json; publishing the
+            # same object here would either rebind or cross-path-save its durable
+            # generation.  Reuse the canonical risk shadow capability to create
+            # a detached exact semantic clone with product-issued opening/causal
+            # authority but no live generation/path binding.  Its first save
+            # therefore establishes only the dedicated recovery-snapshot lineage.
+            live_context_sha256 = self._decision_context_sha256()
+            snapshot = self.authority.risk_policy._shadow_book_for_allocation(
+                self.book
+            )
+            if (
+                type(snapshot) is not PaperBook
+                or snapshot is self.book
+                or not self._same_book_state(snapshot, self.book)
+            ):
+                raise LiveDecisionProgressError(
+                    "cannot detach exact pre-action PaperBook"
+                )
+            snapshot_context_sha256 = self._decision_context_sha256_for_book(
+                snapshot
+            )
+            if snapshot_context_sha256 != live_context_sha256:
+                raise LiveDecisionProgressError(
+                    "pre-action PaperBook context changed before durability"
+                )
+
+            # A new detached shadow is created for every decision cycle so the live
+            # canonical PaperBook never acquires the recovery-artifact path authority.
+            # When a previous pre-action artifact already exists, explicitly adopt
+            # that artifact's *current* durable generation before replacement.  This
+            # is a product-owned capability resolved from the sealed persistence graph
+            # below; generic PaperBook.save() remains fail-closed for unbound/stale
+            # objects and for cross-path publication.
+            _paperbook_authority._bind_book(snapshot, self.pre_action_book_path)
+            snapshot.save(self.pre_action_book_path)
             durable_pre_action = PaperBook.load(self.pre_action_book_path)
-            if not self._same_book_state(durable_pre_action, self.book):
+            durable_context_sha256 = self._decision_context_sha256_for_book(
+                durable_pre_action
+            )
+            current_context_sha256 = self._decision_context_sha256()
+            if (
+                not self._same_book_state(durable_pre_action, self.book)
+                or durable_context_sha256 != live_context_sha256
+                or current_context_sha256 != live_context_sha256
+            ):
                 raise LiveDecisionProgressError(
                     "pre-action PaperBook durability verification failed"
                 )
@@ -1935,9 +2023,7 @@ class PersistentLiveDecisionLoop:
                 phase=_PHASE_PENDING,
                 decision_ts=decision_ts,
                 market_state_sha256=market_state_sha256,
-                decision_context_sha256=self._decision_context_sha256_for_book(
-                    durable_pre_action
-                ),
+                decision_context_sha256=durable_context_sha256,
                 affected_input_ids=affected_input_ids,
                 registered_input_ids=self.dependencies.input_ids,
                 decision_id=None,
@@ -2233,3 +2319,18 @@ class PersistentLiveDecisionLoop:
                 for input_id in self.dependencies.input_ids
             ]
         )
+
+
+# _write_pending is the only live-loop boundary allowed to adopt the existing
+# pre-action recovery snapshot generation for a freshly detached risk shadow.  Seal
+# that positive capability behind the already-frozen PaperBook persistence graph and
+# remove the mutable module alias afterwards.
+from ._paperbook_current_binding_verifier import (
+    seal_current_binding_consumer as _seal_current_binding_consumer,
+)
+
+PersistentLiveDecisionLoop._write_pending = _seal_current_binding_consumer(
+    PersistentLiveDecisionLoop._write_pending
+)
+del _seal_current_binding_consumer
+del _paperbook_authority

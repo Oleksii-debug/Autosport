@@ -8,7 +8,7 @@ from decimal import Decimal
 from typing import TYPE_CHECKING, Iterable, Protocol
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
-from .domain import MarketEvent, TicketLeg
+from .domain import MarketEvent, TicketLeg, _canonical_string_value
 from .market_mirror import MarketMirror
 from .paper import PaperBook
 
@@ -22,12 +22,16 @@ def validate_agent_names(agent_names: Iterable[object]) -> tuple[str, ...]:
     names = tuple(agent_names)
     if not names:
         raise ValueError("agent composition must contain at least one agent")
-    for name in names:
-        if not isinstance(name, str) or not name.strip() or name != name.strip():
-            raise ValueError("agent names must be non-empty canonical strings")
-    if len(set(names)) != len(names):
+    try:
+        canonical_names = tuple(
+            _canonical_string_value(name, f"agent_names[{index}]")
+            for index, name in enumerate(names)
+        )
+    except ValueError as exc:
+        raise ValueError("agent names must be non-empty canonical strings") from exc
+    if len(set(canonical_names)) != len(canonical_names):
         raise ValueError("agent composition contains duplicate agent names")
-    return names
+    return canonical_names
 
 
 def agent_composition_sha256(agent_names: Iterable[object]) -> str:
@@ -57,18 +61,36 @@ class _LatestQuotesView(Mapping[object, MarketEvent]):
         self._by_quote: dict[str, MarketEvent] = {}
         self._ambiguous_quotes: set[str] = set()
         for event in events:
-            provider_key = (event.source_id, event.quote_key)
+            if type(event) is not MarketEvent:
+                raise TypeError("latest_quotes event must be an exact MarketEvent")
+            source_id = _canonical_string_value(
+                event.source_id, "latest_quotes source_id"
+            )
+            quote_key = _canonical_string_value(
+                event.quote_key, "latest_quotes quote_key"
+            )
+            provider_key = (source_id, quote_key)
             self._by_source_quote[provider_key] = event
-            previous = self._by_quote.get(event.quote_key)
+            previous = self._by_quote.get(quote_key)
             if previous is None:
-                self._by_quote[event.quote_key] = event
-            elif previous.source_id != event.source_id:
-                self._ambiguous_quotes.add(event.quote_key)
+                self._by_quote[quote_key] = event
+            else:
+                previous_source_id = _canonical_string_value(
+                    previous.source_id, "latest_quotes previous source_id"
+                )
+                if previous_source_id != source_id:
+                    self._ambiguous_quotes.add(quote_key)
 
     def __getitem__(self, key: object) -> MarketEvent:
-        if isinstance(key, tuple) and len(key) == 2:
-            return self._by_source_quote[key]
-        if isinstance(key, str):
+        if type(key) is tuple and len(key) == 2:
+            source_id = _canonical_string_value(
+                key[0], "latest_quotes source_id"
+            )
+            quote_key = _canonical_string_value(
+                key[1], "latest_quotes quote_key"
+            )
+            return self._by_source_quote[(source_id, quote_key)]
+        if type(key) is str:
             if key in self._ambiguous_quotes:
                 raise ValueError(
                     "latest quote_key is ambiguous across providers; "
@@ -137,18 +159,22 @@ class AgentContext:
                     "paper_provider_accounts must contain (source_id, account_id) tuples"
                 )
             source_id, account_id = binding
-            if (
-                type(source_id) is not str
-                or not source_id
-                or source_id.strip() != source_id
-                or type(account_id) is not str
-                or not account_id
-                or account_id.strip() != account_id
-            ):
+            try:
+                canonical_source_id = _canonical_string_value(
+                    source_id,
+                    "paper_provider_accounts source_id",
+                )
+                canonical_account_id = _canonical_string_value(
+                    account_id,
+                    "paper_provider_accounts account_id",
+                )
+            except ValueError as exc:
                 raise ValueError(
                     "paper_provider_accounts must contain canonical non-empty text"
-                )
-            normalized_accounts.append((source_id, account_id))
+                ) from exc
+            normalized_accounts.append(
+                (canonical_source_id, canonical_account_id)
+            )
         canonical_accounts = tuple(normalized_accounts)
         if (
             canonical_accounts != tuple(sorted(canonical_accounts))
@@ -162,8 +188,8 @@ class AgentContext:
         self.paper_execution = paper_execution
         self.paper_provider_accounts = canonical_accounts
         self.notes = [] if notes is None else notes
-        if market_mirror is not None and not isinstance(market_mirror, MarketMirror):
-            raise TypeError("market_mirror must be a MarketMirror")
+        if market_mirror is not None and type(market_mirror) is not MarketMirror:
+            raise TypeError("market_mirror must be an exact MarketMirror")
         self.market_mirror = market_mirror if market_mirror is not None else MarketMirror()
 
         if latest_quotes is not None:

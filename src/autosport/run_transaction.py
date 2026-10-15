@@ -102,6 +102,8 @@ class RunTransaction:
         self.run_id = _require_portable_run_id(run_id)
         self.root = self.workspace / self.ROOT_NAME / self.run_id
         self.manifest_path = self.root / "manifest.json"
+        self.base_book_snapshot_path = self.root / "paper_book.base.json"
+        self.terminal_book_snapshot_path = self.root / "paper_book.terminal.json"
         self.run_ledger_path = self.root / "run-decisions.jsonl"
         self.staged_book_path = self.root / "paper_book.next.json"
         self.staged_ledger_path = self.root / "decisions.next.jsonl"
@@ -122,6 +124,15 @@ class RunTransaction:
         base_decision_ledger_sha256: str,
     ) -> "RunTransaction":
         tx = cls(workspace, run_id)
+        base_book_snapshot = tx._verified_canonical_paper_book_snapshot(
+            tx.workspace / "paper_book.json",
+            "base PaperBook",
+        )
+        if base_book_snapshot.sha256 != base_paper_book_sha256:
+            raise RunTransactionError(
+                "base PaperBook SHA-256 canonical hash is not the expected transaction state"
+            )
+
         tx.root.mkdir(parents=True, exist_ok=False)
         manifest = {
             "schema_version": cls.SCHEMA_VERSION,
@@ -137,6 +148,10 @@ class RunTransaction:
                 "decision_ledger_sha256": base_decision_ledger_sha256,
             },
             "new": {},
+            "retained": {
+                "base_paper_book": "paper_book.base.json",
+                "terminal_paper_book": "paper_book.terminal.json",
+            },
             "targets": {
                 "paper_book": "paper_book.json",
                 "decision_ledger": "decisions.jsonl",
@@ -150,6 +165,34 @@ class RunTransaction:
             },
         }
         atomic_write_json(tx.manifest_path, manifest)
+        try:
+            tx._atomic_write_bytes(
+                tx.base_book_snapshot_path,
+                base_book_snapshot.payload,
+            )
+            retained_base = tx._verified_canonical_paper_book_snapshot(
+                tx.base_book_snapshot_path,
+                "retained base PaperBook",
+            )
+            if (
+                retained_base.sha256 != base_book_snapshot.sha256
+                or retained_base.payload != base_book_snapshot.payload
+            ):
+                raise RunTransactionError(
+                    "retained base PaperBook exact snapshot mismatch"
+                )
+        except BaseException as retention_error:
+            try:
+                manifest["phase"] = "aborted"
+                atomic_write_json(tx.manifest_path, manifest)
+            except BaseException as abort_error:
+                retention_error.add_note(
+                    "RunTransaction could not persist aborted phase after base "
+                    "PaperBook snapshot retention failed: "
+                    f"{type(abort_error).__name__}: {abort_error}"
+                )
+            raise
+
         tx._identity = TransactionIdentity(
             run_id=run_id,
             experiment_key=experiment_key,
@@ -161,6 +204,93 @@ class RunTransaction:
         )
         tx._require_complete_identity_anchor()
         return tx
+
+    def verified_base_paper_book_snapshot(self) -> VerifiedFileSnapshot:
+        """Return exact BASE bytes after re-resolving the canonical run identity."""
+
+        manifest = self._read_manifest()
+        if manifest.get("retained") != {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }:
+            raise RunTransactionError(
+                "transaction lacks retained base PaperBook evidence contract"
+            )
+        experiment_key = manifest.get("experiment_key")
+        if not isinstance(experiment_key, str) or not experiment_key:
+            raise RunTransactionError(
+                "retained base PaperBook lacks transaction experiment identity"
+            )
+        try:
+            from .run_registry import RunRegistry
+
+            registry_item = RunRegistry(
+                self.workspace / "run_registry.json"
+            ).get(experiment_key)
+            identity = self._identity_from_registry(
+                registry_item,
+                experiment_key,
+            )
+            self._validate_manifest_identity(manifest, identity)
+        except RunTransactionError:
+            raise
+        except Exception as exc:
+            raise RunTransactionError(
+                "retained base PaperBook cannot validate canonical registry identity"
+            ) from exc
+
+        expected_hash = identity.base_paper_book_sha256
+        if expected_hash is None:
+            raise RunTransactionError(
+                "retained base PaperBook lacks transaction-aware registry BASE identity"
+            )
+        snapshot = self._verified_canonical_paper_book_snapshot(
+            self.base_book_snapshot_path,
+            "retained base PaperBook",
+        )
+        if snapshot.sha256 != expected_hash:
+            raise RunTransactionError(
+                "retained base PaperBook SHA-256 does not match transaction BASE"
+            )
+        return snapshot
+
+    def verified_terminal_paper_book_snapshot(self) -> VerifiedFileSnapshot:
+        """Return exact terminal NEW bytes bound to completed canonical run evidence."""
+
+        manifest = self._read_manifest()
+        if manifest.get("phase") not in {"canonical_committed", "completed"}:
+            raise RunTransactionError(
+                "retained terminal PaperBook requires a terminal transaction"
+            )
+        if manifest.get("retained") != {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }:
+            raise RunTransactionError(
+                "transaction lacks retained terminal PaperBook evidence contract"
+            )
+
+        registry_item = self._completed_registry_item()
+        self._require_complete_identity_anchor()
+        assert self._identity is not None
+        self._validate_manifest_identity(manifest, self._identity)
+        self._validate_completed_registry_evidence(manifest, registry_item)
+        self._validate_precommit_evidence(manifest)
+
+        expected_hash = self._hash_field(
+            manifest,
+            "new",
+            "paper_book_sha256",
+        )
+        snapshot = self._verified_canonical_paper_book_snapshot(
+            self.terminal_book_snapshot_path,
+            "retained terminal PaperBook",
+        )
+        if snapshot.sha256 != expected_hash:
+            raise RunTransactionError(
+                "retained terminal PaperBook SHA-256 does not match transaction NEW"
+            )
+        return snapshot
 
     def _stage_paper_book_snapshot(self, book: PaperBook) -> None:
         """Write non-authoritative staging bytes from the exact current canonical book."""
@@ -426,11 +556,46 @@ class RunTransaction:
             raise RunTransactionError("transaction is not in staging phase")
         if not self.staged_book_path.is_file() or not self.staged_ledger_path.is_file():
             raise RunTransactionError("staged outputs are incomplete")
-        self._require_hash(
-            self.workspace / "paper_book.json",
-            self._hash_field(manifest, "base", "paper_book_sha256"),
-            "PaperBook",
+        expected_base_book_hash = self._hash_field(
+            manifest,
+            "base",
+            "paper_book_sha256",
         )
+        base_book_snapshot = self._verified_canonical_paper_book_snapshot(
+            self.workspace / "paper_book.json",
+            "base PaperBook",
+        )
+        if base_book_snapshot.sha256 != expected_base_book_hash:
+            raise RunTransactionError(
+                "base PaperBook SHA-256 canonical hash is not the expected transaction state"
+            )
+
+        expected_retained_contract = {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }
+        retained_contract = manifest.get("retained")
+        if retained_contract is None:
+            self._atomic_write_bytes(
+                self.base_book_snapshot_path,
+                base_book_snapshot.payload,
+            )
+        elif retained_contract != expected_retained_contract:
+            raise RunTransactionError(
+                "transaction retained-evidence paths are invalid"
+            )
+
+        retained_base = self._verified_canonical_paper_book_snapshot(
+            self.base_book_snapshot_path,
+            "retained base PaperBook",
+        )
+        if (
+            retained_base.sha256 != expected_base_book_hash
+            or retained_base.payload != base_book_snapshot.payload
+        ):
+            raise RunTransactionError(
+                "retained base PaperBook exact snapshot mismatch"
+            )
         canonical_snapshot = self._require_decision_ledger_snapshot(
             self.workspace / "decisions.jsonl",
             self._hash_field(manifest, "base", "decision_ledger_sha256"),
@@ -480,6 +645,23 @@ class RunTransaction:
             raise RunTransactionError("combined staged Decision Ledger changed after stage_outputs")
         if staged_snapshot.payload != canonical_snapshot.payload + run_snapshot.payload:
             raise RunTransactionError("combined staged Decision Ledger exact snapshot mismatch")
+
+        manifest["retained"] = expected_retained_contract
+        self._atomic_write_bytes(
+            self.terminal_book_snapshot_path,
+            book_snapshot.payload,
+        )
+        retained_terminal = self._verified_canonical_paper_book_snapshot(
+            self.terminal_book_snapshot_path,
+            "retained terminal PaperBook",
+        )
+        if (
+            retained_terminal.sha256 != book_snapshot.sha256
+            or retained_terminal.payload != book_snapshot.payload
+        ):
+            raise RunTransactionError(
+                "retained terminal PaperBook exact snapshot mismatch"
+            )
 
         book_hash = book_snapshot.sha256
         ledger_hash = staged_snapshot.sha256
@@ -895,6 +1077,12 @@ class RunTransaction:
         }
         if manifest.get("targets") != expected_targets or manifest.get("staged") != expected_staged:
             raise RunTransactionError("transaction manifest paths are invalid")
+        retained = manifest.get("retained")
+        if retained is not None and retained != {
+            "base_paper_book": "paper_book.base.json",
+            "terminal_paper_book": "paper_book.terminal.json",
+        }:
+            raise RunTransactionError("transaction retained-evidence paths are invalid")
 
     @staticmethod
     def _hash_field(manifest: dict[str, Any], section: str, field: str) -> str:
@@ -1315,6 +1503,38 @@ class RunTransaction:
         expected_book_hash = self._hash_field(manifest, "new", "paper_book_sha256")
         expected_ledger_hash = self._hash_field(manifest, "new", "decision_ledger_sha256")
         expected_summary_hash = self._hash_field(manifest, "new", "summary_sha256")
+
+        retained_contract = manifest.get("retained")
+        if retained_contract is not None:
+            if retained_contract != {
+                "base_paper_book": "paper_book.base.json",
+                "terminal_paper_book": "paper_book.terminal.json",
+            }:
+                raise RunTransactionError(
+                    "transaction retained-evidence paths are invalid"
+                )
+            retained_base_snapshot = self._verified_canonical_paper_book_snapshot(
+                self.base_book_snapshot_path,
+                "retained base PaperBook",
+            )
+            expected_base_book_hash = self._hash_field(
+                manifest,
+                "base",
+                "paper_book_sha256",
+            )
+            if retained_base_snapshot.sha256 != expected_base_book_hash:
+                raise RunTransactionError(
+                    "retained base PaperBook SHA-256 does not match transaction BASE"
+                )
+            terminal_snapshot = self._verified_canonical_paper_book_snapshot(
+                self.terminal_book_snapshot_path,
+                "retained terminal PaperBook",
+            )
+            if terminal_snapshot.sha256 != expected_book_hash:
+                raise RunTransactionError(
+                    "retained terminal PaperBook SHA-256 does not match transaction NEW"
+                )
+
         summary_target = self.workspace / f"run-{self.run_id}.json"
 
         if summary_target.exists():

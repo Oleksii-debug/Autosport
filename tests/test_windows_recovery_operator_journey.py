@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import unittest
+from dataclasses import replace
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from unittest.mock import patch
@@ -150,6 +151,64 @@ class WindowsRecoveryOperatorJourneyTests(unittest.TestCase):
             parent_run.assert_called_once_with()
             self.assertIsNone(app._recovery_view)
             self.assertFalse(app._workspace_requires_recovery(workspace))
+
+
+    def test_foreign_recovery_result_never_unblocks_another_workspace(self) -> None:
+        """A stale/misrouted worker response cannot release a quarantined workspace."""
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            foreign_workspace = workspace / "foreign-workspace"
+            app = self._app_after_replay_failure(workspace)
+
+            with patch("autosport.windows_gui.messagebox.showerror"):
+                WindowsAutosportApp._poll_replay_worker(app)
+            self.assertTrue(app._workspace_requires_recovery(workspace))
+            app._block_workspace_for_recovery(foreign_workspace)
+
+            recovery_worker = _CapturedRecoveryWorker()
+            app.recovery_worker = recovery_worker
+            WindowsAutosportApp.repair_workspace(app)
+            self.assertIsNotNone(recovery_worker.task)
+            assert recovery_worker.task is not None
+            recovered = recovery_worker.task()
+            foreign_result = replace(
+                recovered,
+                session_view=replace(
+                    recovered.session_view, workspace=foreign_workspace
+                ),
+            )
+            recovery_worker.message = RecoveryWorkerMessage(result=foreign_result)
+
+            with patch("autosport.windows_gui.messagebox.showerror") as error_dialog:
+                WindowsAutosportApp._poll_recovery_worker(app)
+
+            error_dialog.assert_called_once()
+            self.assertTrue(app._workspace_requires_recovery(workspace))
+            self.assertTrue(app._workspace_requires_recovery(foreign_workspace))
+            self.assertIsNone(app._recovery_view)
+            self.assertIsNone(app.session)
+
+            with patch.object(AutosportApp, "run_dataset") as parent_run:
+                WindowsAutosportApp.run_dataset(app)
+            parent_run.assert_not_called()
+            self.assertTrue(app._workspace_requires_recovery(workspace))
+
+            # A later exact-identity repair releases only its own workspace.
+            exact_worker = _CapturedRecoveryWorker()
+            app.recovery_worker = exact_worker
+            WindowsAutosportApp.repair_workspace(app)
+            self.assertIsNotNone(exact_worker.task)
+            assert exact_worker.task is not None
+            exact_worker.message = RecoveryWorkerMessage(result=exact_worker.task())
+            with patch("autosport.windows_gui.messagebox.showinfo") as info_dialog:
+                WindowsAutosportApp._poll_recovery_worker(app)
+
+            info_dialog.assert_called_once()
+            self.assertFalse(app._workspace_requires_recovery(workspace))
+            self.assertTrue(app._workspace_requires_recovery(foreign_workspace))
+            self.assertIsNotNone(app._recovery_view)
+            assert app._recovery_view is not None
+            self.assertEqual(app._recovery_view.workspace, workspace)
 
 
 if __name__ == "__main__":

@@ -211,5 +211,60 @@ class WindowsRecoveryOperatorJourneyTests(unittest.TestCase):
             self.assertEqual(app._recovery_view.workspace, workspace)
 
 
+    def test_wrong_strategy_recovery_result_never_unblocks_workspace(self) -> None:
+        """The correct workspace is insufficient when a recovery reply has the wrong strategy.
+
+        The worker task executes actual local recovery; only its result identity is
+        substituted, to prove the Tk/operator acceptance boundary remains fail-closed.
+        """
+        with TemporaryDirectory() as temporary:
+            workspace = Path(temporary)
+            app = self._app_after_replay_failure(workspace)
+
+            with patch("autosport.windows_gui.messagebox.showerror"):
+                WindowsAutosportApp._poll_replay_worker(app)
+            self.assertTrue(app._workspace_requires_recovery(workspace))
+
+            worker = _CapturedRecoveryWorker()
+            app.recovery_worker = worker
+            WindowsAutosportApp.repair_workspace(app)
+            self.assertIsNotNone(worker.task)
+            assert worker.task is not None
+            recovered = worker.task()
+            wrong_strategy = replace(
+                recovered,
+                session_view=replace(
+                    recovered.session_view,
+                    strategy_id="foreign-strategy-v2",
+                ),
+            )
+            worker.message = RecoveryWorkerMessage(result=wrong_strategy)
+
+            with patch("autosport.windows_gui.messagebox.showerror") as error_dialog:
+                WindowsAutosportApp._poll_recovery_worker(app)
+            error_dialog.assert_called_once()
+            self.assertTrue(app._workspace_requires_recovery(workspace))
+            self.assertIsNone(app._recovery_view)
+            self.assertIsNone(app.session)
+            self.assertIn("не збіга", app.status.value.lower())
+
+            with patch.object(AutosportApp, "run_dataset") as parent_run:
+                WindowsAutosportApp.run_dataset(app)
+            parent_run.assert_not_called()
+
+            # A later exact workspace + strategy match, and only that match,
+            # can release the quarantine without a second replay side effect.
+            valid_worker = _CapturedRecoveryWorker()
+            app.recovery_worker = valid_worker
+            WindowsAutosportApp.repair_workspace(app)
+            assert valid_worker.task is not None
+            valid_worker.message = RecoveryWorkerMessage(result=valid_worker.task())
+            with patch("autosport.windows_gui.messagebox.showinfo") as info_dialog:
+                WindowsAutosportApp._poll_recovery_worker(app)
+            info_dialog.assert_called_once()
+            self.assertFalse(app._workspace_requires_recovery(workspace))
+            self.assertEqual(app._recovery_view.strategy_id, "baseline-v1")
+
+
 if __name__ == "__main__":
     unittest.main()

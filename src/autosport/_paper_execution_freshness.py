@@ -138,6 +138,10 @@ def _install() -> None:
 
 _install()
 
+# Install exact single-leg LAY economics before persistence/preload guards clone and
+# freeze the PaperBook positive load/save dispatch graph.
+from . import _paperbook_lay_economics_guard as _paperbook_lay_economics_guard  # noqa: E402,F401
+
 # PAPER path persistence is structural evidence unless an independent durable
 # authority re-admits it. Install that fail-closed boundary as part of the existing
 # PAPER execution durability composition rather than inventing a parallel runtime.
@@ -176,3 +180,8 @@ from . import _paperbook_preload_wrapper_helper_guard as _paperbook_preload_wrap
 # load/save callables to remain reachable from the owning guard module. Retire those
 # obsolete capability handles only after every canonical wrapper has captured them.
 from . import _paperbook_preload_generation_handle_cleanup as _paperbook_preload_generation_handle_cleanup  # noqa: E402,F401
+
+# With PaperBook persistence authority now sealed, extend the already-existing #623
+# adoption runtime so LAY side identity survives preparation, durable attempt truth,
+# materialization, duplicate detection, and restart reconciliation.
+from . import _paper_execution_lay_adoption_guard as _paper_execution_lay_adoption_guard  # noqa: E402,F401

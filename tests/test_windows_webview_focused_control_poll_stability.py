@@ -219,8 +219,23 @@ def test_focused_error_hands_off_before_the_live_region_is_hidden() -> None:
         "setHiddenIfChanged(errorNode, true);"
     )
 
-    assert source.count("clearErrorStatusWithFocusHandoff();") == 2
+    # Three intentional users: ordinary announcement, poll projection and
+    # explicit acknowledgment of an unconfirmed dispatch.  Each must route
+    # through the focus-safe helper rather than hiding a focused live region.
+    assert source.count("clearErrorStatusWithFocusHandoff();") == 3
     assert source.count("setHiddenIfChanged(errorNode, true);") == 1
+
+    acknowledgement_start = source.index('dispatchUncertainAck.addEventListener("click", () => {')
+    acknowledgement_end = source.index("\n  });", acknowledgement_start)
+    acknowledgement = source[acknowledgement_start:acknowledgement_end]
+    assert "unconfirmedDispatchResult = false;" in acknowledgement
+    assert "focusOperatorTarget(statusNode);" in acknowledgement
+    assert "setHiddenIfChanged(dispatchUncertainAck, true);" in acknowledgement
+    assert "clearErrorStatusWithFocusHandoff();" in acknowledgement
+    assert acknowledgement.index("focusOperatorTarget(statusNode);") < acknowledgement.index(
+        "setHiddenIfChanged(dispatchUncertainAck, true);"
+    ) < acknowledgement.index("clearErrorStatusWithFocusHandoff();")
+    assert "Попередня дія залишається непідтвердженою." in acknowledgement
 
 
 def test_programmatic_focus_routes_away_from_unavailable_targets() -> None:

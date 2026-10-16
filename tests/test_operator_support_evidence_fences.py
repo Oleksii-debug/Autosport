@@ -122,3 +122,74 @@ def test_every_declared_agent_goal_has_ukrainian_operator_explanation():
         assert any('а' <= c <= 'я' for c in strategy_goal_uk(strategy.strategy_id))
         for agent in strategy.agent_names:
             assert any('а' <= c <= 'я' for c in agent_purpose_uk(agent))
+
+
+def test_agent_report_reads_only_the_selected_canonical_strategy_workspace(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    selected = workspace / "strategies" / "research-replay-v1-identity"
+    selected.mkdir(parents=True)
+    (selected / "decisions.jsonl").write_text(
+        "raw secret payload must never appear in a support report", encoding="utf-8"
+    )
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=FakeClock())
+    try:
+        _, agent_file = trace.export_reports(
+            tmp_path,
+            selected_strategy="research-replay-v1",
+            research_plan_loaded=True,
+            agent_workspace=selected,
+        )
+        report = json.loads(agent_file.read_text(encoding="utf-8"))
+        assert report["agent_workspace_scope"] == "CANONICAL_STRATEGY"
+        decisions = next(item for item in report["memory_and_learning_artifacts"]
+                         if item["type"] == "decisions.jsonl")
+        assert decisions["state"] == "PRESENT_UNVERIFIED"
+        assert "raw secret payload" not in agent_file.read_text(encoding="utf-8")
+
+        _, base_file = trace.export_reports(
+            tmp_path, selected_strategy="observe-only-v1"
+        )
+        baseline = json.loads(base_file.read_text(encoding="utf-8"))
+        assert baseline["agent_workspace_scope"] == "ROOT"
+        base_decisions = next(
+            item for item in baseline["memory_and_learning_artifacts"]
+            if item["type"] == "decisions.jsonl"
+        )
+        assert base_decisions["state"] == "NOT_PRESENT"
+    finally:
+        trace.close()
+
+
+def test_agent_report_refuses_foreign_and_symlink_strategy_paths(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    external = tmp_path / "unrelated"
+    external.mkdir()
+    (workspace / "strategies").mkdir()
+    link = workspace / "strategies" / "outbound"
+    try:
+        link.symlink_to(external, target_is_directory=True)
+    except OSError:
+        pytest.skip("creating directory symlinks requires host privileges")
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=FakeClock())
+    try:
+        for invalid in (external, link, workspace / "arbitrary" / "subdir"):
+            with pytest.raises(SupportExportError, match="outside canonical"):
+                trace.export_reports(
+                    tmp_path, selected_strategy="observe-only-v1",
+                    agent_workspace=invalid,
+                )
+    finally:
+        trace.close()
+
+
+def test_webview_learning_and_report_paths_follow_selected_strategy_identity():
+    root = __import__("pathlib").Path(__file__).resolve().parents[1]
+    source = (root / "src/autosport/windows_webview_shell.py").read_text(
+        encoding="utf-8"
+    )
+    assert "selected_agent_workspace = self._product_runtime_target_workspace()" in source
+    assert "self.learning_status_worker.start(selected_agent_workspace)" in source
+    assert "agent_workspace=selected_agent_workspace" in source
+    assert "workspace_for_strategy(self.workspace, strategy_id, plan)" in source

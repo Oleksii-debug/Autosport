@@ -16,3 +16,32 @@ A product launch creates the daily journal; while it runs, an application-owned 
 ## AutoTrade comparison
 
 The system deliberately adopts the **separation** described in AutoTrade's `docs/engineering/05_LEARNING_MEMORY_AI_AND_AGENT_ARCHITECTURE.md`: declared strategy role and goal, observed agent activity, durable memory evidence, scientific validation and model/champion promotion are separate facts. It does not import AutoTrade's trading/financial code or treat describing a learning policy as proof that training was run. Autosport retains its canonical agent/strategy/scientific/memory authorities.
+
+
+## Two-file integrity and exact strategy scope (source extension)
+
+Both JSONs share report_pair_sha256, calculated over the complete contents
+of both reports with the pair digest excluded. The verify_report_pair()
+function reads both published files back and rejects a mixed pair, tampering,
+different snapshot time, or an unexpected claim of release/real-money/NVDA
+authority. SHA-256 is not a signing certificate. If one file is from a
+previous export, download both again from one operation.
+
+For a strategy other than the baseline, the science registry, AgentLoop,
+ResearchSupervisor and memory inventory are read from that strategy's
+canonical strategies/identity workspace. The technical one-second journal
+remains rooted at the product workspace, allowing multiple strategies to
+share process-level history. The agent_workspace_scope field is either ROOT
+or CANONICAL_STRATEGY, without leaking a personal directory name. A symlink
+or arbitrary external folder is rejected. Incomplete research configuration
+requires selecting its valid research plan first.
+
+The WebView2 research area displays Ukrainian explanations of each registered
+strategy goal and agent role. Those descriptions do not prove successful
+training. The Оновити стан навчання control uses the same selected strategy
+workspace. Research and AgentLoop snapshots newer than the report's causal
+cutoff fail closed, rather than presenting future state as historical truth.
+
+The one-second heartbeat proves process liveness only, not the observation of
+every internal instruction/OS call/provider event. Missing seconds, lost
+events and uninstrumented operations remain explicit limitations.

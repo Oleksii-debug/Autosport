@@ -346,10 +346,25 @@ class OperatorSupportTrace:
                     raise SupportExportError("support trace is too large for a bounded export")
             return tuple(result)
 
-    def _artifact_inventory(self) -> list[dict[str, object]]:
+    def _resolve_agent_workspace(self, proposed: str | Path | None) -> Path:
+        """Admit root or one exact canonical strategy storage directory only.
+
+        Reports never read arbitrary user-selected paths or follow a strategy
+        symlink out of Autosport's economic workspace authority.
+        """
+        try:
+            root = self.workspace.resolve(strict=True)
+            target = root if proposed is None else Path(proposed).resolve(strict=False)
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise SupportExportError("selected strategy workspace cannot be resolved") from exc
+        if target != root and target.parent != root / "strategies":
+            raise SupportExportError("agent report workspace is outside canonical strategy scope")
+        return target
+
+    def _artifact_inventory(self, agent_workspace: Path) -> list[dict[str, object]]:
         artifacts = []
         for basename, purpose in _ARTIFACTS.items():
-            path = self.workspace / basename
+            path = agent_workspace / basename
             # lexists distinguishes a missing member from a broken symlink.
             # The latter is malformed evidence and must fail closed.
             if not os.path.lexists(path):
@@ -366,10 +381,12 @@ class OperatorSupportTrace:
             })
         return artifacts
 
-    def _reports(self, *, selected_strategy: str, research_plan_loaded: bool) -> tuple[dict, dict]:
+    def _reports(self, *, selected_strategy: str, research_plan_loaded: bool,
+                 agent_workspace: str | Path | None = None) -> tuple[dict, dict]:
         from .strategies import available_strategies, strategy_spec
 
         selection = strategy_spec(selected_strategy)
+        selected_workspace = self._resolve_agent_workspace(agent_workspace)
         records = self._collect_records()
         activities = []
         seconds: dict[str, dict[str, object]] = {}
@@ -474,9 +491,13 @@ class OperatorSupportTrace:
             "instrumented_agent_activity": agent_activity,
             "lost_activity_count": lost_activities,
             "pending_unflushed_activity_count": self._pending.qsize(),
-            "memory_and_learning_artifacts": self._artifact_inventory(),
+            "memory_and_learning_artifacts": self._artifact_inventory(selected_workspace),
+            "agent_workspace_scope": (
+                "ROOT" if selected_workspace == self.workspace.resolve(strict=True)
+                else "CANONICAL_STRATEGY"
+            ),
             "verified_learning_evidence": verified_learning_projection(
-                self.workspace, as_of=_utc(self._clock)
+                selected_workspace, as_of=_utc(self._clock)
             ),
             "learning_verification": "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE",
             "known_limits_uk": (
@@ -510,6 +531,7 @@ class OperatorSupportTrace:
         *,
         selected_strategy: str,
         research_plan_loaded: bool = False,
+        agent_workspace: str | Path | None = None,
     ) -> tuple[Path, Path]:
         if type(research_plan_loaded) is not bool:
             raise SupportExportError("research plan status must be an exact boolean")
@@ -527,6 +549,7 @@ class OperatorSupportTrace:
         diagnostics, agents = self._reports(
             selected_strategy=selected_strategy,
             research_plan_loaded=research_plan_loaded,
+            agent_workspace=agent_workspace,
         )
         # The files are deliberately independent; failure cannot produce a
         # false "both reports exported" success status in the controller.

@@ -1923,7 +1923,14 @@ class AutosportWebController:
         """Read-only agent/research status; no domain or training effects."""
         if self.learning_status_worker.busy:
             return self._fail("Перевірка навчання вже виконується.")
-        if not self.learning_status_worker.start(self.workspace):
+        try:
+            selected_agent_workspace = self._product_runtime_target_workspace()
+        except Exception:
+            return self._fail(
+                "Для перевірки агентів спочатку завершіть вибір стратегії "
+                "та потрібного їй дослідницького плану."
+            )
+        if not self.learning_status_worker.start(selected_agent_workspace):
             return self._fail("Не вдалося запустити перевірку стану агентів.")
         self.learning_status_lines = ["Перевірка справжніх записів агентів виконується."]
         return self._ok(
@@ -1953,11 +1960,19 @@ class AutosportWebController:
             )
         except (OSError, RuntimeError, TypeError, ValueError):
             return self._fail("Не вдалося визначити каталог експорту.")
+        try:
+            selected_agent_workspace = self._product_runtime_target_workspace()
+        except Exception:
+            return self._fail(
+                "Для звіту агентів виберіть завершену конфігурацію стратегії. "
+                "Автоматичне збирання технічної діагностики триває."
+            )
         if not self.support_export_worker.start(
             self._support_trace,
             target,
             strategy=self.strategy_id,
             research_plan_loaded=self.research_plan is not None,
+            agent_workspace=selected_agent_workspace,
         ):
             return self._fail("Не вдалося запустити безпечний експорт звітів.")
         self.support_export_status = (

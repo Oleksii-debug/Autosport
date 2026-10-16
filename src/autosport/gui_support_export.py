@@ -38,6 +38,7 @@ class OneShotSupportExportWorker:
         *,
         strategy: str,
         research_plan_loaded: bool,
+        agent_workspace: str | Path | None = None,
     ) -> bool:
         if not isinstance(trace, OperatorSupportTrace):
             return False
@@ -45,6 +46,7 @@ class OneShotSupportExportWorker:
             return False
         try:
             parent = Path(directory)
+            selected_workspace = None if agent_workspace is None else Path(agent_workspace)
         except (TypeError, ValueError, OSError):
             return False
         with self._lock:
@@ -54,7 +56,7 @@ class OneShotSupportExportWorker:
         try:
             thread = threading.Thread(
                 target=self._run,
-                args=(trace, parent, strategy, research_plan_loaded),
+                args=(trace, parent, strategy, research_plan_loaded, selected_workspace),
                 name="autosport-support-export",
                 daemon=False,
             )
@@ -72,12 +74,14 @@ class OneShotSupportExportWorker:
         directory: Path,
         strategy: str,
         research_plan_loaded: bool,
+        agent_workspace: Path | None,
     ) -> None:
         try:
             paths = trace.export_reports(
                 directory,
                 selected_strategy=strategy,
                 research_plan_loaded=research_plan_loaded,
+                agent_workspace=agent_workspace,
             )
             message = SupportExportMessage(
                 completed=True,

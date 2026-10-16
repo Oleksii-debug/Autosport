@@ -232,9 +232,7 @@ class ForwardOpportunityEnvelope:
             "reveal_boundary_receipt_id",
         ):
             _text(getattr(self, name), name)
-        if isinstance(self.candidate_sequence, bool) or not isinstance(
-            self.candidate_sequence, int
-        ) or self.candidate_sequence <= 0:
+        if type(self.candidate_sequence) is not int or self.candidate_sequence <= 0:
             raise ForwardEvidenceCompletenessError(
                 "candidate_sequence must be a positive integer"
             )
@@ -334,7 +332,7 @@ class CohortRootEnvelope:
         _sha256(self.ordered_leaf_sha256, "ordered_leaf_sha256")
         for name in ("first_sequence", "last_sequence", "candidate_count"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if type(value) is not int or value <= 0:
                 raise ForwardEvidenceCompletenessError(
                     f"{name} must be a positive integer"
                 )
@@ -431,7 +429,7 @@ class CampaignCloseEnvelope:
             _sha256(self.predecessor_close_sha256, "predecessor_close_sha256")
         for name in ("final_candidate_count", "first_sequence", "last_sequence"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if type(value) is not int or value <= 0:
                 raise ForwardEvidenceCompletenessError(
                     f"{name} must be a positive integer"
                 )
@@ -550,9 +548,7 @@ class CostEvidence:
     all_material_costs_known: bool
 
     def __post_init__(self) -> None:
-        if isinstance(self.candidate_sequence, bool) or not isinstance(
-            self.candidate_sequence, int
-        ) or self.candidate_sequence <= 0:
+        if type(self.candidate_sequence) is not int or self.candidate_sequence <= 0:
             raise ForwardEvidenceCompletenessError(
                 "candidate_sequence must be a positive integer"
             )

@@ -418,6 +418,16 @@
     setSelectOptions(strategy, state.strategy_choices || []);
     setValueUnlessFocused(strategy, state.strategy_id || previousStrategy);
     renderList(byId("agent-overview-list"), state.agent_overview || []);
+    renderList(byId("agent-learning-evidence"), state.agent_learning_evidence || []);
+    setTextIfChanged(
+      byId("agent-learning-status"),
+      state.agent_learning_busy
+        ? "Зчитування наукових записів виконується."
+        : "Поточні перевірені дані про агентів нижче.",
+    );
+    setDisabledWithFocusFallback(
+      byId("agent-learning-refresh"), state.agent_learning_busy === true,
+    );
     const supportExport = state.support_export || {};
     setTextIfChanged(
       byId("support-export-status"),
@@ -634,6 +644,9 @@
   byId(108).addEventListener("click", () => dispatch("recovery.run"));
   byId(109).addEventListener("click", () => {
     dispatch("evidence.export", { path: byId("evidence-path").value });
+  });
+  byId("agent-learning-refresh").addEventListener("click", () => {
+    dispatch("agents.status");
   });
   byId("support-export-button").addEventListener("click", () => {
     dispatch("support.export", { directory: byId("support-folder").value });

@@ -91,3 +91,115 @@ class OneShotSupportExportWorker:
         with self._lock:
             self._busy = False
         return result
+
+
+@dataclass(frozen=True, slots=True)
+class LearningStatusMessage:
+    """Only bounded, non-sensitive summaries or a stable failure code."""
+
+    lines: tuple[str, ...] | None = None
+    error_code: str | None = None
+
+
+class OneShotLearningStatusWorker:
+    """Inspect canonical science/agent state off the keyboard/UI thread.
+
+    Reuses the same verified-learning projector as the downloadable agent report;
+    this is NOT a second learning engine and cannot train or promote a policy.
+    """
+
+    def __init__(self) -> None:
+        self._lock = threading.Lock()
+        self._busy = False
+        self._queue: queue.Queue[LearningStatusMessage] = queue.Queue(maxsize=1)
+        self._thread: threading.Thread | None = None
+
+    @property
+    def busy(self) -> bool:
+        with self._lock:
+            return self._busy
+
+    def start(self, workspace: str | Path) -> bool:
+        try:
+            target = Path(workspace)
+        except (OSError, TypeError, ValueError):
+            return False
+        with self._lock:
+            if self._busy:
+                return False
+            self._busy = True
+        try:
+            worker = threading.Thread(
+                target=self._run, args=(target,), daemon=False,
+                name="autosport-learning-status",
+            )
+            self._thread = worker
+            worker.start()
+        except Exception:
+            with self._lock:
+                self._busy = False
+            return False
+        return True
+
+    def _run(self, workspace: Path) -> None:
+        try:
+            from .learning_evidence_projection import verified_learning_projection
+            projection = verified_learning_projection(workspace)
+            science = projection["science"]
+            research = projection["research_runs"]
+            loop = projection["agent_loop"]
+            state_science = science["state"]
+            state_research = research["state"]
+            state_loop = loop["state"]
+            # The known fixed states below are read from the canonical verifier,
+            # never from untrusted disk strings or model-generated prose.
+            if state_science not in {"NOT_PRESENT", "CANONICAL_REGISTRY_VERIFIED"}:
+                raise ValueError("invalid scientific status")
+            if state_research not in {"NOT_PRESENT", "VERIFIED_SUPERVISOR_SNAPSHOTS"}:
+                raise ValueError("invalid research status")
+            if state_loop not in {"NOT_PRESENT", "VERIFIED_RESTART_SNAPSHOT"}:
+                raise ValueError("invalid agent loop status")
+            lines = [
+                "Науковий реєстр: " + (
+                    "перевірено" if state_science == "CANONICAL_REGISTRY_VERIFIED"
+                    else "записів немає"
+                ),
+                "Дослідницький цикл: " + (
+                    "перевірені записи присутні" if state_research == "VERIFIED_SUPERVISOR_SNAPSHOTS"
+                    else "записів немає"
+                ),
+                "Цикл агентів: " + (
+                    "стан відновлення перевірено" if state_loop == "VERIFIED_RESTART_SNAPSHOT"
+                    else "записів немає"
+                ),
+            ]
+            if state_science == "CANONICAL_REGISTRY_VERIFIED":
+                lines.append("Канонічних наукових записів: " + str(science["records_total"]))
+                lines.append("Експериментів: " + str(next(
+                    x["count"] for x in science["types"] if x["type"] == "Experiment"
+                )))
+                lines.append("Рішень щодо промоції моделей: " + str(next(
+                    x["count"] for x in science["types"] if x["type"] == "PromotionDecision"
+                )))
+            if state_research == "VERIFIED_SUPERVISOR_SNAPSHOTS":
+                lines.append("Дослідницьких запусків: " + str(research["count"]))
+            if state_loop == "VERIFIED_RESTART_SNAPSHOT":
+                lines.append("Кроків циклу агентів: " + str(loop["sequence"]))
+            lines.extend((
+                "Усі дані — перевірені записи або явно відсутні джерела.",
+                "Збереження старих знань і фактичне поліпшення моделі тут не доведені.",
+                "Доступ до реальних коштів цим екраном не надається.",
+            ))
+            message = LearningStatusMessage(lines=tuple(lines))
+        except Exception:
+            message = LearningStatusMessage(error_code="LEARNING_STATUS_UNAVAILABLE")
+        self._queue.put(message)
+
+    def poll(self) -> LearningStatusMessage | None:
+        try:
+            result = self._queue.get_nowait()
+        except queue.Empty:
+            return None
+        with self._lock:
+            self._busy = False
+        return result

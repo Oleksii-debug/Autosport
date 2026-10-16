@@ -38,3 +38,20 @@ def test_keyboard_and_screen_reader_report_controls_are_present():
     assert 'byId("support-export-button").addEventListener("click"' in js
     assert 'renderList(byId("agent-overview-list"), state.agent_overview || [])' in js
     assert "state.support_export" in js
+
+
+def test_agent_learning_status_is_read_only_and_keyboard_accessible():
+    shell = SHELL.read_text(encoding="utf-8")
+    html = HTML.read_text(encoding="utf-8")
+    js = JS.read_text(encoding="utf-8")
+    assert '"agents.status": self._action_agent_status_refresh,' in shell
+    assert "self.learning_status_worker = OneShotLearningStatusWorker()" in shell
+    assert "def _action_agent_status_refresh(" in shell
+    assert '"agent_learning_evidence":' in shell
+    assert '"agent_learning_busy":' in shell
+    assert "self.learning_status_worker" in shell
+    assert 'id="agent-learning-refresh"' in html
+    assert 'id="agent-learning-evidence"' in html
+    assert 'id="agent-learning-status" role="status" aria-live="polite"' in html
+    assert 'dispatch("agents.status")' in js
+    assert 'renderList(byId("agent-learning-evidence"), state.agent_learning_evidence || [])' in js

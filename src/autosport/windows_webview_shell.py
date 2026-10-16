@@ -15,7 +15,7 @@ from .causal_collector import GapState, SyncState
 from .dataset import ReplayDataset, load_dataset
 from .dataset_worker import OneShotDatasetValidationWorker
 from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
-from .gui_support_export import OneShotSupportExportWorker
+from .gui_support_export import OneShotLearningStatusWorker, OneShotSupportExportWorker
 from .operator_support import OperatorSupportTrace, SupportExportError
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
@@ -479,6 +479,8 @@ class AutosportWebController:
         self.recovery_worker = OneShotRecoveryWorker()
         self.evidence_export_worker = OneShotEvidenceExportWorker()
         self.support_export_worker = OneShotSupportExportWorker()
+        self.learning_status_worker = OneShotLearningStatusWorker()
+        self.learning_status_lines = ["Натисніть Оновити стан навчання для перевірки наукових записів."]
         self._support_trace: OperatorSupportTrace | None = None
         self._support_trace_fault = False
         self.support_export_status = "Журнал діагностики буде ввімкнено під час запуску вікна."
@@ -1352,6 +1354,15 @@ class AutosportWebController:
             else:
                 self._ok(text("ui.status.evidence_export.complete"))
 
+        learning_status = self.learning_status_worker.poll()
+        if learning_status is not None:
+            if learning_status.lines is None:
+                self.learning_status_lines = [
+                    "Перевірені записи агентів недоступні; навчання не підтверджено."
+                ]
+            else:
+                self.learning_status_lines = list(learning_status.lines)
+
         support_message = self.support_export_worker.poll()
         if support_message is not None:
             if support_message.completed:
@@ -1566,6 +1577,8 @@ class AutosportWebController:
                     )
                 ),
                 "strategy_id": self.strategy_id,
+                "agent_learning_evidence": list(self.learning_status_lines),
+                "agent_learning_busy": self.learning_status_worker.busy,
                 "agent_overview": [
                     "Вибрана стратегія: " + spec.strategy_id,
                     "Оголошена мета стратегії: " + spec.description,
@@ -1895,6 +1908,19 @@ class AutosportWebController:
             focus_id="202",
         )
 
+
+
+    def _action_agent_status_refresh(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Read-only agent/research status; no domain or training effects."""
+        if self.learning_status_worker.busy:
+            return self._fail("Перевірка навчання вже виконується.")
+        if not self.learning_status_worker.start(self.workspace):
+            return self._fail("Не вдалося запустити перевірку стану агентів.")
+        self.learning_status_lines = ["Перевірка справжніх записів агентів виконується."]
+        return self._ok(
+            "Оновлюється науковий стан агентів.",
+            focus_id="agent-learning-status",
+        )
 
     def _action_support_export(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Export two safe reports without handling live market/financial effects."""
@@ -2283,6 +2309,7 @@ class AutosportWebController:
             "recovery.run": self._action_recovery_run,
             "evidence.export": self._action_evidence_export,
             "support.export": self._action_support_export,
+            "agents.status": self._action_agent_status_refresh,
             "product_source.configure": self._action_product_source_configure,
             "product_runtime.start": self._action_product_runtime_start,
             "product_runtime.stop": self._action_product_runtime_stop,
@@ -2409,6 +2436,7 @@ class AutosportWebController:
                 self.recovery_worker,
                 self.evidence_export_worker,
                 self.support_export_worker,
+                self.learning_status_worker,
             ):
                 self._wait_for_terminal_worker(worker)
 

@@ -47,6 +47,14 @@
       <select id="106" aria-label="Стратегія повтору"></select>
       <h3 id="agent-overview-heading">Агенти: ролі, цілі та поточна стратегія</h3>
       <ul id="agent-overview-list" class="readback-list" tabindex="0" aria-labelledby="agent-overview-heading"></ul>
+      <button id="agent-learning-refresh" type="button" aria-describedby="agent-learning-status">
+        Оновити стан навчання агентів
+      </button>
+      <p id="agent-learning-status" role="status" aria-live="polite" aria-atomic="true">
+        Перевірка наукових записів ще не запускалася.
+      </p>
+      <ul id="agent-learning-evidence" class="readback-list" tabindex="0"
+          aria-label="Перевірені факти про експерименти, пам’ять і навчання агентів"></ul>
 
       <label for="research-plan-path">Шлях до JSON-плану дослідження</label>
       <input id="research-plan-path" type="text" autocomplete="off" aria-describedby="research-plan-summary">

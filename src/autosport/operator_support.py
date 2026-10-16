@@ -34,7 +34,7 @@ _COMPONENT = frozenset({"interface", "runtime", "agent", "research", "learning",
 _ACTION = frozenset({
     "dataset.select", "strategy.set", "research_plan.select", "replay_speed.set",
     "live_mode.set", "replay.run", "live.refresh", "recovery.run",
-    "evidence.export", "support.export", "agents.export", "product_source.configure",
+    "evidence.export", "support.export", "agents.export", "agents.status", "product_source.configure",
     "product_runtime.start", "product_runtime.stop", "surface.select",
     "owner.preview", "owner.initialize", "manual.calculate", "manual.clear",
     "product.started", "product.tick", "product.stopped", "product.error",
@@ -129,6 +129,7 @@ class OperatorSupportTrace:
             maxsize=_MAX_PENDING_ACTIVITY
         )
         self._lost_activity_count = 0
+        self._lost_activity_lock = threading.Lock()
         self._open_day()
         if auto_start:
             self._thread = threading.Thread(
@@ -193,12 +194,14 @@ class OperatorSupportTrace:
         status = _canonical_status(status)
         cycle = _bounded_cycle(cycle)
         observed_second = _seconds(_utc(self._clock).isoformat().replace("+00:00", "Z"))
-        with self._guard:
-            if self._closed or self._fault is not None:
-                return
-            try:
-                self._pending.put_nowait((component, action, status, cycle, observed_second))
-            except queue.Full:
+        # Never acquire the recorder's disk-I/O lock here. A hung filesystem
+        # must not delay keyboard commands or the emergency STOP lane.
+        if self._closed or self._fault is not None:
+            return
+        try:
+            self._pending.put_nowait((component, action, status, cycle, observed_second))
+        except queue.Full:
+            with self._lost_activity_lock:
                 self._lost_activity_count += 1
 
     def _drain_pending(self) -> None:
@@ -357,6 +360,8 @@ class OperatorSupportTrace:
             right_dt = datetime.fromisoformat(right.replace("Z", "+00:00"))
             missed += max(0, int((right_dt - left_dt).total_seconds()) - 1)
         now = _utc(self._clock).isoformat().replace("+00:00", "Z")
+        with self._lost_activity_lock:
+            lost_activities = self._lost_activity_count
         diagnostics = {
             "schema_version": REPORT_VERSION,
             "report_kind": "autosport-operator-diagnostics",
@@ -370,10 +375,10 @@ class OperatorSupportTrace:
                 "record_count": len(records),
                 "activity_count": len(activities),
                 "recorder_status": (
-                    "PARTIAL_DROPPED_EVENTS" if self._lost_activity_count
+                    "PARTIAL_DROPPED_EVENTS" if lost_activities
                     else ("HEALTHY" if self._fault is None else self._fault)
                 ),
-                "lost_activity_count": self._lost_activity_count,
+                "lost_activity_count": lost_activities,
                 "event_time_basis": "observed_utc_second_when_available_else_journal_timestamp",
                 "does_not_prove_os_or_provider_operations": True,
             },
@@ -404,7 +409,7 @@ class OperatorSupportTrace:
             "research_plan_loaded": research_plan_loaded,
             "strategies": strategy_catalog,
             "instrumented_agent_activity": agent_activity,
-            "lost_activity_count": self._lost_activity_count,
+            "lost_activity_count": lost_activities,
             "memory_and_learning_artifacts": self._artifact_inventory(),
             "verified_learning_evidence": verified_learning_projection(
                 self.workspace, as_of=_utc(self._clock)

@@ -40,3 +40,44 @@ def test_support_export_worker_does_not_leak_raw_exception(tmp_path):
     assert result.files is None
     assert result.error_code == 'SUPPORT_EXPORT_FAILED'
     t.close()
+
+
+def test_learning_status_reads_verified_science_without_raw_records(monkeypatch, tmp_path):
+    from autosport.gui_support_export import OneShotLearningStatusWorker
+    import autosport.learning_evidence_projection as projection
+    def result(_workspace):
+        return {
+            'science': {'state': 'CANONICAL_REGISTRY_VERIFIED', 'records_total': 4, 'types': [
+                {'type': 'Experiment', 'count': 3}, {'type': 'PromotionDecision', 'count': 1},
+            ]},
+            'research_runs': {'state': 'VERIFIED_SUPERVISOR_SNAPSHOTS', 'count': 2},
+            'agent_loop': {'state': 'VERIFIED_RESTART_SNAPSHOT', 'sequence': 18},
+        }
+    monkeypatch.setattr(projection, 'verified_learning_projection', result)
+    worker=OneShotLearningStatusWorker()
+    assert worker.start(tmp_path)
+    worker._thread.join(2)
+    assert worker.busy is True
+    response=worker.poll()
+    assert response is not None and response.error_code is None
+    text='\n'.join(response.lines)
+    assert 'Експериментів: 3' in text
+    assert 'Кроків циклу агентів: 18' in text
+    assert 'тут не доведені' in text
+    assert 'secret-token' not in text
+    assert worker.busy is False
+
+
+def test_corrupt_scientific_state_is_explicit_unavailable(monkeypatch, tmp_path):
+    from autosport.gui_support_export import OneShotLearningStatusWorker
+    import autosport.learning_evidence_projection as projection
+    def fail(_workspace):
+        raise ValueError('API_KEY=secret-operator-trace')
+    monkeypatch.setattr(projection, 'verified_learning_projection', fail)
+    worker=OneShotLearningStatusWorker()
+    assert worker.start(tmp_path)
+    worker._thread.join(2)
+    response=worker.poll()
+    assert response.lines is None
+    assert response.error_code == 'LEARNING_STATUS_UNAVAILABLE'
+    assert 'secret' not in str(response)

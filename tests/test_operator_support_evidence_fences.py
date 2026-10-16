@@ -257,6 +257,10 @@ def test_diagnostic_recorder_fault_not_masked_by_dropped_events(tmp_path):
         coverage = json.loads(path.read_text(encoding="utf-8"))["coverage"]
         assert coverage["recorder_status"] == "RECORDER_ERROR"
         assert coverage["recorder_fault_present"] is True
+        assert coverage["lost_activity_count"] == 3
+        assert coverage["complete_activity_capture_proven"] is False
+    finally:
+        trace.close()
 
 
 def test_bad_science_never_blocks_verified_diagnostics(tmp_path, monkeypatch):
@@ -418,9 +422,5 @@ def test_recomputed_pair_digest_cannot_claim_live_training_from_unverified_sourc
         agent_file.write_text(json.dumps(a), encoding="utf-8")
         with pytest.raises(SupportExportError, match="cannot claim proven"):
             verify_report_pair(diagnostic, agent_file)
-    finally:
-        trace.close()
-        assert coverage["lost_activity_count"] == 3
-        assert coverage["complete_activity_capture_proven"] is False
     finally:
         trace.close()

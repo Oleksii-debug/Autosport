@@ -289,6 +289,8 @@ def test_listener_csharp_compiler_binds_explicit_loaded_uia_references() -> None
     assert "[System.Windows.Automation.AutomationElement].Assembly.Location" in TEXT
     assert "[System.Windows.Automation.NotificationEventArgs].Assembly.Location" in TEXT
     assert "[System.Collections.Concurrent.ConcurrentQueue[string]].Assembly.Location" in TEXT
+    assert "[System.Object].Assembly.Location" in TEXT
+    assert "System.Private.CoreLib" in TEXT
     assert "(Join-Path $PSHOME 'System.Runtime.dll')" in TEXT
     assert "(Join-Path $PSHOME 'System.Collections.Concurrent.dll')" in TEXT
     assert "Add-Type -TypeDefinition $recorderSource -Language CSharp -ReferencedAssemblies $uiaReferences" in TEXT
@@ -304,3 +306,13 @@ def test_invalid_runtime_event_requirement_fails_before_uia_compiler() -> None:
     assert TEXT.index("Add-Type -AssemblyName UIAutomationClient") < TEXT.index(
         "Add-Type -TypeDefinition $recorderSource -Language CSharp"
     )
+
+
+def test_listener_precompiler_failure_has_zero_event_report_shape() -> None:
+    # Compilation failure cannot leave a stale PASS or omit report fields.
+    startup = TEXT.split("$startupFailure = [ordered]@{", 1)[1].split("\n}", 1)[0]
+    assert "status = 'FAIL'" in startup
+    assert "event_count = 0" in startup
+    assert "events = @()" in startup
+    for field in ("real_money_execution", "human_tested", "nvda_verified", "whole_product_complete"):
+        assert f"{field} = $false" in startup

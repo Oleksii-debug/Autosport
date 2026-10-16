@@ -24,6 +24,9 @@ $startupFailure = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_notification_client'
     failures = @('Listener invocation was not qualified')
+    # Pre-compiler failures must not inherit an old PASS or omit evidence fields.
+    event_count = 0
+    events = @()
     real_money_execution = $false
     human_tested = $false
     nvda_verified = $false
@@ -125,6 +128,8 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
     }
 }
 $uiaReferences = @(
+    # Explicit Roslyn references must include System.Private.CoreLib for ConcurrentQueue<T>.
+    [System.Object].Assembly.Location,
     [System.Windows.Automation.Automation].Assembly.Location,
     [System.Windows.Automation.AutomationElement].Assembly.Location,
     [System.Windows.Automation.NotificationEventArgs].Assembly.Location,

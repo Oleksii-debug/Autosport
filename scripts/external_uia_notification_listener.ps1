@@ -68,42 +68,44 @@ public sealed class AutosportUiaNotificationRecord
 
 public sealed class AutosportUiaNotificationBuffer
 {
-    // Array-backed circular FIFO avoids ConcurrentQueue<T>'s forwarded-type
-    // failure on the hosted Windows .NET 10 Roslyn compilation path.
-    private readonly object _gate = new object();
+    // CLR-synchronized methods avoid Roslyn's implicit Monitor.Exit intrinsic
+    // (CS0656 on the hosted PowerShell 7 / .NET 10 Add-Type path).
+    // Every access to _items/_head/_count uses the same instance monitor.
     private AutosportUiaNotificationRecord[] _items = new AutosportUiaNotificationRecord[16];
     private int _head = 0;
     private int _count = 0;
 
+    public int Count
+    {
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.Synchronized)]
+        get { return _count; }
+    }
+
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.Synchronized)]
     public void Enqueue(AutosportUiaNotificationRecord item)
     {
         if (item == null) throw new ArgumentNullException(nameof(item));
-        lock (_gate)
+        if (_count == _items.Length)
         {
-            if (_count == _items.Length)
-            {
-                var bigger = new AutosportUiaNotificationRecord[checked(_items.Length * 2)];
-                for (int i = 0; i < _count; i++)
-                    bigger[i] = _items[(_head + i) % _items.Length];
-                _items = bigger;
-                _head = 0;
-            }
-            _items[(_head + _count) % _items.Length] = item;
-            _count++;
+            var bigger = new AutosportUiaNotificationRecord[checked(_items.Length * 2)];
+            for (int i = 0; i < _count; i++)
+                bigger[i] = _items[(_head + i) % _items.Length];
+            _items = bigger;
+            _head = 0;
         }
+        _items[(_head + _count) % _items.Length] = item;
+        _count++;
     }
 
+    [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.Synchronized)]
     public bool TryDequeue(out AutosportUiaNotificationRecord item)
     {
-        lock (_gate)
-        {
-            if (_count == 0) { item = null; return false; }
-            item = _items[_head];
-            _items[_head] = null;
-            _head = (_head + 1) % _items.Length;
-            _count--;
-            return true;
-        }
+        if (_count == 0) { item = null; return false; }
+        item = _items[_head];
+        _items[_head] = null;
+        _head = (_head + 1) % _items.Length;
+        _count--;
+        return true;
     }
 }
 

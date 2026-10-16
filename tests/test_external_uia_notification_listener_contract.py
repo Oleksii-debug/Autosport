@@ -83,7 +83,10 @@ def test_listener_hard_codes_prehuman_truth_false() -> None:
 
 def test_listener_uses_thread_safe_csharp_callback_recorder() -> None:
     assert "AutosportUiaNotificationRecord[] _items" in TEXT
-    assert "lock (_gate)" in TEXT
+    assert "public int Count" in TEXT
+    assert "get { return _count; }" in TEXT
+    assert TEXT.count("System.Runtime.CompilerServices.MethodImplOptions.Synchronized") == 3
+    assert "lock (_gate)" not in TEXT
     assert "public bool TryDequeue(out AutosportUiaNotificationRecord item)" in TEXT
     assert "using System.Collections.Concurrent;" not in TEXT
     assert "AutomationEventHandler Handler" in TEXT

@@ -942,11 +942,16 @@ function Find-UiaRootWithElementForProcessFamily {
                 [int]$candidateProcessId
             )
             Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ENUM_PROBE'
-            $windows = $desktop.FindAll(
+            # Candidate 38861632532 stalled at desktop FindAll collection.
+            # FindFirst fetches only one process-scoped window in the same bounded
+            # MTA worker. A missing/blocked real semantic witness remains FAIL.
+            $firstWindow = $desktop.FindFirst(
                 [System.Windows.Automation.TreeScope]::Children,
                 $processCondition
             )
             Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WINDOWS_READY'
+            $windows = @()
+            if ($null -ne $firstWindow) { $windows = @($firstWindow) }
             # PowerShell's implicit AutomationElementCollection enumerator can
             # enter a synchronous UIA provider before the loop body. Use indexed
             # access so the independent watchdog can distinguish collection

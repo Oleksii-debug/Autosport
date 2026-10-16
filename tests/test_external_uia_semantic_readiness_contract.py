@@ -104,7 +104,10 @@ def test_external_uia_semantic_surface_returns_one_root_element_pair() -> None:
     # a real UIA ProcessIdProperty condition before window property reads.
     assert "[System.Windows.Automation.AutomationElement]::ProcessIdProperty" in helper
     assert "$processCondition = New-Object System.Windows.Automation.PropertyCondition(" in helper
-    assert "$windows = $desktop.FindAll(" in helper
+    assert "$firstWindow = $desktop.FindFirst(" in helper
+    assert "$desktop.FindAll(" not in helper
+    assert "$windows = @()" in helper
+    assert "if ($null -ne $firstWindow) { $windows = @($firstWindow) }" in helper
     assert "                $processCondition\n" in helper
     assert "$candidateProcessId = [int]$window.Current.ProcessId" not in helper
     assert "[System.Windows.Automation.Condition]::TrueCondition" not in helper

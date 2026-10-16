@@ -851,11 +851,14 @@ def test_external_uia_family_scan_reports_exact_preblocking_stage_without_false_
         "SEMANTIC_DESCENDANT_PROBE",
     )]
     assert positions == sorted(positions)
-    assert positions[0] < fn.index("$desktop.FindAll(")
-    assert fn.index("$desktop.FindAll(") < positions[1] < fn.index("$windowCount = $windows.Count")
+    assert positions[0] < fn.index("$desktop.FindFirst(")
+    assert fn.index("$desktop.FindFirst(") < positions[1] < fn.index("$windowCount = $windows.Count")
     assert positions[2] < fn.index("$window.Current.AutomationId")
     assert positions[3] < fn.index("$element = Find-BoundedUiaSemanticViaChildren -Root $window")
     assert "$report.status = 'PASS'" not in fn
+    assert "$desktop.FindAll(" not in fn
+    assert "$windows = @()" in fn
+    assert "if ($null -ne $firstWindow) { $windows = @($firstWindow) }" in fn
     for stage in (
         "SEMANTIC_FAMILY_IDS_READY",
         "SEMANTIC_DESKTOP_ENUM_PROBE",
@@ -878,7 +881,7 @@ def test_external_uia_scoped_collection_iteration_has_watchdog_visible_boundarie
     family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
         "function Wait-ForUiaElement {", 1
     )[0]
-    scan = family.index("$windows = $desktop.FindAll(")
+    scan = family.index("$firstWindow = $desktop.FindFirst(")
     ready = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WINDOWS_READY'", scan)
     count = family.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_COUNT_PROBE'", ready)
     get_count = family.index("$windowCount = $windows.Count", count)
@@ -980,8 +983,8 @@ def test_external_uia_native_hwnd_candidates_preserve_real_semantic_and_process_
     family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
         "function Wait-ForUiaElement {", 1
     )[0]
-    assert family.index("[AutosportNativeWindows]::ForProcessFamily($ProcessIds)") < family.index("$desktop.FindAll(")
-    assert family.index("AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)") < family.index("$desktop.FindAll(")
+    assert family.index("[AutosportNativeWindows]::ForProcessFamily($ProcessIds)") < family.index("$desktop.FindFirst(")
+    assert family.index("AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)") < family.index("$desktop.FindFirst(")
     assert "($ProcessIds -contains $nativeProcessId)" in family
     assert "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId" in family
     assert "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId" in family

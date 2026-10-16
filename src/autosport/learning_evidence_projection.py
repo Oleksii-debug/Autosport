@@ -23,8 +23,8 @@ _RESEARCH_TYPES = (
 _MAX_RECORDS_PER_TYPE = 20000
 _MAX_RECENT = 25
 _SCIENTIFIC_NAMES = ("scientific-registry.json", "scientific_registry.json")
-_ALLOWED_EXP_OUTCOMES = {"QUALIFIED", "NEGATIVE", "INCONCLUSIVE", "INVALID", "FAILED"}
-_ALLOWED_PROMOTION = {"PROMOTE", "REJECT", "ROLLBACK", "NO_CHANGE", "ABSTAIN"}
+_ALLOWED_EXP_OUTCOMES = {"POSITIVE", "NEGATIVE", "NULL", "HARMFUL", "INCONCLUSIVE"}
+_ALLOWED_PROMOTION = {"PROMOTE", "RETAIN", "REJECT", "ROLLBACK"}
 
 
 def _regular_file(path: Path) -> bool:
@@ -87,6 +87,9 @@ def verified_learning_projection(
         groups: list[dict[str, object]] = []
         experiment_statuses: Counter[str] = Counter()
         promotions: Counter[str] = Counter()
+        promotion_evidence_validity: Counter[str] = Counter()
+        promotion_evidence_guardrail_failures = 0
+        promotion_evidence_holdout_missing = 0
         total = 0
         for typ in _RESEARCH_TYPES:
             entries = registry.causal_records(typ, as_of=cutoff)
@@ -107,6 +110,15 @@ def verified_learning_projection(
                     experiment_statuses[_safe_enum(entry.payload.get("outcome"), _ALLOWED_EXP_OUTCOMES)] += 1
                 if typ == "PromotionDecision":
                     promotions[_safe_enum(entry.payload.get("action"), _ALLOWED_PROMOTION)] += 1
+                if typ == "PromotionEvidence":
+                    promotion_evidence_validity[_safe_enum(
+                        entry.payload.get("validity"),
+                        {"ELIGIBLE", "INCONCLUSIVE", "INVALID"},
+                    )] += 1
+                    if entry.payload.get("guardrails_passed") is False:
+                        promotion_evidence_guardrail_failures += 1
+                    if entry.payload.get("holdout_consumed") is not True:
+                        promotion_evidence_holdout_missing += 1
             groups.append({"type": typ, "count": len(entries), "recent": recent})
         summary["science"] = {
             "state": "CANONICAL_REGISTRY_VERIFIED",
@@ -115,6 +127,9 @@ def verified_learning_projection(
             "types": groups,
             "experiment_outcomes": dict(sorted(experiment_statuses.items())),
             "promotion_decisions": dict(sorted(promotions.items())),
+            "promotion_evidence_validity": dict(sorted(promotion_evidence_validity.items())),
+            "promotion_evidence_guardrail_failures": promotion_evidence_guardrail_failures,
+            "promotion_evidence_holdout_missing": promotion_evidence_holdout_missing,
             "evidence_scope": "causal_records_by_availability_not_training_performance_proof",
         }
 

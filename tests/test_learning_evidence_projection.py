@@ -106,3 +106,28 @@ def test_symlink_registry_is_not_imported(tmp_path):
     (tmp_path/'scientific-registry.json').symlink_to(outside)
     with pytest.raises(ValueError, match='ordinary'):
         verified_learning_projection(tmp_path, as_of=NOW)
+
+
+def test_registry_uses_actual_positive_null_harmful_and_retain_taxonomy(tmp_path):
+    (tmp_path/'scientific-registry.json').write_text('{}')
+    class FullTaxonomyRegistry(Registry):
+        def causal_records(self, typ, *, as_of):
+            if typ == 'Experiment':
+                return tuple(_entry('exp-'+v, 'outcome', v) for v in ('POSITIVE','NULL','HARMFUL'))
+            if typ == 'PromotionDecision':
+                return (_entry('retain-1','action','RETAIN'),)
+            if typ == 'PromotionEvidence':
+                return (SimpleNamespace(
+                    record_id='evidence-1', record_sha256='e'*64,
+                    available_at='2026-10-15T23:00:00+00:00',
+                    payload={'validity':'INCONCLUSIVE','guardrails_passed':False,'holdout_consumed':False},
+                ),)
+            return ()
+    report = verified_learning_projection(tmp_path,as_of=NOW,registry_factory=FullTaxonomyRegistry)
+    info=report['science']
+    assert info['experiment_outcomes'] == {'HARMFUL':1,'NULL':1,'POSITIVE':1}
+    assert info['promotion_decisions']=={'RETAIN':1}
+    assert info['promotion_evidence_validity']=={'INCONCLUSIVE':1}
+    assert info['promotion_evidence_guardrail_failures']==1
+    assert info['promotion_evidence_holdout_missing']==1
+    assert report['proven_live_model_learning'] is False

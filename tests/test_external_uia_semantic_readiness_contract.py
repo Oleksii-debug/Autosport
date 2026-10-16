@@ -199,7 +199,7 @@ def test_external_uia_native_pid_is_single_read_before_bounded_worker() -> None:
     end = script.index("$report = [ordered]@{", start)
     helper = script[start:end]
     native_start = helper.index("foreach ($nativeHandle in $nativeWindows)")
-    fallback_start = helper.index("# The existing UIA desktop search", native_start)
+    fallback_start = helper.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED'", native_start)
     native = helper[native_start:fallback_start]
 
     # Read the candidate PID once from Win32; do not bind a COM UIA root

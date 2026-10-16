@@ -146,3 +146,112 @@ def test_keyboard_observe_never_waits_for_recorder_filesystem_lock(tmp_path):
     diag, _ = t.export_reports(tmp_path, selected_strategy='observe-only-v1')
     assert json.loads(diag.read_text())['activities'][0]['cycle'] == 12
     t.close()
+
+
+def test_stalled_sampler_cannot_hold_operator_shutdown_or_falsely_close_journal(tmp_path):
+    trace = OperatorSupportTrace(tmp_path / "workspace", auto_start=False, clock=Clock())
+
+    class StalledSampler:
+        def __init__(self):
+            self.join_calls = 0
+
+        def join(self, timeout=None):
+            assert timeout == 2.0
+            self.join_calls += 1
+
+        def is_alive(self):
+            return True
+
+    stalled = StalledSampler()
+    trace._thread = stalled
+    try:
+        trace.close()
+        assert stalled.join_calls == 1
+        assert trace._stop.is_set()
+        assert trace._closed is True
+        assert trace._fault == "RECORDER_ERROR"
+        assert trace.recorder_incomplete is True
+        # A still-running journal writer must not receive concurrent close.
+        assert trace._journal is not None
+    finally:
+        # The fixture has no sampler; close its test journal here.
+        trace._journal.close({"observation_phase": trace._phase})
+
+
+def test_finished_sampler_closes_normally_after_bounded_join(tmp_path):
+    trace = OperatorSupportTrace(tmp_path / "workspace", auto_start=False, clock=Clock())
+
+    class FinishedSampler:
+        def join(self, timeout=None):
+            assert timeout == 2.0
+
+        def is_alive(self):
+            return False
+
+    trace._thread = FinishedSampler()
+    trace.close()
+    assert trace._closed is True
+    assert trace._fault is None
+
+
+def test_export_workers_do_not_hold_windows_process_open(tmp_path, monkeypatch):
+    import autosport.gui_support_export as export_module
+
+    class NonrunningThread:
+        def __init__(self, **kwargs):
+            self.daemon = kwargs["daemon"]
+
+        def start(self):
+            pass
+
+    monkeypatch.setattr(export_module.threading, "Thread", NonrunningThread)
+    trace = OperatorSupportTrace(tmp_path / "workspace", auto_start=False, clock=Clock())
+    try:
+        exporter = export_module.OneShotSupportExportWorker()
+        assert exporter.start(trace, tmp_path, strategy="observe-only-v1", research_plan_loaded=False)
+        assert exporter._thread.daemon is True
+        scientist = export_module.OneShotLearningStatusWorker()
+        assert scientist.start(tmp_path)
+        assert scientist._thread.daemon is True
+    finally:
+        trace.close()
+
+
+def test_tail_gap_remains_visible_without_a_second_heartbeat(tmp_path):
+    t, c, w = trace(tmp_path)
+    try:
+        t.heartbeat()
+        c.advance(9)
+        diagnostics, _ = t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+        coverage = json.loads(diagnostics.read_text())['coverage']
+        # Historical pairwise gap is zero, but seconds 1-8 lack a subsequent
+        # verified heartbeat. Second 9 is the still-open export second.
+        assert coverage['missing_heartbeat_seconds_between_observations'] == 0
+        assert coverage['last_verified_heartbeat_age_seconds'] == 9
+        assert coverage['tail_seconds_without_verified_heartbeat'] == 8
+        assert coverage['complete_activity_capture_proven'] is False
+    finally:
+        t.close()
+
+
+def test_no_heartbeat_does_not_claim_a_zero_length_tail(tmp_path):
+    t, c, w = trace(tmp_path)
+    try:
+        diagnostics, _ = t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+        coverage = json.loads(diagnostics.read_text())['coverage']
+        assert coverage['first_heartbeat_utc'] is None
+        assert coverage['last_verified_heartbeat_age_seconds'] is None
+        assert coverage['tail_seconds_without_verified_heartbeat'] is None
+    finally:
+        t.close()
+
+
+def test_future_heartbeat_is_not_accepted_in_a_historical_report(tmp_path):
+    t, c, w = trace(tmp_path)
+    try:
+        t.heartbeat()
+        c.advance(-1)
+        with pytest.raises(SupportExportError, match='causal report cutoff'):
+            t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+    finally:
+        t.close()

@@ -438,6 +438,20 @@ class OperatorSupportTrace:
         # A single causal cutoff for both reports and scientific verification.
         snapshot_instant = _utc(self._clock)
         now = snapshot_instant.isoformat().replace("+00:00", "Z")
+        # A period with no later heartbeat has no right-hand observation. Do not
+        # silently report it as zero missing seconds just because the historical
+        # pairwise-gap count can only see gaps BETWEEN two verified heartbeats.
+        # Null means no verified heartbeat was available to anchor an age.
+        tail_seconds: int | None = None
+        last_heartbeat_age: int | None = None
+        if heartbeats:
+            last_heartbeat = datetime.fromisoformat(
+                heartbeats[-1].replace("Z", "+00:00")
+            )
+            if last_heartbeat > snapshot_instant:
+                raise SupportExportError("support heartbeat exceeds causal report cutoff")
+            last_heartbeat_age = int((snapshot_instant - last_heartbeat).total_seconds())
+            tail_seconds = max(0, last_heartbeat_age - 1)
         with self._lost_activity_lock:
             lost_activities = self._lost_activity_count
         diagnostics = {
@@ -450,6 +464,10 @@ class OperatorSupportTrace:
                 "first_heartbeat_utc": heartbeats[0] if heartbeats else None,
                 "last_heartbeat_utc": heartbeats[-1] if heartbeats else None,
                 "missing_heartbeat_seconds_between_observations": missed,
+                # Tail cannot be counted by a pairwise gap until another verified
+                # heartbeat arrives. This is uncertainty, not proof of OS failure.
+                "tail_seconds_without_verified_heartbeat": tail_seconds,
+                "last_verified_heartbeat_age_seconds": last_heartbeat_age,
                 "record_count": len(records),
                 "activity_count": len(activities),
                 "recorder_status": (
@@ -485,6 +503,49 @@ class OperatorSupportTrace:
             "requires_research_plan": spec.requires_research_plan,
             "selected": spec.strategy_id == selection.strategy_id,
         } for spec in available_strategies()]
+        # Inventory and science are distinct evidence channels. Their failures
+        # must never erase an independently verified process chronology. Do not
+        # serialize exception text, private source bytes, or filesystem paths.
+        try:
+            artifacts = self._artifact_inventory(selected_workspace)
+            inventory_failed = False
+        except Exception:
+            artifacts = []
+            inventory_failed = True
+        try:
+            science_evidence = verified_learning_projection(
+                selected_workspace, as_of=snapshot_instant
+            )
+            science_state = (
+                science_evidence.get("science") if type(science_evidence) is dict else None
+            )
+            if (
+                type(science_state) is not dict
+                or science_state.get("state") not in {"NOT_PRESENT", "CANONICAL_REGISTRY_VERIFIED"}
+                or science_state.get("cutoff_utc") != snapshot_instant.isoformat()
+                or science_evidence.get("proven_live_model_learning") is not False
+                or science_evidence.get("economic_improvement_proven_by_this_report") is not False
+                or science_evidence.get("has_live_execution_authority") is not False
+            ):
+                raise ValueError("scientific evidence projection is not verified")
+            science_failed = False
+        except Exception:
+            science_failed = True
+            science_evidence = {
+                "science": {
+                    "state": "VERIFICATION_FAILED",
+                    "cutoff_utc": snapshot_instant.isoformat(),
+                },
+                "research_runs": {"state": "NOT_VERIFIED"},
+                "agent_loop": {"state": "NOT_VERIFIED"},
+                "knowledge_retention": {"status": "NOT_EVALUATED"},
+                "proven_live_model_learning": False,
+                "economic_improvement_proven_by_this_report": False,
+                "has_live_execution_authority": False,
+                "verified_source_sha256": {},
+            }
+        diagnostics["coverage"]["scientific_evidence_verification_failed"] = science_failed
+        diagnostics["coverage"]["artifact_inventory_verification_failed"] = inventory_failed
         agents = {
             "schema_version": REPORT_VERSION,
             "report_kind": "autosport-agent-research-memory",
@@ -497,15 +558,16 @@ class OperatorSupportTrace:
             "instrumented_agent_activity": agent_activity,
             "lost_activity_count": lost_activities,
             "pending_unflushed_activity_count": self._pending.qsize(),
-            "memory_and_learning_artifacts": self._artifact_inventory(selected_workspace),
+            "memory_and_learning_artifacts": artifacts,
             "agent_workspace_scope": (
                 "ROOT" if selected_workspace == self.workspace.resolve(strict=True)
                 else "CANONICAL_STRATEGY"
             ),
-            "verified_learning_evidence": verified_learning_projection(
-                selected_workspace, as_of=snapshot_instant
+            "verified_learning_evidence": science_evidence,
+            "learning_verification": (
+                "SOURCE_VERIFICATION_FAILED_NO_LEARNING_CLAIM"
+                if science_failed else "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE"
             ),
-            "learning_verification": "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE",
             "known_limits_uk": (
                 "Наведені цілі — описи оголошених стратегій, а не підтверджені "
                 "внутрішні наміри агентів. Пам’ять показана як наявність артефактів, "
@@ -567,7 +629,16 @@ class OperatorSupportTrace:
     def close(self) -> None:
         self._stop.set()
         if self._thread is not None:
-            self._thread.join()
+            # A journal fsync can hang while the sampler holds _guard. Never
+            # make app shutdown wait forever for best-effort diagnostics.
+            # The sampler is daemon and partial journals remain unclean.
+            self._thread.join(timeout=2.0)
+            if self._thread.is_alive():
+                # A blocked writer may hold _guard; do not acquire it or
+                # concurrently close the journal it still owns.
+                self._fault = "RECORDER_ERROR"
+                self._closed = True
+                return
         with self._guard:
             if self._fault is None:
                 self._drain_pending()
@@ -623,6 +694,38 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
     # part of this snapshot.  Reject even a pair whose SHA-256 is recomputed.
     evidence = agents.get("verified_learning_evidence")
     science = evidence.get("science") if type(evidence) is dict else None
+    # A recomputed digest must not turn a failed source verification into a
+    # claimed verified learning state or conceal a rejected memory inventory.
+    coverage = diagnostics.get("coverage")
+    if type(coverage) is not dict or type(evidence) is not dict or type(science) is not dict:
+        raise SupportExportError("support verification state is malformed")
+    science_failed = coverage.get("scientific_evidence_verification_failed")
+    inventory_failed = coverage.get("artifact_inventory_verification_failed")
+    if type(science_failed) is not bool or type(inventory_failed) is not bool:
+        raise SupportExportError("support verification flags must be exact booleans")
+    if any(evidence.get(key) is not False for key in (
+        "proven_live_model_learning",
+        "economic_improvement_proven_by_this_report",
+        "has_live_execution_authority",
+    )):
+        raise SupportExportError("report cannot claim proven real learning or execution")
+    if science_failed:
+        if (
+            science.get("state") != "VERIFICATION_FAILED"
+            or agents.get("learning_verification") != "SOURCE_VERIFICATION_FAILED_NO_LEARNING_CLAIM"
+            or evidence.get("proven_live_model_learning") is not False
+            or evidence.get("economic_improvement_proven_by_this_report") is not False
+            or evidence.get("has_live_execution_authority") is not False
+            or evidence.get("verified_source_sha256") != {}
+        ):
+            raise SupportExportError("failed scientific evidence cannot claim learning")
+    elif (
+        science.get("state") not in {"NOT_PRESENT", "CANONICAL_REGISTRY_VERIFIED"}
+        or agents.get("learning_verification") != "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE"
+    ):
+        raise SupportExportError("science report status contradicts verification")
+    if inventory_failed and agents.get("memory_and_learning_artifacts") != []:
+        raise SupportExportError("rejected artifact inventory cannot claim presence")
     cutoff_text = science.get("cutoff_utc") if type(science) is dict else None
     generated_text = diagnostics.get("generated_at_utc")
     if type(cutoff_text) is not str or type(generated_text) is not str:

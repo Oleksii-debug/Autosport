@@ -42,6 +42,28 @@ training. The Оновити стан навчання control uses the same sel
 workspace. Research and AgentLoop snapshots newer than the report's causal
 cutoff fail closed, rather than presenting future state as historical truth.
 
+
+## Independent operator diagnostics under damaged science or memory
+
+The coverage summary also exposes `last_verified_heartbeat_age_seconds` and
+`tail_seconds_without_verified_heartbeat` at the exact report cutoff. A report
+can otherwise display zero *between-observation* gaps while its most recent
+heartbeat is already several seconds old. An unknown tail (no heartbeat) is
+`null`, never silently reported as zero. This is evidence of absent verified
+process heartbeats only; it is not a measurement of OS operations or a claim
+that the provider is down. A heartbeat newer than the report cutoff is rejected.
+
+The forensic trace and scientific/memory evidence are different verified sources.
+Corrupt, inaccessible, symlinked or changing science never erases separately
+verified technical chronology. Invalid causal cutoff or fabricated success flags
+also fail closed into VERIFICATION_FAILED without erasing valid diagnostics. `coverage.scientific_evidence_verification_failed`
+and `coverage.artifact_inventory_verification_failed` identify independent failures.
+Damaged or malformed science uses `science.state=VERIFICATION_FAILED`,
+`learning_verification=SOURCE_VERIFICATION_FAILED_NO_LEARNING_CLAIM`, and
+`proven_live_model_learning=false` with no private source or exception text.
+Damaged inventory is empty rather than claimed present and does not discredit
+otherwise verified science. A corrupted diagnostic journal still fails closed;
+none of these reports proves human NVDA or real execution.
 The one-second heartbeat proves process liveness only, not the observation of
 every internal instruction/OS call/provider event. Missing seconds, lost
 events and uninstrumented operations remain explicit limitations.

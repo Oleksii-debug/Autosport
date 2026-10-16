@@ -58,7 +58,7 @@ class OneShotSupportExportWorker:
                 target=self._run,
                 args=(trace, parent, strategy, research_plan_loaded, selected_workspace),
                 name="autosport-support-export",
-                daemon=False,
+                daemon=True,
             )
             self._thread = thread
             thread.start()
@@ -139,7 +139,7 @@ class OneShotLearningStatusWorker:
             self._busy = True
         try:
             worker = threading.Thread(
-                target=self._run, args=(target,), daemon=False,
+                target=self._run, args=(target,), daemon=True,
                 name="autosport-learning-status",
             )
             self._thread = worker
@@ -174,7 +174,7 @@ class OneShotLearningStatusWorker:
                     else "записів немає"
                 ),
                 "Дослідницький цикл: " + (
-                    "перевірені записи присутні" if state_research == "VERIFIED_SUPERVISOR_SNAPSHOTS"
+                    "реєстр перевірено" if state_research == "VERIFIED_SUPERVISOR_SNAPSHOTS"
                     else "записів немає"
                 ),
                 "Цикл агентів: " + (
@@ -190,6 +190,59 @@ class OneShotLearningStatusWorker:
                 lines.append("Рішень щодо промоції моделей: " + str(next(
                     x["count"] for x in science["types"] if x["type"] == "PromotionDecision"
                 )))
+                # Registry events are observations, not proven model gains.
+                # Only allow canonical outcome names and bounded counters;
+                # match their sum to the verified event count before announcing.
+                for field, record_type, labels in (
+                    (
+                        "experiment_outcomes", "Experiment",
+                        (
+                            ("POSITIVE", "позитивні"),
+                            ("NEGATIVE", "негативні"),
+                            ("NULL", "нульові"),
+                            ("HARMFUL", "шкідливі"),
+                            ("INCONCLUSIVE", "неоднозначні"),
+                            ("OTHER_OR_UNVERIFIED", "непідтверджені"),
+                        ),
+                    ),
+                    (
+                        "promotion_decisions", "PromotionDecision",
+                        (
+                            ("PROMOTE", "підвищення"),
+                            ("RETAIN", "збереження"),
+                            ("REJECT", "відхилення"),
+                            ("ROLLBACK", "відкати"),
+                            ("OTHER_OR_UNVERIFIED", "непідтверджені"),
+                        ),
+                    ),
+                ):
+                    counts = science.get(field)
+                    expected = next(
+                        x["count"] for x in science["types"]
+                        if x["type"] == record_type
+                    )
+                    allowed = {key for key, _label in labels}
+                    if (
+                        type(counts) is not dict
+                        or type(expected) is not int
+                        or expected < 0
+                        or any(
+                            type(key) is not str or key not in allowed
+                            or type(value) is not int or not 0 <= value <= 20000
+                            for key, value in counts.items()
+                        )
+                        or sum(counts.values()) != expected
+                    ):
+                        raise ValueError("learning evidence counters are inconsistent")
+                    label = (
+                        "Результати експериментів" if record_type == "Experiment"
+                        else "Рішення щодо моделей"
+                    )
+                    lines.append(
+                        label + ": " + "; ".join(
+                            f"{name} {counts.get(key, 0)}" for key, name in labels
+                        )
+                    )
             if state_research == "VERIFIED_SUPERVISOR_SNAPSHOTS":
                 lines.append("Дослідницьких запусків: " + str(research["count"]))
             if state_loop == "VERIFIED_RESTART_SNAPSHOT":

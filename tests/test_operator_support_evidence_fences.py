@@ -257,6 +257,169 @@ def test_diagnostic_recorder_fault_not_masked_by_dropped_events(tmp_path):
         coverage = json.loads(path.read_text(encoding="utf-8"))["coverage"]
         assert coverage["recorder_status"] == "RECORDER_ERROR"
         assert coverage["recorder_fault_present"] is True
+
+
+def test_bad_science_never_blocks_verified_diagnostics(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=FakeClock())
+    try:
+        trace.record(component="runtime", action="product.tick", status="active", cycle=23)
+
+        def corrupt_science(*args, **kwargs):
+            raise ValueError("secret-token /private/learning.json")
+
+        monkeypatch.setattr("autosport.operator_support.verified_learning_projection", corrupt_science)
+        diagnostic, agents = trace.export_reports(tmp_path, selected_strategy="observe-only-v1")
+        assert verify_report_pair(diagnostic, agents)
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agents.read_text(encoding="utf-8"))
+        assert d["activities"][-1]["cycle"] == 23
+        assert d["coverage"]["scientific_evidence_verification_failed"] is True
+        assert d["coverage"]["artifact_inventory_verification_failed"] is False
+        assert a["verified_learning_evidence"]["science"]["state"] == "VERIFICATION_FAILED"
+        assert a["learning_verification"] == "SOURCE_VERIFICATION_FAILED_NO_LEARNING_CLAIM"
+        assert a["verified_learning_evidence"]["proven_live_model_learning"] is False
+        assert "secret-token" not in agents.read_text(encoding="utf-8")
+        assert "/private/learning.json" not in diagnostic.read_text(encoding="utf-8")
+    finally:
+        trace.close()
+
+
+def test_malformed_science_projection_fails_closed_without_erasing_diagnostics(tmp_path, monkeypatch):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=FakeClock())
+    try:
+        monkeypatch.setattr(
+            "autosport.operator_support.verified_learning_projection",
+            lambda *args, **kwargs: {"science": {"state": "UNTRUSTED_SUCCESS"}},
+        )
+        diagnostic, agent_file = trace.export_reports(tmp_path, selected_strategy="observe-only-v1")
+        assert verify_report_pair(diagnostic, agent_file)
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agent_file.read_text(encoding="utf-8"))
+        assert d["coverage"]["scientific_evidence_verification_failed"] is True
+        assert a["verified_learning_evidence"]["science"]["state"] == "VERIFICATION_FAILED"
+        assert a["verified_learning_evidence"]["proven_live_model_learning"] is False
+        assert a["memory_and_learning_artifacts"]
+    finally:
+        trace.close()
+
+
+def test_bad_inventory_does_not_erase_valid_science(tmp_path):
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    foreign = tmp_path / "secret.txt"
+    foreign.write_text("hidden-secret", encoding="utf-8")
+    try:
+        (workspace / "decisions.jsonl").symlink_to(foreign)
+    except OSError:
+        pytest.skip("symlinks unavailable")
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=FakeClock())
+    try:
+        diagnostic, agents = trace.export_reports(tmp_path, selected_strategy="observe-only-v1")
+        assert verify_report_pair(diagnostic, agents)
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agents.read_text(encoding="utf-8"))
+        assert d["coverage"]["artifact_inventory_verification_failed"] is True
+        assert d["coverage"]["scientific_evidence_verification_failed"] is False
+        assert a["memory_and_learning_artifacts"] == []
+        assert a["verified_learning_evidence"]["science"]["state"] == "NOT_PRESENT"
+        assert "hidden-secret" not in agents.read_text(encoding="utf-8")
+    finally:
+        trace.close()
+
+
+def test_recomputed_hash_cannot_turn_failed_science_into_success(tmp_path, monkeypatch):
+    import hashlib
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=FakeClock())
+    try:
+        def corrupt(*args, **kwargs):
+            raise ValueError("broken")
+        monkeypatch.setattr("autosport.operator_support.verified_learning_projection", corrupt)
+        diagnostic, agent_file = trace.export_reports(tmp_path, selected_strategy="observe-only-v1")
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agent_file.read_text(encoding="utf-8"))
+        d.pop("report_pair_sha256")
+        a.pop("report_pair_sha256")
+        a["verified_learning_evidence"]["science"]["state"] = "CANONICAL_REGISTRY_VERIFIED"
+        digest = hashlib.sha256(json.dumps({"diagnostics": d, "agents": a},
+            sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+            allow_nan=False).encode("utf-8")).hexdigest()
+        d["report_pair_sha256"] = digest
+        a["report_pair_sha256"] = digest
+        diagnostic.write_text(json.dumps(d), encoding="utf-8")
+        agent_file.write_text(json.dumps(a), encoding="utf-8")
+        with pytest.raises(SupportExportError, match="failed scientific evidence"):
+            verify_report_pair(diagnostic, agent_file)
+    finally:
+        trace.close()
+
+
+@pytest.mark.parametrize("projection", [
+    {"science": {"state": "NOT_PRESENT", "cutoff_utc": "2030-01-01T00:00:00+00:00"},
+     "proven_live_model_learning": False,
+     "economic_improvement_proven_by_this_report": False,
+     "has_live_execution_authority": False},
+    {"science": {"state": "CANONICAL_REGISTRY_VERIFIED",
+                 "cutoff_utc": NOW.isoformat()},
+     "proven_live_model_learning": True,
+     "economic_improvement_proven_by_this_report": False,
+     "has_live_execution_authority": False},
+])
+def test_false_science_cutoff_or_claim_preserves_diagnostics_with_failure_marker(
+    tmp_path, monkeypatch, projection,
+):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    trace = OperatorSupportTrace(root, auto_start=False, clock=FakeClock())
+    monkeypatch.setattr(
+        "autosport.operator_support.verified_learning_projection",
+        lambda *args, **kwargs: projection,
+    )
+    try:
+        diag, agents = trace.export_reports(
+            tmp_path, selected_strategy="observe-only-v1"
+        )
+        assert verify_report_pair(diag, agents)
+        d = json.loads(diag.read_text(encoding="utf-8"))
+        a = json.loads(agents.read_text(encoding="utf-8"))
+        assert d["coverage"]["scientific_evidence_verification_failed"] is True
+        assert a["verified_learning_evidence"]["science"]["state"] == "VERIFICATION_FAILED"
+        assert a["verified_learning_evidence"]["proven_live_model_learning"] is False
+    finally:
+        trace.close()
+
+
+def test_recomputed_pair_digest_cannot_claim_live_training_from_unverified_source(tmp_path):
+    import hashlib
+    root = tmp_path / "workspace"
+    root.mkdir()
+    trace = OperatorSupportTrace(root, auto_start=False, clock=FakeClock())
+    try:
+        diagnostic, agent_file = trace.export_reports(
+            tmp_path, selected_strategy="observe-only-v1"
+        )
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agent_file.read_text(encoding="utf-8"))
+        d.pop("report_pair_sha256")
+        a.pop("report_pair_sha256")
+        a["verified_learning_evidence"]["proven_live_model_learning"] = True
+        digest = hashlib.sha256(json.dumps(
+            {"diagnostics": d, "agents": a}, sort_keys=True,
+            ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        d["report_pair_sha256"] = digest
+        a["report_pair_sha256"] = digest
+        diagnostic.write_text(json.dumps(d), encoding="utf-8")
+        agent_file.write_text(json.dumps(a), encoding="utf-8")
+        with pytest.raises(SupportExportError, match="cannot claim proven"):
+            verify_report_pair(diagnostic, agent_file)
+    finally:
+        trace.close()
         assert coverage["lost_activity_count"] == 3
         assert coverage["complete_activity_capture_proven"] is False
     finally:

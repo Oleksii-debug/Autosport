@@ -1424,3 +1424,29 @@ def test_desktop_uia_fallback_binds_actual_rawview_search_function() -> None:
     assert "Start-ThreadJob -ScriptBlock {" in fallback
     assert "$script:semanticWorkerTimedOut = $true" in fallback
     assert "$ResultQueue.Enqueue([object](New-BoundedUiaPair" in fallback
+
+
+def test_external_uia_chrome_wrapper_defers_to_real_desktop_provider() -> None:
+    """A proven Chrome_WidgetWin_ FromHandle hang must not preempt real fallback.
+
+    Win32 window class is selection only. The independent desktop MTA worker
+    still requires an actual provider AutomationId/PID and preserves FAIL.
+    """
+    audit = _audit()
+    family = audit.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    wrapper = "if ($nativeBucket -in @('CHROME_WIDGET_VISIBLE', 'CHROME_WIDGET_HIDDEN')) {"
+    assert "$nativeBucket = [AutosportNativeWindows]::DiagnosticClassBucket($nativeHandle)" in family
+    assert wrapper in family
+    assert family.index(wrapper) < family.index(
+        "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId"
+    )
+    assert "SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED" in family
+    assert "SEMANTIC_DESKTOP_WORKER_START_PROBE" in family
+    assert "$desktop = [System.Windows.Automation.AutomationElement]::RootElement" in family
+    assert "[System.Windows.Automation.AutomationElement]::ProcessIdProperty" in family
+    assert "[string]$window.Current.AutomationId -eq $AutomationId" in family
+    assert "$ResultQueue.Enqueue" in family
+    assert "$script:semanticWorkerTimedOut = $true" in family
+    assert "$report.status = 'PASS'" not in family

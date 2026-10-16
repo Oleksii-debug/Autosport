@@ -854,6 +854,16 @@ function Find-UiaRootWithElementForProcessFamily {
             # the bounded MTA worker; a missing/hung provider stays FAILURE.
             $nativeProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeHandle)
             if (-not ($ProcessIds -contains $nativeProcessId)) { continue }
+            # Windows Candidate 38839881777: the real Chrome_WidgetWin_
+            # UIA provider blocked inside AutomationElement.FromHandle. A
+            # native wrapper HWND is never semantic accessibility evidence.
+            # Route this class to the already bounded, genuine desktop MTA
+            # ProcessId/AutomationId search below, not to the blocked native
+            # FromHandle worker. No real witness still means FAIL.
+            $nativeBucket = [AutosportNativeWindows]::DiagnosticClassBucket($nativeHandle)
+            if ($nativeBucket -in @('CHROME_WIDGET_VISIBLE', 'CHROME_WIDGET_HIDDEN')) {
+                continue
+            }
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'
             $nativeSemantic = Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId
             if ($null -ne $nativeSemantic) {

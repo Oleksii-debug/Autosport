@@ -136,7 +136,38 @@ $uiaReferences = @(
     [System.Collections.Concurrent.ConcurrentQueue[string]].Assembly.Location
 ) | Select-Object -Unique
 if ($runtimeFacades.Count -gt 0) {
-    $uiaReferences = @($uiaReferences + $runtimeFacades | Select-Object -Unique)
+    # -ReferencedAssemblies replaces Add-Type's default .NET reference set.
+    # The small facade/CoreLib list has failed CS1069 in real Windows CI.
+    # Use the trusted platform assembly manifest for the running CLR: this
+    # resolves type-forwarder closure, rather than guessing framework versions.
+    # Missing/inconsistent framework metadata must FAIL CLOSED, never PASS.
+    $trustedAssemblyManifest = [AppContext]::GetData('TRUSTED_PLATFORM_ASSEMBLIES')
+    if (-not ($trustedAssemblyManifest -is [string]) -or
+        [string]::IsNullOrWhiteSpace($trustedAssemblyManifest)) {
+        throw 'Trusted .NET framework reference manifest for UIA listener is unavailable'
+    }
+    $trustedFrameworkReferences = @(
+        $trustedAssemblyManifest -split [System.IO.Path]::PathSeparator
+    )
+    if ($trustedFrameworkReferences.Count -lt 20 -or
+        $trustedFrameworkReferences.Count -gt 1024) {
+        throw 'Trusted .NET framework reference manifest has invalid bounds'
+    }
+    foreach ($reference in $trustedFrameworkReferences) {
+        if (-not [System.IO.Path]::IsPathFullyQualified($reference) -or
+            -not (Test-Path -LiteralPath $reference -PathType Leaf)) {
+            throw 'Trusted .NET framework reference manifest contains unavailable assembly'
+        }
+    }
+    if (-not @($trustedFrameworkReferences | Where-Object {
+        [System.IO.Path]::GetFileName($_) -ceq 'System.Private.CoreLib.dll'
+    }).Count) {
+        throw 'Trusted .NET framework reference manifest lacks System.Private.CoreLib'
+    }
+    $uiaReferences = @(
+        $uiaReferences + $runtimeFacades + $trustedFrameworkReferences |
+            Select-Object -Unique
+    )
 }
 if (-not ('AutosportUiaNotificationRecorder' -as [type])) {
     Add-Type -TypeDefinition $recorderSource -Language CSharp -ReferencedAssemblies $uiaReferences

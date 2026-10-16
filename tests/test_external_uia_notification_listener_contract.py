@@ -295,6 +295,26 @@ def test_listener_csharp_compiler_binds_explicit_loaded_uia_references() -> None
     assert "(Join-Path $PSHOME 'System.Collections.Concurrent.dll')" in TEXT
     assert "Add-Type -TypeDefinition $recorderSource -Language CSharp -ReferencedAssemblies $uiaReferences" in TEXT
     assert "Required .NET reference facade for UIA notification listener is unavailable" in TEXT
+    # The original narrow list still fails CS1069 (forwarded ConcurrentQueue)
+    # on Windows .NET 10. Prove that the complete trusted CLR reference set
+    # now participates in the exact Add-Type compilation instead.
+    assert "[AppContext]::GetData('TRUSTED_PLATFORM_ASSEMBLIES')" in TEXT
+    assert "$trustedAssemblyManifest -split [System.IO.Path]::PathSeparator" in TEXT
+    assert "$uiaReferences + $runtimeFacades + $trustedFrameworkReferences" in TEXT
+    assert "Trusted .NET framework reference manifest lacks System.Private.CoreLib" in TEXT
+
+
+def test_trusted_clr_manifest_precedes_listener_compilation() -> None:
+    manifest = TEXT.index("[AppContext]::GetData('TRUSTED_PLATFORM_ASSEMBLIES')")
+    compile_site = TEXT.index("Add-Type -TypeDefinition $recorderSource -Language CSharp")
+    assert TEXT.index("$startupFailure | ConvertTo-Json") < manifest < compile_site
+    assert "-not [System.IO.Path]::IsPathFullyQualified($reference)" in TEXT
+    assert "Trusted .NET framework reference manifest contains unavailable assembly" in TEXT
+    assert "Trusted .NET framework reference manifest has invalid bounds" in TEXT
+    assert "CAPABILITY_READY" in TEXT
+    assert "ConcurrentQueue<AutosportUiaNotificationRecord>" in TEXT
+    assert "real_money_execution = $false" in TEXT
+    assert "nvda_verified = $false"
 
 
 def test_invalid_runtime_event_requirement_fails_before_uia_compiler() -> None:

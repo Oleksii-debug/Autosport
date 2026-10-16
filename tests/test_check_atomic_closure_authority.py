@@ -147,3 +147,155 @@ def test_output_is_stable_and_read_only(tmp_path):
     b = module.inspect(tmp_path)
     assert a == b and a["gate"] == "SOURCE_AUTHORITY_ONLY_NOT_WINDOWS_OR_NVDA"
     assert before == [(p.name, p.read_bytes()) for p in tmp_path.iterdir()]
+
+
+def test_terminal_parent_requires_all_three_terminal_atomic_sections(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = ATOMIC
+    for key, desc in (("2А", "WebView2"), ("2Б", "Navigation"), ("2В", "Native STOP")):
+        atomic = atomic.replace(f"| {key} | {desc} | IN_PROGRESS / NOT DONE |", f"| {key} | {desc} | Статус: DONE — qualified and merged |")
+    assert module.inspect(make_tree(tmp_path, registry, atomic))["ok"]
+
+
+def test_partial_terminal_atomic_section_is_allowed_while_parent_in_progress(tmp_path):
+    atomic = ATOMIC.replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |", "| 2А | WebView2 | Статус: DONE — merged |")
+    assert module.inspect(make_tree(tmp_path, atomic=atomic))["ok"]
+
+
+def test_parent_done_with_one_unfinished_atomic_is_rejected(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = ATOMIC.replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |", "| 2А | WebView2 | Статус: DONE — merged |")
+    rejected(tmp_path, registry, atomic)
+
+
+def test_status_column_missing_is_rejected(tmp_path):
+    rejected(tmp_path, atomic=ATOMIC.replace("| 2Б | Navigation | IN_PROGRESS / NOT DONE |", "| 2Б | Navigation |"))
+
+
+def test_status_column_injected_fourth_cell_is_rejected(tmp_path):
+    rejected(tmp_path, atomic=ATOMIC.replace("| 2Б | Navigation | IN_PROGRESS / NOT DONE |", "| 2Б | Navigation | DONE | injected |"))
+
+
+def test_description_done_cannot_substitute_for_atomic_state(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = ATOMIC.replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |", "| 2А | DONE description | IN_PROGRESS / NOT DONE |")
+    rejected(tmp_path, registry, atomic)
+
+
+def test_mixed_done_not_done_is_not_terminal(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = ATOMIC.replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |", "| 2А | WebView2 | Статус: DONE / NOT DONE |")
+    rejected(tmp_path, registry, atomic)
+
+
+def test_regular_file_path_replaced_during_read_is_rejected(tmp_path, monkeypatch):
+    make_tree(tmp_path)
+    original_read = module.os.read
+    changed = False
+
+    def swapped_read(fd, amount):
+        nonlocal changed
+        data = original_read(fd, amount)
+        if not changed:
+            changed = True
+            path = tmp_path / module.REGISTRY
+            replacement = tmp_path / "replacement.tmp"
+            replacement.write_bytes(path.read_bytes())
+            replacement.replace(path)
+        return data
+
+    monkeypatch.setattr(module.os, "read", swapped_read)
+    try:
+        module.inspect(tmp_path)
+        assert False, "identical-content path replacement must fail"
+    except module.AuthorityError:
+        pass
+    assert changed
+
+
+def test_regular_file_inplace_modified_during_read_is_rejected(tmp_path, monkeypatch):
+    make_tree(tmp_path)
+    original_read = module.os.read
+    changed = False
+
+    def modified_read(fd, amount):
+        nonlocal changed
+        data = original_read(fd, amount)
+        if not changed:
+            changed = True
+            path = tmp_path / module.REGISTRY
+            path.write_text(REGISTRY + "\nconcurrent edit\n", encoding="utf-8")
+        return data
+
+    monkeypatch.setattr(module.os, "read", modified_read)
+    try:
+        module.inspect(tmp_path)
+        assert False, "in-place mutation must fail"
+    except module.AuthorityError:
+        pass
+    assert changed
+
+
+def test_oversized_file_is_rejected(tmp_path):
+    make_tree(tmp_path)
+    (tmp_path / module.ATOMIC).write_bytes(b"x" * (module.MAX_BYTES + 1))
+    try:
+        module.inspect(tmp_path)
+        assert False
+    except module.AuthorityError:
+        pass
+
+
+def test_directory_in_place_of_file_is_rejected(tmp_path):
+    make_tree(tmp_path)
+    f = tmp_path / module.ATOMIC
+    f.unlink()
+    f.mkdir()
+    try:
+        module.inspect(tmp_path)
+        assert False
+    except module.AuthorityError:
+        pass
+
+
+def test_registry_replaced_between_authority_file_reads_is_rejected(tmp_path, monkeypatch):
+    """Both authority files must belong to one stable read epoch."""
+    make_tree(tmp_path)
+    original_read = module.os.read
+    swapped = False
+
+    def change_after_first_file(fd, amount):
+        nonlocal swapped
+        # On the first read of the second authority file, replace the first
+        # file with identical bytes: a single-file pinned read cannot detect it.
+        if not swapped and module.os.fstat(fd).st_ino == (tmp_path / module.ATOMIC).stat().st_ino:
+            swapped = True
+            target = tmp_path / module.REGISTRY
+            replacement = tmp_path / 'replacement.tmp'
+            replacement.write_bytes(target.read_bytes())
+            replacement.replace(target)
+        return original_read(fd, amount)
+
+    monkeypatch.setattr(module.os, 'read', change_after_first_file)
+    with __import__('pytest').raises(module.AuthorityError):
+        module.inspect(tmp_path)
+    assert swapped
+
+
+def test_registry_modified_between_authority_file_reads_is_rejected(tmp_path, monkeypatch):
+    make_tree(tmp_path)
+    original_read = module.os.read
+    changed = False
+
+    def change_after_first_file(fd, amount):
+        nonlocal changed
+        if not changed and module.os.fstat(fd).st_ino == (tmp_path / module.ATOMIC).stat().st_ino:
+            changed = True
+            target = tmp_path / module.REGISTRY
+            target.write_text(REGISTRY + '\n# concurrent edit\n', encoding='utf-8')
+        return original_read(fd, amount)
+
+    monkeypatch.setattr(module.os, 'read', change_after_first_file)
+    with __import__('pytest').raises(module.AuthorityError):
+        module.inspect(tmp_path)
+    assert changed

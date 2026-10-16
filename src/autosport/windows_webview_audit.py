@@ -240,6 +240,30 @@ def _reject_broken_html_id_references(
             failures.append(f"id={source}: {attribute} references missing id={target}")
 
 
+def _reject_inaccessible_emergency_stop(
+    parser: _SemanticShellParser, failures: list[str]
+) -> None:
+    """Reject emergency STOP controls hidden from or unreachable by keyboard/AT."""
+    element = parser.elements.get("emergency-stop-action")
+    if element is None:
+        return
+    _, attrs = element
+    if "hidden" in attrs or "inert" in attrs:
+        failures.append("id=emergency-stop-action: hidden/inert HTML state")
+    for name in ("aria-hidden", "aria-disabled"):
+        if name in attrs and (attrs[name] or "").strip().lower() != "false":
+            failures.append(
+                f"id=emergency-stop-action: {name} must be absent or false"
+            )
+    if "role" in attrs and (attrs["role"] or "").strip().lower() != "button":
+        failures.append("id=emergency-stop-action: native button role overridden")
+    if "tabindex" in attrs and (attrs["tabindex"] or "").strip() != "0":
+        failures.append("id=emergency-stop-action: not in the normal Tab order")
+    style = "".join((attrs.get("style") or "").lower().split())
+    if "display:none" in style or "visibility:hidden" in style:
+        failures.append("id=emergency-stop-action: hidden by inline CSS")
+
+
 def _reject_missing_accessible_names(
     parser: _SemanticShellParser, failures: list[str]
 ) -> None:
@@ -311,6 +335,7 @@ def inspect_semantic_shell() -> dict[str, Any]:
         _reject_duplicate_html_identities(parser, failures)
         _reject_broken_html_id_references(parser, failures)
         _reject_missing_accessible_names(parser, failures)
+        _reject_inaccessible_emergency_stop(parser, failures)
     except Exception as exc:
         failures.append(f"semantic shell HTML parse failed: {type(exc).__name__}: {exc}")
 
@@ -473,6 +498,7 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     _reject_duplicate_html_identities(parser, failures)
     _reject_broken_html_id_references(parser, failures)
     _reject_missing_accessible_names(parser, failures)
+    _reject_inaccessible_emergency_stop(parser, failures)
     for marker in _REQUIRED_SHORTCUT_MARKERS:
         if marker not in javascript:
             failures.append(f"keyboard marker missing: {marker}")

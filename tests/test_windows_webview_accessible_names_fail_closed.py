@@ -98,3 +98,60 @@ def test_blank_aria_labelledby_has_precedence_over_button_text(
         "emergency-stop-action" in message and "accessible name" in message
         for message in result["failures"]
     ), result
+
+@pytest.mark.parametrize("keyboard", [False, True])
+@pytest.mark.parametrize(
+    ("attribute", "diagnostic"),
+    [
+        ("hidden", "hidden/inert"),
+        ("inert", "hidden/inert"),
+        ('aria-hidden="true"', "aria-hidden"),
+        ('aria-hidden="invalid"', "aria-hidden"),
+        ('aria-disabled="true"', "aria-disabled"),
+        ('role="none"', "native button role"),
+        ('role="presentation"', "native button role"),
+        ('role="link"', "native button role"),
+        ('tabindex="-1"', "normal Tab order"),
+        ('style="display: none"', "inline CSS"),
+        ('style="visibility: hidden"', "inline CSS"),
+    ],
+)
+def test_emergency_stop_static_accessibility_exclusion_fails_closed(
+    tmp_path: Path, keyboard: bool, attribute: str, diagnostic: str
+) -> None:
+    index, _ = audit._asset_paths()
+    html = index.read_text(encoding="utf-8")
+    anchor = 'id="emergency-stop-action" type="button"'
+    assert html.count(anchor) == 1, "canonical HTML fixture changed"
+    result = _check(tmp_path, html.replace(anchor, anchor + " " + attribute, 1), keyboard)
+    assert result["status"] == "FAIL", result
+    assert any(
+        "emergency-stop-action" in message and diagnostic in message
+        for message in result["failures"]
+    ), result
+    assert result["human_tested"] is False
+    assert result["nvda_verified"] is False
+    assert result["real_money_execution"] is False
+
+
+@pytest.mark.parametrize("keyboard", [False, True])
+def test_emergency_stop_explicit_accessible_states_are_permitted(
+    tmp_path: Path, keyboard: bool
+) -> None:
+    index, _ = audit._asset_paths()
+    html = index.read_text(encoding="utf-8")
+    anchor = 'id="emergency-stop-action" type="button"'
+    assert html.count(anchor) == 1
+    result = _check(
+        tmp_path,
+        html.replace(
+            anchor,
+            anchor + ' aria-hidden="false" aria-disabled="false" role="button" tabindex="0"',
+            1,
+        ),
+        keyboard,
+    )
+    assert result["status"] == "PASS", result
+    assert result["human_tested"] is False
+    assert result["nvda_verified"] is False
+    assert result["real_money_execution"] is False

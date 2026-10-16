@@ -35,6 +35,17 @@ Write-ExternalUiaProgress -Stage 'START'
 # A timed-out UIA COM worker poisons this audit process for further provider
 # probes. Never retry another HWND or query the stalled provider in cleanup.
 $script:semanticWorkerTimedOut = $false
+# Fixed OS-only class-bucket counts reveal whether a provider-backed render
+# HWND was even available. These are diagnostic counts, never UIA proof.
+$script:nativeSemanticCandidateBuckets = [ordered]@{
+    RENDER_WIDGET_VISIBLE = 0
+    RENDER_WIDGET_HIDDEN = 0
+    CHROME_WIDGET_VISIBLE = 0
+    CHROME_WIDGET_HIDDEN = 0
+    OTHER_VISIBLE = 0
+    OTHER_HIDDEN = 0
+    UNKNOWN = 0
+}
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
@@ -844,6 +855,25 @@ function Find-UiaRootWithElementForProcessFamily {
     # provider exposing the expected AutomationId and process identity.
     Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_PROBE'
     $nativeWindows = [AutosportNativeWindows]::ForProcessFamily($ProcessIds)
+    # Gather only seven fixed OS metadata buckets; never persist HWND, raw
+    # class names, PIDs, titles, paths or anything returned by the UIA provider.
+    # The latest runner timed out in desktop FindFirst: this distinguishes an
+    # absent native render candidate from an actual native-provider failure.
+    $bucketCounts = [ordered]@{
+        RENDER_WIDGET_VISIBLE = 0
+        RENDER_WIDGET_HIDDEN = 0
+        CHROME_WIDGET_VISIBLE = 0
+        CHROME_WIDGET_HIDDEN = 0
+        OTHER_VISIBLE = 0
+        OTHER_HIDDEN = 0
+        UNKNOWN = 0
+    }
+    foreach ($candidateHandle in $nativeWindows) {
+        $classBucket = [string][AutosportNativeWindows]::DiagnosticClassBucket($candidateHandle)
+        if (-not $bucketCounts.Contains($classBucket)) { $classBucket = 'UNKNOWN' }
+        $bucketCounts[$classBucket] = [int]$bucketCounts[$classBucket] + 1
+    }
+    $script:nativeSemanticCandidateBuckets = $bucketCounts
     Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_READY'
     foreach ($nativeHandle in $nativeWindows) {
         if ([DateTime]::UtcNow -ge $Deadline) { break }
@@ -925,6 +955,49 @@ function Find-UiaRootWithElementForProcessFamily {
             $ProcessIds = [int[]]@($ProcessIdsCsv.Split(',') | ForEach-Object {
                 [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
             })
+        # Desktop ProcessIdProperty FindAll (38861632532) and FindFirst
+        # (38874072815) both blocked on this real Windows provider. Before
+        # querying all desktop children, try a different *real UIA* entry point:
+        # the currently focused element of the packaged process and its bounded
+        # process-owned RawView ancestor. This never sends keys, probes a
+        # foreign-process subtree or treats OS HWNDs as semantic evidence.
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PROBE'
+        $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_READY'
+        if ($null -ne $focusedElement) {
+            $focusedPid = [int]$focusedElement.Current.ProcessId
+            if ($ProcessIds -contains $focusedPid) {
+                $ancestorWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+                $focusedRoot = $focusedElement
+                $ancestorHops = 0
+                while ($ancestorHops -lt 64 -and [DateTime]::UtcNow -lt $Deadline) {
+                    $ancestorHops += 1
+                    Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE'
+                    $ancestor = $ancestorWalker.GetParent($focusedRoot)
+                    if ($null -eq $ancestor) { break }
+                    if (-not ($ProcessIds -contains [int]$ancestor.Current.ProcessId)) { break }
+                    $focusedRoot = $ancestor
+                }
+                if ($ancestorHops -ge 64) {
+                    throw 'External UIA focused ancestor traversal exceeded its bound'
+                }
+                Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE'
+                $focusSemantic = Find-BoundedUiaSemanticViaChildren -Root $focusedRoot -AutomationId $AutomationId -Deadline $Deadline
+                if ($null -ne $focusSemantic) {
+                    # The child walker must have read the genuine AutomationId.
+                    # Reverify exact ID and OS-observed process-family ownership
+                    # before returning the same UIA root/element pair.
+                    if (
+                        [string]$focusSemantic.Current.AutomationId -cne $AutomationId -or
+                        -not ($ProcessIds -contains [int]$focusSemantic.Current.ProcessId)
+                    ) {
+                        throw 'External UIA focused candidate failed semantic identity'
+                    }
+                    $ResultQueue.Enqueue([object](New-BoundedUiaPair -Window $focusedRoot -Element $focusSemantic))
+                    return
+                }
+            }
+        }
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_PROBE'
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_READY'
@@ -1068,6 +1141,7 @@ $report = [ordered]@{
     initial_window_observed = $false
     observed_window_class = 'NOT_OBSERVED'
     last_observed_process_family_count = 0
+    native_semantic_candidate_buckets = $null
     process_id = $null
     process_family_ids = @()
     root_name = $null
@@ -1685,6 +1759,7 @@ try {
     # launcher with child processes differs from a completely empty process family.
     # Export neither descendant PIDs nor native window names in this diagnostic.
     $report.last_observed_process_family_count = [int]@($lastFamilyIds).Count
+    $report.native_semantic_candidate_buckets = $script:nativeSemanticCandidateBuckets
     # Record bounded process-lifetime evidence BEFORE cleanup can kill a live
     # window. Do not disclose command lines, workspace paths, or environment.
     # A missing semantic automation id must remain a hard FAIL regardless.

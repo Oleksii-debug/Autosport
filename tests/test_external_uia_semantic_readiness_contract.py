@@ -263,3 +263,44 @@ def test_native_semantic_helper_never_binds_com_root_before_mta_job() -> None:
     assert "$workerResults.TryDequeue([ref]$result)" in helper
     assert "return $null" in helper
     assert "if ($result -isnot [System.Windows.Automation.AutomationElement])" in helper
+
+
+def test_external_uia_windows_focus_ancestry_is_real_scoped_fallback_not_a_fake_pass() -> None:
+    """Exact Windows gate stalled in desktop FindAll AND FindFirst; no bypass allowed."""
+    script = _audit_script_text()
+    start = script.index("function Find-UiaRootWithElementForProcessFamily")
+    end = script.index("function Wait-ForUiaElement", start)
+    helper = script[start:end]
+    focus = helper.split("Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PROBE'", 1)[1].split(
+        "Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_PROBE'", 1
+    )[0]
+    assert "[System.Windows.Automation.AutomationElement]::FocusedElement" in focus
+    assert "$ProcessIds -contains $focusedPid" in focus
+    assert "[System.Windows.Automation.TreeWalker]::RawViewWalker" in focus
+    assert "$ancestorHops -lt 64" in focus
+    assert "$ProcessIds -contains [int]$ancestor.Current.ProcessId" in focus
+    assert "Find-BoundedUiaSemanticViaChildren -Root $focusedRoot" in focus
+    assert "[string]$focusSemantic.Current.AutomationId -cne $AutomationId" in focus
+    assert "$ProcessIds -contains [int]$focusSemantic.Current.ProcessId" in focus
+    assert "New-BoundedUiaPair -Window $focusedRoot -Element $focusSemantic" in focus
+    assert "SendKeys" not in focus
+    assert "return [pscustomobject]@{ status = 'PASS' }" not in focus
+
+
+def test_external_uia_native_bucket_diagnostics_have_no_identifiers_or_pass_authority() -> None:
+    script = _audit_script_text()
+    begin = script.index("$bucketCounts = [ordered]@{")
+    end = script.index("$script:nativeSemanticCandidateBuckets = $bucketCounts", begin)
+    counts = script[begin:end]
+    for kind in (
+        "RENDER_WIDGET_VISIBLE", "RENDER_WIDGET_HIDDEN",
+        "CHROME_WIDGET_VISIBLE", "CHROME_WIDGET_HIDDEN",
+        "OTHER_VISIBLE", "OTHER_HIDDEN", "UNKNOWN",
+    ):
+        assert kind + " = 0" in counts
+    assert "DiagnosticClassBucket($candidateHandle)" in counts
+    assert "$bucketCounts[$classBucket] = [int]$bucketCounts[$classBucket] + 1" in counts
+    assert "$report.native_semantic_candidate_buckets = $script:nativeSemanticCandidateBuckets" in script
+    assert "$report.status = 'PASS'" not in counts
+    assert "Current.Name" not in counts
+    assert "ProcessIdForHandle" not in counts

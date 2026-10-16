@@ -565,7 +565,7 @@ class AutosportWebController:
         except (OSError, RuntimeError, TypeError, ValueError):
             self._support_trace_fault = True
             self.support_export_status = (
-                "Діагностика виявила збій запису. Повний експорт недоступний."
+                "Діагностика виявила збій запису; перевірені попередні записи можна експортувати як неповні."
             )
 
     def _fail(self, message: str) -> dict[str, Any]:
@@ -1367,8 +1367,11 @@ class AutosportWebController:
         if support_message is not None:
             if support_message.completed:
                 self.support_export_status = (
-                    "Звіти збережено: Autosport-diagnostics.json "
-                    "та Autosport-agents.json."
+                    "Діагностика часткова (збій запису або втрачена подія). "
+                    if support_message.recording_fault else "Діагностику збережено. "
+                ) + (
+                    "Файли: Autosport-diagnostics.json та Autosport-agents.json. "
+                    "Вони описують лише фактично зафіксовану активність."
                 )
                 self._ok(self.support_export_status)
             else:
@@ -1927,7 +1930,7 @@ class AutosportWebController:
         if self.support_export_worker.busy:
             return self._fail("Попереднє створення діагностичних файлів ще триває.")
         self._enable_support_trace()
-        if self._support_trace_fault or self._support_trace is None:
+        if self._support_trace is None:
             return self._fail(
                 "Автоматичний журнал недоступний. Перевірте робочу область."
             )

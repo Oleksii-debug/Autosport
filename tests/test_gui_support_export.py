@@ -31,7 +31,8 @@ def test_support_export_worker_does_not_leak_raw_exception(tmp_path):
     workspace = tmp_path / 'w'
     workspace.mkdir()
     t = OperatorSupportTrace(workspace, auto_start=False, clock=lambda: datetime(2026,10,16,tzinfo=timezone.utc))
-    t._fault='RECORDER_ERROR'
+    # An invalid symbolic link cannot be followed into private source data.
+    (workspace/'decisions.jsonl').symlink_to(tmp_path/'outside-secret.txt')
     worker=OneShotSupportExportWorker()
     assert worker.start(t, tmp_path, strategy='observe-only-v1', research_plan_loaded=False)
     worker._thread.join(timeout=10)
@@ -81,3 +82,17 @@ def test_corrupt_scientific_state_is_explicit_unavailable(monkeypatch, tmp_path)
     assert response.lines is None
     assert response.error_code == 'LEARNING_STATUS_UNAVAILABLE'
     assert 'secret' not in str(response)
+
+
+def test_partial_recorder_is_exportable_and_ui_knows_it_is_incomplete(tmp_path):
+    workspace=tmp_path/'w'; workspace.mkdir()
+    trace=OperatorSupportTrace(workspace,auto_start=False,clock=lambda: datetime(2026,10,16,tzinfo=timezone.utc))
+    trace.heartbeat()
+    trace._fault='RECORDER_ERROR'
+    worker=OneShotSupportExportWorker()
+    assert worker.start(trace,tmp_path,strategy='observe-only-v1',research_plan_loaded=False)
+    worker._thread.join(2)
+    msg=worker.poll()
+    assert msg and msg.completed is True and msg.recording_fault is True
+    assert json.loads((tmp_path/'Autosport-diagnostics.json').read_text())['coverage']['recorder_status']=='RECORDER_ERROR'
+    trace.close()

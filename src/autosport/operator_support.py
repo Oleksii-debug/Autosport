@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import os
 import stat
 import threading
 import queue
@@ -271,11 +272,20 @@ class OperatorSupportTrace:
         with self._guard:
             return self._fault
 
+    @property
+    def recorder_incomplete(self) -> bool:
+        """A partial recorder never self-certifies complete activity capture."""
+        with self._lost_activity_lock:
+            lost = self._lost_activity_count
+        return self._fault is not None or lost > 0 or not self._pending.empty()
+
     def _collect_records(self) -> tuple:
         with self._guard:
-            if self._fault is not None:
-                raise SupportExportError("support trace has an unverified recorder fault")
-            self._drain_pending()
+            # A recorder failure is *why* operators may need diagnostics. Keep
+            # exporting previously committed verified records and mark gaps;
+            # never call the damaged writer again or invent missing effects.
+            if self._fault is None:
+                self._drain_pending()
             days = tuple((_utc(self._clock).date() - timedelta(days=delta)).isoformat()
                          for delta in range(REPORT_DAYS - 1, -1, -1))
             result = []
@@ -296,7 +306,9 @@ class OperatorSupportTrace:
         artifacts = []
         for basename, purpose in _ARTIFACTS.items():
             path = self.workspace / basename
-            if not path.exists():
+            # lexists distinguishes a missing member from a broken symlink.
+            # The latter is malformed evidence and must fail closed.
+            if not os.path.lexists(path):
                 artifacts.append({"type": basename, "purpose_uk": purpose, "state": "NOT_PRESENT"})
                 continue
             info = path.lstat()
@@ -379,6 +391,8 @@ class OperatorSupportTrace:
                     else ("HEALTHY" if self._fault is None else self._fault)
                 ),
                 "lost_activity_count": lost_activities,
+                "pending_unflushed_activity_count": self._pending.qsize(),
+                "complete_activity_capture_proven": False,
                 "event_time_basis": "observed_utc_second_when_available_else_journal_timestamp",
                 "does_not_prove_os_or_provider_operations": True,
             },
@@ -410,6 +424,7 @@ class OperatorSupportTrace:
             "strategies": strategy_catalog,
             "instrumented_agent_activity": agent_activity,
             "lost_activity_count": lost_activities,
+            "pending_unflushed_activity_count": self._pending.qsize(),
             "memory_and_learning_artifacts": self._artifact_inventory(),
             "verified_learning_evidence": verified_learning_projection(
                 self.workspace, as_of=_utc(self._clock)

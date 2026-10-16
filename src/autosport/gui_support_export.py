@@ -14,6 +14,7 @@ class SupportExportMessage:
     completed: bool
     files: tuple[str, str] | None = None
     error_code: str | None = None
+    recording_fault: bool = False
 
 
 class OneShotSupportExportWorker:
@@ -78,7 +79,11 @@ class OneShotSupportExportWorker:
                 selected_strategy=strategy,
                 research_plan_loaded=research_plan_loaded,
             )
-            message = SupportExportMessage(completed=True, files=(paths[0].name, paths[1].name))
+            message = SupportExportMessage(
+                completed=True,
+                files=(paths[0].name, paths[1].name),
+                recording_fault=trace.recorder_incomplete,
+            )
         except Exception:
             message = SupportExportMessage(completed=False, error_code="SUPPORT_EXPORT_FAILED")
         self._queue.put(message)

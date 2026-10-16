@@ -78,10 +78,17 @@ def test_day_rotation_keeps_historical_records(tmp_path):
     assert report['coverage']['missing_heartbeat_seconds_between_observations']==86399
     t.close()
 
-def test_recorder_fault_cannot_export_false_complete(tmp_path):
+def test_recorder_fault_exports_only_verified_partial_evidence(tmp_path):
     t,c,w=trace(tmp_path)
+    t.heartbeat()
     t._fault='RECORDER_ERROR'
-    with pytest.raises(SupportExportError): t.export_reports(tmp_path,selected_strategy='observe-only-v1')
+    t.observe(component='agent', action='learning.observed', status='active')
+    diagnostic,agent=t.export_reports(tmp_path,selected_strategy='observe-only-v1')
+    payload=json.loads(diagnostic.read_text())
+    assert payload['coverage']['recorder_status']=='RECORDER_ERROR'
+    assert payload['coverage']['complete_activity_capture_proven'] is False
+    assert payload['coverage']['record_count']==2
+    assert json.loads(agent.read_text())['learning_verification']=='NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE'
     t.close()
 
 def test_existing_memory_not_exfiltrated(tmp_path):
@@ -120,4 +127,22 @@ def test_observation_buffer_overflow_is_reported_as_partial_not_as_healthy(tmp_p
     assert report['coverage']['lost_activity_count'] == 76
     assert len(report['activities']) == 1024
     assert agent_report['lost_activity_count'] == 76
+    t.close()
+
+
+def test_keyboard_observe_never_waits_for_recorder_filesystem_lock(tmp_path):
+    import threading
+    t, c, w = trace(tmp_path)
+    completed = threading.Event()
+    # Simulates a background journal fsync holding the recorder lock.
+    with t._guard:
+        worker = threading.Thread(target=lambda: (
+            t.observe(component='runtime', action='product.tick', status='active', cycle=12),
+            completed.set(),
+        ))
+        worker.start()
+        assert completed.wait(0.5), 'keyboard event waited on diagnostic disk lock'
+    worker.join(1.0)
+    diag, _ = t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+    assert json.loads(diag.read_text())['activities'][0]['cycle'] == 12
     t.close()

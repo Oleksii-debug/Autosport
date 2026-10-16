@@ -82,7 +82,10 @@ def test_listener_hard_codes_prehuman_truth_false() -> None:
 
 
 def test_listener_uses_thread_safe_csharp_callback_recorder() -> None:
-    assert "ConcurrentQueue<AutosportUiaNotificationRecord>" in TEXT
+    assert "AutosportUiaNotificationRecord[] _items" in TEXT
+    assert "lock (_gate)" in TEXT
+    assert "public bool TryDequeue(out AutosportUiaNotificationRecord item)" in TEXT
+    assert "using System.Collections.Concurrent;" not in TEXT
     assert "AutomationEventHandler Handler" in TEXT
     assert "private void OnEvent" in TEXT
     assert "Records.Enqueue" in TEXT
@@ -288,14 +291,14 @@ def test_listener_csharp_compiler_binds_explicit_loaded_uia_references() -> None
     assert "[System.Windows.Automation.Automation].Assembly.Location" in TEXT
     assert "[System.Windows.Automation.AutomationElement].Assembly.Location" in TEXT
     assert "[System.Windows.Automation.NotificationEventArgs].Assembly.Location" in TEXT
-    assert "[System.Collections.Concurrent.ConcurrentQueue[string]].Assembly.Location" in TEXT
+    assert "[System.Array].Assembly.Location" in TEXT
     assert "[System.Object].Assembly.Location" in TEXT
     assert "System.Private.CoreLib" in TEXT
     assert "(Join-Path $PSHOME 'System.Runtime.dll')" in TEXT
     assert "(Join-Path $PSHOME 'System.Collections.Concurrent.dll')" in TEXT
     assert "Add-Type -TypeDefinition $recorderSource -Language CSharp -ReferencedAssemblies $uiaReferences" in TEXT
     assert "Required .NET reference facade for UIA notification listener is unavailable" in TEXT
-    # The original narrow list still fails CS1069 (forwarded ConcurrentQueue)
+    # The original narrow list failed CS1069 (forwarded ConcurrentQueue)
     # on Windows .NET 10. Prove that the complete trusted CLR reference set
     # now participates in the exact Add-Type compilation instead.
     assert "[AppContext]::GetData('TRUSTED_PLATFORM_ASSEMBLIES')" in TEXT
@@ -312,7 +315,7 @@ def test_trusted_clr_manifest_precedes_listener_compilation() -> None:
     assert "Trusted .NET framework reference manifest contains unavailable assembly" in TEXT
     assert "Trusted .NET framework reference manifest has invalid bounds" in TEXT
     assert "CAPABILITY_READY" in TEXT
-    assert "ConcurrentQueue<AutosportUiaNotificationRecord>" in TEXT
+    assert "AutosportUiaNotificationRecord[] _items" in TEXT
     assert "real_money_execution = $false" in TEXT
     assert "nvda_verified = $false"
 

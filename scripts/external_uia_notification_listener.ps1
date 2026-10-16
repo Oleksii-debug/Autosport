@@ -53,7 +53,6 @@ Add-Type -AssemblyName UIAutomationTypes
 
 $recorderSource = @'
 using System;
-using System.Collections.Concurrent;
 using System.Windows.Automation;
 
 public sealed class AutosportUiaNotificationRecord
@@ -67,10 +66,51 @@ public sealed class AutosportUiaNotificationRecord
     public string ActivityId { get; set; }
 }
 
+public sealed class AutosportUiaNotificationBuffer
+{
+    // Array-backed circular FIFO avoids ConcurrentQueue<T>'s forwarded-type
+    // failure on the hosted Windows .NET 10 Roslyn compilation path.
+    private readonly object _gate = new object();
+    private AutosportUiaNotificationRecord[] _items = new AutosportUiaNotificationRecord[16];
+    private int _head = 0;
+    private int _count = 0;
+
+    public void Enqueue(AutosportUiaNotificationRecord item)
+    {
+        if (item == null) throw new ArgumentNullException(nameof(item));
+        lock (_gate)
+        {
+            if (_count == _items.Length)
+            {
+                var bigger = new AutosportUiaNotificationRecord[checked(_items.Length * 2)];
+                for (int i = 0; i < _count; i++)
+                    bigger[i] = _items[(_head + i) % _items.Length];
+                _items = bigger;
+                _head = 0;
+            }
+            _items[(_head + _count) % _items.Length] = item;
+            _count++;
+        }
+    }
+
+    public bool TryDequeue(out AutosportUiaNotificationRecord item)
+    {
+        lock (_gate)
+        {
+            if (_count == 0) { item = null; return false; }
+            item = _items[_head];
+            _items[_head] = null;
+            _head = (_head + 1) % _items.Length;
+            _count--;
+            return true;
+        }
+    }
+}
+
 public sealed class AutosportUiaNotificationRecorder
 {
-    public ConcurrentQueue<AutosportUiaNotificationRecord> Records { get; }
-        = new ConcurrentQueue<AutosportUiaNotificationRecord>();
+    public AutosportUiaNotificationBuffer Records { get; }
+        = new AutosportUiaNotificationBuffer();
 
     public AutomationEventHandler Handler { get; }
 
@@ -128,16 +168,16 @@ if ($PSVersionTable.PSEdition -eq 'Core') {
     }
 }
 $uiaReferences = @(
-    # Explicit Roslyn references must include System.Private.CoreLib for ConcurrentQueue<T>.
+    # Pin the running CLR CoreLib identity for the synchronized event buffer.
     [System.Object].Assembly.Location,
     [System.Windows.Automation.Automation].Assembly.Location,
     [System.Windows.Automation.AutomationElement].Assembly.Location,
     [System.Windows.Automation.NotificationEventArgs].Assembly.Location,
-    [System.Collections.Concurrent.ConcurrentQueue[string]].Assembly.Location
+    [System.Array].Assembly.Location
 ) | Select-Object -Unique
 if ($runtimeFacades.Count -gt 0) {
     # -ReferencedAssemblies replaces Add-Type's default .NET reference set.
-    # The small facade/CoreLib list has failed CS1069 in real Windows CI.
+    # Retain the full trusted CLR reference set for UIA type forwarders.
     # Use the trusted platform assembly manifest for the running CLR: this
     # resolves type-forwarder closure, rather than guessing framework versions.
     # Missing/inconsistent framework metadata must FAIL CLOSED, never PASS.

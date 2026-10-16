@@ -5,6 +5,7 @@ import hashlib
 import io
 import json
 import os
+import re
 import tempfile
 from pathlib import Path, PurePosixPath
 import zipfile
@@ -230,6 +231,16 @@ def _transform_windows_start_guide(payload: bytes) -> bytes:
         raise ValueError("stage-neutral guide retained the legacy archive name")
     if LEGACY_READY_LABEL in guide:
         raise ValueError("stage-neutral guide retained the legacy readiness label")
+    # Require exactly one canonical false claim. Recomputable ZIP checksums
+    # cannot authorize contradictory operator-facing readiness assertions.
+    readiness_claims = re.findall(
+        r"(?i)\b(?:V1_READY|WHOLE_PRODUCT_COMPLETE)\s*=\s*[^\s`]+",
+        guide,
+    )
+    if readiness_claims != [STAGE_NEUTRAL_READY_LABEL]:
+        raise ValueError(
+            "stage-neutral guide has missing or contradictory readiness assertion"
+        )
     return guide.encode("utf-8")
 
 
@@ -250,6 +261,13 @@ def _transform_members(
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO.json source_sha does not match requested source SHA")
     _require_false_truth_labels(build_info)
+    # Optional historical readiness flags may be absent; when present they
+    # must be the exact boolean False, never rewritten from a positive input.
+    for claim in ("v1_ready", "whole_product_complete"):
+        if claim in build_info and build_info[claim] is not False:
+            raise ValueError(
+                f"legacy BUILD_INFO.json must preserve {claim}=false when present"
+            )
     if build_info.get("version") != LEGACY_BUILD_VERSION:
         raise ValueError(
             "legacy BUILD_INFO.json version is not the exact transitional version"

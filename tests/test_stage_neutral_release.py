@@ -84,6 +84,90 @@ def _stub_deep_verifier(monkeypatch: pytest.MonkeyPatch, *, status: str = "PASS"
     monkeypatch.setattr(canonical_release, "verify_windows_package", verify)
 
 
+
+def _reseal_legacy_metadata(members: dict[str, bytes]) -> None:
+    """Make adversarial fixtures internally checksum-consistent."""
+    manifest = {
+        "schema_version": 1,
+        "files": {
+            key: _sha256(value)
+            for key, value in members.items()
+            if key not in {"PACKAGE_MANIFEST.json", "SHA256SUMS.txt"}
+        },
+    }
+    members["PACKAGE_MANIFEST.json"] = _canonical_json(manifest)
+    members["SHA256SUMS.txt"] = "".join(
+        f"{_sha256(members[key])}  {key}\n"
+        for key in sorted(members)
+        if key != "SHA256SUMS.txt"
+    ).encode("utf-8")
+
+
+@pytest.mark.parametrize("field", ["v1_ready", "whole_product_complete"])
+@pytest.mark.parametrize("value", [True, "true", 1])
+def test_repack_rejects_checksum_valid_positive_readiness_metadata(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    field: str,
+    value: object,
+) -> None:
+    _stub_deep_verifier(monkeypatch)
+    members = _legacy_members()
+    info = json.loads(members["BUILD_INFO.json"])
+    info[field] = value
+    members["BUILD_INFO.json"] = _canonical_json(info)
+    _reseal_legacy_metadata(members)
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy, members)
+    with pytest.raises(ValueError, match=f"{field}=false"):
+        stage_release.repackage_stage_neutral_windows_release(
+            legacy, output, expected_source_sha=SOURCE_SHA,
+        )
+    assert not output.exists()
+
+
+@pytest.mark.parametrize(
+    "additional",
+    [
+        "V1_READY=true",
+        "v1_ready = TRUE",
+        "WHOLE_PRODUCT_COMPLETE=true",
+        "WHOLE_PRODUCT_COMPLETE=unknown",
+        "WHOLE_PRODUCT_COMPLETE=falseX",
+        "WHOLE_PRODUCT_COMPLETE=false\nWHOLE_PRODUCT_COMPLETE=true",
+    ],
+)
+def test_guide_rejects_residual_ready_claims(additional: str) -> None:
+    guide = (
+        f"{stage_release.LEGACY_GUIDE_TITLE}\n"
+        "V1_READY=false\n"
+        f"{additional}\n"
+    )
+    with pytest.raises(ValueError, match="contradictory readiness"):
+        stage_release._transform_windows_start_guide(guide.encode("utf-8"))
+
+
+def test_guide_rejects_missing_readiness_claim() -> None:
+    guide = f"{stage_release.LEGACY_GUIDE_TITLE}\nNo readiness claim\n"
+    with pytest.raises(ValueError, match="missing or contradictory readiness"):
+        stage_release._transform_windows_start_guide(guide.encode("utf-8"))
+
+
+def test_legacy_optional_explicit_false_readiness_is_compatible() -> None:
+    members = _legacy_members()
+    info = json.loads(members["BUILD_INFO.json"])
+    info.update(v1_ready=False, whole_product_complete=False)
+    members["BUILD_INFO.json"] = _canonical_json(info)
+    _reseal_legacy_metadata(members)
+    converted = stage_release._transform_members(
+        members, expected_source_sha=SOURCE_SHA,
+    )
+    evidence = json.loads(converted["BUILD_INFO.json"])
+    assert evidence["v1_ready"] is False
+    assert evidence["whole_product_complete"] is False
+
+
 def test_repackage_stage_neutral_release_rewrites_identity_and_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

@@ -15,6 +15,11 @@ from .causal_collector import GapState, SyncState
 from .dataset import ReplayDataset, load_dataset
 from .dataset_worker import OneShotDatasetValidationWorker
 from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
+from .gui_support_export import OneShotLearningStatusWorker, OneShotSupportExportWorker
+from .operator_support import (
+    OperatorSupportTrace, SupportExportError,
+    strategy_goal_uk, agent_purpose_uk,
+)
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
 from .operator_source_config import OperatorSourceSelection, OperatorSourceSelectionState
@@ -476,6 +481,12 @@ class AutosportWebController:
         self.live_worker = OneShotObservationWorker()
         self.recovery_worker = OneShotRecoveryWorker()
         self.evidence_export_worker = OneShotEvidenceExportWorker()
+        self.support_export_worker = OneShotSupportExportWorker()
+        self.learning_status_worker = OneShotLearningStatusWorker()
+        self.learning_status_lines = ["Натисніть Оновити стан навчання для перевірки наукових записів."]
+        self._support_trace: OperatorSupportTrace | None = None
+        self._support_trace_fault = False
+        self.support_export_status = "Журнал діагностики буде ввімкнено під час запуску вікна."
         self.product_worker = ProductGuiWorker()
         self.product_runtime_status = "Тривалий імітаційний режим не запущено."
         self._product_runtime_identity: tuple[Path, str, str] | None = None
@@ -519,6 +530,46 @@ class AutosportWebController:
         self.log.append(str(value))
         if len(self.log) > 200:
             self.log = self.log[-200:]
+
+
+    def _enable_support_trace(self) -> None:
+        """Activate per-second evidence only for the trusted, launched UI.
+
+        Unit tests can construct a headless controller without starting a
+        periodic worker, and recorder failure cannot confer financial authority.
+        """
+        if self._support_trace is not None or self._support_trace_fault:
+            return
+        try:
+            self._support_trace = OperatorSupportTrace(self.workspace)
+            self.support_export_status = (
+                "Автоматичний журнал активності працює. "
+                "Експорт доступний у будь-який момент."
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            self._support_trace_fault = True
+            self.support_export_status = (
+                "Журнал діагностики недоступний; автоматичний запис не підтверджено."
+            )
+
+    def _support_record(
+        self,
+        *,
+        component: str,
+        action: str,
+        status: str,
+        cycle: int | None = None,
+    ) -> None:
+        trace = self._support_trace
+        if trace is None or self._support_trace_fault:
+            return
+        try:
+            trace.observe(component=component, action=action, status=status, cycle=cycle)
+        except (OSError, RuntimeError, TypeError, ValueError):
+            self._support_trace_fault = True
+            self.support_export_status = (
+                "Діагностика виявила збій запису; перевірені попередні записи можна експортувати як неповні."
+            )
 
     def _fail(self, message: str) -> dict[str, Any]:
         self.last_error = message
@@ -1306,6 +1357,33 @@ class AutosportWebController:
             else:
                 self._ok(text("ui.status.evidence_export.complete"))
 
+        learning_status = self.learning_status_worker.poll()
+        if learning_status is not None:
+            if learning_status.lines is None:
+                self.learning_status_lines = [
+                    "Перевірені записи агентів недоступні; навчання не підтверджено."
+                ]
+            else:
+                self.learning_status_lines = list(learning_status.lines)
+
+        support_message = self.support_export_worker.poll()
+        if support_message is not None:
+            if support_message.completed:
+                self.support_export_status = (
+                    "Діагностика часткова (збій запису або втрачена подія). "
+                    if support_message.recording_fault else "Діагностику збережено. "
+                ) + (
+                    "Файли: Autosport-diagnostics.json та Autosport-agents.json. "
+                    "Вони описують лише фактично зафіксовану активність."
+                )
+                self._ok(self.support_export_status)
+            else:
+                self.support_export_status = (
+                    "Не вдалося підготувати перевірені звіти. "
+                    "Дані не позначено як повні."
+                )
+                self._fail(self.support_export_status)
+
         # Drain the current product queue before deriving actionability in state().
         # ProductGuiWorker publishes the terminal message immediately before clearing
         # busy; consuming only one message could therefore re-enable START while a
@@ -1314,6 +1392,24 @@ class AutosportWebController:
             product_message = self.product_worker.poll()
             if product_message is None:
                 break
+            support_kind = {
+                "STARTED": ("product.started", "started"),
+                "TICK": ("product.tick", "active"),
+                "STOPPED": ("product.stopped", "stopped"),
+                "ERROR": ("product.error", "failed"),
+            }.get(product_message.kind)
+            if support_kind is not None:
+                observed_cycle = (
+                    getattr(product_message.tick, "cycle_index", None)
+                    if product_message.kind == "TICK"
+                    else None
+                )
+                self._support_record(
+                    component="runtime",
+                    action=support_kind[0],
+                    status=support_kind[1],
+                    cycle=observed_cycle if type(observed_cycle) is int else None,
+                )
             if product_message.kind == "STARTED" and product_message.status is not None:
                 # STARTED proves lifecycle/source identity only. The prior run's
                 # economic snapshot is not current for this run until a TICK carries
@@ -1487,6 +1583,20 @@ class AutosportWebController:
                     )
                 ),
                 "strategy_id": self.strategy_id,
+                "agent_learning_evidence": list(self.learning_status_lines),
+                "agent_learning_busy": self.learning_status_worker.busy,
+                "agent_overview": [
+                    "Вибрана стратегія: " + spec.strategy_id,
+                    "Оголошена мета стратегії: " + strategy_goal_uk(spec.strategy_id),
+                    "Підключені ролі агентів: " + "; ".join(
+                        f"{name} — {agent_purpose_uk(name)}"
+                        for name in spec.agent_names
+                    ),
+                    "Хеш складу агентів: " + spec.agent_composition_sha256,
+                    "План дослідження: "
+                    + ("обрано" if self.research_plan is not None else "не обрано"),
+                    "Фактичне навчання не підтверджується лише цим описом.",
+                ],
                 "strategy_choices": self._strategy_choices(),
                 "strategy_requires_plan": spec.requires_research_plan,
                 "replay_speed": self.replay_speed,
@@ -1527,6 +1637,11 @@ class AutosportWebController:
                     ],
                     "source_last_success_at": runtime_source["last_success_at"],
                     "economic_snapshot": runtime_economic,
+                },
+                "support_export": {
+                    "status": self.support_export_status,
+                    "busy": self.support_export_worker.busy,
+                    "available": self._support_trace is not None and not self._support_trace_fault,
                 },
                 "surface_key": self.surface_key,
                 "surfaces": surfaces,
@@ -1801,6 +1916,69 @@ class AutosportWebController:
             text("ui.status.evidence_export.running"),
             focus_id="202",
         )
+
+
+
+    def _action_agent_status_refresh(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Read-only agent/research status; no domain or training effects."""
+        if self.learning_status_worker.busy:
+            return self._fail("Перевірка навчання вже виконується.")
+        try:
+            selected_agent_workspace = self._product_runtime_target_workspace()
+        except Exception:
+            return self._fail(
+                "Для перевірки агентів спочатку завершіть вибір стратегії "
+                "та потрібного їй дослідницького плану."
+            )
+        if not self.learning_status_worker.start(selected_agent_workspace):
+            return self._fail("Не вдалося запустити перевірку стану агентів.")
+        self.learning_status_lines = ["Перевірка справжніх записів агентів виконується."]
+        return self._ok(
+            "Оновлюється науковий стан агентів.",
+            focus_id="agent-learning-status",
+        )
+
+    def _action_support_export(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Export two safe reports without handling live market/financial effects."""
+        if self.support_export_worker.busy:
+            return self._fail("Попереднє створення діагностичних файлів ще триває.")
+        self._enable_support_trace()
+        if self._support_trace is None:
+            return self._fail(
+                "Автоматичний журнал недоступний. Перевірте робочу область."
+            )
+        raw = payload.get("directory", "")
+        if not isinstance(raw, str):
+            return self._fail("Каталог для експорту вказано некоректно.")
+        if raw.strip() and raw != raw.strip():
+            return self._fail("Каталог для експорту має зайві пробіли.")
+        try:
+            target = (
+                Path(raw).expanduser().absolute()
+                if raw
+                else self.workspace.resolve(strict=True).parent
+            )
+        except (OSError, RuntimeError, TypeError, ValueError):
+            return self._fail("Не вдалося визначити каталог експорту.")
+        try:
+            selected_agent_workspace = self._product_runtime_target_workspace()
+        except Exception:
+            return self._fail(
+                "Для звіту агентів виберіть завершену конфігурацію стратегії. "
+                "Автоматичне збирання технічної діагностики триває."
+            )
+        if not self.support_export_worker.start(
+            self._support_trace,
+            target,
+            strategy=self.strategy_id,
+            research_plan_loaded=self.research_plan is not None,
+            agent_workspace=selected_agent_workspace,
+        ):
+            return self._fail("Не вдалося запустити безпечний експорт звітів.")
+        self.support_export_status = (
+            "Готуються два окремі звіти: діагностика та агенти."
+        )
+        return self._ok(self.support_export_status, focus_id="support-export-status")
 
     def _action_product_source_configure(
         self,
@@ -2154,6 +2332,8 @@ class AutosportWebController:
             "live.refresh": self._action_live_refresh,
             "recovery.run": self._action_recovery_run,
             "evidence.export": self._action_evidence_export,
+            "support.export": self._action_support_export,
+            "agents.status": self._action_agent_status_refresh,
             "product_source.configure": self._action_product_source_configure,
             "product_runtime.start": self._action_product_runtime_start,
             "product_runtime.stop": self._action_product_runtime_stop,
@@ -2200,6 +2380,11 @@ class AutosportWebController:
                         response = self._fail(_safe_exception_text(exc))
                 result = {"request_id": request_id, **response}
                 self._store_request_result(request_id, command_identity, result)
+                self._support_record(
+                    component="interface",
+                    action=action_id,
+                    status="completed" if result.get("status") == "completed" else "rejected",
+                )
                 return result
             except BaseException:
                 self._release_request_identity(request_id, command_identity)
@@ -2274,6 +2459,8 @@ class AutosportWebController:
                 self.live_worker,
                 self.recovery_worker,
                 self.evidence_export_worker,
+                self.support_export_worker,
+                self.learning_status_worker,
             ):
                 self._wait_for_terminal_worker(worker)
 
@@ -2310,6 +2497,11 @@ class AutosportWebController:
 
         with self._lock:
             self._close_complete = True
+        if self._support_trace is not None:
+            try:
+                self._support_trace.close()
+            except (OSError, RuntimeError, ValueError):
+                self._support_trace_fault = True
 
 
 _WEB_CONTROLLER_AUTHORITY_CLASS = AutosportWebController
@@ -3054,6 +3246,11 @@ def launch_windows_shell(
         _default_web_bridge() if bridge is None else bridge
     )
     api = _require_canonical_web_bridge_controller(api)
+    # Begin observational sampling only when the trusted Windows host launches.
+    # Headless controller construction during scientific/CI tests is side-effect free.
+    with api._trust_lock:
+        product_controller = api._registered_controller_locked()
+        product_controller._enable_support_trace()
     bind_trusted_window = api._bind_trusted_window
     close_from_host = api._close_from_host
     revoke_trust = api._revoke_trust

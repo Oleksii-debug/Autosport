@@ -231,13 +231,21 @@ def _transform_windows_start_guide(payload: bytes) -> bytes:
         raise ValueError("stage-neutral guide retained the legacy archive name")
     if LEGACY_READY_LABEL in guide:
         raise ValueError("stage-neutral guide retained the legacy readiness label")
-    # Require exactly one canonical false claim. Recomputable ZIP checksums
-    # cannot authorize contradictory operator-facing readiness assertions.
+    # Preserve one authoritative standalone false declaration; the shipped
+    # operator guide also explains the same false value in ordinary prose.
+    # Every other readiness assertion must still match that exact false value.
     readiness_claims = re.findall(
         r"(?i)\b(?:V1_READY|WHOLE_PRODUCT_COMPLETE)\s*=\s*[^\s`]+",
         guide,
     )
-    if readiness_claims != [STAGE_NEUTRAL_READY_LABEL]:
+    standalone_claims = [
+        line.strip()
+        for line in guide.splitlines()
+        if re.match(r"(?i)^(?:V1_READY|WHOLE_PRODUCT_COMPLETE)\s*=", line.strip())
+    ]
+    if standalone_claims != [STAGE_NEUTRAL_READY_LABEL] or any(
+        claim != STAGE_NEUTRAL_READY_LABEL for claim in readiness_claims
+    ):
         raise ValueError(
             "stage-neutral guide has missing or contradictory readiness assertion"
         )

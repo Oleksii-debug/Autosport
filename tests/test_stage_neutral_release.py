@@ -154,6 +154,47 @@ def test_guide_rejects_missing_readiness_claim() -> None:
         stage_release._transform_windows_start_guide(guide.encode("utf-8"))
 
 
+def test_shipped_guide_repackages_with_false_prose_and_one_declaration(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The real source guide has one declaration and another true false-in-prose mention."""
+    original = (Path(__file__).resolve().parents[1] / "WINDOWS_START_HERE.txt").read_bytes()
+    assert original.count(b"V1_READY=false") == 2
+    _stub_deep_verifier(monkeypatch)
+    members = _legacy_members()
+    members["WINDOWS_START_HERE.txt"] = original
+    _reseal_legacy_metadata(members)
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy, members)
+
+    evidence = stage_release.repackage_stage_neutral_windows_release(
+        legacy, output, expected_source_sha=SOURCE_SHA,
+    )
+    assert evidence["status"] == "PASS"
+    assert evidence["whole_product_complete"] is False
+    with zipfile.ZipFile(output) as archive:
+        transformed = archive.read(
+            stage_release.STAGE_NEUTRAL_PREFIX + "WINDOWS_START_HERE.txt"
+        ).decode("utf-8")
+    assert "V1_READY" not in transformed
+    assert stage_release.LEGACY_ARCHIVE_NAME not in transformed
+    assert [line.strip() for line in transformed.splitlines()
+            if line.strip().startswith("WHOLE_PRODUCT_COMPLETE=")] == [
+        stage_release.STAGE_NEUTRAL_READY_LABEL
+    ]
+    assert transformed.count(stage_release.STAGE_NEUTRAL_READY_LABEL) == 2
+
+
+def test_guide_rejects_inline_only_readiness_without_declaration() -> None:
+    guide = (
+        f"{stage_release.LEGACY_GUIDE_TITLE}\n"
+        "The operator explanation says V1_READY=false.\n"
+    )
+    with pytest.raises(ValueError, match="missing or contradictory readiness"):
+        stage_release._transform_windows_start_guide(guide.encode("utf-8"))
+
+
 def test_legacy_optional_explicit_false_readiness_is_compatible() -> None:
     members = _legacy_members()
     info = json.loads(members["BUILD_INFO.json"])

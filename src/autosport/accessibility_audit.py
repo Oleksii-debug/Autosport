@@ -8,6 +8,7 @@ import tk_uia
 
 from .gui import AUTOMATION_IDS
 from .integrity import atomic_write_json
+from .secret_redaction import redact_operator_value, safe_exception_text
 from .windows_gui import WINDOWS_BANKROLL_AUTOMATION_ID, WindowsAutosportApp
 from .windows_layout import OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS, WINDOWS_SHELL_AUTOMATION_IDS
 from .windows_manual_calculation import WORKBENCH_AUTOMATION_IDS, show_manual_calculation_workbench
@@ -100,17 +101,9 @@ _BLOCKING_GAPS = {
 
 
 def _safe_exception_detail(exc: Exception) -> str:
-    """Render audit failure evidence without trusting exception formatting."""
+    """Do not persist credential-bearing exception text or untrusted type names."""
 
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = "exception details unavailable"
-    return f"{exception_type}: {rendered}"
+    return safe_exception_text(exc)
 
 
 def _enum_name(value: Any) -> str | None:
@@ -287,7 +280,7 @@ def summarize_description(
     if provider_trouble:
         failures.extend(f"provider trouble: {item}" for item in provider_trouble)
 
-    return {
+    return redact_operator_value({
         "status": "PASS" if not failures else "FAIL",
         "strategy": _enum_name(description.strategy),
         "critical_controls": [controls[key] for key in sorted(controls)],
@@ -303,7 +296,7 @@ def summarize_description(
         "human_tested": False,
         "nvda_verified": False,
         "real_money_execution": False,
-    }
+    })
 
 
 def run_accessibility_audit(output_path: str | Path) -> int:
@@ -367,5 +360,5 @@ def run_accessibility_audit(output_path: str | Path) -> int:
                 app.close_app()
             except Exception:
                 pass
-    atomic_write_json(destination, report)
+    atomic_write_json(destination, redact_operator_value(report))
     return 0 if report.get("status") == "PASS" else 1

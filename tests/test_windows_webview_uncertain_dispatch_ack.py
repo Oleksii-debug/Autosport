@@ -52,6 +52,7 @@ const calls = [], focused = [];
 let loseReply = true, id = 0, backendEffects = 0;
 const sandbox = {
   statusNode, errorNode, dispatchUncertainAck, module:{exports:{}},
+  document:{activeElement:statusNode},
   globalThis:{pywebview:{api:{async dispatch(command) {
     calls.push(command);
     backendEffects++;
@@ -71,7 +72,7 @@ const sandbox = {
   clearErrorStatusWithFocusHandoff:() => { errorNode.hidden = true; errorNode.textContent = ""; },
   refreshState:async () => {},
 };
-vm.runInNewContext("let unconfirmedDispatchResult = false;\n" + code +
+vm.runInNewContext("let operatorFocusEpoch = 0;\nlet unconfirmedDispatchResult = false;\n" + code +
   "\nmodule.exports = {dispatch, projectLiveState};", sandbox);
 (async () => {
   const {dispatch, projectLiveState} = sandbox.module.exports;

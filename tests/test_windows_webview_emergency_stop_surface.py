@@ -329,7 +329,12 @@ def test_emergency_stop_uses_one_live_region_announcement_authority():
     assert "async function dispatch(actionId, payload = {}, options = {})" in app_script
     assert "const useGlobalAnnouncement = options.globalAnnouncement !== false;" in app_script
     assert "const useResultFocus = options.resultFocus !== false;" in app_script
-    assert "if (useResultFocus) focusResult(result);" in app_script
+    # Async results must not restore focus after the operator navigates away.
+    assert "const focusEpochAtRequest = operatorFocusEpoch;" in app_script
+    assert "const focusedElementAtRequest = document.activeElement;" in app_script
+    assert "&& operatorFocusEpoch === focusEpochAtRequest" in app_script
+    assert "&& document.activeElement === focusedElementAtRequest" in app_script
+    assert "focusResult(result);" in app_script
     assert app_script.count("if (useGlobalAnnouncement) {") == 2
 
     assert '"emergency_stop.activate",' in emergency_script

@@ -170,7 +170,52 @@ def test_zero_event_runtime_threshold_is_rejected_on_windows(tmp_path: Path) -> 
     assert "MinimumEvents must be at least 1 for runtime notification evidence" in (
         completed.stdout + completed.stderr
     )
-    assert not output.exists()
+    # Preflight writes a fail-closed sentinel instead of retaining stale PASS.
+    import json
+
+    report = json.loads(output.read_text(encoding="utf-8-sig"))
+    assert report["status"] == "FAIL"
+    assert report["real_money_execution"] is False
+    assert report["nvda_verified"] is False
+
+
+def test_rejected_invocation_overwrites_stale_pass_on_windows(tmp_path: Path) -> None:
+    import json
+    import shutil
+    import subprocess
+    import sys
+    import pytest
+
+    if sys.platform != "win32":
+        pytest.skip("Requires Windows PowerShell UIA runtime")
+    pwsh = shutil.which("pwsh")
+    assert pwsh is not None
+    output = tmp_path / "stale-prior-pass.json"
+    output.write_text('{"status":"PASS","event_count":99}', encoding="utf-8")
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-File", str(SCRIPT), "-Output", str(output),
+         "-RootProcessId", "1", "-MinimumEvents", "0"],
+        check=False, capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode != 0
+    report = json.loads(output.read_text(encoding="utf-8-sig"))
+    assert report["status"] == "FAIL"
+    assert report["source"] == "external_windows_uia_notification_client"
+    assert report["real_money_execution"] is False
+    assert report["human_tested"] is False
+    assert report["nvda_verified"] is False
+    assert report["whole_product_complete"] is False
+
+
+def test_fail_closed_startup_precedes_external_uia_calls() -> None:
+    # If Add-Type fails, a previously published PASS cannot survive.
+    assert "$startupFailure | ConvertTo-Json" in TEXT
+    assert TEXT.index("$startupFailure | ConvertTo-Json") < TEXT.index(
+        "Add-Type -AssemblyName UIAutomationClient"
+    )
+    assert "status = 'FAIL'" in TEXT.split(
+        "Add-Type -AssemblyName UIAutomationClient", 1
+    )[0]
 
 
 def test_process_family_discovery_uses_one_bounded_identity_snapshot() -> None:

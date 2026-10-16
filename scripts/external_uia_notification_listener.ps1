@@ -10,6 +10,28 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# A reused evidence path must never retain a prior PASS when this invocation
+# fails before the full listener report exists (invalid parameters, unsupported
+# UIAutomationClient surface, or a child process startup failure).
+# Publish a non-authoritative FAIL sentinel before touching external UIA.
+$outputPath = [System.IO.Path]::GetFullPath($Output)
+$outputDirectory = Split-Path -Parent $outputPath
+if (-not [string]::IsNullOrWhiteSpace($outputDirectory)) {
+    New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
+}
+$startupFailure = [ordered]@{
+    schema_version = 1
+    status = 'FAIL'
+    source = 'external_windows_uia_notification_client'
+    failures = @('Listener invocation was not qualified')
+    real_money_execution = $false
+    human_tested = $false
+    nvda_verified = $false
+    whole_product_complete = $false
+}
+$startupFailure | ConvertTo-Json -Depth 4 |
+    Set-Content -LiteralPath $outputPath -Encoding utf8
+
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 

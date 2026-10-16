@@ -559,7 +559,7 @@ class AutosportWebController:
         if trace is None or self._support_trace_fault:
             return
         try:
-            trace.record(component=component, action=action, status=status, cycle=cycle)
+            trace.observe(component=component, action=action, status=status, cycle=cycle)
         except (OSError, RuntimeError, TypeError, ValueError):
             self._support_trace_fault = True
             self.support_export_status = (

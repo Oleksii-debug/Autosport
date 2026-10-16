@@ -92,3 +92,32 @@ def test_existing_memory_not_exfiltrated(tmp_path):
     assert 'secret' not in contents and 'password' not in contents
     assert 'PRESENT_UNVERIFIED' in contents
     t.close()
+
+
+def test_nonblocking_observe_preserves_original_second_even_after_later_flush(tmp_path):
+    t, c, w = trace(tmp_path)
+    t.observe(component='runtime', action='product.tick', status='active', cycle=9)
+    c.advance(15)
+    # No durable I/O happens in the UI enqueue path.
+    assert len(t._journal.snapshot()) == 1
+    diag, agents = t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+    report = json.loads(diag.read_text())
+    assert report['activities'][0]['second_utc'] == '2026-10-16T10:00:00Z'
+    assert report['activities'][0]['cycle'] == 9
+    assert report['coverage']['event_time_basis'].startswith('observed_utc_second')
+    assert report['coverage']['lost_activity_count'] == 0
+    t.close()
+
+
+def test_observation_buffer_overflow_is_reported_as_partial_not_as_healthy(tmp_path):
+    t, c, w = trace(tmp_path)
+    for i in range(1100):
+        t.observe(component='runtime', action='product.tick', status='active', cycle=i)
+    diag, agents = t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+    report = json.loads(diag.read_text())
+    agent_report = json.loads(agents.read_text())
+    assert report['coverage']['recorder_status'] == 'PARTIAL_DROPPED_EVENTS'
+    assert report['coverage']['lost_activity_count'] == 76
+    assert len(report['activities']) == 1024
+    assert agent_report['lost_activity_count'] == 76
+    t.close()

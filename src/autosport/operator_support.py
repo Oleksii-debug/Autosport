@@ -12,6 +12,8 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import stat
 import threading
+import queue
+import re
 from typing import Callable, Iterable
 
 from .forensic_session_journal import ForensicSessionJournal, read_verified_records
@@ -22,6 +24,8 @@ from .integrity import atomic_write_json
 REPORT_VERSION = 1
 REPORT_DAYS = 3
 MAX_RECORDS = 350_000
+_MAX_PENDING_ACTIVITY = 1024
+_OBSERVED_SECOND = re.compile(r"^\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}Z$")
 TRACE_DIRECTORY = "operator-support-trace"
 DIAGNOSTIC_FILENAME = "Autosport-diagnostics.json"
 AGENTS_FILENAME = "Autosport-agents.json"
@@ -121,6 +125,10 @@ class OperatorSupportTrace:
         self._journal: ForensicSessionJournal | None = None
         self._day: str | None = None
         self._thread: threading.Thread | None = None
+        self._pending: queue.Queue[tuple[str, str, str, int | None, str]] = queue.Queue(
+            maxsize=_MAX_PENDING_ACTIVITY
+        )
+        self._lost_activity_count = 0
         self._open_day()
         if auto_start:
             self._thread = threading.Thread(
@@ -145,6 +153,7 @@ class OperatorSupportTrace:
     def _heartbeat_loop(self) -> None:
         while not self._stop.wait(1.0):
             try:
+                self._drain_pending()
                 self.heartbeat()
             except Exception:
                 # Report collection defects truthfully; no raw error string is
@@ -165,6 +174,76 @@ class OperatorSupportTrace:
                 self._fault = "RECORDER_ERROR"
                 raise
 
+    def observe(
+        self,
+        *,
+        component: str,
+        action: str,
+        status: str,
+        cycle: int | None = None,
+    ) -> None:
+        """Nonblocking UI-facing event observation; never wait for disk I/O.
+
+        Capture the original UTC second before queuing so a slow recorder never
+        silently changes the meaning of event time. Overflow is surfaced in
+        both reports instead of blocking STOP or falsely claiming completeness.
+        """
+        component = _canonical_component(component)
+        action = _canonical_action(action)
+        status = _canonical_status(status)
+        cycle = _bounded_cycle(cycle)
+        observed_second = _seconds(_utc(self._clock).isoformat().replace("+00:00", "Z"))
+        with self._guard:
+            if self._closed or self._fault is not None:
+                return
+            try:
+                self._pending.put_nowait((component, action, status, cycle, observed_second))
+            except queue.Full:
+                self._lost_activity_count += 1
+
+    def _drain_pending(self) -> None:
+        """Only a background worker or export worker invokes durable writes."""
+        with self._guard:
+            while True:
+                try:
+                    component, action, status, cycle, observed = self._pending.get_nowait()
+                except queue.Empty:
+                    return
+                self._record_verified(
+                    component=component, action=action,
+                    status=status, cycle=cycle, observed_second=observed,
+                )
+
+    def _record_verified(
+        self,
+        *,
+        component: str,
+        action: str,
+        status: str,
+        cycle: int | None,
+        observed_second: str | None,
+    ) -> None:
+        if observed_second is not None and not _OBSERVED_SECOND.fullmatch(observed_second):
+            raise ValueError("observed activity time is not canonical UTC second")
+        if self._closed or self._fault is not None:
+            return
+        try:
+            self._open_day()
+            assert self._journal is not None
+            payload = {"component": component, "action": action, "status": status}
+            if cycle is not None:
+                payload["cycle"] = cycle
+            if observed_second is not None:
+                payload["observed_second_utc"] = observed_second
+            self._journal.append_material("support.activity", payload)
+            if action == "product.started" and status == "started":
+                self._phase = "active"
+            if action == "product.stopped" and status == "stopped":
+                self._phase = "idle"
+        except Exception:
+            self._fault = "RECORDER_ERROR"
+            raise
+
     def record(
         self,
         *,
@@ -173,27 +252,16 @@ class OperatorSupportTrace:
         status: str,
         cycle: int | None = None,
     ) -> None:
+        """Synchronous trusted test/science API; UI callers must use observe()."""
         component = _canonical_component(component)
         action = _canonical_action(action)
         status = _canonical_status(status)
         cycle = _bounded_cycle(cycle)
         with self._guard:
-            if self._closed or self._fault is not None:
-                return
-            try:
-                self._open_day()
-                assert self._journal is not None
-                payload = {"component": component, "action": action, "status": status}
-                if cycle is not None:
-                    payload["cycle"] = cycle
-                self._journal.append_material("support.activity", payload)
-                if action == "product.started" and status == "started":
-                    self._phase = "active"
-                if action == "product.stopped" and status == "stopped":
-                    self._phase = "idle"
-            except Exception:
-                self._fault = "RECORDER_ERROR"
-                raise
+            self._record_verified(
+                component=component, action=action, status=status,
+                cycle=cycle, observed_second=None,
+            )
 
     @property
     def fault(self) -> str | None:
@@ -204,6 +272,7 @@ class OperatorSupportTrace:
         with self._guard:
             if self._fault is not None:
                 raise SupportExportError("support trace has an unverified recorder fault")
+            self._drain_pending()
             days = tuple((_utc(self._clock).date() - timedelta(days=delta)).isoformat()
                          for delta in range(REPORT_DAYS - 1, -1, -1))
             result = []
@@ -251,6 +320,12 @@ class OperatorSupportTrace:
             if record.event_type not in {"support.activity", "lifecycle.heartbeat", "lifecycle.startup", "lifecycle.shutdown", "lifecycle.unclean_restart"}:
                 raise SupportExportError("unsupported event in operator support trace")
             second = _seconds(record.timestamp_utc)
+            if record.event_type == "support.activity":
+                observed_second = record.payload.get("observed_second_utc")
+                if observed_second is not None:
+                    if type(observed_second) is not str or _OBSERVED_SECOND.fullmatch(observed_second) is None:
+                        raise SupportExportError("support activity has an invalid observed second")
+                    second = observed_second
             slot = seconds.setdefault(second, {"second_utc": second, "heartbeat": False, "activities": 0})
             if record.event_type == "lifecycle.heartbeat":
                 slot["heartbeat"] = True
@@ -262,7 +337,9 @@ class OperatorSupportTrace:
             action = _canonical_action(payload.get("action"))
             status = _canonical_status(payload.get("status"))
             cycle = _bounded_cycle(payload.get("cycle"))
-            if set(payload) not in ({"component", "action", "status"}, {"component", "action", "status", "cycle"}):
+            required = {"component", "action", "status"}
+            optional = {"cycle", "observed_second_utc"}
+            if not required.issubset(payload) or not set(payload).issubset(required | optional):
                 raise SupportExportError("operator support record contains unknown fields")
             event = {"second_utc": second, "component": component, "action": action, "status": status, "sequence": record.seq}
             if cycle is not None:
@@ -292,7 +369,12 @@ class OperatorSupportTrace:
                 "missing_heartbeat_seconds_between_observations": missed,
                 "record_count": len(records),
                 "activity_count": len(activities),
-                "recorder_status": "HEALTHY" if self._fault is None else self._fault,
+                "recorder_status": (
+                    "PARTIAL_DROPPED_EVENTS" if self._lost_activity_count
+                    else ("HEALTHY" if self._fault is None else self._fault)
+                ),
+                "lost_activity_count": self._lost_activity_count,
+                "event_time_basis": "observed_utc_second_when_available_else_journal_timestamp",
                 "does_not_prove_os_or_provider_operations": True,
             },
             "seconds": [seconds[key] for key in sorted(seconds)],
@@ -322,6 +404,7 @@ class OperatorSupportTrace:
             "research_plan_loaded": research_plan_loaded,
             "strategies": strategy_catalog,
             "instrumented_agent_activity": agent_activity,
+            "lost_activity_count": self._lost_activity_count,
             "memory_and_learning_artifacts": self._artifact_inventory(),
             "verified_learning_evidence": verified_learning_projection(
                 self.workspace, as_of=_utc(self._clock)
@@ -375,6 +458,8 @@ class OperatorSupportTrace:
         if self._thread is not None:
             self._thread.join()
         with self._guard:
+            if self._fault is None:
+                self._drain_pending()
             if self._closed:
                 return
             self._closed = True

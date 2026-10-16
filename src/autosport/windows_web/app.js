@@ -417,6 +417,16 @@
     const previousStrategy = strategy.value;
     setSelectOptions(strategy, state.strategy_choices || []);
     setValueUnlessFocused(strategy, state.strategy_id || previousStrategy);
+    renderList(byId("agent-overview-list"), state.agent_overview || []);
+    const supportExport = state.support_export || {};
+    setTextIfChanged(
+      byId("support-export-status"),
+      supportExport.status || "Стан діагностики ще не підтверджено.",
+    );
+    setDisabledWithFocusFallback(
+      byId("support-export-button"),
+      supportExport.busy === true,
+    );
 
     setValueUnlessFocused(byId(103), String(state.replay_speed));
     setValueUnlessFocused(byId(104), state.live_mode);
@@ -624,6 +634,9 @@
   byId(108).addEventListener("click", () => dispatch("recovery.run"));
   byId(109).addEventListener("click", () => {
     dispatch("evidence.export", { path: byId("evidence-path").value });
+  });
+  byId("support-export-button").addEventListener("click", () => {
+    dispatch("support.export", { directory: byId("support-folder").value });
   });
   byId("product-source-save").addEventListener("click", () => {
     dispatch("product_source.configure", {

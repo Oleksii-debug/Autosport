@@ -16,7 +16,10 @@ from .dataset import ReplayDataset, load_dataset
 from .dataset_worker import OneShotDatasetValidationWorker
 from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
 from .gui_support_export import OneShotLearningStatusWorker, OneShotSupportExportWorker
-from .operator_support import OperatorSupportTrace, SupportExportError
+from .operator_support import (
+    OperatorSupportTrace, SupportExportError,
+    strategy_goal_uk, agent_purpose_uk,
+)
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
 from .operator_source_config import OperatorSourceSelection, OperatorSourceSelectionState
@@ -1584,8 +1587,11 @@ class AutosportWebController:
                 "agent_learning_busy": self.learning_status_worker.busy,
                 "agent_overview": [
                     "Вибрана стратегія: " + spec.strategy_id,
-                    "Оголошена мета стратегії: " + spec.description,
-                    "Підключені ролі агентів: " + ", ".join(spec.agent_names),
+                    "Оголошена мета стратегії: " + strategy_goal_uk(spec.strategy_id),
+                    "Підключені ролі агентів: " + "; ".join(
+                        f"{name} — {agent_purpose_uk(name)}"
+                        for name in spec.agent_names
+                    ),
                     "Хеш складу агентів: " + spec.agent_composition_sha256,
                     "План дослідження: "
                     + ("обрано" if self.research_plan is not None else "не обрано"),

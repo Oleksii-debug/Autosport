@@ -48,6 +48,27 @@ def _observed_identity(value: str) -> str:
     return hashlib.sha256(value.encode("utf-8")).hexdigest()
 
 
+def _require_snapshot_not_from_future(
+    value: object, cutoff: datetime, field: str
+) -> None:
+    """Reject current-only research and AgentLoop states later than causal cutoff.
+
+    The canonical ScientificRegistry supports causal_records(as_of), but the
+    supervisor and AgentLoop only expose their latest state; returning that
+    state for an earlier query would leak future learning/research information.
+    """
+    if type(value) is not str:
+        raise ValueError(f"{field} must be a canonical timestamp")
+    try:
+        observed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise ValueError(f"{field} has an invalid timestamp") from exc
+    if observed.tzinfo is None or observed.utcoffset() is None:
+        raise ValueError(f"{field} must include a timezone")
+    if observed.astimezone(timezone.utc) > cutoff:
+        raise ValueError(f"{field} is newer than the requested causal cutoff")
+
+
 def verified_learning_projection(
     workspace: str | Path,
     *,
@@ -146,6 +167,9 @@ def verified_learning_projection(
         status_counts: Counter[str] = Counter()
         recent_runs = []
         for run in runs:
+            _require_snapshot_not_from_future(
+                run.updated_at, instant.astimezone(timezone.utc), "research run"
+            )
             phase = getattr(run.phase, "value", None)
             status = getattr(run.status, "value", None)
             if type(phase) is not str or type(status) is not str:
@@ -173,6 +197,9 @@ def verified_learning_projection(
             from .agent_loop import AgentLoopRuntime
             agent_loop_factory = AgentLoopRuntime
         snapshot = agent_loop_factory(agent_path).snapshot()
+        _require_snapshot_not_from_future(
+            snapshot.updated_at, instant.astimezone(timezone.utc), "agent loop"
+        )
         phase = getattr(snapshot.phase, "value", None)
         effect = getattr(snapshot.external_effect_state, "value", None)
         if type(phase) is not str or type(effect) is not str:

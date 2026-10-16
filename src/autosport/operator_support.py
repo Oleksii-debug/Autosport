@@ -8,6 +8,8 @@ Uninstrumented OS/browser/provider work is never represented as observed.
 from __future__ import annotations
 
 from collections import Counter
+import hashlib
+import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 import os
@@ -42,6 +44,48 @@ _ACTION = frozenset({
     "replay.finished", "live.finished", "recovery.finished", "research.selected",
     "memory.observed", "learning.observed",
 })
+# Ukrainian explanations are presentation only; they cannot replace canonical
+# strategy identity, claim model performance, or grant any execution capability.
+_STRATEGY_GOALS_UK = {
+    "baseline-v1": (
+        "Прозора тестова симуляція: віртуальний квиток створюється лише "
+        "для причинно підтвердженої тестової події з окремим сигналом."
+    ),
+    "observe-only-v1": (
+        "Контрольна стратегія спостереження: відстежує стан ринку "
+        "без створення навіть віртуальних квитків."
+    ),
+    "research-replay-v1": (
+        "Дослідницький симуляційний повтор: перевіряє дані, прогнози, "
+        "критику, портфельні наслідки та обмеження ризику."
+    ),
+}
+_AGENT_PURPOSES_UK = {
+    "market-mirror": "Формувати причинно узгоджений стан котирувань та їхню історію.",
+    "paper-baseline": "Пропонувати лише контрольовані віртуальні тестові дії.",
+    "research-replay-pipeline": (
+        "Перевіряти прогнози, дослідницькі гіпотези, критичні зауваження, "
+        "наслідки для портфеля і паперовий ризик без права на реальні ставки."
+    ),
+}
+
+
+def strategy_goal_uk(strategy_id: str) -> str:
+    return _STRATEGY_GOALS_UK.get(
+        strategy_id,
+        "Мету цієї стратегії ще не локалізовано; "
+        "її технічний ідентифікатор відображається окремо.",
+    )
+
+
+def agent_purpose_uk(agent_id: str) -> str:
+    return _AGENT_PURPOSES_UK.get(
+        agent_id,
+        "Роль цього агента ще не локалізовано; ідентифікатор "
+        "не підтверджує виконання конкретної роботи.",
+    )
+
+
 # Expose metadata only, NEVER the contents of economic, model or agent state.
 _ARTIFACTS = {
     "decisions.jsonl": "Канонічні рішення та докази",
@@ -407,7 +451,12 @@ class OperatorSupportTrace:
         strategy_catalog = [{
             "strategy_id": spec.strategy_id,
             "goal_description": spec.description,
+            "goal_uk": strategy_goal_uk(spec.strategy_id),
             "agents": list(spec.agent_names),
+            "agent_roles": [
+                {"agent_id": name, "purpose_uk": agent_purpose_uk(name)}
+                for name in spec.agent_names
+            ],
             "composition_sha256": spec.agent_composition_sha256,
             "opens_paper_tickets": spec.opens_paper_tickets,
             "requires_research_plan": spec.requires_research_plan,
@@ -441,6 +490,18 @@ class OperatorSupportTrace:
             "nvda_verified": False,
             "whole_product_complete": False,
         }
+        # Both separately downloadable files describe one consistent snapshot.
+        # This also detects a crash that left an old agent report next to a
+        # newly written diagnostic report (or vice versa).
+        pair_sha256 = hashlib.sha256(
+            json.dumps(
+                {"diagnostics": diagnostics, "agents": agents},
+                sort_keys=True, ensure_ascii=False, separators=(",", ":"),
+                allow_nan=False,
+            ).encode("utf-8")
+        ).hexdigest()
+        diagnostics["report_pair_sha256"] = pair_sha256
+        agents["report_pair_sha256"] = pair_sha256
         return diagnostics, agents
 
     def export_reports(
@@ -471,6 +532,7 @@ class OperatorSupportTrace:
         # false "both reports exported" success status in the controller.
         atomic_write_json(diagnostic_path, diagnostics)
         atomic_write_json(agent_path, agents)
+        verify_report_pair(diagnostic_path, agent_path)
         return diagnostic_path, agent_path
 
     def close(self) -> None:
@@ -487,4 +549,61 @@ class OperatorSupportTrace:
                 self._journal.close({"observation_phase": self._phase})
 
 
-__all__ = ["OperatorSupportTrace", "SupportExportError", "DIAGNOSTIC_FILENAME", "AGENTS_FILENAME"]
+def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> str:
+    """Verify that BOTH written files belong to one unmodified evidence snapshot.
+
+    This is a digest, not a signature, and cannot grant financial, learning or
+    release authority. The user may send both JSONs to support for rechecking.
+    """
+    from .json_integrity import strict_json_loads
+
+    def read(path: Path) -> dict:
+        info = path.lstat()
+        if not stat.S_ISREG(info.st_mode) or info.st_nlink != 1:
+            raise SupportExportError("support report is not one regular file")
+        if info.st_size > 128 * 1024 * 1024:
+            raise SupportExportError("support report exceeds bounded read size")
+        result = strict_json_loads(path.read_text(encoding="utf-8"))
+        if type(result) is not dict:
+            raise SupportExportError("support report must be a JSON object")
+        return result
+
+    diagnostics = read(Path(diagnostic_path))
+    agents = read(Path(agent_path))
+    supplied = diagnostics.pop("report_pair_sha256", None)
+    other = agents.pop("report_pair_sha256", None)
+    if (
+        type(supplied) is not str or len(supplied) != 64
+        or any(char not in "0123456789abcdef" for char in supplied)
+        or supplied != other
+    ):
+        raise SupportExportError("two support reports have different snapshot identities")
+    if (
+        diagnostics.get("report_kind") != "autosport-operator-diagnostics"
+        or agents.get("report_kind") != "autosport-agent-research-memory"
+        or diagnostics.get("generated_at_utc") != agents.get("generated_at_utc")
+    ):
+        raise SupportExportError("two support reports have mismatched semantics")
+    for report in (diagnostics, agents):
+        if any(report.get(field) is not False for field in (
+            "real_money_execution", "human_tested",
+            "nvda_verified", "whole_product_complete",
+        )):
+            raise SupportExportError("support report claims unverified release authority")
+    computed = hashlib.sha256(
+        json.dumps(
+            {"diagnostics": diagnostics, "agents": agents},
+            sort_keys=True, ensure_ascii=False,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")
+    ).hexdigest()
+    if computed != supplied:
+        raise SupportExportError("support report pair digest mismatch")
+    return supplied
+
+
+__all__ = [
+    "OperatorSupportTrace", "SupportExportError", "DIAGNOSTIC_FILENAME",
+    "AGENTS_FILENAME", "strategy_goal_uk", "agent_purpose_uk",
+    "verify_report_pair",
+]

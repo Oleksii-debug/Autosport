@@ -16,6 +16,7 @@ from typing import Callable, Iterable
 
 from .forensic_session_journal import ForensicSessionJournal, read_verified_records
 from .gui_evidence_export import resolve_evidence_output_destination
+from .learning_evidence_projection import verified_learning_projection
 from .integrity import atomic_write_json
 
 REPORT_VERSION = 1
@@ -42,7 +43,8 @@ _ARTIFACTS = {
     "run_registry.json": "Зареєстровані запуски стратегій",
     "paper_book.json": "Паперові операції та результати",
     "source_health.json": "Стан джерел даних",
-    "scientific_registry.jsonl": "Історія досліджень, гіпотез і перевірок",
+    "scientific-registry.json": "Канонічна історія досліджень і промоцій",
+    "scientific_registry.json": "Можливий канонічний реєстр досліджень",
     "research-supervisor.json": "Контроль дослідницьких запусків",
     "agent-loop.json": "Стан циклу агентів і постмортеми",
     "sport-memory.json": "Історична пам’ять спортивних об’єктів",
@@ -321,6 +323,9 @@ class OperatorSupportTrace:
             "strategies": strategy_catalog,
             "instrumented_agent_activity": agent_activity,
             "memory_and_learning_artifacts": self._artifact_inventory(),
+            "verified_learning_evidence": verified_learning_projection(
+                self.workspace, as_of=_utc(self._clock)
+            ),
             "learning_verification": "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE",
             "known_limits_uk": (
                 "Наведені цілі — описи оголошених стратегій, а не підтверджені "

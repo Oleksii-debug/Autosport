@@ -10,6 +10,7 @@ from __future__ import annotations
 from collections import Counter
 from datetime import datetime, timezone
 import hashlib
+import os
 from pathlib import Path
 import stat
 from typing import Callable
@@ -23,6 +24,8 @@ _RESEARCH_TYPES = (
 _MAX_RECORDS_PER_TYPE = 20000
 _MAX_RECENT = 25
 _SCIENTIFIC_NAMES = ("scientific-registry.json", "scientific_registry.json")
+_STATE_SOURCES = (*_SCIENTIFIC_NAMES, "research-supervisor.json", "agent-loop.json")
+_MAX_SNAPSHOT_SOURCE_BYTES = 64 * 1024 * 1024
 _ALLOWED_EXP_OUTCOMES = {"POSITIVE", "NEGATIVE", "NULL", "HARMFUL", "INCONCLUSIVE"}
 _ALLOWED_PROMOTION = {"PROMOTE", "RETAIN", "REJECT", "ROLLBACK"}
 
@@ -35,6 +38,63 @@ def _regular_file(path: Path) -> bool:
     if not stat.S_ISREG(details.st_mode) or details.st_nlink != 1:
         raise ValueError("agent evidence file is not an ordinary independent file")
     return True
+
+
+def _verified_source_fingerprint(path: Path) -> str | None:
+    """Check actual bounded bytes before/after each multi-registry report pass.
+
+    A single as_of timestamp does not freeze a live, atomically replaced JSON
+    registry. Fingerprints detect source change between causal_records() calls
+    without copying private source content into the downloadable report.
+    """
+    try:
+        before = path.lstat()
+    except FileNotFoundError:
+        return None
+    if not stat.S_ISREG(before.st_mode) or before.st_nlink != 1:
+        raise ValueError("canonical learning evidence is not an ordinary independent file")
+    if before.st_size > _MAX_SNAPSHOT_SOURCE_BYTES:
+        raise ValueError("canonical learning evidence exceeds bounded report size")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    handle = os.open(path, flags)
+    try:
+        opened = os.fstat(handle)
+        if not stat.S_ISREG(opened.st_mode) or opened.st_nlink != 1:
+            raise ValueError("canonical learning evidence changed before verification")
+        digest = hashlib.sha256()
+        size = 0
+        while True:
+            block = os.read(handle, 1024 * 1024)
+            if not block:
+                break
+            size += len(block)
+            if size > _MAX_SNAPSHOT_SOURCE_BYTES:
+                raise ValueError("canonical learning evidence exceeded read size")
+            digest.update(block)
+        opened_after = os.fstat(handle)
+        current = path.lstat()
+        # Path metadata is compared only with path metadata: on Windows 3.12
+        # pathlib.stat and fstat may use different identity domains.
+        pathname_identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        handle_identity = ("st_dev", "st_ino", "st_size", "st_mtime_ns", "st_ctime_ns")
+        if (not stat.S_ISREG(current.st_mode)
+            or current.st_nlink != 1
+            or any(getattr(before, field) != getattr(current, field)
+                   for field in pathname_identity)
+            or any(getattr(opened, field) != getattr(opened_after, field)
+                   for field in handle_identity)
+            or opened.st_size != size or before.st_size != size):
+            raise ValueError("canonical learning evidence changed during verification")
+        return digest.hexdigest()
+    finally:
+        os.close(handle)
+
+
+def _source_snapshot(root: Path) -> dict[str, str | None]:
+    return {
+        name: _verified_source_fingerprint(root / name)
+        for name in _STATE_SOURCES
+    }
 
 
 def _safe_enum(value: object, allow: set[str]) -> str:
@@ -82,6 +142,7 @@ def verified_learning_projection(
     if not isinstance(instant, datetime) or instant.tzinfo is None or instant.utcoffset() is None:
         raise ValueError("learning report cutoff must be timezone aware")
     cutoff = instant.astimezone(timezone.utc).isoformat()
+    source_before = _source_snapshot(root)
 
     paths = tuple(root / name for name in _SCIENTIFIC_NAMES)
     found = [path for path in paths if _regular_file(path)]
@@ -215,4 +276,11 @@ def verified_learning_projection(
             "research_handoff_recorded": snapshot.research_run_id is not None,
             "economic_goal_identity_present": bool(snapshot.economic_goal_fingerprint),
         }
+    source_after = _source_snapshot(root)
+    if source_after != source_before:
+        raise ValueError("canonical learning sources changed during causal report")
+    summary["verified_source_sha256"] = {
+        name: digest for name, digest in sorted(source_after.items())
+        if digest is not None
+    }
     return summary

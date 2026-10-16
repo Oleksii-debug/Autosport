@@ -153,7 +153,12 @@ class _SemanticShellParser(HTMLParser):
         # Static name evidence, distinct from the mere existence of a label/IDREF.
         self.element_text: dict[str, list[str]] = {}
         self.label_text: dict[str, list[str]] = {}
-        self._open_tag_stack: list[tuple[str, str | None, str | None]] = []
+        # Separate IDREF text from implicit names: hidden descendants may
+        # provide explicit aria-labelledby labels, but not implicit names.
+        self.renderable_element_text: dict[str, list[str]] = {}
+        self.renderable_label_text: dict[str, list[str]] = {}
+        self.hidden_ancestor: dict[str, str] = {}
+        self._open_tag_stack: list[tuple[str, str | None, str | None, bool]] = []
 
     def handle_starttag(
         self,
@@ -165,6 +170,26 @@ class _SemanticShellParser(HTMLParser):
         id_attributes = [value for name, value in attrs if name == "id"]
         values = dict(attrs)
         element_id = values.get("id")
+        # This is only a bounded HTML source check, not computed CSS/UIA.
+        inline_style = "".join((values.get("style") or "").lower().split())
+        locally_hidden = (
+            tag == "template"
+            or "hidden" in values
+            or "inert" in values
+            or ("aria-hidden" in values and
+                (values.get("aria-hidden") or "").strip().lower() != "false")
+            or "display:none" in inline_style
+            or "visibility:hidden" in inline_style
+        )
+        if element_id:
+            for ancestor_tag, ancestor_id, _, ancestor_hidden in reversed(
+                self._open_tag_stack
+            ):
+                if ancestor_hidden:
+                    self.hidden_ancestor[element_id] = (
+                        f"<{ancestor_tag}> id={ancestor_id or '(none)'}"
+                    )
+                    break
         if len(id_attributes) > 1:
             self.duplicate_id_attributes.add(element_id or tag)
         if element_id:
@@ -207,14 +232,24 @@ class _SemanticShellParser(HTMLParser):
             "link", "meta", "param", "source", "track", "wbr",
         }:
             label_target = str(values["for"]) if tag == "label" and values.get("for") else None
-            self._open_tag_stack.append((tag, element_id, label_target))
+            self._open_tag_stack.append((tag, element_id, label_target, locally_hidden))
 
     def handle_data(self, data: str) -> None:
-        for _, element_id, label_target in self._open_tag_stack:
+        # Visible-name text excludes hidden descendant subtrees. Preserve
+        # unfiltered text solely for explicit aria-labelledby IDREFs.
+        hidden_descendant = False
+        for _, element_id, label_target, locally_hidden in reversed(
+            self._open_tag_stack
+        ):
             if element_id:
                 self.element_text.setdefault(element_id, []).append(data)
+                if not hidden_descendant:
+                    self.renderable_element_text.setdefault(element_id, []).append(data)
             if label_target:
                 self.label_text.setdefault(label_target, []).append(data)
+                if not hidden_descendant:
+                    self.renderable_label_text.setdefault(label_target, []).append(data)
+            hidden_descendant = hidden_descendant or locally_hidden
 
     def handle_endtag(self, tag: str) -> None:
         for index in range(len(self._open_tag_stack) - 1, -1, -1):
@@ -248,6 +283,12 @@ def _reject_inaccessible_emergency_stop(
     if element is None:
         return
     _, attrs = element
+    ancestor = parser.hidden_ancestor.get("emergency-stop-action")
+    if ancestor:
+        failures.append(
+            "id=emergency-stop-action: inaccessible under hidden HTML ancestor "
+            + ancestor
+        )
     if "hidden" in attrs or "inert" in attrs:
         failures.append("id=emergency-stop-action: hidden/inert HTML state")
     for name in ("aria-hidden", "aria-disabled"):
@@ -291,11 +332,11 @@ def _reject_missing_accessible_names(
             )
         elif (attrs.get("aria-label") or "").strip():
             named = True
-        elif "".join(parser.label_text.get(automation_id, [])).strip():
+        elif "".join(parser.renderable_label_text.get(automation_id, [])).strip():
             named = True
         else:
             named = tag == "button" and bool(
-                "".join(parser.element_text.get(automation_id, [])).strip()
+                "".join(parser.renderable_element_text.get(automation_id, [])).strip()
             )
         if not named:
             failures.append(

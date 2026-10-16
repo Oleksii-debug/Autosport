@@ -656,3 +656,64 @@ def test_cli_rejects_windows_casefold_receipt_alias(
             "--source-sha", SOURCE_SHA, "--evidence", str(receipt),
         ])
     assert not output.exists()
+
+
+def test_stage_neutral_drops_verified_ci_only_qa_evidence(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _stub_deep_verifier(monkeypatch)
+    members = _legacy_members()
+    qa = {
+        "packaged-diagnostic.json": b'{"kind":"synthetic-qa"}',
+        "accessibility-audit.json": b'{"kind":"synthetic-qa"}',
+        "keyboard-audit.json": b'{"kind":"synthetic-qa"}',
+        "restart-recovery-audit.json": b'{"kind":"synthetic-qa"}',
+    }
+    members.update(qa)
+    _reseal_legacy_metadata(members)
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy, members)
+    evidence = stage_release.repackage_stage_neutral_windows_release(
+        legacy, output, expected_source_sha=SOURCE_SHA,
+    )
+    assert evidence["status"] == "PASS"
+    assert evidence["file_count"] == 5
+    with zipfile.ZipFile(legacy) as archive:
+        for name, payload in qa.items():
+            assert archive.read(stage_release.LEGACY_PREFIX + name) == payload
+    with zipfile.ZipFile(output) as archive:
+        installed = {
+            name[len(stage_release.STAGE_NEUTRAL_PREFIX):]: archive.read(name)
+            for name in archive.namelist()
+        }
+    assert not set(qa).intersection(installed)
+    assert set(installed) == set(members).difference(qa)
+    stage_release._validate_manifest(installed, label="detached user package")
+    stage_release._validate_sums(installed, label="detached user package")
+
+
+def test_stage_neutral_retains_non_root_demo_with_qa_like_filename() -> None:
+    members = _legacy_members()
+    nested = "examples/fixture/packaged-diagnostic.json"
+    members[nested] = b'{"sample":true}'
+    _reseal_legacy_metadata(members)
+    transformed = stage_release._transform_members(members, expected_source_sha=SOURCE_SHA)
+    assert transformed[nested] == members[nested]
+    stage_release._validate_manifest(transformed, label="nested sample preservation")
+
+
+def test_stage_neutral_fails_closed_on_reinjected_ci_qa(tmp_path: Path) -> None:
+    converted = stage_release._transform_members(_legacy_members(), expected_source_sha=SOURCE_SHA)
+    converted["packaged-diagnostic.json"] = b'{"tampered":"synthetic"}'
+    _reseal_legacy_metadata(converted)
+    package_zip = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    digest = canonical_release._write_canonical_zip(
+        package_zip,
+        {stage_release.STAGE_NEUTRAL_PREFIX + name: payload for name,payload in converted.items()},
+    )
+    with pytest.raises(ValueError, match="embeds CI-only evidence"):
+        stage_release._verify_stage_neutral_output(
+            package_zip, expected_source_sha=SOURCE_SHA,
+            expected_members=converted, expected_writer_sha=digest,
+        )

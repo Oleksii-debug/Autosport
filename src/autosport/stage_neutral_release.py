@@ -32,6 +32,15 @@ _REQUIRED_TRUTH_LABELS = (
     "human_tested",
     "nvda_verified",
 )
+# Build-time audit receipts stay in GitHub Actions evidence, not the end-user ZIP.
+# The legacy ZIP still undergoes its canonical deep verification before filtering.
+_CI_ONLY_QA_MEMBERS = frozenset({
+    "accessibility-audit.json",
+    "keyboard-audit.json",
+    "packaged-diagnostic.json",
+    "restart-recovery-audit.json",
+})
+
 _SHA256_LENGTH = 64
 _HEX_CHARS = frozenset("0123456789abcdef")
 
@@ -287,7 +296,11 @@ def _transform_members(
             "legacy release package is missing WINDOWS_START_HERE.txt"
         )
 
-    transformed = dict(legacy_members)
+    transformed = {
+        name: payload
+        for name, payload in legacy_members.items()
+        if name not in _CI_ONLY_QA_MEMBERS
+    }
     transformed_build = dict(build_info)
     transformed_build["version"] = STAGE_NEUTRAL_BUILD_VERSION
     transformed_build["whole_product_complete"] = False
@@ -296,22 +309,12 @@ def _transform_members(
         guide_payload
     )
 
-    manifest = _decode_json_object(
-        transformed["PACKAGE_MANIFEST.json"],
-        "PACKAGE_MANIFEST.json",
-    )
-    raw_manifest_files = manifest.get("files")
-    if not isinstance(raw_manifest_files, dict):
-        raise ValueError("PACKAGE_MANIFEST.json files map is invalid")
+    # Recompute from the exact installed file set, never carry legacy QA hashes.
     manifest_files = {
-        str(key): str(value) for key, value in raw_manifest_files.items()
+        relative: _sha256_bytes(payload)
+        for relative, payload in transformed.items()
+        if relative not in {"PACKAGE_MANIFEST.json", "SHA256SUMS.txt"}
     }
-    manifest_files["BUILD_INFO.json"] = _sha256_bytes(
-        transformed["BUILD_INFO.json"]
-    )
-    manifest_files[WINDOWS_START_GUIDE] = _sha256_bytes(
-        transformed[WINDOWS_START_GUIDE]
-    )
     transformed_manifest: dict[str, object] = {
         "schema_version": 1,
         "files": manifest_files,
@@ -360,6 +363,12 @@ def _verify_stage_neutral_output(
 
     _require_canonical_container(authored_bytes)
     observed = _load_stage_neutral_members(authored_bytes)
+    embedded_qa = sorted(_CI_ONLY_QA_MEMBERS.intersection(observed))
+    if embedded_qa:
+        raise ValueError(
+            "stage-neutral release package embeds CI-only evidence: "
+            + ", ".join(embedded_qa)
+        )
     if observed != expected_members:
         raise ValueError("stage-neutral release package payload drifted during write")
     _validate_manifest(observed, label="stage-neutral release package")

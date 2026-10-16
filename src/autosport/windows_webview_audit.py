@@ -237,19 +237,19 @@ class _SemanticShellParser(HTMLParser):
     def handle_data(self, data: str) -> None:
         # Visible-name text excludes hidden descendant subtrees. Preserve
         # unfiltered text solely for explicit aria-labelledby IDREFs.
-        # Implicit names must exclude text hidden by ANY enclosing element,
-        # including the label itself or its parent. Explicit aria-labelledby
-        # references continue to use the separate unfiltered element_text.
-        implicitly_visible = not any(frame[3] for frame in self._open_tag_stack)
-        for _, element_id, label_target, _ in reversed(self._open_tag_stack):
+        hidden_descendant = False
+        for _, element_id, label_target, locally_hidden in reversed(
+            self._open_tag_stack
+        ):
             if element_id:
                 self.element_text.setdefault(element_id, []).append(data)
-                if implicitly_visible:
+                if not hidden_descendant:
                     self.renderable_element_text.setdefault(element_id, []).append(data)
             if label_target:
                 self.label_text.setdefault(label_target, []).append(data)
-                if implicitly_visible:
+                if not hidden_descendant:
                     self.renderable_label_text.setdefault(label_target, []).append(data)
+            hidden_descendant = hidden_descendant or locally_hidden
 
     def handle_endtag(self, tag: str) -> None:
         for index in range(len(self._open_tag_stack) - 1, -1, -1):

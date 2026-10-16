@@ -864,6 +864,13 @@ function Find-UiaRootWithElementForProcessFamily {
             if ($nativeBucket -in @('CHROME_WIDGET_VISIBLE', 'CHROME_WIDGET_HIDDEN')) {
                 continue
             }
+            # Windows Candidate 38850620735 stalled at FROM_HANDLE_ENTER
+            # on OTHER_VISIBLE. Only render-content HWNDs remain direct native
+            # UIA candidates; unrelated/unknown wrappers defer to the bounded
+            # real desktop MTA provider. Missing semantic evidence means FAIL.
+            if ($nativeBucket -in @('OTHER_VISIBLE', 'OTHER_HIDDEN', 'UNKNOWN')) {
+                continue
+            }
             Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_DESCENDANT_PROBE'
             $nativeSemantic = Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $nativeHandle -ExpectedProcessId $nativeProcessId
             if ($null -ne $nativeSemantic) {

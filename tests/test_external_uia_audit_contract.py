@@ -1437,11 +1437,14 @@ def test_external_uia_chrome_wrapper_defers_to_real_desktop_provider() -> None:
         "function Wait-ForUiaElement {", 1
     )[0]
     wrapper = "if ($nativeBucket -in @('CHROME_WIDGET_VISIBLE', 'CHROME_WIDGET_HIDDEN')) {"
+    other = "if ($nativeBucket -in @('OTHER_VISIBLE', 'OTHER_HIDDEN', 'UNKNOWN')) {"
     assert "$nativeBucket = [AutosportNativeWindows]::DiagnosticClassBucket($nativeHandle)" in family
-    assert wrapper in family
-    assert family.index(wrapper) < family.index(
-        "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId"
-    )
+    assert wrapper in family and other in family
+    native_probe = "Find-BoundedUiaSemanticViaChildren -AutomationId $AutomationId"
+    assert family.index(wrapper) < family.index(other) < family.index(native_probe)
+    assert family[family.index(other):family.index(native_probe)].count("continue") == 1
+    assert "RENDER_WIDGET_VISIBLE" not in (wrapper + other)
+    assert "RENDER_WIDGET_HIDDEN" not in (wrapper + other)
     assert "SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED" in family
     assert "SEMANTIC_DESKTOP_WORKER_START_PROBE" in family
     assert "$desktop = [System.Windows.Automation.AutomationElement]::RootElement" in family

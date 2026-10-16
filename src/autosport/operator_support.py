@@ -619,6 +619,24 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
             "nvda_verified", "whole_product_complete",
         )):
             raise SupportExportError("support report claims unverified release authority")
+    # Digest equality alone cannot make evidence at a different science time
+    # part of this snapshot.  Reject even a pair whose SHA-256 is recomputed.
+    evidence = agents.get("verified_learning_evidence")
+    science = evidence.get("science") if type(evidence) is dict else None
+    cutoff_text = science.get("cutoff_utc") if type(science) is dict else None
+    generated_text = diagnostics.get("generated_at_utc")
+    if type(cutoff_text) is not str or type(generated_text) is not str:
+        raise SupportExportError("report causal cutoff is missing")
+    try:
+        cutoff_instant = datetime.fromisoformat(cutoff_text.replace("Z", "+00:00"))
+        generated_instant = datetime.fromisoformat(generated_text.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise SupportExportError("report causal cutoff is invalid") from exc
+    if any(
+        instant.tzinfo is None or instant.utcoffset() != timedelta(0)
+        for instant in (cutoff_instant, generated_instant)
+    ) or cutoff_instant != generated_instant:
+        raise SupportExportError("report science causal cutoff does not match UTC export")
     computed = hashlib.sha256(
         json.dumps(
             {"diagnostics": diagnostics, "agents": agents},

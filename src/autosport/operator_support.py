@@ -359,6 +359,9 @@ class OperatorSupportTrace:
             raise SupportExportError("selected strategy workspace cannot be resolved") from exc
         if target != root and target.parent != root / "strategies":
             raise SupportExportError("agent report workspace is outside canonical strategy scope")
+        # A valid in-scope symlink alias also misattributes selected agent identity.
+        if proposed is not None and Path(proposed).is_symlink():
+            raise SupportExportError("agent report workspace is a symbolic link")
         return target
 
     def _artifact_inventory(self, agent_workspace: Path) -> list[dict[str, object]]:
@@ -432,7 +435,9 @@ class OperatorSupportTrace:
             left_dt = datetime.fromisoformat(left.replace("Z", "+00:00"))
             right_dt = datetime.fromisoformat(right.replace("Z", "+00:00"))
             missed += max(0, int((right_dt - left_dt).total_seconds()) - 1)
-        now = _utc(self._clock).isoformat().replace("+00:00", "Z")
+        # A single causal cutoff for both reports and scientific verification.
+        snapshot_instant = _utc(self._clock)
+        now = snapshot_instant.isoformat().replace("+00:00", "Z")
         with self._lost_activity_lock:
             lost_activities = self._lost_activity_count
         diagnostics = {
@@ -448,9 +453,10 @@ class OperatorSupportTrace:
                 "record_count": len(records),
                 "activity_count": len(activities),
                 "recorder_status": (
-                    "PARTIAL_DROPPED_EVENTS" if lost_activities
-                    else ("HEALTHY" if self._fault is None else self._fault)
+                    self._fault if self._fault is not None
+                    else ("PARTIAL_DROPPED_EVENTS" if lost_activities else "HEALTHY")
                 ),
+                "recorder_fault_present": self._fault is not None,
                 "lost_activity_count": lost_activities,
                 "pending_unflushed_activity_count": self._pending.qsize(),
                 "complete_activity_capture_proven": False,
@@ -497,7 +503,7 @@ class OperatorSupportTrace:
                 else "CANONICAL_STRATEGY"
             ),
             "verified_learning_evidence": verified_learning_projection(
-                selected_workspace, as_of=_utc(self._clock)
+                selected_workspace, as_of=snapshot_instant
             ),
             "learning_verification": "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE",
             "known_limits_uk": (

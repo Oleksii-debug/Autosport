@@ -193,3 +193,71 @@ def test_webview_learning_and_report_paths_follow_selected_strategy_identity():
     assert "self.learning_status_worker.start(selected_agent_workspace)" in source
     assert "agent_workspace=selected_agent_workspace" in source
     assert "workspace_for_strategy(self.workspace, strategy_id, plan)" in source
+
+def test_diagnostics_and_science_use_one_causal_instant(tmp_path):
+    class TickingClock:
+        def __init__(self):
+            self.now = NOW
+
+        def __call__(self):
+            instant = self.now
+            self.now += timedelta(seconds=1)
+            return instant
+
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=TickingClock())
+    try:
+        a, b = trace.export_reports(tmp_path, selected_strategy="observe-only-v1")
+        diagnostics = json.loads(a.read_text(encoding="utf-8"))
+        agents = json.loads(b.read_text(encoding="utf-8"))
+        assert datetime.fromisoformat(
+            diagnostics["generated_at_utc"].replace("Z", "+00:00")
+        ) == datetime.fromisoformat(
+            agents["verified_learning_evidence"]["science"]["cutoff_utc"]
+        )
+    finally:
+        trace.close()
+
+
+def test_agent_report_rejects_in_scope_strategy_symlink_alias(tmp_path):
+    root = tmp_path / "workspace"
+    strategies = root / "strategies"
+    strategies.mkdir(parents=True)
+    target = strategies / "strategy-a"
+    target.mkdir()
+    alias = strategies / "strategy-b"
+    try:
+        alias.symlink_to(target, target_is_directory=True)
+    except OSError:
+        pytest.skip("directory symlinks are unavailable on test host")
+    trace = OperatorSupportTrace(root, auto_start=False, clock=FakeClock())
+    try:
+        with pytest.raises(SupportExportError, match="symbolic link"):
+            trace.export_reports(
+                tmp_path, selected_strategy="observe-only-v1",
+                agent_workspace=alias,
+            )
+    finally:
+        trace.close()
+
+
+def test_diagnostic_recorder_fault_not_masked_by_dropped_events(tmp_path):
+    root = tmp_path / "workspace"
+    root.mkdir()
+    trace = OperatorSupportTrace(root, auto_start=False, clock=FakeClock())
+    try:
+        with trace._lost_activity_lock:
+            trace._lost_activity_count = 3
+        with trace._guard:
+            trace._fault = "RECORDER_ERROR"
+        path, _ = trace.export_reports(
+            tmp_path, selected_strategy="observe-only-v1"
+        )
+        coverage = json.loads(path.read_text(encoding="utf-8"))["coverage"]
+        assert coverage["recorder_status"] == "RECORDER_ERROR"
+        assert coverage["recorder_fault_present"] is True
+        assert coverage["lost_activity_count"] == 3
+        assert coverage["complete_activity_capture_proven"] is False
+    finally:
+        trace.close()

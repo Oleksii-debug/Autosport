@@ -281,3 +281,26 @@ def test_listener_invalid_root_fails_on_real_windows_without_claiming_events(tmp
     assert report["human_tested"] is False
     assert report["nvda_verified"] is False
     assert report["real_money_execution"] is False
+
+
+def test_listener_csharp_compiler_binds_explicit_loaded_uia_references() -> None:
+    # Fail-closed regression for Windows PowerShell 7 CS0234 with implicit Add-Type.
+    assert "[System.Windows.Automation.Automation].Assembly.Location" in TEXT
+    assert "[System.Windows.Automation.AutomationElement].Assembly.Location" in TEXT
+    assert "[System.Windows.Automation.NotificationEventArgs].Assembly.Location" in TEXT
+    assert "[System.Collections.Concurrent.ConcurrentQueue[string]].Assembly.Location" in TEXT
+    assert "(Join-Path $PSHOME 'System.Runtime.dll')" in TEXT
+    assert "(Join-Path $PSHOME 'System.Collections.Concurrent.dll')" in TEXT
+    assert "Add-Type -TypeDefinition $recorderSource -Language CSharp -ReferencedAssemblies $uiaReferences" in TEXT
+    assert "Required .NET reference facade for UIA notification listener is unavailable" in TEXT
+
+
+def test_invalid_runtime_event_requirement_fails_before_uia_compiler() -> None:
+    # The failure sentinel precedes validation; validation precedes foreign UIA.
+    validate = "if (-not $CapabilityProbeOnly -and $MinimumEvents -eq 0) {"
+    assert TEXT.count(validate) == 1
+    assert TEXT.index("$startupFailure | ConvertTo-Json") < TEXT.index(validate)
+    assert TEXT.index(validate) < TEXT.index("Add-Type -AssemblyName UIAutomationClient")
+    assert TEXT.index("Add-Type -AssemblyName UIAutomationClient") < TEXT.index(
+        "Add-Type -TypeDefinition $recorderSource -Language CSharp"
+    )

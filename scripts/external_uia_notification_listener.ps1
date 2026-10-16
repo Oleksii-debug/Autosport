@@ -32,6 +32,19 @@ $startupFailure = [ordered]@{
 $startupFailure | ConvertTo-Json -Depth 4 |
     Set-Content -LiteralPath $outputPath -Encoding utf8
 
+# Reject false evidence claims before loading or compiling managed UIA.
+if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 300) {
+    throw 'TimeoutSeconds must be between 1 and 300'
+}
+if ($MinimumEvents -lt 0 -or $MinimumEvents -gt 10000) {
+    throw 'MinimumEvents must be between 0 and 10000'
+}
+if (-not $CapabilityProbeOnly -and $MinimumEvents -eq 0) {
+    # A zero-event runtime listen must not mint a PASS-shaped UIA evidence report.
+    # CapabilityProbeOnly has its own explicit CAPABILITY_READY evidence class.
+    throw 'MinimumEvents must be at least 1 for runtime notification evidence'
+}
+
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 
@@ -94,8 +107,34 @@ public sealed class AutosportUiaNotificationRecorder
 }
 '@
 
+# PowerShell 7 Roslyn compilation requires explicit UIAutomation references;
+# loading the assemblies with Add-Type -AssemblyName alone is not sufficient.
+# Use the same bounded, fail-closed reference strategy as external_uia_audit.ps1.
+$runtimeFacades = @()
+if ($PSVersionTable.PSEdition -eq 'Core') {
+    $runtimeFacades = @(
+        (Join-Path $PSHOME 'System.Runtime.dll'),
+        (Join-Path $PSHOME 'System.Threading.dll'),
+        (Join-Path $PSHOME 'System.Collections.dll'),
+        (Join-Path $PSHOME 'System.Collections.Concurrent.dll')
+    )
+    foreach ($reference in $runtimeFacades) {
+        if (-not (Test-Path -LiteralPath $reference -PathType Leaf)) {
+            throw 'Required .NET reference facade for UIA notification listener is unavailable'
+        }
+    }
+}
+$uiaReferences = @(
+    [System.Windows.Automation.Automation].Assembly.Location,
+    [System.Windows.Automation.AutomationElement].Assembly.Location,
+    [System.Windows.Automation.NotificationEventArgs].Assembly.Location,
+    [System.Collections.Concurrent.ConcurrentQueue[string]].Assembly.Location
+) | Select-Object -Unique
+if ($runtimeFacades.Count -gt 0) {
+    $uiaReferences = @($uiaReferences + $runtimeFacades | Select-Object -Unique)
+}
 if (-not ('AutosportUiaNotificationRecorder' -as [type])) {
-    Add-Type -TypeDefinition $recorderSource -Language CSharp
+    Add-Type -TypeDefinition $recorderSource -Language CSharp -ReferencedAssemblies $uiaReferences
 }
 
 function Get-Sha256Text {
@@ -227,17 +266,6 @@ if (-not [string]::IsNullOrWhiteSpace($outputDirectory)) {
     New-Item -ItemType Directory -Path $outputDirectory -Force | Out-Null
 }
 
-if ($TimeoutSeconds -lt 1 -or $TimeoutSeconds -gt 300) {
-    throw 'TimeoutSeconds must be between 1 and 300'
-}
-if ($MinimumEvents -lt 0 -or $MinimumEvents -gt 10000) {
-    throw 'MinimumEvents must be between 0 and 10000'
-}
-if (-not $CapabilityProbeOnly -and $MinimumEvents -eq 0) {
-    # A zero-event runtime listen must not mint a PASS-shaped UIA evidence report.
-    # CapabilityProbeOnly has its own explicit CAPABILITY_READY evidence class.
-    throw 'MinimumEvents must be at least 1 for runtime notification evidence'
-}
 
 # UIA calls are foreign COM code: a loop deadline cannot interrupt FromHandle,
 # FindAll, event subscribe/unsubscribe or focus inspection if they hang.

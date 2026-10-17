@@ -145,3 +145,51 @@ def test_partial_recorder_is_exportable_and_ui_knows_it_is_incomplete(tmp_path):
     assert msg and msg.completed is True and msg.recording_fault is True
     assert json.loads((tmp_path/'Autosport-diagnostics.json').read_text())['coverage']['recorder_status']=='RECORDER_ERROR'
     trace.close()
+
+
+def test_missing_verified_heartbeat_is_announced_as_partial(tmp_path):
+    workspace = tmp_path / 'w'
+    workspace.mkdir()
+    trace = OperatorSupportTrace(
+        workspace, auto_start=False,
+        clock=lambda: datetime(2026, 10, 16, tzinfo=timezone.utc),
+    )
+    try:
+        worker = OneShotSupportExportWorker()
+        assert worker.start(trace, tmp_path, strategy='observe-only-v1',
+                            research_plan_loaded=False)
+        worker._thread.join(timeout=10)
+        message = worker.poll()
+        assert message is not None and message.completed is True
+        assert message.recording_fault is True
+        report = json.loads((tmp_path / 'Autosport-diagnostics.json').read_text())
+        assert report['coverage']['recorder_status'] == 'NO_VERIFIED_HEARTBEAT'
+    finally:
+        trace.close()
+
+
+def test_stale_heartbeat_is_announced_as_partial(tmp_path):
+    class Clock:
+        now = datetime(2026, 10, 16, tzinfo=timezone.utc)
+
+        def __call__(self):
+            return self.now
+
+    workspace = tmp_path / 'w'
+    workspace.mkdir()
+    clock = Clock()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=clock)
+    try:
+        trace.heartbeat()
+        clock.now = datetime(2026, 10, 16, 0, 0, 9, tzinfo=timezone.utc)
+        worker = OneShotSupportExportWorker()
+        assert worker.start(trace, tmp_path, strategy='observe-only-v1',
+                            research_plan_loaded=False)
+        worker._thread.join(timeout=10)
+        message = worker.poll()
+        assert message is not None and message.completed is True
+        assert message.recording_fault is True
+        report = json.loads((tmp_path / 'Autosport-diagnostics.json').read_text())
+        assert report['coverage']['recorder_status'] == 'PARTIAL_HEARTBEAT_GAPS'
+    finally:
+        trace.close()

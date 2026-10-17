@@ -55,3 +55,12 @@ def test_agent_learning_status_is_read_only_and_keyboard_accessible():
     assert 'id="agent-learning-status" role="status" aria-live="polite"' in html
     assert 'dispatch("agents.status")' in js
     assert 'renderList(byId("agent-learning-evidence"), state.agent_learning_evidence || [])' in js
+
+
+def test_accessible_support_export_warning_mentions_unverified_heartbeat_gaps():
+    shell = SHELL.read_text(encoding="utf-8")
+    assert "пропуски сигналів активності" in shell
+    assert "незаписані події або збій запису" in shell
+    assert "if support_message.recording_fault" in shell
+    assert "self._ok(self.support_export_status)" in shell
+    assert "support-export-status" in shell

@@ -1370,7 +1370,7 @@ class AutosportWebController:
         if support_message is not None:
             if support_message.completed:
                 self.support_export_status = (
-                    "Діагностика часткова (збій запису або втрачена подія). "
+                    "Діагностика часткова (пропуски сигналів активності, незаписані події або збій запису). "
                     if support_message.recording_fault else "Діагностику збережено. "
                 ) + (
                     "Файли: Autosport-diagnostics.json та Autosport-agents.json. "

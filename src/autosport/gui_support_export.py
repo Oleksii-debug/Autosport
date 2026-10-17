@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from pathlib import Path
 
 from .operator_support import OperatorSupportTrace
+from .json_integrity import strict_json_loads
 
 
 @dataclass(frozen=True, slots=True)
@@ -83,10 +84,23 @@ class OneShotSupportExportWorker:
                 research_plan_loaded=research_plan_loaded,
                 agent_workspace=agent_workspace,
             )
+            # Export has already verified the paired snapshot. Report the
+            # recorded liveness truth, including absent/stale heartbeats,
+            # rather than a mutable writer flag which misses those gaps.
+            diagnostic_snapshot = strict_json_loads(
+                paths[0].read_text(encoding="utf-8")
+            )
+            recorder_status = diagnostic_snapshot["coverage"]["recorder_status"]
+            if recorder_status not in {
+                "HEALTHY", "RECORDER_ERROR", "PARTIAL_DROPPED_EVENTS",
+                "PARTIAL_PENDING_EVENTS", "NO_VERIFIED_HEARTBEAT",
+                "PARTIAL_HEARTBEAT_GAPS",
+            }:
+                raise ValueError("unrecognized diagnostic recorder status")
             message = SupportExportMessage(
                 completed=True,
                 files=(paths[0].name, paths[1].name),
-                recording_fault=trace.recorder_incomplete,
+                recording_fault=recorder_status != "HEALTHY",
             )
         except Exception:
             message = SupportExportMessage(completed=False, error_code="SUPPORT_EXPORT_FAILED")

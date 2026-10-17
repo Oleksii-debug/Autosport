@@ -151,3 +151,22 @@ def test_fromhandle_positive_is_not_packaged_product_pass():
     verdict = validate_report(report(mode="FromHandle", status="CONTROL_UIA_OK", semantic_focus_matches=False))
     assert verdict["diagnostic_success"] is True
     assert verdict["autosport_packaged_uia_qualified"] is False
+
+
+@pytest.mark.parametrize(("field", "status"), [
+    ("probe_mode", "CONTROL_FOCUSED_UIA_OK"),
+    ("status", "CONTROL_FOCUSED_UIA_OK"),
+    ("focus_reject_reason", "CONTROL_FOCUSED_UIA_REJECTED"),
+    ("last_allowlisted_stage", "CONTROL_UIA_TIMEOUT"),
+])
+@pytest.mark.parametrize("malformed", [
+    ["PRIVATE_CANARY_DO_NOT_ECHO"],
+    {"secret": "PRIVATE_CANARY_DO_NOT_ECHO"},
+], ids=("json-array", "json-object"))
+def test_malformed_diagnostic_enum_rejected_as_fixed_invalid_evidence(field, status, malformed):
+    # JSON arrays/objects are unhashable; no TypeError/traceback can escape
+    # from any fixed-code enum field, even for rejected or timeout reports.
+    bad = report(status=status)
+    bad[field] = malformed
+    with pytest.raises(InvalidEvidence):
+        validate_report(bad)

@@ -39,7 +39,7 @@ jobs:
         run: |
           python -m pip install pytest==8.4.2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q tests/test_windows_uia_environment_control_contract.py
+          python -m pytest -q --noconftest tests/test_windows_uia_environment_control_contract.py
           exit $LASTEXITCODE
       - name: Probe independent STA WinForms HWND from killable MTA UIA child
         shell: pwsh

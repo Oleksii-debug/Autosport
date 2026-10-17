@@ -114,8 +114,10 @@ def campaign(
         root = build_cohort_root(
             opportunities[:last],
             previous_cohort_root_sha256=previous_root,
-            anchor_lower=BASE + timedelta(seconds=20 + last),
-            anchor_upper=BASE + timedelta(seconds=21 + last),
+            # External commitment intervals must be provably ordered, not
+            # share an ambiguous timestamp at adjacent interval endpoints.
+            anchor_lower=BASE + timedelta(seconds=20 + 2 * last),
+            anchor_upper=BASE + timedelta(seconds=21 + 2 * last),
         )
         roots.append(root)
         previous_root = root.cohort_root_sha256

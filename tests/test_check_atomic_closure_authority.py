@@ -997,7 +997,8 @@ def test_r15_unclosed_long_markdown_label_fails_without_quadratic_rescan(tmp_pat
     rejected(tmp_path, registry, atomic)
 
 
-@pytest.mark.parametrize("hidden_negative", ["[N]OT DONE", "N[OT] DONE", "[NO]T DONE"])def test_r15_shortcut_reference_link_label_cannot_hide_negative(tmp_path, hidden_negative):
+@pytest.mark.parametrize("hidden_negative", ["[N]OT DONE", "N[OT] DONE", "[NO]T DONE"])
+def test_r15_shortcut_reference_link_label_cannot_hide_negative(tmp_path, hidden_negative):
     registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
     atomic = ATOMIC
     for key, desc in (("2А", "WebView2"), ("2Б", "Navigation"), ("2В", "Native STOP")):

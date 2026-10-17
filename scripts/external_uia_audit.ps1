@@ -1111,20 +1111,34 @@ function Wait-ForUiaElement {
 
 function Wait-ForFocusedAutomationId {
     param(
+        [int]$RootProcessId,
         [string]$AutomationId,
         [DateTime]$Deadline
     )
 
+    if ($RootProcessId -le 0) {
+        throw 'Focused UIA witness requires a valid launched Autosport process'
+    }
+    $familyIds = @()
+    $nextFamilyRefresh = [DateTime]::MinValue
     while ([DateTime]::UtcNow -lt $Deadline) {
+        $now = [DateTime]::UtcNow
+        if ($now -ge $nextFamilyRefresh) {
+            $familyIds = @(Get-ProcessFamilyIds -RootProcessId $RootProcessId)
+            $nextFamilyRefresh = $now.AddMilliseconds(500)
+        }
         try {
             $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
             if (
                 $null -ne $focused -and
-                [string]$focused.Current.AutomationId -eq $AutomationId
+                ($familyIds -contains [int]$focused.Current.ProcessId) -and
+                [string]$focused.Current.AutomationId -ceq $AutomationId
             ) {
                 return $focused
             }
-        } catch {}
+        } catch {
+            # An unavailable/foreign provider cannot satisfy keyboard focus evidence.
+        }
         Start-Sleep -Milliseconds 50
     }
     return $null
@@ -1447,7 +1461,7 @@ try {
         $uiaRoot.SetFocus()
         [System.Windows.Forms.SendKeys]::SendWait('{F2}')
         $shortcutDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
-        $focusedF2 = Wait-ForFocusedAutomationId -AutomationId '301' -Deadline $shortcutDeadline
+        $focusedF2 = Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '301' -Deadline $shortcutDeadline
         if ($null -eq $focusedF2) {
             throw "F2 did not move packaged keyboard focus to semantic screen navigation"
         }
@@ -1456,7 +1470,7 @@ try {
         $uiaRoot.SetFocus()
         [System.Windows.Forms.SendKeys]::SendWait('{F8}')
         $shortcutDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
-        $focusedF8 = Wait-ForFocusedAutomationId -AutomationId '204' -Deadline $shortcutDeadline
+        $focusedF8 = Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '204' -Deadline $shortcutDeadline
         if ($null -eq $focusedF8) {
             throw "F8 did not move packaged keyboard focus to evaluation evidence"
         }
@@ -1653,7 +1667,7 @@ try {
             $report.live_region_event_status = 'PASS'
 
             $stopFocusDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
-            if ($null -eq (Wait-ForFocusedAutomationId -AutomationId 'emergency-stop-status' -Deadline $stopFocusDeadline)) {
+            if ($null -eq (Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId 'emergency-stop-status' -Deadline $stopFocusDeadline)) {
                 throw "packaged emergency STOP confirmation did not retain focus on the dedicated status"
             }
             if (-not (Test-Path -LiteralPath $stopJournal -PathType Leaf)) {
@@ -1681,7 +1695,7 @@ try {
             }
             Invoke-ExternalAction -Element $ownerClose
             $focusDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
-            if ($null -eq (Wait-ForFocusedAutomationId -AutomationId '305' -Deadline $focusDeadline)) {
+            if ($null -eq (Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '305' -Deadline $focusDeadline)) {
                 throw "owner disclosure close did not restore focus to automation_id=305"
             }
 
@@ -1691,7 +1705,7 @@ try {
             }
             Invoke-ExternalAction -Element $manualClose
             $focusDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
-            if ($null -eq (Wait-ForFocusedAutomationId -AutomationId '330' -Deadline $focusDeadline)) {
+            if ($null -eq (Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '330' -Deadline $focusDeadline)) {
                 throw "manual disclosure close did not restore focus to automation_id=330"
             }
         } catch {

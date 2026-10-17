@@ -22,7 +22,7 @@ from typing import Callable, Iterable
 from .forensic_session_journal import ForensicSessionJournal, read_verified_records
 from .gui_evidence_export import resolve_evidence_output_destination
 from .learning_evidence_projection import verified_learning_projection
-from .integrity import atomic_write_json
+from .integrity import atomic_write_json, durable_path_lock
 
 REPORT_VERSION = 1
 REPORT_DAYS = 3
@@ -679,9 +679,14 @@ class OperatorSupportTrace:
         )
         # The files are deliberately independent; failure cannot produce a
         # false "both reports exported" success status in the controller.
-        atomic_write_json(diagnostic_path, diagnostics)
-        atomic_write_json(agent_path, agents)
-        verify_report_pair(diagnostic_path, agent_path)
+        # Serialize the complete report-pair publication and verification across
+        # threads AND processes. Per-file atomic writes alone allow two exports
+        # to interleave, leaving diagnostics and agents from different snapshots.
+        # Retain the lock sidecar to avoid replacing its inode for later lockers.
+        with durable_path_lock(folder / ".autosport-support-report-pair"):
+            atomic_write_json(diagnostic_path, diagnostics)
+            atomic_write_json(agent_path, agents)
+            verify_report_pair(diagnostic_path, agent_path)
         return diagnostic_path, agent_path
 
     def close(self) -> None:

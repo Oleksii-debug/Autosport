@@ -99,6 +99,10 @@ def test_workflow_checks_exact_head_and_both_real_probes():
     assert "uia-control.json" in WORKFLOW
     assert "uia-focus-control.json" in WORKFLOW
     assert "verify_as05_focus_evidence.py" in WORKFLOW
+    # The evidence schema verifier must still run after a rejected focus probe.
+    validator = "      - name: Validate the two fixed-class diagnostic reports (never product UIA)\n"
+    assert validator + "        if: ${{ !cancelled() }}\n" in WORKFLOW
+    assert "if ($fromHandleEvidenceExit -ne 0 -or $focusEvidenceExit -ne 0) { exit 1 }" in WORKFLOW
 
 
 def test_machine_report_good_focus_is_only_diagnostic():

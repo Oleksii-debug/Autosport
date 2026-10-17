@@ -52,6 +52,7 @@ jobs:
           $focusedElementExit = $LASTEXITCODE
           if ($fromHandleExit -ne 0 -or $focusedElementExit -ne 0) { exit 1 }
       - name: Validate the two fixed-class diagnostic reports (never product UIA)
+        if: ${{ !cancelled() }}
         shell: pwsh
         run: |
           python ./scripts/verify_as05_focus_evidence.py ./uia-control.json

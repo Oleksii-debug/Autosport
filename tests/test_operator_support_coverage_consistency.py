@@ -5,6 +5,7 @@ import json
 
 import pytest
 from autosport.operator_support import OperatorSupportTrace, SupportExportError, verify_report_pair
+from autosport.learning_evidence_projection import _RESEARCH_TYPES
 
 
 @pytest.mark.parametrize("mutation", [
@@ -236,13 +237,23 @@ def test_report_pair_accepts_past_science_with_timezone_offset(tmp_path):
         d = json.loads(diagnostic.read_text(encoding="utf-8"))
         a = json.loads(agent_path.read_text(encoding="utf-8"))
         evidence = a["verified_learning_evidence"]
+        entry = {
+            "record_identity_sha256": "a" * 64,
+            "record_sha256": "b" * 64,
+            "available_at": "2026-10-17T01:00:00+02:00",
+        }
         evidence["science"].update(
             state="CANONICAL_REGISTRY_VERIFIED", records_total=1,
-            types=[{"type": "Experiment", "count": 1, "recent": [{
-                "record_identity_sha256": "a" * 64,
-                "record_sha256": "b" * 64,
-                "available_at": "2026-10-17T01:00:00+02:00",
-            }]}],
+            types=[
+                {"type": kind, "count": int(kind == "Experiment"),
+                 "recent": [entry] if kind == "Experiment" else []}
+                for kind in _RESEARCH_TYPES
+            ],
+            experiment_outcomes={"NEGATIVE": 1}, promotion_decisions={},
+            promotion_evidence_validity={},
+            promotion_evidence_guardrail_failures=0,
+            promotion_evidence_holdout_missing=0,
+            evidence_scope="causal_records_by_availability_not_training_performance_proof",
         )
         evidence["research_runs"] = {
             "state": "VERIFIED_SUPERVISOR_SNAPSHOTS", "count": 1,

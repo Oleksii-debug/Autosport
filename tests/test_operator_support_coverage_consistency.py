@@ -116,3 +116,54 @@ def test_report_pair_rejects_forged_observation_even_with_new_digest(tmp_path, m
             verify_report_pair(diagnostic, agent_path)
     finally:
         trace.close()
+
+@pytest.mark.parametrize("mutation", [
+    "diagnostics_injected_field", "agents_fabricated_training",
+    "coverage_injected_field", "learning_fabricated_proof",
+    "diagnostics_future_schema", "agents_boolean_schema",
+    "agents_missing_field", "coverage_missing_field",
+])
+def test_report_pair_rejects_injected_claims_and_schema_even_when_rehashed(tmp_path, mutation):
+    clock = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=lambda: clock)
+    try:
+        trace.heartbeat()
+        trace.record(component="agent", action="learning.observed", status="active")
+        diagnostic, agent_path = trace.export_reports(
+            tmp_path, selected_strategy="observe-only-v1"
+        )
+        verify_report_pair(diagnostic, agent_path)
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agent_path.read_text(encoding="utf-8"))
+        if mutation == "diagnostics_injected_field":
+            d["raw_private_token"] = "must not be accepted"
+        elif mutation == "agents_fabricated_training":
+            a["agent_training_succeeded"] = True
+        elif mutation == "coverage_injected_field":
+            d["coverage"]["complete_os_visibility"] = True
+        elif mutation == "learning_fabricated_proof":
+            a["verified_learning_evidence"]["verified_training_success"] = True
+        elif mutation == "diagnostics_future_schema":
+            d["schema_version"] = 2
+        elif mutation == "agents_boolean_schema":
+            a["schema_version"] = True
+        elif mutation == "agents_missing_field":
+            del a["known_limits_uk"]
+        elif mutation == "coverage_missing_field":
+            del d["coverage"]["event_time_basis"]
+        d.pop("report_pair_sha256")
+        a.pop("report_pair_sha256")
+        digest = hashlib.sha256(json.dumps(
+            {"diagnostics": d, "agents": a}, sort_keys=True, ensure_ascii=False,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        d["report_pair_sha256"] = digest
+        a["report_pair_sha256"] = digest
+        diagnostic.write_text(json.dumps(d), encoding="utf-8")
+        agent_path.write_text(json.dumps(a), encoding="utf-8")
+        with pytest.raises(SupportExportError, match="(report|schema)"):
+            verify_report_pair(diagnostic, agent_path)
+    finally:
+        trace.close()

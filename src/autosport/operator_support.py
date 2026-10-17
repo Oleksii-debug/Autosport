@@ -726,6 +726,52 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
         or diagnostics.get("generated_at_utc") != agents.get("generated_at_utc")
     ):
         raise SupportExportError("two support reports have mismatched semantics")
+    # A paired hash is not an authenticity signature. Nevertheless, do not
+    # accept caller-added fields that this version of the safe exporter never
+    # emits (including fake success claims or private notes) after rehashing.
+    diagnostics_fields = frozenset({
+        "schema_version", "report_kind", "generated_at_utc", "coverage",
+        "seconds", "activities", "status_counts", "real_money_execution",
+        "human_tested", "nvda_verified", "whole_product_complete",
+    })
+    agents_fields = frozenset({
+        "schema_version", "report_kind", "generated_at_utc",
+        "current_strategy_id", "current_agent_names",
+        "current_agent_composition_sha256", "research_plan_loaded",
+        "strategies", "instrumented_agent_activity", "lost_activity_count",
+        "pending_unflushed_activity_count", "memory_and_learning_artifacts",
+        "agent_workspace_scope", "verified_learning_evidence",
+        "learning_verification", "known_limits_uk", "real_money_execution",
+        "human_tested", "nvda_verified", "whole_product_complete",
+    })
+    coverage_fields = frozenset({
+        "scope", "requested_days", "first_heartbeat_utc", "last_heartbeat_utc",
+        "missing_heartbeat_seconds_between_observations",
+        "tail_seconds_without_verified_heartbeat",
+        "last_verified_heartbeat_age_seconds", "record_count", "activity_count",
+        "recorder_status", "recorder_fault_present", "lost_activity_count",
+        "pending_unflushed_activity_count", "complete_activity_capture_proven",
+        "event_time_basis", "does_not_prove_os_or_provider_operations",
+        "scientific_evidence_verification_failed",
+        "artifact_inventory_verification_failed",
+    })
+    learning_fields = frozenset({
+        "science", "research_runs", "agent_loop", "knowledge_retention",
+        "proven_live_model_learning", "economic_improvement_proven_by_this_report",
+        "has_live_execution_authority", "verified_source_sha256",
+    })
+    if (type(diagnostics.get("schema_version")) is not int
+            or diagnostics["schema_version"] != REPORT_VERSION
+            or type(agents.get("schema_version")) is not int
+            or agents["schema_version"] != REPORT_VERSION):
+        raise SupportExportError("unsupported support report schema")
+    if set(diagnostics) != diagnostics_fields or set(agents) != agents_fields:
+        raise SupportExportError("support report contains noncanonical fields")
+    if (type(diagnostics.get("coverage")) is not dict
+            or set(diagnostics["coverage"]) != coverage_fields
+            or type(agents.get("verified_learning_evidence")) is not dict
+            or set(agents["verified_learning_evidence"]) != learning_fields):
+        raise SupportExportError("support report evidence fields are not canonical")
     for report in (diagnostics, agents):
         if any(report.get(field) is not False for field in (
             "real_money_execution", "human_tested",

@@ -304,3 +304,30 @@ def test_external_uia_native_bucket_diagnostics_have_no_identifiers_or_pass_auth
     assert "$report.status = 'PASS'" not in counts
     assert "Current.Name" not in counts
     assert "ProcessIdForHandle" not in counts
+
+
+def test_focused_automation_id_requires_exact_launched_process_family() -> None:
+    """A foreign application with the same AutomationId must never pass F2/F8/STOP focus."""
+    script = _audit_script_text()
+    start = script.index("function Wait-ForFocusedAutomationId {")
+    stop = script.index("$report = [ordered]@{", start)
+    focus = script[start:stop]
+
+    assert "[int]$RootProcessId" in focus
+    assert "if ($RootProcessId -le 0)" in focus
+    assert "Get-ProcessFamilyIds -RootProcessId $RootProcessId" in focus
+    assert "$nextFamilyRefresh = $now.AddMilliseconds(500)" in focus
+
+    pid_witness = "($familyIds -contains [int]$focused.Current.ProcessId)"
+    semantic_witness = "[string]$focused.Current.AutomationId -ceq $AutomationId"
+    assert pid_witness in focus
+    assert semantic_witness in focus
+    assert focus.index(pid_witness) < focus.index(semantic_witness) < focus.index("return $focused")
+    assert "($familyIds -contains [int]$focused.Current.ProcessId)" in focus
+
+    process_scoped_call = (
+        "Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId"
+    )
+    # F2, F8, emergency STOP, owner panel close, manual panel close.
+    assert script.count(process_scoped_call) == 5
+    assert "Wait-ForFocusedAutomationId -AutomationId" not in script

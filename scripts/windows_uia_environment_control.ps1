@@ -114,11 +114,30 @@ if ($Mode -eq 'probe') {
         }
         Add-Type -AssemblyName UIAutomationClient
         Add-Type -AssemblyName UIAutomationTypes
+        # Host focus claim is point-in-time; sample foreground around client UIA.
+        Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AutosportUiaProbeForeground {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+}
+'@
         # Each potentially blocking COM entry is isolated in this disposable
         # MTA *process*, not in a ThreadJob sharing a poisoned UIA process.
         if ($ProbeMode -eq 'FocusedElement') {
             [System.IO.File]::WriteAllText((Join-Path $StateDirectory 'stage'), 'FOCUSED_ELEMENT_PROBE')
+            $foregroundBefore = [AutosportUiaProbeForeground]::GetForegroundWindow()
+            if ($foregroundBefore -ne [IntPtr]::new($WindowHandle)) {
+                $focusRejectReason = 'FOREGROUND_LOST_BEFORE_UIA'
+                throw 'native foreground left control host before UIA query'
+            }
             $root = [System.Windows.Automation.AutomationElement]::FocusedElement
+            $foregroundAfter = [AutosportUiaProbeForeground]::GetForegroundWindow()
+            if ($foregroundAfter -ne [IntPtr]::new($WindowHandle)) {
+                $focusRejectReason = 'FOREGROUND_LOST_DURING_UIA'
+                throw 'native foreground left control host during UIA query'
+            }
             [System.IO.File]::WriteAllText((Join-Path $StateDirectory 'stage'), 'FOCUSED_ELEMENT_RETURNED')
         } else {
             $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($WindowHandle))
@@ -250,7 +269,8 @@ try {
                 $allowedFocusRejectReasons = @(
                     'PROVIDER_OR_PROPERTY_ERROR', 'NO_ELEMENT', 'FOREIGN_PROCESS',
                     'MISSING_TYPE', 'AUTOMATION_ID_MISMATCH',
-                    'ACCESSIBLE_NAME_MISMATCH', 'ROLE_MISMATCH'
+                    'ACCESSIBLE_NAME_MISMATCH', 'ROLE_MISMATCH',
+                    'FOREGROUND_LOST_BEFORE_UIA', 'FOREGROUND_LOST_DURING_UIA'
                 )
                 if (
                     ($ProbeMode -cne 'FocusedElement' -or

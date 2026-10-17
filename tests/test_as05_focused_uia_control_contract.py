@@ -243,3 +243,32 @@ def test_unambiguous_json_still_produces_diagnostic_only(tmp_path):
     assert verdict["autosport_packaged_uia_qualified"] is False
     assert verdict["human_tested"] is False
     assert verdict["nvda_verified"] is False
+
+@pytest.mark.parametrize("reason", [
+    "FOREGROUND_LOST_BEFORE_UIA",
+    "FOREGROUND_LOST_DURING_UIA",
+])
+def test_transient_native_foreground_loss_is_a_negative_diagnostic(reason):
+    rejected = report(status="CONTROL_FOCUSED_UIA_REJECTED",
+                      process_id_matches=False, control_type_present=False,
+                      semantic_focus_matches=False, focus_reject_reason=reason)
+    verdict = validate_report(rejected)
+    assert verdict["diagnostic_success"] is False
+    assert verdict["autosport_packaged_uia_qualified"] is False
+
+
+def test_disposable_mta_probe_samples_os_foreground_on_both_sides_of_uia_call():
+    probe = SCRIPT.split("if ($Mode -eq 'probe') {", 1)[1].split(
+        "$result = New-Evidence -Code 'CONTROL_INFRA_UNAVAILABLE'", 1
+    )[0]
+    before = "$foregroundBefore = [AutosportUiaProbeForeground]::GetForegroundWindow()"
+    query = "$root = [System.Windows.Automation.AutomationElement]::FocusedElement"
+    after = "$foregroundAfter = [AutosportUiaProbeForeground]::GetForegroundWindow()"
+    assert probe.index(before) < probe.index(query) < probe.index(after)
+    assert "$foregroundBefore -ne [IntPtr]::new($WindowHandle)" in probe
+    assert "$foregroundAfter -ne [IntPtr]::new($WindowHandle)" in probe
+    assert "FOREGROUND_LOST_BEFORE_UIA" in probe
+    assert "FOREGROUND_LOST_DURING_UIA" in probe
+    assert "$focusRejectReason = 'FOREGROUND_LOST_BEFORE_UIA'" in probe
+    assert "$focusRejectReason = 'FOREGROUND_LOST_DURING_UIA'" in probe
+    assert "Add-Type -TypeDefinition @'" in probe

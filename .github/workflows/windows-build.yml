@@ -325,7 +325,7 @@ jobs:
           if ([string]$stageReport.package_sha256 -ne $stageHash) {
             throw 'Stage-neutral ZIP changed since exact-source verification'
           }
-          $stageExtractRoot = Join-Path $PWD '.build-stage-neutral-fresh-extraction'
+          $stageExtractRoot = Join-Path $PWD '.build-stage-neutral-Перевірка шляху з пробілами'
           if (Test-Path -LiteralPath $stageExtractRoot) {
             Remove-Item -LiteralPath $stageExtractRoot -Recurse -Force
           }
@@ -345,6 +345,43 @@ jobs:
           }
           foreach ($field in @('real_money_execution', 'human_tested', 'nvda_verified', 'whole_product_complete')) {
             if ($stageInfo.$field -ne $false) { throw "Fresh stage-neutral BUILD_INFO $field is not false" }
+          }
+          # Run the final stage-neutral user's EXEs after Unicode-path extraction.
+          # Earlier legacy ZIP tests cannot substitute for the shipped ZIP.
+          $stageDataExe = Join-Path $stagePackageRoot 'Autosport-Data.exe'
+          $stageDemo = Join-Path $stagePackageRoot 'examples/tt_demo'
+          if (-not (Test-Path -LiteralPath $stageDataExe -PathType Leaf)) {
+            throw 'Final stage-neutral ZIP is missing Autosport-Data.exe'
+          }
+          $demoManifest = Join-Path $stageDemo 'manifest.json'
+          if (-not (Test-Path -LiteralPath $demoManifest -PathType Leaf)) {
+            throw 'Final stage-neutral ZIP is missing demo dataset'
+          }
+          $stageDataDigest = (Get-FileHash -LiteralPath $stageDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ([string]$stageInfo.autosport_data_exe_sha256 -ne $stageDataDigest) {
+            throw 'Final stage-neutral Data EXE digest mismatch'
+          }
+          & $stageDataExe verify-dataset $stageDemo
+          if ($LASTEXITCODE -ne 0) { throw "Final stage-neutral Data EXE dataset verification exited $LASTEXITCODE" }
+          $stageDatasetAuditPath = Join-Path $PWD 'dist/stage-neutral-dataset-smoke.json'
+          [ordered]@{
+            status = 'PASS'
+            evidence_class = 'AUTOMATED_WINDOWS_SHIPPING_ZIP_SMOKE'
+            source_sha = $env:AUTOSPORT_SOURCE_SHA
+            zip_sha256 = $stageHash
+            data_exe_sha256 = $stageDataDigest
+            demo_manifest_sha256 = (Get-FileHash -LiteralPath $demoManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+            real_money_execution = $false
+            human_tested = $false
+            nvda_verified = $false
+            whole_product_complete = $false
+          } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $stageDatasetAuditPath -Encoding utf8
+          $stageUiaAuditPath = Join-Path $PWD 'dist/stage-neutral-external-uia-audit.json'
+          ./scripts/external_uia_audit.ps1 -Exe $stageExe -Output $stageUiaAuditPath
+          $stageUiaAudit = Get-Content -LiteralPath $stageUiaAuditPath -Raw | ConvertFrom-Json
+          if ($stageUiaAudit.status -ne 'PASS') { throw 'Final stage-neutral EXE external UIA check did not PASS' }
+          foreach ($field in @('real_money_execution', 'human_tested', 'nvda_verified')) {
+            if ($stageUiaAudit.$field -ne $false) { throw "Final stage-neutral UIA evidence $field is not false" }
           }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
@@ -383,4 +420,6 @@ jobs:
           path: |
             dist/Autosport-windows-x64.zip
             dist/stage-neutral-release-verification.json
+            dist/stage-neutral-dataset-smoke.json
+            dist/stage-neutral-external-uia-audit.json
           if-no-files-found: error

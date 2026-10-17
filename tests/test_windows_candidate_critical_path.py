@@ -142,3 +142,28 @@ exit 0
         capture_output=True,
         text=True,
     )
+
+
+def test_final_stage_neutral_zip_runs_data_and_uia_from_unicode_extraction() -> None:
+    """Enforce runtime smoke on the actual final shipping ZIP, not a precursor."""
+    workflow = (ROOT / ".github" / "workflows" / "windows-build.yml").read_text(
+        encoding="utf-8"
+    )
+    section = workflow.split("- name: Verify independent stage-neutral release extraction", 1)[1]
+    section = section.split("      - uses: actions/upload-artifact@", 1)[0]
+    for marker in (
+        ".build-stage-neutral-Перевірка шляху з пробілами",
+        "$stageDataExe = Join-Path $stagePackageRoot 'Autosport-Data.exe'",
+        "if ([string]$stageInfo.autosport_data_exe_sha256 -ne $stageDataDigest)",
+        "& $stageDataExe verify-dataset $stageDemo",
+        "if ($LASTEXITCODE -ne 0)",
+        "./scripts/external_uia_audit.ps1 -Exe $stageExe -Output $stageUiaAuditPath",
+        "if ($stageUiaAudit.status -ne 'PASS')",
+        "evidence_class = 'AUTOMATED_WINDOWS_SHIPPING_ZIP_SMOKE'",
+        "whole_product_complete = $false",
+    ):
+        assert marker in section
+    assert "continue-on-error:" not in section
+    upload = workflow.split("name: Autosport-Windows-stage-neutral-prehuman", 1)[1]
+    assert "dist/stage-neutral-dataset-smoke.json" in upload
+    assert "dist/stage-neutral-external-uia-audit.json" in upload

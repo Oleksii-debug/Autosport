@@ -891,6 +891,7 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
     if root_conflict:
         codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
     previous_root_sha256 = _GENESIS
+    previous_anchor_upper: datetime | None = None
     for root in roots:
         if (
             root.campaign_id != protocol.campaign_id
@@ -909,6 +910,14 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         ):
             codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
         latest_observed_upper = max(item.observed_upper for item in prefix)
+        # The successor commits to a predecessor that must already have been
+        # externally anchored. Overlapping intervals cannot establish order.
+        if previous_anchor_upper is not None and (
+            root.anchor_lower is None
+            or previous_anchor_upper > root.anchor_lower
+        ):
+            codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
+            details.setdefault("root_anchor_chain_order", root.cohort_root_sha256)
         if (
             root.anchor_lower is None
             or root.anchor_upper is None
@@ -922,6 +931,7 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
                 root.cohort_root_sha256,
             )
         previous_root_sha256 = root.cohort_root_sha256
+        previous_anchor_upper = root.anchor_upper
 
     terminal_root_sha256 = roots[-1].cohort_root_sha256 if roots else None
     if opportunities and (

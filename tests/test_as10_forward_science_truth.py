@@ -17,7 +17,7 @@ from autosport.forward_evidence_completeness import (
     VerificationResult,
     verify_campaign,
 )
-from test_forward_evidence_completeness import campaign
+from test_forward_evidence_completeness import BASE, campaign
 
 
 class IntImpostor(int):
@@ -137,3 +137,38 @@ def test_enormous_safety_margin_fails_closed_without_datetime_underflow(
     verdict = verify_campaign(replace(baseline, safety_margin=margin))
     assert not verdict.ok
     assert VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN in verdict.codes
+
+
+@pytest.mark.parametrize("successor_second", [23, 25])
+def test_successor_root_anchor_must_follow_predecessor_interval(
+    successor_second: int,
+) -> None:
+    """Two individually valid roots with correctly rebound hashes still fail.
+
+    Both intervals precede the unchanged reveal boundary (+100 seconds).
+    The first root is anchored at [+25,+26], then the successor claims
+    [+23,+24] (reversed) or [+25,+26] (ambiguous overlap).
+    """
+    baseline = campaign(states=(DecisionState.NO_BET, DecisionState.NO_BET))
+    assert verify_campaign(baseline).ok
+    first, second = baseline.cohort_roots
+    first = replace(
+        first,
+        anchor_lower=BASE + timedelta(seconds=25),
+        anchor_upper=BASE + timedelta(seconds=26),
+    )
+    second = replace(
+        second,
+        previous_cohort_root_sha256=first.cohort_root_sha256,
+        anchor_lower=BASE + timedelta(seconds=successor_second),
+        anchor_upper=BASE + timedelta(seconds=successor_second + 1),
+    )
+    close = replace(
+        baseline.closes[0],
+        terminal_cohort_root_sha256=second.cohort_root_sha256,
+    )
+    altered = replace(baseline, cohort_roots=(first, second), closes=(close,))
+    verdict = verify_campaign(altered)
+    assert not verdict.ok
+    assert VerificationCode.COHORT_ROOT_MISMATCH in verdict.codes
+    assert ("root_anchor_chain_order", second.cohort_root_sha256) in verdict.details

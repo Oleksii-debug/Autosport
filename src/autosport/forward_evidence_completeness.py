@@ -821,16 +821,15 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         codes.append(VerificationCode.RUNTIME_IDENTITY_CONFLICT)
 
     if opportunities:
-        expected_sequences = tuple(
-            range(
-                opportunities[0].candidate_sequence,
-                opportunities[-1].candidate_sequence + 1,
-            )
-        )
         actual_sequences = tuple(
             item.candidate_sequence for item in opportunities
         )
-        if actual_sequences != expected_sequences or actual_sequences[0] != 1:
+        # Compare observed members in O(n); huge sparse sequence values
+        # must yield a negative verdict rather than overflow or allocation.
+        if actual_sequences[0] != 1 or any(
+            sequence != offset
+            for offset, sequence in enumerate(actual_sequences, start=1)
+        ):
             codes.append(VerificationCode.SEQUENCE_GAP)
             details["actual_sequences"] = repr(actual_sequences)
 
@@ -1017,8 +1016,10 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         earliest_root = min(candidate_roots, key=lambda root: root.anchor_upper)
         assert earliest_root.anchor_upper is not None
         if not (
-            earliest_root.anchor_upper
-            < boundary.boundary_lower - evidence.safety_margin
+            # Compare UTC instants without subtracting an enormous timedelta
+            # from a datetime; extreme margins must fail closed.
+            boundary.boundary_lower - earliest_root.anchor_upper
+            > evidence.safety_margin
         ):
             codes.append(VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN)
 
@@ -1052,6 +1053,9 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
             costs[item.candidate_sequence] = item.all_material_costs_known
     if cost_conflict:
         codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
+    # A cost record outside the frozen universe cannot silently disappear.
+    if costs.keys() - set(expected_denominator):
+        codes.append(VerificationCode.DENOMINATOR_INCOMPLETE)
     if any(not costs.get(sequence, False) for sequence in expected_denominator):
         codes.append(VerificationCode.ECONOMICS_INCOMPLETE)
 

@@ -188,6 +188,10 @@ def verified_learning_projection(
                     "available_at": entry.available_at,
                 })
             for entry in entries:
+                _require_snapshot_not_from_future(
+                    entry.available_at, instant.astimezone(timezone.utc),
+                    "scientific record",
+                )
                 if typ == "Experiment":
                     experiment_statuses[_safe_enum(entry.payload.get("outcome"), _ALLOWED_EXP_OUTCOMES)] += 1
                 if typ == "PromotionDecision":

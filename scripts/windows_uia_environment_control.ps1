@@ -46,6 +46,17 @@ function New-Evidence {
 if ($Mode -eq 'host') {
     if (-not [System.IO.Directory]::Exists($StateDirectory)) { throw 'missing control state directory' }
     Add-Type -AssemblyName System.Windows.Forms
+    # Local WinForms Focused is not global desktop foreground ownership.
+    # Use the native Win32 witness to avoid attributing a hosted-runner focus
+    # limitation to the WebView2/UIA provider itself.
+    Add-Type -TypeDefinition @'
+using System;
+using System.Runtime.InteropServices;
+public static class AutosportUiaNativeForeground {
+    [DllImport("user32.dll")]
+    public static extern IntPtr GetForegroundWindow();
+}
+'@
     $form = [System.Windows.Forms.Form]::new()
     $form.Name = 'autosport-uia-control-form'
     $form.Text = 'Disposable UIA control'
@@ -61,7 +72,12 @@ if ($Mode -eq 'host') {
     try {
         $form.Show()
         $form.Activate()
-        $focusClaimed = [bool]$focusInput.Focus() -and [bool]$focusInput.Focused
+        $focusInput.Focus() | Out-Null
+        [System.Windows.Forms.Application]::DoEvents()
+        # Failure to own the real foreground is reported as CONTROL_FOCUS_NOT_OWNED.
+        # It must never be promoted to a focused-UIA or packaged acceptance PASS.
+        $foregroundOwned = [AutosportUiaNativeForeground]::GetForegroundWindow() -eq $form.Handle
+        $focusClaimed = [bool]$focusInput.Focused -and [bool]$foregroundOwned
         $handle = $form.Handle.ToInt64()
         if ($handle -le 0) { throw 'native control HWND unavailable' }
         Write-JsonAtomically -Path (Join-Path $StateDirectory 'ready.json') -Value ([ordered]@{

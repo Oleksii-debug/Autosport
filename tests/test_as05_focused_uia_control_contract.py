@@ -45,6 +45,16 @@ def test_true_focused_element_requires_native_and_external_semantic_identity():
         assert marker in SCRIPT
 
 
+def test_native_focus_claim_requires_real_foreground_window_witness():
+    # WinForms.Focus()/Focused alone are not an OS-wide keyboard/UIA oracle.
+    assert '[DllImport("user32.dll")]' in SCRIPT
+    assert "public static extern IntPtr GetForegroundWindow();" in SCRIPT
+    assert "$foregroundOwned = [AutosportUiaNativeForeground]::GetForegroundWindow() -eq $form.Handle" in SCRIPT
+    assert "$focusClaimed = [bool]$focusInput.Focused -and [bool]$foregroundOwned" in SCRIPT
+    assert "if ($ProbeMode -eq 'FocusedElement' -and $native.focus_claimed -ne $true)" in SCRIPT
+    assert "$result.status = 'CONTROL_FOCUS_NOT_OWNED'" in SCRIPT
+
+
 def test_fromhandle_remains_default_but_success_is_per_probe():
     assert "[string]$ProbeMode = 'FromHandle'" in SCRIPT
     assert "$expectedPass = if ($ProbeMode -eq 'FocusedElement')" in SCRIPT

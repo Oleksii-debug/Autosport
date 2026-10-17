@@ -69,7 +69,8 @@ def test_focus_rejection_is_classified_without_exposing_foreign_desktop_metadata
     with pytest.raises(InvalidEvidence):
         validate_report(bad)
     good = report(status="CONTROL_FOCUSED_UIA_REJECTED",
-                  focus_reject_reason="FOREIGN_PROCESS")
+                  process_id_matches=False, control_type_present=False,
+                  semantic_focus_matches=False, focus_reject_reason="FOREIGN_PROCESS")
     assert validate_report(good)["diagnostic_success"] is False
     with pytest.raises(InvalidEvidence):
         validate_report(report(status="CONTROL_FOCUSED_UIA_REJECTED"))
@@ -142,7 +143,9 @@ def test_truth_and_privacy_flags_fail_closed(alterations):
 
 
 def test_focus_timeout_reports_allowlisted_stage_but_is_never_pass():
-    evidence = report(status="CONTROL_UIA_TIMEOUT", last_allowlisted_stage="FOCUSED_ELEMENT_PROBE")
+    evidence = report(status="CONTROL_UIA_TIMEOUT", last_allowlisted_stage="FOCUSED_ELEMENT_PROBE",
+                      process_id_matches=False, control_type_present=False,
+                      semantic_focus_matches=False)
     assert validate_report(evidence)["diagnostic_success"] is False
     evidence["last_allowlisted_stage"] = "PRIVATE_CREDENTIAL"
     with pytest.raises(InvalidEvidence):

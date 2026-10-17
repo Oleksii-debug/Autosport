@@ -6,6 +6,7 @@ on:
       - 'scripts/windows_uia_environment_control.ps1'
       - 'tests/test_windows_uia_environment_control_contract.py'
       - 'tests/test_as05_focused_uia_control_contract.py'
+      - 'tests/test_as05_inconsistent_machine_evidence.py'
       - 'scripts/verify_as05_focus_evidence.py'
       - '.github/workflows/windows-uia-environment-control.yml'
   workflow_dispatch:
@@ -41,7 +42,7 @@ jobs:
         run: |
           python -m pip install pytest==8.4.2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q --noconftest tests/test_windows_uia_environment_control_contract.py tests/test_as05_focused_uia_control_contract.py
+          python -m pytest -q --noconftest tests/test_windows_uia_environment_control_contract.py tests/test_as05_focused_uia_control_contract.py tests/test_as05_inconsistent_machine_evidence.py
           exit $LASTEXITCODE
       - name: Compare real FromHandle and FocusedElement in separate killable MTA children
         shell: pwsh

@@ -66,6 +66,20 @@ def validate_report(report: dict) -> dict:
     for key in ("process_id_matches", "control_type_present", "semantic_focus_matches", "host_focus_claimed"):
         if report.get(key) not in (True, False) or type(report[key]) is not bool:
             raise InvalidEvidence(f"missing/invalid fixed boolean: {key}")
+    # Handle identity is not proof of desktop focus; failed UIA calls
+    # cannot simultaneously assert positive provider identity witnesses.
+    if mode == "FromHandle" and report["semantic_focus_matches"] is True:
+        raise InvalidEvidence("handle-only probe cannot witness semantic focus")
+    if status not in SUCCESS and any(report[key] is True for key in (
+        "process_id_matches", "control_type_present", "semantic_focus_matches"
+    )):
+        raise InvalidEvidence("negative diagnostic contains positive UIA witnesses")
+    if status == "CONTROL_FOCUS_NOT_OWNED" and mode != "FocusedElement":
+        raise InvalidEvidence("no-host-focus status incompatible with handle lookup")
+    if status == "CONTROL_FOCUS_NOT_OWNED" and report["host_focus_claimed"] is True:
+        raise InvalidEvidence("no-host-focus status contradicts foreground witness")
+    if status == "CONTROL_HOST_UNAVAILABLE" and report["host_focus_claimed"] is True:
+        raise InvalidEvidence("absent native host cannot claim foreground")
     if status in SUCCESS:
         if report["process_id_matches"] is not True or report["control_type_present"] is not True:
             raise InvalidEvidence("positive status missing genuine PID/type witnesses")

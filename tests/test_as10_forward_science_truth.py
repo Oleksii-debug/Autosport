@@ -139,7 +139,7 @@ def test_enormous_safety_margin_fails_closed_without_datetime_underflow(
     assert VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN in verdict.codes
 
 
-@pytest.mark.parametrize("successor_second", [23, 25])
+@pytest.mark.parametrize("successor_second", [23, 25, 26])
 def test_successor_root_anchor_must_follow_predecessor_interval(
     successor_second: int,
 ) -> None:
@@ -147,7 +147,8 @@ def test_successor_root_anchor_must_follow_predecessor_interval(
 
     Both intervals precede the unchanged reveal boundary (+100 seconds).
     The first root is anchored at [+25,+26], then the successor claims
-    [+23,+24] (reversed) or [+25,+26] (ambiguous overlap).
+    [+23,+24] (reversed), [+25,+26] (overlap), or
+    [+26,+27] (same boundary instant, no provable causal order).
     """
     baseline = campaign(states=(DecisionState.NO_BET, DecisionState.NO_BET))
     assert verify_campaign(baseline).ok
@@ -172,3 +173,20 @@ def test_successor_root_anchor_must_follow_predecessor_interval(
     assert not verdict.ok
     assert VerificationCode.COHORT_ROOT_MISMATCH in verdict.codes
     assert ("root_anchor_chain_order", second.cohort_root_sha256) in verdict.details
+
+
+def test_close_anchor_equal_terminal_root_end_is_not_causal_order() -> None:
+    """Close and terminal root cannot be proven ordered at the same instant."""
+    baseline = campaign(states=(DecisionState.NO_BET,))
+    assert verify_campaign(baseline).ok
+    terminal_root = baseline.cohort_roots[-1]
+    assert terminal_root.anchor_upper is not None
+    close = replace(
+        baseline.closes[0],
+        anchor_lower=terminal_root.anchor_upper,
+        anchor_upper=terminal_root.anchor_upper + timedelta(seconds=1),
+    )
+    verdict = verify_campaign(replace(baseline, closes=(close,)))
+    assert not verdict.ok
+    assert VerificationCode.COHORT_ROOT_MISMATCH in verdict.codes
+    assert ("close_anchor_causal_order", close.close_sha256) in verdict.details

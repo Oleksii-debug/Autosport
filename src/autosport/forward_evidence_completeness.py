@@ -914,7 +914,7 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         # externally anchored. Overlapping intervals cannot establish order.
         if previous_anchor_upper is not None and (
             root.anchor_lower is None
-            or previous_anchor_upper > root.anchor_lower
+            or previous_anchor_upper >= root.anchor_lower
         ):
             codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
             details.setdefault("root_anchor_chain_order", root.cohort_root_sha256)
@@ -970,7 +970,7 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
             and (
                 terminal_root.anchor_upper is None
                 or close.anchor_lower is None
-                or terminal_root.anchor_upper > close.anchor_lower
+                or terminal_root.anchor_upper >= close.anchor_lower
             )
         ):
             # CLOSED is a commitment over the terminal root, so the terminal

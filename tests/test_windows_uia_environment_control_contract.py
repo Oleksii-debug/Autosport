@@ -21,7 +21,8 @@ def test_timeout_is_process_isolated_and_fails_closed():
     assert "$probeProcess.WaitForExit(10000)" in SOURCE
     assert "$probeProcess.Kill($true)" in SOURCE
     assert "'CONTROL_UIA_TIMEOUT'" in SOURCE
-    assert "if ($result.status -cne 'CONTROL_UIA_OK') { exit 1 }" in SOURCE
+    assert "$expectedPass = if ($ProbeMode -eq 'FocusedElement')" in SOURCE
+    assert "if ($result.status -cne $expectedPass) { exit 1 }" in SOURCE
     assert "CONTROL_PROBE_UNTRUSTED" in SOURCE
     assert "$probe.process_id_matches -eq $true" in SOURCE
 

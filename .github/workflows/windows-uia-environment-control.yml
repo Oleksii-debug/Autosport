@@ -5,6 +5,8 @@ on:
     paths:
       - 'scripts/windows_uia_environment_control.ps1'
       - 'tests/test_windows_uia_environment_control_contract.py'
+      - 'tests/test_as05_focused_uia_control_contract.py'
+      - 'scripts/verify_as05_focus_evidence.py'
       - '.github/workflows/windows-uia-environment-control.yml'
   workflow_dispatch:
 
@@ -39,17 +41,30 @@ jobs:
         run: |
           python -m pip install pytest==8.4.2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q --noconftest tests/test_windows_uia_environment_control_contract.py
+          python -m pytest -q --noconftest tests/test_windows_uia_environment_control_contract.py tests/test_as05_focused_uia_control_contract.py
           exit $LASTEXITCODE
-      - name: Probe independent STA WinForms HWND from killable MTA UIA child
+      - name: Compare real FromHandle and FocusedElement in separate killable MTA children
         shell: pwsh
         run: |
-          & ./scripts/windows_uia_environment_control.ps1 -ReportPath ./uia-control.json
-          exit $LASTEXITCODE
+          & ./scripts/windows_uia_environment_control.ps1 -ProbeMode FromHandle -ReportPath ./uia-control.json
+          $fromHandleExit = $LASTEXITCODE
+          & ./scripts/windows_uia_environment_control.ps1 -ProbeMode FocusedElement -ReportPath ./uia-focus-control.json
+          $focusedElementExit = $LASTEXITCODE
+          if ($fromHandleExit -ne 0 -or $focusedElementExit -ne 0) { exit 1 }
+      - name: Validate the two fixed-class diagnostic reports (never product UIA)
+        shell: pwsh
+        run: |
+          python ./scripts/verify_as05_focus_evidence.py ./uia-control.json
+          $fromHandleEvidenceExit = $LASTEXITCODE
+          python ./scripts/verify_as05_focus_evidence.py ./uia-focus-control.json
+          $focusEvidenceExit = $LASTEXITCODE
+          if ($fromHandleEvidenceExit -ne 0 -or $focusEvidenceExit -ne 0) { exit 1 }
       - name: Preserve machine-readable control classification even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: windows-uia-environment-control
-          path: uia-control.json
+          path: |
+            uia-control.json
+            uia-focus-control.json
           if-no-files-found: warn

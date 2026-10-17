@@ -1,0 +1,86 @@
+"""Validate the Windows UIA *diagnostic* report without upgrading product claims.
+
+The hosted WinForms control tests Windows UI Automation plumbing only. Even
+CONTROL_FOCUSED_UIA_OK is not an Autosport packaged UIA, keyboard, STOP,
+Windows/NVDA owner or final-release PASS.
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+FALSE_FLAGS = (
+    "autosport_packaged_uia_qualified", "autosport_keyboard_qualified",
+    "autosport_emergency_stop_qualified", "real_money_execution", "human_tested",
+    "nvda_verified", "whole_product_complete",
+)
+PROBES = {
+    "FromHandle": {"CONTROL_UIA_OK", "CONTROL_UIA_REJECTED"},
+    "FocusedElement": {"CONTROL_FOCUSED_UIA_OK", "CONTROL_FOCUSED_UIA_REJECTED"},
+}
+INFRA = {
+    "CONTROL_INFRA_UNAVAILABLE", "CONTROL_HOST_UNAVAILABLE",
+    "CONTROL_FOCUS_NOT_OWNED", "CONTROL_PROBE_FAILED",
+    "CONTROL_UIA_TIMEOUT", "CONTROL_PROBE_UNTRUSTED",
+}
+SUCCESS = {"CONTROL_UIA_OK", "CONTROL_FOCUSED_UIA_OK"}
+STAGES = {"FOCUSED_ELEMENT_PROBE", "FOCUSED_ELEMENT_RETURNED", "NO_STAGE", "INVALID"}
+
+
+class InvalidEvidence(ValueError):
+    pass
+
+
+def validate_report(report: dict) -> dict:
+    if not isinstance(report, dict):
+        raise InvalidEvidence("report must be a JSON object")
+    if report.get("evidence_class") != "independent_hosted_windows_uia_control_only":
+        raise InvalidEvidence("wrong evidence class")
+    if any(report.get(key) is not False for key in FALSE_FLAGS):
+        raise InvalidEvidence("product or human attestation flag not explicitly false")
+    mode = report.get("probe_mode")
+    if mode not in PROBES:
+        raise InvalidEvidence("unknown probe mode")
+    status = report.get("status")
+    if status not in PROBES[mode] | INFRA:
+        raise InvalidEvidence("mode-incompatible or unknown status")
+    for key in ("process_id_matches", "control_type_present", "semantic_focus_matches", "host_focus_claimed"):
+        if report.get(key) not in (True, False) or type(report[key]) is not bool:
+            raise InvalidEvidence(f"missing/invalid fixed boolean: {key}")
+    if status in SUCCESS:
+        if report["process_id_matches"] is not True or report["control_type_present"] is not True:
+            raise InvalidEvidence("positive status missing genuine PID/type witnesses")
+        if mode == "FocusedElement" and (report["semantic_focus_matches"] is not True or report["host_focus_claimed"] is not True):
+            raise InvalidEvidence("positive focus status lacks native+UIA focus witnesses")
+    if status == "CONTROL_UIA_TIMEOUT" and mode == "FocusedElement":
+        if report.get("last_allowlisted_stage") not in STAGES:
+            raise InvalidEvidence("no bounded focus timeout stage")
+    elif "last_allowlisted_stage" in report:
+        raise InvalidEvidence("unexpected stage outside focused timeout")
+    allowed = set(FALSE_FLAGS) | {
+        "evidence_class", "probe_mode", "status", "process_id_matches",
+        "control_type_present", "semantic_focus_matches", "host_focus_claimed",
+        "last_allowlisted_stage",
+    }
+    if set(report) - allowed:
+        raise InvalidEvidence("unexpected diagnostic fields")
+    return {"status": status, "probe_mode": mode, "diagnostic_success": status in SUCCESS,
+            "autosport_packaged_uia_qualified": False, "human_tested": False, "nvda_verified": False}
+
+
+def main() -> int:
+    p = argparse.ArgumentParser()
+    p.add_argument("report", type=Path)
+    a = p.parse_args()
+    try:
+        verdict = validate_report(json.loads(a.report.read_text(encoding="utf-8")))
+    except (OSError, ValueError, json.JSONDecodeError):
+        print("INVALID_MACHINE_EVIDENCE")
+        return 2
+    print(json.dumps(verdict, ensure_ascii=False, sort_keys=True))
+    return 0 if verdict["diagnostic_success"] else 1
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

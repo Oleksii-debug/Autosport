@@ -8,7 +8,9 @@ param(
     [string]$StateDirectory = '',
     [long]$WindowHandle = 0,
     [int]$ExpectedPid = 0,
-    [string]$ReportPath = ''
+    [string]$ReportPath = '',
+    [ValidateSet('FromHandle', 'FocusedElement')]
+    [string]$ProbeMode = 'FromHandle'
 )
 $ErrorActionPreference = 'Stop'
 Set-StrictMode -Version Latest
@@ -25,6 +27,11 @@ function New-Evidence {
     param([string]$Code)
     return [ordered]@{
         status = $Code
+        probe_mode = $ProbeMode
+        process_id_matches = $false
+        control_type_present = $false
+        semantic_focus_matches = $false
+        host_focus_claimed = $false
         evidence_class = 'independent_hosted_windows_uia_control_only'
         autosport_packaged_uia_qualified = $false
         autosport_keyboard_qualified = $false
@@ -45,13 +52,22 @@ if ($Mode -eq 'host') {
     $form.Width = 350
     $form.Height = 160
     $form.ShowInTaskbar = $false
+    # Exact native focus intent for a separate FocusedElement diagnostic.
+    $focusInput = [System.Windows.Forms.TextBox]::new()
+    $focusInput.Name = 'autosport-uia-control-focused-input'
+    $focusInput.AccessibleName = 'Autosport UIA hosted focus anchor'
+    $focusInput.TabIndex = 0
+    $form.Controls.Add($focusInput)
     try {
         $form.Show()
+        $form.Activate()
+        $focusClaimed = [bool]$focusInput.Focus() -and [bool]$focusInput.Focused
         $handle = $form.Handle.ToInt64()
         if ($handle -le 0) { throw 'native control HWND unavailable' }
         Write-JsonAtomically -Path (Join-Path $StateDirectory 'ready.json') -Value ([ordered]@{
             pid = $PID
             hwnd = $handle
+            focus_claimed = $focusClaimed
         })
         $deadline = [DateTime]::UtcNow.AddSeconds(20)
         while (
@@ -79,22 +95,44 @@ if ($Mode -eq 'probe') {
         }
         Add-Type -AssemblyName UIAutomationClient
         Add-Type -AssemblyName UIAutomationTypes
-        # Genuine external UIA provider call. No in-process retry on timeout.
-        $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($WindowHandle))
-        if ($null -eq $root) { throw 'UIA returned no native control element' }
+        # Each potentially blocking COM entry is isolated in this disposable
+        # MTA *process*, not in a ThreadJob sharing a poisoned UIA process.
+        if ($ProbeMode -eq 'FocusedElement') {
+            [System.IO.File]::WriteAllText((Join-Path $StateDirectory 'stage'), 'FOCUSED_ELEMENT_PROBE')
+            $root = [System.Windows.Automation.AutomationElement]::FocusedElement
+            [System.IO.File]::WriteAllText((Join-Path $StateDirectory 'stage'), 'FOCUSED_ELEMENT_RETURNED')
+        } else {
+            $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($WindowHandle))
+        }
+        if ($null -eq $root) { throw 'UIA returned no control element' }
         $actualPid = [int]$root.Current.ProcessId
         $typeName = [string]$root.Current.ControlType.ProgrammaticName
         if ($actualPid -ne $ExpectedPid -or [string]::IsNullOrWhiteSpace($typeName)) {
             throw 'UIA native identity/type mismatch'
         }
-        $result.status = 'CONTROL_UIA_OK'
+        if ($ProbeMode -eq 'FocusedElement') {
+            # Native WinForms intent + REAL UIA Name/AutomationId/role/PID.
+            # A foreign focus, empty provider metadata, or property exception
+            # never counts as UIA success.
+            $focusId = [string]$root.Current.AutomationId
+            $focusName = [string]$root.Current.Name
+            if ($focusId -cne 'autosport-uia-control-focused-input' -or
+                $focusName -cne 'Autosport UIA hosted focus anchor' -or
+                $typeName -cne 'ControlType.Edit') {
+                throw 'focused UIA semantic identity mismatch'
+            }
+            $result.status = 'CONTROL_FOCUSED_UIA_OK'
+            $result.semantic_focus_matches = $true
+        } else {
+            $result.status = 'CONTROL_UIA_OK'
+        }
         $result.process_id_matches = $true
         $result.control_type_present = $true
     }
     catch {
         # Deliberately never persist window titles, exception messages,
         # command lines, environment, user paths or other sensitive data.
-        $result.status = 'CONTROL_UIA_REJECTED'
+        $result.status = if ($ProbeMode -eq 'FocusedElement') { 'CONTROL_FOCUSED_UIA_REJECTED' } else { 'CONTROL_UIA_REJECTED' }
         $result.process_id_matches = $false
         $result.control_type_present = $false
     }
@@ -135,13 +173,29 @@ try {
         if ($controlPid -le 0 -or $controlHandle -le 0 -or $controlPid -ne $hostProcess.Id) {
             throw 'native host identity mismatch'
         }
+        $result.host_focus_claimed = ($native.focus_claimed -eq $true)
+        if ($ProbeMode -eq 'FocusedElement' -and $native.focus_claimed -ne $true) {
+            # A focus not actually claimed in native WinForms is not a
+            # property of the Windows UIA provider: classify separately.
+            $result.status = 'CONTROL_FOCUS_NOT_OWNED'
+        } else {
         $probeProcess = Start-Process -FilePath $pwsh -PassThru -ArgumentList @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta', '-File', $quotedScript,
             '-Mode', 'probe', '-StateDirectory', $quotedWork,
-            '-WindowHandle', $controlHandle, '-ExpectedPid', $controlPid
+            '-WindowHandle', $controlHandle, '-ExpectedPid', $controlPid,
+            '-ProbeMode', $ProbeMode
         )
         if (-not $probeProcess.WaitForExit(10000)) {
             $result.status = 'CONTROL_UIA_TIMEOUT'
+            if ($ProbeMode -eq 'FocusedElement') {
+                $stagePath = Join-Path $work 'stage'
+                $stage = 'NO_STAGE'
+                if (Test-Path -LiteralPath $stagePath) {
+                    $rawStage = [System.IO.File]::ReadAllText($stagePath)
+                    $stage = if (@('FOCUSED_ELEMENT_PROBE','FOCUSED_ELEMENT_RETURNED') -ccontains $rawStage) { $rawStage } else { 'INVALID' }
+                }
+                $result.last_allowlisted_stage = $stage
+            }
         }
         else {
             $probePath = Join-Path $work 'probe.json'
@@ -150,26 +204,37 @@ try {
             }
             else {
                 $probe = Get-Content -LiteralPath $probePath -Raw | ConvertFrom-Json
+                $allowedProbeStatuses = if ($ProbeMode -eq 'FocusedElement') {
+                    @('CONTROL_FOCUSED_UIA_OK', 'CONTROL_FOCUSED_UIA_REJECTED')
+                } else { @('CONTROL_UIA_OK', 'CONTROL_UIA_REJECTED') }
                 if (
                     $probe.evidence_class -ceq 'independent_hosted_windows_uia_control_only' -and
                     $probe.autosport_packaged_uia_qualified -eq $false -and
                     $probe.real_money_execution -eq $false -and
                     $probe.nvda_verified -eq $false -and
-                    @('CONTROL_UIA_OK', 'CONTROL_UIA_REJECTED') -ccontains [string]$probe.status -and
+                    $probe.human_tested -eq $false -and
+                    $probe.whole_product_complete -eq $false -and
+                    $probe.probe_mode -ceq $ProbeMode -and
+                    $allowedProbeStatuses -ccontains [string]$probe.status -and
                     (
-                        $probe.status -cne 'CONTROL_UIA_OK' -or
+                        $probe.status -cnotin @('CONTROL_UIA_OK', 'CONTROL_FOCUSED_UIA_OK') -or
                         (
                             $probe.process_id_matches -eq $true -and
-                            $probe.control_type_present -eq $true
+                            $probe.control_type_present -eq $true -and
+                            ($ProbeMode -cne 'FocusedElement' -or $probe.semantic_focus_matches -eq $true)
                         )
                     )
                 ) {
                     $result.status = [string]$probe.status
+                    $result.process_id_matches = ($probe.process_id_matches -eq $true)
+                    $result.control_type_present = ($probe.control_type_present -eq $true)
+                    $result.semantic_focus_matches = ($ProbeMode -eq 'FocusedElement' -and $probe.semantic_focus_matches -eq $true)
                 }
                 else {
                     $result.status = 'CONTROL_PROBE_UNTRUSTED'
                 }
             }
+        }
         }
     }
 }
@@ -194,4 +259,5 @@ if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
     Write-JsonAtomically -Path ([System.IO.Path]::GetFullPath($ReportPath)) -Value $result
 }
 ConvertTo-Json -InputObject $result -Compress
-if ($result.status -cne 'CONTROL_UIA_OK') { exit 1 }
+$expectedPass = if ($ProbeMode -eq 'FocusedElement') { 'CONTROL_FOCUSED_UIA_OK' } else { 'CONTROL_UIA_OK' }
+if ($result.status -cne $expectedPass) { exit 1 }

@@ -1150,13 +1150,26 @@ def _capture_parlay_product_source_factory(
 ):
     """Bind shipped source constructors and source-rights authority once at import."""
 
-    def create_parlay_product_source() -> ParlayApiProductSource:
-        """Construct the supported read-only Parlay source from closed dependencies."""
+    workspace_from_environment = object()
+
+    def create_parlay_product_source(
+        *,
+        workspace: object = workspace_from_environment,
+    ) -> ParlayApiProductSource:
+        """Construct the source with import-sealed rights and optional workspace.
+
+        An explicitly selected packaged workspace never changes process env.
+        Both call modes retain the canonical source-rights authorization gate.
+        """
 
         provider = provider_type(
             api_key=required_env("AUTOSPORT_PARLAY_API_KEY")
         )
-        workspace = required_env("AUTOSPORT_PRODUCT_WORKSPACE")
+        resolved_workspace = (
+            required_env("AUTOSPORT_PRODUCT_WORKSPACE")
+            if workspace is workspace_from_environment
+            else workspace
+        )
         rights_path = required_env("AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST")
         try:
             manifest = rights_loader(rights_path)
@@ -1183,7 +1196,7 @@ def _capture_parlay_product_source_factory(
             )
         return source_type(
             provider,
-            workspace=workspace,
+            workspace=resolved_workspace,
             lawful_terms_ref=lawful_terms_ref,
             retention_ref=retention_ref,
             source_rights_authorization=authorization,

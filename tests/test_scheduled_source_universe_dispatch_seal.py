@@ -749,6 +749,7 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             path, store, cycle_seq, _candidate = _ready_store(tmp)
             original_new = Path.__new__
+            original_new_descriptor = vars(Path)["__new__"]
             hostile_calls = []
 
             def hostile_new(cls, *args, **kwargs):
@@ -769,14 +770,16 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                         end_cycle_seq=cycle_seq,
                     )
             finally:
-                Path.__new__ = original_new
+                Path.__new__ = original_new_descriptor
 
+            self.assertIs(vars(Path)["__new__"], original_new_descriptor)
             self.assertEqual(hostile_calls, [])
 
     def test_scheduled_string_expected_path_cannot_dispatch_path_constructor(self):
         with tempfile.TemporaryDirectory() as tmp:
             path, store, _cycle_seq, candidate = _ready_store(tmp)
             original_new = Path.__new__
+            original_new_descriptor = vars(Path)["__new__"]
             hostile_calls = []
 
             def hostile_new(cls, *args, **kwargs):
@@ -799,8 +802,9 @@ class ScheduledSourceUniverseDispatchSealTests(unittest.TestCase):
                         expected_end_slot_ordinal=0,
                     )
             finally:
-                Path.__new__ = original_new
+                Path.__new__ = original_new_descriptor
 
+            self.assertIs(vars(Path)["__new__"], original_new_descriptor)
             self.assertEqual(hostile_calls, [])
 
 

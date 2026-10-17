@@ -10,6 +10,9 @@ from types import SimpleNamespace
 
 import pytest
 
+# Source-level diagnostic retained from canonical Plan-6 WebView branch.
+_PATH_NEW_DESCRIPTOR_TEST_BASE = vars(Path).get("__new__")
+
 # Root-selection production now correctly treats post-composition replacement of the
 # OS account-location resolver as an authority violation. Tests that need a sandbox
 # must therefore install one stable process-local resolver *before* importing the
@@ -319,3 +322,13 @@ def _historical_data_k07_network_fixture_bridge(request, monkeypatch):
         test_monkeypatch.setattr(_historical_urllib_request, "_opener", Opener())
 
     monkeypatch.setattr(module, "_install_details_transport", install_details_transport)
+
+
+# Preserve canonical Plan-6 negative test oracle without weakening STOP guard.
+@pytest.hookimpl(trylast=True)
+def pytest_runtest_teardown(item, nextitem):
+    if vars(Path).get("__new__") is not _PATH_NEW_DESCRIPTOR_TEST_BASE:
+        raise AssertionError(
+            "Path.__new__ changed after completed test/fixture teardown: "
+            + item.nodeid
+        )

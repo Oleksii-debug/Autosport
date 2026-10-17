@@ -79,3 +79,65 @@ def test_button_visibility_determines_implicit_name(
     failures = _name_failures(button_markup)
     missing = "id=101: missing nonblank accessible name/label" in failures
     assert missing is not should_be_named
+
+
+# Exact canonical #1598 regression: packaged Windows accessibility audit on
+# 74d29aef523235b3316eea5775d6f3584b9b09a7 now FAILS before external UIA.
+# The last production parser change excludes implicit labels under *all* hidden
+# ancestors, including two intentionally collapsed but keyboard-revealable
+# panels. A label/control sharing the SAME verifiably revealable panel must be
+# named when that panel is expanded. The negative label-only-hidden tests above
+# must remain red until fixed; reverting the protection is not acceptable.
+@pytest.mark.parametrize(
+    "panel_id, opener_id, control_id, control_markup",
+    [
+        pytest.param("owner-panel", "305", "309", '<input id="309" type="text">', id="owner-goal"),
+        pytest.param("owner-panel", "305", "326", '<input id="326" type="text">', id="owner-restricted-markets"),
+        pytest.param("manual-panel", "330", "331", '<select id="331"><option>Додавання</option></select>', id="manual-operation"),
+        pytest.param("manual-panel", "330", "332", '<textarea id="332"></textarea>', id="manual-input"),
+        pytest.param("manual-panel", "330", "334", '<textarea id="334"></textarea>', id="manual-output"),
+    ],
+)
+def test_cohidden_control_and_label_share_a_revealable_panel(
+    panel_id: str, opener_id: str, control_id: str, control_markup: str
+) -> None:
+    html = (
+        f'<button id="{opener_id}" type="button" aria-controls="{panel_id}" '
+        'aria-expanded="false">Відкрити панель</button>'
+        f'<div id="{panel_id}" hidden>'
+        f'<label for="{control_id}">Назва елемента</label>{control_markup}</div>'
+    )
+    failures = _name_failures(html)
+    assert f"id={control_id}: missing nonblank accessible name/label" not in failures, failures
+
+
+@pytest.mark.parametrize("hidden_label_markup", [
+    pytest.param('<label for="309" hidden>Назва елемента</label>', id="label-hidden-locally"),
+    pytest.param('<div hidden><label for="309">Назва елемента</label></div>', id="label-extra-hidden-ancestor"),
+    pytest.param('<label for="309" inert>Назва елемента</label>', id="label-inert"),
+])
+def test_revealable_panel_must_not_rescue_still_hidden_implicit_label(
+    hidden_label_markup: str,
+) -> None:
+    html = (
+        '<button id="305" aria-controls="owner-panel" aria-expanded="false">Відкрити</button>'
+        '<div id="owner-panel" hidden>'
+        + hidden_label_markup
+        + '<input id="309" type="text"></div>'
+    )
+    failures = _name_failures(html)
+    assert "id=309: missing nonblank accessible name/label" in failures, failures
+
+
+def test_shipped_collapsible_panels_preserve_critical_accessible_names() -> None:
+    # This is source/package HTML, not a claim of computed WebView2 UIA or NVDA.
+    from autosport.windows_webview_shell import web_shell_index_path
+
+    failures = _name_failures(web_shell_index_path().read_text(encoding="utf-8"))
+    affected = ("309", "326", "331", "332", "334")
+    missing = [
+        failure for failure in failures
+        if any(failure.startswith(f"id={control_id}: missing nonblank accessible name")
+               for control_id in affected)
+    ]
+    assert not missing, missing

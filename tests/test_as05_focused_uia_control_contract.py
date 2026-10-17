@@ -55,6 +55,25 @@ def test_native_focus_claim_requires_real_foreground_window_witness():
     assert "$result.status = 'CONTROL_FOCUS_NOT_OWNED'" in SCRIPT
 
 
+def test_focus_rejection_is_classified_without_exposing_foreign_desktop_metadata():
+    for marker in ("'FOREIGN_PROCESS'", "'AUTOMATION_ID_MISMATCH'",
+                   "'ACCESSIBLE_NAME_MISMATCH'", "'ROLE_MISMATCH'",
+                   "$result.focus_reject_reason = $focusRejectReason",
+                   "$allowedFocusRejectReasons -ccontains [string]$probe.focus_reject_reason"):
+        assert marker in SCRIPT
+    bad = report(status="CONTROL_FOCUSED_UIA_REJECTED",
+                 focus_reject_reason="RAW_FOREIGN_WINDOW_TITLE")
+    with pytest.raises(InvalidEvidence):
+        validate_report(bad)
+    good = report(status="CONTROL_FOCUSED_UIA_REJECTED",
+                  focus_reject_reason="FOREIGN_PROCESS")
+    assert validate_report(good)["diagnostic_success"] is False
+    with pytest.raises(InvalidEvidence):
+        validate_report(report(status="CONTROL_FOCUSED_UIA_REJECTED"))
+    with pytest.raises(InvalidEvidence):
+        validate_report(report(focus_reject_reason="FOREIGN_PROCESS"))
+
+
 def test_fromhandle_remains_default_but_success_is_per_probe():
     assert "[string]$ProbeMode = 'FromHandle'" in SCRIPT
     assert "$expectedPass = if ($ProbeMode -eq 'FocusedElement')" in SCRIPT

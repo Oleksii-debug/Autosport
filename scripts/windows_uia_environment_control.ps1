@@ -105,6 +105,9 @@ if ($Mode -eq 'probe') {
     if ($WindowHandle -le 0 -or $ExpectedPid -le 0) { throw 'invalid native identity' }
     if (-not [System.IO.Directory]::Exists($StateDirectory)) { throw 'missing probe state directory' }
     $result = New-Evidence -Code 'CONTROL_UIA_REJECTED'
+    # Fixed classifications only. Never serialize raw UIA property values,
+    # foreign window titles, process IDs, or exception text.
+    $focusRejectReason = 'PROVIDER_OR_PROPERTY_ERROR'
     try {
         if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
             throw 'UIA control probe requires MTA'
@@ -120,11 +123,19 @@ if ($Mode -eq 'probe') {
         } else {
             $root = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($WindowHandle))
         }
-        if ($null -eq $root) { throw 'UIA returned no control element' }
+        if ($null -eq $root) {
+            $focusRejectReason = 'NO_ELEMENT'
+            throw 'UIA returned no control element'
+        }
         $actualPid = [int]$root.Current.ProcessId
         $typeName = [string]$root.Current.ControlType.ProgrammaticName
-        if ($actualPid -ne $ExpectedPid -or [string]::IsNullOrWhiteSpace($typeName)) {
-            throw 'UIA native identity/type mismatch'
+        if ($actualPid -ne $ExpectedPid) {
+            $focusRejectReason = 'FOREIGN_PROCESS'
+            throw 'UIA native process mismatch'
+        }
+        if ([string]::IsNullOrWhiteSpace($typeName)) {
+            $focusRejectReason = 'MISSING_TYPE'
+            throw 'UIA native type missing'
         }
         if ($ProbeMode -eq 'FocusedElement') {
             # Native WinForms intent + REAL UIA Name/AutomationId/role/PID.
@@ -132,10 +143,17 @@ if ($Mode -eq 'probe') {
             # never counts as UIA success.
             $focusId = [string]$root.Current.AutomationId
             $focusName = [string]$root.Current.Name
-            if ($focusId -cne 'autosport-uia-control-focused-input' -or
-                $focusName -cne 'Autosport UIA hosted focus anchor' -or
-                $typeName -cne 'ControlType.Edit') {
-                throw 'focused UIA semantic identity mismatch'
+            if ($focusId -cne 'autosport-uia-control-focused-input') {
+                $focusRejectReason = 'AUTOMATION_ID_MISMATCH'
+                throw 'focused UIA automation identity mismatch'
+            }
+            if ($focusName -cne 'Autosport UIA hosted focus anchor') {
+                $focusRejectReason = 'ACCESSIBLE_NAME_MISMATCH'
+                throw 'focused UIA accessible name mismatch'
+            }
+            if ($typeName -cne 'ControlType.Edit') {
+                $focusRejectReason = 'ROLE_MISMATCH'
+                throw 'focused UIA role mismatch'
             }
             $result.status = 'CONTROL_FOCUSED_UIA_OK'
             $result.semantic_focus_matches = $true
@@ -149,6 +167,7 @@ if ($Mode -eq 'probe') {
         # Deliberately never persist window titles, exception messages,
         # command lines, environment, user paths or other sensitive data.
         $result.status = if ($ProbeMode -eq 'FocusedElement') { 'CONTROL_FOCUSED_UIA_REJECTED' } else { 'CONTROL_UIA_REJECTED' }
+        if ($ProbeMode -eq 'FocusedElement') { $result.focus_reject_reason = $focusRejectReason }
         $result.process_id_matches = $false
         $result.control_type_present = $false
     }
@@ -223,7 +242,17 @@ try {
                 $allowedProbeStatuses = if ($ProbeMode -eq 'FocusedElement') {
                     @('CONTROL_FOCUSED_UIA_OK', 'CONTROL_FOCUSED_UIA_REJECTED')
                 } else { @('CONTROL_UIA_OK', 'CONTROL_UIA_REJECTED') }
+                $allowedFocusRejectReasons = @(
+                    'PROVIDER_OR_PROPERTY_ERROR', 'NO_ELEMENT', 'FOREIGN_PROCESS',
+                    'MISSING_TYPE', 'AUTOMATION_ID_MISMATCH',
+                    'ACCESSIBLE_NAME_MISMATCH', 'ROLE_MISMATCH'
+                )
                 if (
+                    ($ProbeMode -cne 'FocusedElement' -or
+                     $probe.status -cne 'CONTROL_FOCUSED_UIA_REJECTED' -or
+                     $allowedFocusRejectReasons -ccontains [string]$probe.focus_reject_reason) -and
+                    ($probe.status -ceq 'CONTROL_FOCUSED_UIA_REJECTED' -or
+                     -not ($probe.PSObject.Properties.Name -ccontains 'focus_reject_reason')) -and
                     $probe.evidence_class -ceq 'independent_hosted_windows_uia_control_only' -and
                     $probe.autosport_packaged_uia_qualified -eq $false -and
                     $probe.real_money_execution -eq $false -and
@@ -245,6 +274,10 @@ try {
                     $result.process_id_matches = ($probe.process_id_matches -eq $true)
                     $result.control_type_present = ($probe.control_type_present -eq $true)
                     $result.semantic_focus_matches = ($ProbeMode -eq 'FocusedElement' -and $probe.semantic_focus_matches -eq $true)
+                    if ($ProbeMode -eq 'FocusedElement' -and
+                        $probe.status -ceq 'CONTROL_FOCUSED_UIA_REJECTED') {
+                        $result.focus_reject_reason = [string]$probe.focus_reject_reason
+                    }
                 }
                 else {
                     $result.status = 'CONTROL_PROBE_UNTRUSTED'

@@ -26,6 +26,11 @@ INFRA = {
 }
 SUCCESS = {"CONTROL_UIA_OK", "CONTROL_FOCUSED_UIA_OK"}
 STAGES = {"FOCUSED_ELEMENT_PROBE", "FOCUSED_ELEMENT_RETURNED", "NO_STAGE", "INVALID"}
+FOCUS_REJECT_REASONS = {
+    "PROVIDER_OR_PROPERTY_ERROR", "NO_ELEMENT", "FOREIGN_PROCESS",
+    "MISSING_TYPE", "AUTOMATION_ID_MISMATCH",
+    "ACCESSIBLE_NAME_MISMATCH", "ROLE_MISMATCH",
+}
 
 
 class InvalidEvidence(ValueError):
@@ -53,6 +58,11 @@ def validate_report(report: dict) -> dict:
             raise InvalidEvidence("positive status missing genuine PID/type witnesses")
         if mode == "FocusedElement" and (report["semantic_focus_matches"] is not True or report["host_focus_claimed"] is not True):
             raise InvalidEvidence("positive focus status lacks native+UIA focus witnesses")
+    if status == "CONTROL_FOCUSED_UIA_REJECTED":
+        if report.get("focus_reject_reason") not in FOCUS_REJECT_REASONS:
+            raise InvalidEvidence("missing/unknown fixed focus rejection classification")
+    elif "focus_reject_reason" in report:
+        raise InvalidEvidence("focus rejection classification outside focused rejection")
     if status == "CONTROL_UIA_TIMEOUT" and mode == "FocusedElement":
         if report.get("last_allowlisted_stage") not in STAGES:
             raise InvalidEvidence("no bounded focus timeout stage")
@@ -61,7 +71,7 @@ def validate_report(report: dict) -> dict:
     allowed = set(FALSE_FLAGS) | {
         "evidence_class", "probe_mode", "status", "process_id_matches",
         "control_type_present", "semantic_focus_matches", "host_focus_claimed",
-        "last_allowlisted_stage",
+        "last_allowlisted_stage", "focus_reject_reason",
     }
     if set(report) - allowed:
         raise InvalidEvidence("unexpected diagnostic fields")

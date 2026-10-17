@@ -193,7 +193,9 @@ try {
         '-Mode', 'host', '-StateDirectory', $quotedWork
     )
     $readyPath = Join-Path $work 'ready.json'
-    $until = [DateTime]::UtcNow.AddSeconds(7)
+    # Cold hosted Windows runners can take >7 seconds to initialize STA PowerShell/WinForms.
+    # Permit bounded native-HWND startup without weakening the 10s killable UIA probe.
+    $until = [DateTime]::UtcNow.AddSeconds(15)
     while (-not (Test-Path -LiteralPath $readyPath) -and [DateTime]::UtcNow -lt $until) {
         if ($hostProcess.HasExited) { break }
         Start-Sleep -Milliseconds 50

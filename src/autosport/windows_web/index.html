@@ -45,6 +45,16 @@
 
       <label for="106">Стратегія повтору</label>
       <select id="106" aria-label="Стратегія повтору"></select>
+      <h3 id="agent-overview-heading">Агенти: ролі, цілі та поточна стратегія</h3>
+      <ul id="agent-overview-list" class="readback-list" tabindex="0" aria-labelledby="agent-overview-heading"></ul>
+      <button id="agent-learning-refresh" type="button" aria-describedby="agent-learning-status">
+        Оновити стан навчання агентів
+      </button>
+      <p id="agent-learning-status" role="status" aria-live="polite" aria-atomic="true">
+        Перевірка наукових записів ще не запускалася.
+      </p>
+      <ul id="agent-learning-evidence" class="readback-list" tabindex="0"
+          aria-label="Перевірені факти про експерименти, пам’ять і навчання агентів"></ul>
 
       <label for="research-plan-path">Шлях до JSON-плану дослідження</label>
       <input id="research-plan-path" type="text" autocomplete="off" aria-describedby="research-plan-summary">
@@ -68,6 +78,21 @@
       <label for="evidence-path">Файл експорту доказів поза активною робочою областю</label>
       <input id="evidence-path" type="text" autocomplete="off">
       <button id="109" type="button">Експортувати докази</button>
+      <section id="support-reports" aria-labelledby="support-heading">
+        <h3 id="support-heading">Діагностика програми та звіти агентів</h3>
+        <p>Програма автоматично записує доступні дії та намагається зберігати
+          один стан за секунду. Пропущені секунди буде позначено.
+          Експорт не містить паролів, сирих фінансових даних чи команд ставок.</p>
+        <label for="support-folder">Існуючий каталог для двох файлів.
+          Порожнє поле — батьківська папка робочої області</label>
+        <input id="support-folder" type="text" autocomplete="off" aria-describedby="support-export-status">
+        <button id="support-export-button" type="button" aria-describedby="support-export-status">
+          Зберегти діагностику та звіт агентів
+        </button>
+        <p id="support-export-status" role="status" aria-live="polite" aria-atomic="true" tabindex="-1">
+          Доступно два файли: Autosport-diagnostics.json та Autosport-agents.json.
+        </p>
+      </section>
     </section>
 
     <section id="paper-runtime" aria-labelledby="paper-runtime-heading">

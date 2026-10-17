@@ -40,3 +40,8 @@ def test_diagnostic_never_certifies_product_or_owner_evidence():
         assert marker in SOURCE
     assert "independent_hosted_windows_uia_control_only" in SOURCE
     assert "exception messages" in SOURCE
+
+
+def test_success_probe_sets_explicit_exit_code():
+    assert SOURCE.rstrip().endswith('exit 0')
+    assert SOURCE.index('exit 1') < SOURCE.rindex('exit 0')

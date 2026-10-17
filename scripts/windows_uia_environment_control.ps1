@@ -315,3 +315,4 @@ if (-not [string]::IsNullOrWhiteSpace($ReportPath)) {
 ConvertTo-Json -InputObject $result -Compress
 $expectedPass = if ($ProbeMode -eq 'FocusedElement') { 'CONTROL_FOCUSED_UIA_OK' } else { 'CONTROL_UIA_OK' }
 if ($result.status -cne $expectedPass) { exit 1 }
+exit 0

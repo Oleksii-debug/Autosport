@@ -257,12 +257,24 @@ def test_report_pair_accepts_past_science_with_timezone_offset(tmp_path):
         )
         evidence["research_runs"] = {
             "state": "VERIFIED_SUPERVISOR_SNAPSHOTS", "count": 1,
-            "recent": [{"updated_at": "2026-10-16T22:00:00Z"}],
-            "status_counts": {"SUCCEEDED": 1},
+            "recent": [{
+                "run_identity_sha256": "c" * 64,
+                "phase": "COMPLETE", "status": "COMPLETED",
+                "checkpoint_sha256": "d" * 64,
+                "consumed_budget_units": 2,
+                "updated_at": "2026-10-16T22:00:00Z",
+            }],
+            "status_counts": {"COMPLETED": 1},
         }
         evidence["agent_loop"] = {
             "state": "VERIFIED_RESTART_SNAPSHOT",
+            "phase": "OBSERVE", "sequence": 0,
+            "external_effect_state": "NONE",
             "updated_at": "2026-10-16T23:15:00Z",
+            "state_sha256": "e" * 64,
+            "postmortem_recorded": False,
+            "research_handoff_recorded": False,
+            "economic_goal_identity_present": False,
         }
         d.pop("report_pair_sha256")
         a.pop("report_pair_sha256")
@@ -274,5 +286,104 @@ def test_report_pair_accepts_past_science_with_timezone_offset(tmp_path):
         diagnostic.write_text(json.dumps(d), encoding="utf-8")
         agent_path.write_text(json.dumps(a), encoding="utf-8")
         assert verify_report_pair(diagnostic, agent_path) == digest
+    finally:
+        trace.close()
+
+
+@pytest.mark.parametrize("mutation", [
+    "research_unknown_status", "research_status_total",
+    "research_recent_status_conflict", "research_extra_claim",
+    "research_run_wrong_digest", "research_run_fake_phase",
+    "research_run_boolean_budget", "research_false_unverified",
+    "loop_fake_phase", "loop_real_execution_claim",
+    "loop_boolean_sequence", "loop_wrong_digest",
+    "loop_extra_training_claim", "loop_false_unverified",
+])
+def test_report_pair_rejects_rehashed_nested_learning_snapshots(tmp_path, mutation):
+    """Paired SHA-256 cannot mint completed research or loop learning evidence."""
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=lambda: now)
+    try:
+        diagnostic, agent_path = trace.export_reports(
+            tmp_path, selected_strategy="observe-only-v1"
+        )
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agent_path.read_text(encoding="utf-8"))
+        evidence = a["verified_learning_evidence"]
+        evidence["science"].update(
+            state="CANONICAL_REGISTRY_VERIFIED", records_total=0,
+            types=[
+                {"type": kind, "count": 0, "recent": []}
+                for kind in _RESEARCH_TYPES
+            ],
+            experiment_outcomes={}, promotion_decisions={},
+            promotion_evidence_validity={},
+            promotion_evidence_guardrail_failures=0,
+            promotion_evidence_holdout_missing=0,
+            evidence_scope="causal_records_by_availability_not_training_performance_proof",
+        )
+        evidence["research_runs"] = {
+            "state": "VERIFIED_SUPERVISOR_SNAPSHOTS", "count": 1,
+            "status_counts": {"COMPLETED": 1},
+            "recent": [{
+                "run_identity_sha256": "c" * 64, "phase": "COMPLETE",
+                "status": "COMPLETED", "checkpoint_sha256": "d" * 64,
+                "consumed_budget_units": 2,
+                "updated_at": "2026-10-16T22:00:00Z",
+            }],
+        }
+        evidence["agent_loop"] = {
+            "state": "VERIFIED_RESTART_SNAPSHOT",
+            "phase": "OBSERVE", "sequence": 0,
+            "external_effect_state": "NONE",
+            "updated_at": "2026-10-16T23:15:00Z",
+            "state_sha256": "e" * 64,
+            "postmortem_recorded": False,
+            "research_handoff_recorded": False,
+            "economic_goal_identity_present": False,
+        }
+        research = evidence["research_runs"]
+        loop = evidence["agent_loop"]
+        changes = {
+            "research_unknown_status": lambda: research.update(
+                status_counts={"TRAINING_COMPLETE": 1}),
+            "research_status_total": lambda: research.update(
+                status_counts={"COMPLETED": 2}),
+            "research_recent_status_conflict": lambda: research["recent"][0].update(
+                status="ACTIVE"),
+            "research_extra_claim": lambda: research.update(
+                successful_model_training=True),
+            "research_run_wrong_digest": lambda: research["recent"][0].update(
+                checkpoint_sha256="incorrect"),
+            "research_run_fake_phase": lambda: research["recent"][0].update(
+                phase="PROFITABLE_MODEL"),
+            "research_run_boolean_budget": lambda: research["recent"][0].update(
+                consumed_budget_units=True),
+            "research_false_unverified": lambda: research.update(
+                state="NOT_VERIFIED"),
+            "loop_fake_phase": lambda: loop.update(phase="MODEL_PROMOTED"),
+            "loop_real_execution_claim": lambda: loop.update(
+                external_effect_state="REAL_MONEY"),
+            "loop_boolean_sequence": lambda: loop.update(sequence=True),
+            "loop_wrong_digest": lambda: loop.update(state_sha256="incorrect"),
+            "loop_extra_training_claim": lambda: loop.update(
+                model_learning_success=True),
+            "loop_false_unverified": lambda: loop.update(
+                state="NOT_VERIFIED"),
+        }
+        changes[mutation]()
+        d.pop("report_pair_sha256")
+        a.pop("report_pair_sha256")
+        digest = hashlib.sha256(json.dumps(
+            {"diagnostics": d, "agents": a}, sort_keys=True,
+            ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        d["report_pair_sha256"] = a["report_pair_sha256"] = digest
+        diagnostic.write_text(json.dumps(d), encoding="utf-8")
+        agent_path.write_text(json.dumps(a), encoding="utf-8")
+        with pytest.raises(SupportExportError, match="scientific report"):
+            verify_report_pair(diagnostic, agent_path)
     finally:
         trace.close()

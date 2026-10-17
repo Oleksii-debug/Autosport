@@ -1034,22 +1034,83 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
             or type(retention) is not dict
             or retention.get("status") != "NOT_EVALUATED"):
         raise SupportExportError("scientific report learning state is malformed")
+    # Verified research/loop snapshots must retain the actual projection
+    # vocabulary, bounded counters and canonical evidence identifiers.
+    # A rehashed JSON pair must never create a fictitious completed run.
+    def canonical_digest(value: object) -> bool:
+        return (type(value) is str and len(value) == 64
+                and all(char in "0123456789abcdef" for char in value))
+
     if research.get("state") == "VERIFIED_SUPERVISOR_SNAPSHOTS":
+        from .research_supervisor import ResearchPhase, SupervisorStatus
+
         recent = research.get("recent")
+        total = research.get("count")
+        status_counts = research.get("status_counts")
+        statuses = {member.value for member in SupervisorStatus}
+        phases = {member.value for member in ResearchPhase}
+        required_run = {
+            "run_identity_sha256", "phase", "status",
+            "checkpoint_sha256", "consumed_budget_units", "updated_at",
+        }
         if (science.get("state") != "CANONICAL_REGISTRY_VERIFIED"
-                or type(recent) is not list or len(recent) > 25
-                or type(research.get("count")) is not int
-                or not len(recent) <= research["count"] <= 20_000):
-            raise SupportExportError("scientific report research is malformed")
+                or set(research) != {"state", "count", "status_counts", "recent"}
+                or type(total) is not int or not 0 <= total <= 20_000
+                or type(recent) is not list or len(recent) != min(total, 25)
+                or type(status_counts) is not dict
+                or any(type(status) is not str or status not in statuses
+                       or type(count) is not int or count < 0
+                       for status, count in status_counts.items())
+                or sum(status_counts.values()) != total):
+            raise SupportExportError("scientific report research counters are malformed")
+        recent_counts: Counter[str] = Counter()
         for run in recent:
-            if type(run) is not dict:
+            if (type(run) is not dict or set(run) != required_run
+                    or not canonical_digest(run.get("run_identity_sha256"))
+                    or not canonical_digest(run.get("checkpoint_sha256"))
+                    or type(run.get("phase")) is not str
+                    or run["phase"] not in phases
+                    or type(run.get("status")) is not str
+                    or run["status"] not in statuses
+                    or type(run.get("consumed_budget_units")) is not int
+                    or run["consumed_budget_units"] < 0):
                 raise SupportExportError("scientific report research run is malformed")
-            check_scientific_time(run.get("updated_at"))
-    elif research.get("state") not in {"NOT_PRESENT", "NOT_VERIFIED"}:
+            check_scientific_time(run["updated_at"])
+            recent_counts[run["status"]] += 1
+        if any(count > status_counts.get(status, 0)
+               for status, count in recent_counts.items()):
+            raise SupportExportError("scientific report research status counts conflict")
+    elif (research.get("state") not in {"NOT_PRESENT", "NOT_VERIFIED"}
+          or set(research) != {"state"}):
         raise SupportExportError("scientific report research status is invalid")
+
     if loop.get("state") == "VERIFIED_RESTART_SNAPSHOT":
-        check_scientific_time(loop.get("updated_at"))
-    elif loop.get("state") not in {"NOT_PRESENT", "NOT_VERIFIED"}:
+        from .agent_loop import AgentLoopPhase, ExternalEffectState
+
+        required_loop = {
+            "state", "phase", "sequence", "external_effect_state",
+            "updated_at", "state_sha256", "postmortem_recorded",
+            "research_handoff_recorded", "economic_goal_identity_present",
+        }
+        if (set(loop) != required_loop
+                or type(loop.get("phase")) is not str
+                or loop["phase"] not in {member.value for member in AgentLoopPhase}
+                or type(loop.get("external_effect_state")) is not str
+                or loop["external_effect_state"] not in {
+                    member.value for member in ExternalEffectState
+                }
+                or type(loop.get("sequence")) is not int
+                or loop["sequence"] < 0
+                or not canonical_digest(loop.get("state_sha256"))
+                or any(loop.get(key) is not True and loop.get(key) is not False
+                       for key in (
+                           "postmortem_recorded", "research_handoff_recorded",
+                           "economic_goal_identity_present",
+                       ))):
+            raise SupportExportError("scientific report agent state is malformed")
+        check_scientific_time(loop["updated_at"])
+    elif (loop.get("state") not in {"NOT_PRESENT", "NOT_VERIFIED"}
+          or set(loop) != {"state"}):
         raise SupportExportError("scientific report agent state is invalid")
 
     computed = hashlib.sha256(

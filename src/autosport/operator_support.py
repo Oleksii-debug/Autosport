@@ -812,8 +812,30 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
         or agents.get("learning_verification") != "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE"
     ):
         raise SupportExportError("science report status contradicts verification")
-    if inventory_failed and agents.get("memory_and_learning_artifacts") != []:
-        raise SupportExportError("rejected artifact inventory cannot claim presence")
+    artifacts = agents.get("memory_and_learning_artifacts")
+    if type(artifacts) is not list:
+        raise SupportExportError("agent artifact inventory is malformed")
+    if inventory_failed:
+        if artifacts:
+            raise SupportExportError("agent artifact verification failed")
+    else:
+        if len(artifacts) != len(_ARTIFACTS):
+            raise SupportExportError("agent artifact inventory is incomplete")
+        for item, (filename, purpose) in zip(artifacts, _ARTIFACTS.items()):
+            if (type(item) is not dict or item.get("type") != filename
+                    or item.get("purpose_uk") != purpose):
+                raise SupportExportError("agent artifact identity is malformed")
+            state = item.get("state")
+            if state == "NOT_PRESENT":
+                if set(item) != {"type", "purpose_uk", "state"}:
+                    raise SupportExportError("absent agent artifact has extra fields")
+            elif state == "PRESENT_UNVERIFIED":
+                if (set(item) != {"type", "purpose_uk", "state", "size_bytes"}
+                        or type(item.get("size_bytes")) is not int
+                        or item["size_bytes"] < 0):
+                    raise SupportExportError("agent artifact metadata is malformed")
+            else:
+                raise SupportExportError("agent artifact state is not allowlisted")
     cutoff_text = science.get("cutoff_utc") if type(science) is dict else None
     generated_text = diagnostics.get("generated_at_utc")
     if type(cutoff_text) is not str or type(generated_text) is not str:

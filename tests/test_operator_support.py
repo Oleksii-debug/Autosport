@@ -27,6 +27,7 @@ def test_export_has_every_second_and_different_agent_report(tmp_path):
     first=json.loads(diagnostics.read_text())
     second=json.loads(agents.read_text())
     assert first['coverage']['record_count'] == 7
+    assert first['coverage']['recorder_status'] == 'HEALTHY'
     assert first['coverage']['missing_heartbeat_seconds_between_observations'] == 0
     assert sum(x['heartbeat'] for x in first['seconds'])==4
     assert first['activities'][-1]['cycle']==42
@@ -45,6 +46,7 @@ def test_missing_second_is_explicit_not_invented(tmp_path):
     p,_=t.export_reports(tmp_path,selected_strategy='observe-only-v1')
     d=json.loads(p.read_text())
     assert d['coverage']['missing_heartbeat_seconds_between_observations']==7
+    assert d['coverage']['recorder_status'] == 'PARTIAL_HEARTBEAT_GAPS'
     assert len([r for r in d['seconds'] if r['heartbeat']])==2
     t.close()
 
@@ -228,6 +230,7 @@ def test_tail_gap_remains_visible_without_a_second_heartbeat(tmp_path):
         # verified heartbeat. Second 9 is the still-open export second.
         assert coverage['missing_heartbeat_seconds_between_observations'] == 0
         assert coverage['last_verified_heartbeat_age_seconds'] == 9
+        assert coverage['recorder_status'] == 'PARTIAL_HEARTBEAT_GAPS'
         assert coverage['tail_seconds_without_verified_heartbeat'] == 8
         assert coverage['complete_activity_capture_proven'] is False
     finally:
@@ -240,6 +243,7 @@ def test_no_heartbeat_does_not_claim_a_zero_length_tail(tmp_path):
         diagnostics, _ = t.export_reports(tmp_path, selected_strategy='observe-only-v1')
         coverage = json.loads(diagnostics.read_text())['coverage']
         assert coverage['first_heartbeat_utc'] is None
+        assert coverage['recorder_status'] == 'NO_VERIFIED_HEARTBEAT'
         assert coverage['last_verified_heartbeat_age_seconds'] is None
         assert coverage['tail_seconds_without_verified_heartbeat'] is None
     finally:
@@ -278,5 +282,25 @@ def test_delayed_observation_with_future_original_second_is_rejected(tmp_path):
         # The durable write uses rolled-back time; original observation is future.
         with pytest.raises(SupportExportError, match='causal report cutoff'):
             t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+    finally:
+        t.close()
+
+
+def test_pending_queue_evidence_never_reports_healthy_and_pair_counts_agree(tmp_path, monkeypatch):
+    t, c, _ = trace(tmp_path)
+    try:
+        t.heartbeat()
+        # Deterministic concurrent-queue fixture: a pending observation lands
+        # after the durable snapshot but before the report's queue-count sample.
+        monkeypatch.setattr(t._pending, 'qsize', lambda: 3)
+        diagnostics, agents = t.export_reports(
+            tmp_path, selected_strategy='observe-only-v1'
+        )
+        d = json.loads(diagnostics.read_text())
+        a = json.loads(agents.read_text())
+        assert d['coverage']['recorder_status'] == 'PARTIAL_PENDING_EVENTS'
+        assert d['coverage']['pending_unflushed_activity_count'] == 3
+        assert a['pending_unflushed_activity_count'] == 3
+        assert d['coverage']['complete_activity_capture_proven'] is False
     finally:
         t.close()

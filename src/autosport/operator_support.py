@@ -484,6 +484,21 @@ class OperatorSupportTrace:
             tail_seconds = max(0, last_heartbeat_age - 1)
         with self._lost_activity_lock:
             lost_activities = self._lost_activity_count
+        # Sample the queue count ONCE for both reports; otherwise a concurrent
+        # UI observation can make paired files disagree about outstanding work.
+        pending_activities = self._pending.qsize()
+        if self._fault is not None:
+            recorder_status = self._fault
+        elif lost_activities:
+            recorder_status = "PARTIAL_DROPPED_EVENTS"
+        elif pending_activities:
+            recorder_status = "PARTIAL_PENDING_EVENTS"
+        elif not heartbeats:
+            recorder_status = "NO_VERIFIED_HEARTBEAT"
+        elif missed or (tail_seconds is not None and tail_seconds > 0):
+            recorder_status = "PARTIAL_HEARTBEAT_GAPS"
+        else:
+            recorder_status = "HEALTHY"
         diagnostics = {
             "schema_version": REPORT_VERSION,
             "report_kind": "autosport-operator-diagnostics",
@@ -500,13 +515,10 @@ class OperatorSupportTrace:
                 "last_verified_heartbeat_age_seconds": last_heartbeat_age,
                 "record_count": len(records),
                 "activity_count": len(activities),
-                "recorder_status": (
-                    self._fault if self._fault is not None
-                    else ("PARTIAL_DROPPED_EVENTS" if lost_activities else "HEALTHY")
-                ),
+                "recorder_status": recorder_status,
                 "recorder_fault_present": self._fault is not None,
                 "lost_activity_count": lost_activities,
-                "pending_unflushed_activity_count": self._pending.qsize(),
+                "pending_unflushed_activity_count": pending_activities,
                 "complete_activity_capture_proven": False,
                 "event_time_basis": "observed_utc_second_when_available_else_journal_timestamp",
                 "does_not_prove_os_or_provider_operations": True,
@@ -587,7 +599,7 @@ class OperatorSupportTrace:
             "strategies": strategy_catalog,
             "instrumented_agent_activity": agent_activity,
             "lost_activity_count": lost_activities,
-            "pending_unflushed_activity_count": self._pending.qsize(),
+            "pending_unflushed_activity_count": pending_activities,
             "memory_and_learning_artifacts": artifacts,
             "agent_workspace_scope": (
                 "ROOT" if selected_workspace == self.workspace.resolve(strict=True)

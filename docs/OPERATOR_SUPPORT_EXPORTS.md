@@ -51,7 +51,17 @@ can otherwise display zero *between-observation* gaps while its most recent
 heartbeat is already several seconds old. An unknown tail (no heartbeat) is
 `null`, never silently reported as zero. This is evidence of absent verified
 process heartbeats only; it is not a measurement of OS operations or a claim
-that the provider is down. A heartbeat newer than the report cutoff is rejected.
+that the provider is down. A heartbeat newer than the report cutoff is rejected. A system-clock
+rollback cannot turn later journal entries or queued original observation
+seconds into earlier causal evidence. Pair verification independently rejects
+future diagnostic/agent event times even after both SHA-256 digests are
+recomputed. Such a mismatch fails the export instead of inventing history.
+
+The recorder status distinguishes HEALTHY (verified heartbeat, no detected
+gap/drop/pending event), NO_VERIFIED_HEARTBEAT, PARTIAL_HEARTBEAT_GAPS,
+PARTIAL_PENDING_EVENTS, PARTIAL_DROPPED_EVENTS, and RECORDER_ERROR.
+The outstanding-event count is sampled once for both reports. A healthy
+sampler is still not proof of all OS, provider, or model operations.
 
 The forensic trace and scientific/memory evidence are different verified sources.
 Corrupt, inaccessible, symlinked or changing science never erases separately

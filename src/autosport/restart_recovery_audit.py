@@ -41,60 +41,74 @@ def _sha256(path: Path) -> str:
     return hashlib.sha256(path.read_bytes()).hexdigest()
 
 
-def _safe_exception_detail(exc: BaseException) -> str:
-    """Render semantic-audit failure evidence without trusting exception formatting."""
+_ALLOWED_AUDIT_PHASES = frozenset({
+    "session_restart", "session_restart:first_construct",
+    "session_restart:first_run", "session_restart:reopen_construct",
+    "transaction_recovery", "bounded_endurance", "evidence_assembly",
+})
+_TRUSTED_AUDIT_FRAMES = frozenset({
+    "_phase_call", "_audit_session_restart", "_audit_uncommitted_recovery",
+    "_audit_bounded_endurance", "run_restart_recovery_audit",
+})
+_TRUSTED_ERROR_TYPES = (
+    AssertionError, ConnectionError, FileNotFoundError, KeyError, OSError,
+    PermissionError, RuntimeError, TimeoutError, TypeError, ValueError,
+)
 
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = "exception details unavailable"
-    return f"{exception_type}: {rendered}"
+
+def _safe_exception_detail(exc: BaseException) -> str:
+    """Expose fixed built-in error categories; never render exception arguments."""
+    exact_type = type(exc)
+    category = next(
+        (known.__name__ for known in _TRUSTED_ERROR_TYPES if exact_type is known),
+        "Exception",
+    )
+    return f"{category}: details redacted"
+
+
+def _safe_trace_frame(traceback) -> str:
+    """Only emit literal, allowlisted audit frame names into exported diagnostics."""
+    frame = traceback.tb_frame
+    module_name = frame.f_globals.get("__name__")
+    function_name = frame.f_code.co_name
+    lineno = traceback.tb_lineno
+    if (
+        type(module_name) is str
+        and module_name == "autosport.restart_recovery_audit"
+        and type(function_name) is str
+        and function_name in _TRUSTED_AUDIT_FRAMES
+        and type(lineno) is int
+        and 0 < lineno <= 1_000_000
+    ):
+        return f"audit:{function_name}:{lineno}"
+    return "external"
 
 
 def _safe_exception_site(exc: Exception) -> str:
-    """Return a bounded code location without exposing filesystem paths or locals."""
-
+    """Return bounded known audit location, never arbitrary Python symbol names."""
     try:
-        traceback = BaseException.__getattribute__(exc, "__traceback__")
-        if traceback is None:
+        trace = BaseException.__getattribute__(exc, "__traceback__")
+        if trace is None:
             return "unknown"
-        while traceback.tb_next is not None:
-            traceback = traceback.tb_next
-        frame = traceback.tb_frame
-        module_name = frame.f_globals.get("__name__", "unknown")
-        function_name = frame.f_code.co_name
-        line_number = traceback.tb_lineno
-        if type(module_name) is not str or type(function_name) is not str:
-            return "unknown"
-        return f"{module_name}:{function_name}:{line_number}"
+        while trace.tb_next is not None:
+            trace = trace.tb_next
+        return _safe_trace_frame(trace)
     except BaseException:
         return "unknown"
 
 
 def _safe_exception_trace(exc: Exception, *, limit: int = 8) -> list[str]:
-    """Return the bounded innermost call chain without paths, locals, or source text."""
-
+    """Bound and allowlist every frame label, including dynamically generated code."""
     if type(limit) is not int or limit <= 0:
         return []
     try:
-        traceback = BaseException.__getattribute__(exc, "__traceback__")
-        frames: list[str] = []
-        while traceback is not None:
-            frame = traceback.tb_frame
-            module_name = frame.f_globals.get("__name__", "unknown")
-            function_name = frame.f_code.co_name
-            line_number = traceback.tb_lineno
-            if type(module_name) is not str or type(function_name) is not str:
-                return ["unknown"]
-            frames.append(f"{module_name}:{function_name}:{line_number}")
-            traceback = traceback.tb_next
-        if not frames:
-            return ["unknown"]
-        return frames[-limit:]
+        trace = BaseException.__getattribute__(exc, "__traceback__")
+        labels: list[str] = []
+        while trace is not None:
+            labels.append(_safe_trace_frame(trace))
+            labels = labels[-min(limit, 8):]
+            trace = trace.tb_next
+        return labels or ["unknown"]
     except BaseException:
         return ["unknown"]
 
@@ -404,9 +418,13 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
         }
     except Exception as exc:
         try:
-            failure_phase = exc.__dict__.get("_autosport_restart_phase", phase)
+            tagged_phase = exc.__dict__.get("_autosport_restart_phase")
         except BaseException:
-            failure_phase = phase
+            tagged_phase = None
+        failure_phase = (
+            tagged_phase if type(tagged_phase) is str
+            and tagged_phase in _ALLOWED_AUDIT_PHASES else phase
+        )
         payload = {
             "status": "FAIL",
             "phase": failure_phase,

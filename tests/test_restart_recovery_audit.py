@@ -147,7 +147,7 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertEqual(payload["phase"], "session_restart")
             self.assertEqual(
                 payload["error"],
-                "_BrokenStringError: exception details unavailable",
+                "Exception: details redacted",
             )
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
@@ -169,7 +169,7 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertEqual(payload["status"], "FAIL")
             self.assertEqual(
                 payload["error"],
-                "_BrokenMetadataError: exception details unavailable",
+                "Exception: details redacted",
             )
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
@@ -185,7 +185,7 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             trace = restart_audit._safe_exception_trace(exc, limit=1)
 
         self.assertEqual(len(trace), 1)
-        self.assertIn(":nested_failure:", trace[0])
+        self.assertEqual(trace[0], "external")
         self.assertNotIn("/", trace[0])
         self.assertNotIn("\\\\", trace[0])
 
@@ -208,7 +208,7 @@ class RestartRecoveryAuditTests(unittest.TestCase):
         except ValueError as exc:
             site = restart_audit._safe_exception_site(exc)
 
-        self.assertTrue(site.startswith(__name__ + ":test_safe_exception_site_reports_only_module_function_and_line:"))
+        self.assertEqual(site, "external")
         self.assertNotIn("/", site)
         self.assertNotIn("\\\\", site)
 
@@ -244,7 +244,7 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
             self.assertEqual(payload["phase"], "transaction_recovery")
-            self.assertEqual(payload["error"], "ValueError: recovery-canary")
+            self.assertEqual(payload["error"], "ValueError: details redacted")
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])
@@ -297,6 +297,51 @@ class RestartRecoveryAuditTests(unittest.TestCase):
                 {item.name for item in root.iterdir()},
                 {output.name, f".{output.name}.lock"},
             )
+
+    def test_private_exception_and_attached_phase_do_not_leak_into_report(self):
+        marker = "AS11_SYNTHETIC_SECRET_MARKER_71"
+        error = RuntimeError("synthetic_message=" + marker)
+        error._autosport_restart_phase = "session_restart:" + marker
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "recovery.json"
+            with patch.object(restart_audit, "_audit_session_restart", side_effect=error):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(path), 1)
+            raw = path.read_text(encoding="utf-8")
+            report = json.loads(raw)
+        self.assertNotIn(marker, raw)
+        self.assertEqual(report["phase"], "session_restart")
+        self.assertEqual(report["error"], "RuntimeError: details redacted")
+        self.assertFalse(report["real_money_execution"])
+        self.assertFalse(report["nvda_verified"])
+
+    def test_untrusted_exception_class_and_dynamic_python_names_are_private(self):
+        marker = "AS11_SYNTHETIC_DYNAMIC_METADATA_MARKER_72"
+        custom_error = type(marker, (Exception,), {})
+        ns = {"__name__": marker, "Custom": custom_error}
+        exec("def " + marker + "():\n    raise Custom('synthetic')\n", ns)
+        try:
+            ns[marker]()
+        except custom_error as exc:
+            self.assertEqual(restart_audit._safe_exception_detail(exc), "Exception: details redacted")
+            site = restart_audit._safe_exception_site(exc)
+            trace = restart_audit._safe_exception_trace(exc)
+        self.assertNotIn(marker, site)
+        self.assertNotIn(marker, str(trace))
+        self.assertTrue(all(value == "external" or value.startswith("audit:") for value in trace))
+
+    def test_nonstring_exception_phase_is_rejected(self):
+        marker = "AS11_SYNTHETIC_UNHASHABLE_PHASE_73"
+        error = ValueError(marker)
+        error._autosport_restart_phase = ["session_restart", marker]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "recovery.json"
+            with patch.object(restart_audit, "_audit_session_restart", side_effect=error):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(path), 1)
+            raw = path.read_text(encoding="utf-8")
+            report = json.loads(raw)
+        self.assertEqual(report["phase"], "session_restart")
+        self.assertEqual(report["error"], "ValueError: details redacted")
+        self.assertNotIn(marker, raw)
 
 
 if __name__ == "__main__":

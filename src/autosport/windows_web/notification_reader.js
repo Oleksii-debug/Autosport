@@ -156,7 +156,19 @@
         "Очікують прочитання: " + data.events.length + ".", true);
       const urgentNew = data.events.filter(e => e.priority === "ASSERTIVE" && !announced.has(e.event_id));
       for (const event of data.events) announced.add(event.event_id);
-      while (announced.size > 4096) announced.delete(announced.values().next().value);
+      // Bound historical IDs without forgetting any still-pending urgent event:
+      // otherwise a long-running stream can reannounce an old unacknowledged alert.
+      while (announced.size > 4096) {
+        let evicted = false;
+        for (const id of announced) {
+          if (!next.has(id)) {
+            announced.delete(id);
+            evicted = true;
+            break;
+          }
+        }
+        if (!evicted) break;
+      }
       if (!urgentNew.length && activeUrgentId && !next.has(activeUrgentId)) {
         put(urgent, "");
         activeUrgentId = null;

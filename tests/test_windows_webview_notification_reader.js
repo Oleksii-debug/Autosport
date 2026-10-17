@@ -24,12 +24,12 @@ function dom() {
       insertBefore(child, before) {
         if (child.parentNode) child.parentNode.removeChild(child);
         const index = before == null ? this.children.length : this.children.indexOf(before);
-        ok(index >= 0, "insertion anchor exists");
+        if (index < 0) throw new Error("FAIL: insertion anchor missing");
         this.children.splice(index, 0, child); child.parentNode = this; return child;
       },
       removeChild(child) {
         const n = this.children.indexOf(child);
-        ok(n >= 0, "removed node is a child");
+        if (n < 0) throw new Error("FAIL: removed node is not a child");
         this.children.splice(n, 1); child.parentNode = null; return child;
       },
       contains(child) {
@@ -158,6 +158,18 @@ async function run() {
     ok(!(await pending) && !container.children[2].children[0].children[3].disabled &&
        container.children[4].textContent === "",
        "late old-session ACK cannot change reused event ID or action status");
+  }
+  {
+    const {pane,container} = newPane();
+    const pinned = event(1,"a");
+    pane.render(data("long-session",[pinned]));
+    for (let n=2; n<=4100; n++) {
+      const moving = { ...event(n,"b"), event_id: n.toString(16).padStart(64,"0") };
+      pane.render(data("long-session",[pinned,moving]));
+    }
+    pane.render(data("long-session",[pinned]));
+    ok(container.children[3].textContent === "",
+      "pending unacknowledged alert does not reannounce after historical ID rotation");
   }
   {
     const {pane} = newPane(async () => { throw new Error("SECRET=private"); });

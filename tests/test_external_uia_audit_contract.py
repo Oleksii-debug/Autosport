@@ -587,8 +587,8 @@ def test_external_uia_exercises_packaged_f2_and_f8_focus_contract() -> None:
     assert "function Wait-ForFocusedAutomationId" in audit
     assert "[System.Windows.Automation.AutomationElement]::FocusedElement" in audit
     assert "Start-Sleep -Milliseconds 50" in audit
-    assert "Wait-ForFocusedAutomationId -AutomationId '301'" in audit
-    assert "Wait-ForFocusedAutomationId -AutomationId '204'" in audit
+    assert "Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '301' -Deadline $shortcutDeadline" in audit
+    assert "Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '204' -Deadline $shortcutDeadline" in audit
     assert "$null -eq $focusedF2" in audit
     assert "$null -eq $focusedF8" in audit
     assert "Start-Sleep -Milliseconds 150" not in audit
@@ -623,12 +623,12 @@ def test_external_uia_closes_disclosures_and_proves_trigger_focus_handoff() -> N
 
     assert "-AutomationId '329'" in audit
     assert "Invoke-ExternalAction -Element $ownerClose" in audit
-    assert "Wait-ForFocusedAutomationId -AutomationId '305'" in audit
+    assert "Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '305' -Deadline $focusDeadline" in audit
     assert "owner disclosure close did not restore focus to automation_id=305" in audit
 
     assert "-AutomationId '336'" in audit
     assert "Invoke-ExternalAction -Element $manualClose" in audit
-    assert "Wait-ForFocusedAutomationId -AutomationId '330'" in audit
+    assert "Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '330' -Deadline $focusDeadline" in audit
     assert "manual disclosure close did not restore focus to automation_id=330" in audit
     assert "packaged disclosure focus-handoff audit failed" in audit
 
@@ -646,7 +646,7 @@ def test_external_uia_activates_packaged_durable_emergency_stop() -> None:
     assert "-AutomationId 'emergency-stop-status'" in audit
     assert "'^Аварійний STOP (активовано|активний)'" in audit
     assert "'підтверджено стійкий запис ревізії'" in audit
-    assert "Wait-ForFocusedAutomationId -AutomationId 'emergency-stop-status'" in audit
+    assert "Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId 'emergency-stop-status' -Deadline $stopFocusDeadline" in audit
     assert "confirmation did not retain focus on the dedicated status" in audit
     assert "packaged emergency STOP durable journal is empty" in audit
     assert "$report.emergency_stop_activation_status = 'PASS'" in audit

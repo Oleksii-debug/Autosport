@@ -248,6 +248,36 @@ def test_same_column_names_with_wrong_schema_are_rejected(tmp_path):
     with pytest.raises(OperatorStatusIntegrityError, match="schema mismatch"):
         OperatorStatusAnnouncementBroker(path)
 
+@pytest.mark.parametrize("missing_unique", ["event_id", "idempotency_key"])
+def test_missing_unique_identity_constraint_is_rejected_on_restart(tmp_path, missing_unique):
+    # Preserve every column, NOT NULL bit and primary-key flag: table_info
+    # must remain identical while the durable identity fence is missing.
+    path = tmp_path / "status.sqlite3"
+    schema = """CREATE TABLE events(
+        sequence INTEGER PRIMARY KEY,
+        event_id TEXT NOT NULL UNIQUE,
+        idempotency_key TEXT NOT NULL UNIQUE,
+        priority TEXT NOT NULL,
+        coalesce_key TEXT,
+        message TEXT NOT NULL,
+        occurred_at TEXT NOT NULL,
+        published_at TEXT NOT NULL,
+        superseded_by TEXT,
+        acknowledged_at TEXT,
+        record_sha256 TEXT NOT NULL
+    )"""
+    schema = schema.replace(
+        f"{missing_unique} TEXT NOT NULL UNIQUE", f"{missing_unique} TEXT NOT NULL"
+    )
+    with sqlite3.connect(path) as db:
+        db.execute("CREATE TABLE metadata(key TEXT PRIMARY KEY,value TEXT NOT NULL)")
+        db.execute("INSERT INTO metadata VALUES('schema_version','1')")
+        db.execute(schema)
+        db.commit()
+    with pytest.raises(OperatorStatusIntegrityError, match="uniqueness schema mismatch"):
+        OperatorStatusAnnouncementBroker(path)
+
+
 def test_nonfinite_timeout_rejected(tmp_path):
     for value in (float("nan"), float("inf"), float("-inf")):
         with pytest.raises(ValueError, match="finite positive"):

@@ -37,6 +37,18 @@ class InvalidEvidence(ValueError):
     pass
 
 
+
+def _reject_duplicate_json_fields(pairs: list[tuple[str, object]]) -> dict[str, object]:
+    """Fail closed on ambiguous JSON evidence, including nested duplicate keys."""
+    result: dict[str, object] = {}
+    for key, value in pairs:
+        if key in result:
+            raise InvalidEvidence("duplicate JSON field")
+        result[key] = value
+    return result
+
+
+
 def validate_report(report: dict) -> dict:
     if not isinstance(report, dict):
         raise InvalidEvidence("report must be a JSON object")
@@ -86,7 +98,7 @@ def main() -> int:
     p.add_argument("report", type=Path)
     a = p.parse_args()
     try:
-        verdict = validate_report(json.loads(a.report.read_text(encoding="utf-8")))
+        verdict = validate_report(json.loads(a.report.read_text(encoding="utf-8"), object_pairs_hook=_reject_duplicate_json_fields))
     except (OSError, ValueError, json.JSONDecodeError):
         print("INVALID_MACHINE_EVIDENCE")
         return 2

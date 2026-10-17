@@ -1,5 +1,8 @@
 """Fail-closed differential hosted Windows UIA diagnostics, not Autosport/NVDA acceptance."""
 from pathlib import Path
+import json
+import subprocess
+import sys
 
 import pytest
 
@@ -174,3 +177,69 @@ def test_malformed_diagnostic_enum_rejected_as_fixed_invalid_evidence(field, sta
     bad[field] = malformed
     with pytest.raises(InvalidEvidence):
         validate_report(bad)
+
+
+# The independent Windows control is machine evidence. Duplicate JSON keys must
+# never be silently overwritten into a synthetic positive status or an attestation.
+@pytest.mark.parametrize(("field", "contradiction"), [
+    ("status", "CONTROL_UIA_REJECTED"),
+    ("probe_mode", "UnsupportedMode"),
+    ("nvda_verified", True),
+    ("human_tested", True),
+    ("real_money_execution", True),
+    ("whole_product_complete", True),
+    ("autosport_packaged_uia_qualified", True),
+    ("process_id_matches", False),
+    ("control_type_present", False),
+    ("evidence_class", "human_nvda_verified"),
+    ("status", "CONTROL_UIA_OK"),
+])
+def test_duplicate_json_evidence_fails_closed_without_private_output(tmp_path, field, contradiction):
+    record = report(mode="FromHandle", status="CONTROL_UIA_OK",
+                    semantic_focus_matches=False)
+    good = json.dumps(record, ensure_ascii=False)
+    raw = "{" + json.dumps(field) + ":" + json.dumps(contradiction) + "," + good[1:]
+    path = tmp_path / "uia-report.json"
+    path.write_text(raw, encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/verify_as05_focus_evidence.py"), str(path)],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout.strip() == "INVALID_MACHINE_EVIDENCE"
+    assert result.stderr == ""
+
+
+def test_duplicate_json_nested_keys_also_fail_closed_without_echo(tmp_path):
+    record = report(mode="FromHandle", status="CONTROL_UIA_OK",
+                    semantic_focus_matches=False)
+    path = tmp_path / "uia-report.json"
+    path.write_text(
+        json.dumps(record)[:-1] + ',"extraneous":{"secret":"CANARY_PRIVATE","secret":"another"}}',
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/verify_as05_focus_evidence.py"), str(path)],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 2
+    assert result.stdout.strip() == "INVALID_MACHINE_EVIDENCE"
+    assert result.stderr == ""
+    assert "CANARY_PRIVATE" not in result.stdout
+
+
+def test_unambiguous_json_still_produces_diagnostic_only(tmp_path):
+    record = report(mode="FromHandle", status="CONTROL_UIA_OK",
+                    semantic_focus_matches=False)
+    path = tmp_path / "uia-report.json"
+    path.write_text(json.dumps(record), encoding="utf-8")
+    result = subprocess.run(
+        [sys.executable, str(ROOT / "scripts/verify_as05_focus_evidence.py"), str(path)],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0
+    verdict = json.loads(result.stdout)
+    assert verdict["diagnostic_success"] is True
+    assert verdict["autosport_packaged_uia_qualified"] is False
+    assert verdict["human_tested"] is False
+    assert verdict["nvda_verified"] is False

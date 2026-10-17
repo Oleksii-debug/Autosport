@@ -947,6 +947,72 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
         groups = science.get("types")
         if type(groups) is not list or len(groups) > 14:
             raise SupportExportError("scientific report history is malformed")
+        # The writer produces one ordered group per canonical scientific type.
+        # A recomputed paired digest must not turn a fabricated aggregate into
+        # a claimed observed experiment, promotion or retained result.
+        from .learning_evidence_projection import _RESEARCH_TYPES
+        required_science_fields = {
+            "state", "cutoff_utc", "records_total", "types",
+            "experiment_outcomes", "promotion_decisions",
+            "promotion_evidence_validity",
+            "promotion_evidence_guardrail_failures",
+            "promotion_evidence_holdout_missing", "evidence_scope",
+        }
+        if (set(science) != required_science_fields
+                or [row.get("type") if type(row) is dict else None
+                    for row in groups] != list(_RESEARCH_TYPES)
+                or science.get("evidence_scope")
+                != "causal_records_by_availability_not_training_performance_proof"):
+            raise SupportExportError("scientific report provenance claims are malformed")
+        type_counts = {}
+        for group in groups:
+            count = group.get("count")
+            recent = group.get("recent")
+            if (type(count) is not int or not 0 <= count <= 20_000
+                    or type(recent) is not list
+                    or len(recent) != min(count, 25)):
+                raise SupportExportError("scientific report group count contradicts history")
+            type_counts[group["type"]] = count
+            for item in recent:
+                if type(item) is not dict or set(item) != {
+                    "record_identity_sha256", "record_sha256", "available_at"
+                }:
+                    raise SupportExportError("scientific report record fields are malformed")
+                for key in ("record_identity_sha256", "record_sha256"):
+                    digest = item[key]
+                    if (type(digest) is not str or len(digest) != 64
+                            or any(c not in "0123456789abcdef" for c in digest)):
+                        raise SupportExportError("scientific report record digest is malformed")
+        total = science.get("records_total")
+        if (type(total) is not int or total > 20_000
+                or total != sum(type_counts.values())):
+            raise SupportExportError("scientific report total contradicts history")
+
+        def check_science_counts(key: str, valid: set[str], source: str) -> None:
+            counts = science.get(key)
+            if (type(counts) is not dict
+                    or any(type(name) is not str or name not in valid
+                           or type(value) is not int or value < 0
+                           for name, value in counts.items())
+                    or sum(counts.values()) != type_counts[source]):
+                raise SupportExportError("scientific report outcomes contradict history")
+
+        check_science_counts("experiment_outcomes", {
+            "POSITIVE", "NEGATIVE", "NULL", "HARMFUL", "INCONCLUSIVE",
+            "OTHER_OR_UNVERIFIED",
+        }, "Experiment")
+        check_science_counts("promotion_decisions", {
+            "PROMOTE", "RETAIN", "REJECT", "ROLLBACK", "OTHER_OR_UNVERIFIED",
+        }, "PromotionDecision")
+        check_science_counts("promotion_evidence_validity", {
+            "ELIGIBLE", "INCONCLUSIVE", "INVALID", "OTHER_OR_UNVERIFIED",
+        }, "PromotionEvidence")
+        for name in ("promotion_evidence_guardrail_failures",
+                     "promotion_evidence_holdout_missing"):
+            count = science.get(name)
+            if (type(count) is not int
+                    or not 0 <= count <= type_counts["PromotionEvidence"]):
+                raise SupportExportError("scientific report safeguards contradict evidence")
         for group in groups:
             if type(group) is not dict or type(group.get("recent")) is not list:
                 raise SupportExportError("scientific report history is malformed")

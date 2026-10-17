@@ -214,7 +214,10 @@ try {
             # property of the Windows UIA provider: classify separately.
             $result.status = 'CONTROL_FOCUS_NOT_OWNED'
         } else {
-        $probeProcess = Start-Process -FilePath $pwsh -PassThru -ArgumentList @(
+        # A new visible pwsh console may steal focus after native WinForms focus_claimed.
+        # Hide only the disposable MTA UIA client, never the visible WinForms host.
+        # PID, accessible name, AutomationId and role checks must still fail closed.
+        $probeProcess = Start-Process -FilePath $pwsh -PassThru -WindowStyle Hidden -ArgumentList @(
             '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta', '-File', $quotedScript,
             '-Mode', 'probe', '-StateDirectory', $quotedWork,
             '-WindowHandle', $controlHandle, '-ExpectedPid', $controlPid,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 from datetime import datetime, timedelta, timezone
+import hashlib
 import json
 from types import SimpleNamespace
 
@@ -422,5 +423,44 @@ def test_recomputed_pair_digest_cannot_claim_live_training_from_unverified_sourc
         agent_file.write_text(json.dumps(a), encoding="utf-8")
         with pytest.raises(SupportExportError, match="cannot claim proven"):
             verify_report_pair(diagnostic, agent_file)
+    finally:
+        trace.close()
+
+
+def test_rehashed_future_activity_and_heartbeat_are_not_verified(tmp_path):
+    workspace = tmp_path / 'workspace'
+    workspace.mkdir()
+    clock = FakeClock()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=clock)
+    try:
+        trace.heartbeat()
+        trace.record(component='runtime', action='product.tick', status='active')
+        diagnostic_path, agent_path = trace.export_reports(
+            tmp_path, selected_strategy='observe-only-v1'
+        )
+        original_diagnostics = json.loads(diagnostic_path.read_text())
+        original_agents = json.loads(agent_path.read_text())
+        for channel in ('activities', 'seconds', 'first_heartbeat_utc'):
+            diagnostics = json.loads(json.dumps(original_diagnostics))
+            agents = json.loads(json.dumps(original_agents))
+            if channel == 'activities':
+                diagnostics['activities'][0]['second_utc'] = '2030-01-01T00:00:00Z'
+            elif channel == 'seconds':
+                diagnostics['seconds'][0]['second_utc'] = '2030-01-01T00:00:00Z'
+            else:
+                diagnostics['coverage']['first_heartbeat_utc'] = '2030-01-01T00:00:00Z'
+            diagnostics.pop('report_pair_sha256')
+            agents.pop('report_pair_sha256')
+            recomputed = hashlib.sha256(json.dumps(
+                {'diagnostics': diagnostics, 'agents': agents},
+                sort_keys=True, ensure_ascii=False,
+                separators=(',', ':'), allow_nan=False,
+            ).encode('utf-8')).hexdigest()
+            diagnostics['report_pair_sha256'] = recomputed
+            agents['report_pair_sha256'] = recomputed
+            diagnostic_path.write_text(json.dumps(diagnostics), encoding='utf-8')
+            agent_path.write_text(json.dumps(agents), encoding='utf-8')
+            with pytest.raises(SupportExportError, match='causal report cutoff'):
+                verify_report_pair(diagnostic_path, agent_path)
     finally:
         trace.close()

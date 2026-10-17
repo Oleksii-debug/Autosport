@@ -255,3 +255,28 @@ def test_future_heartbeat_is_not_accepted_in_a_historical_report(tmp_path):
             t.export_reports(tmp_path, selected_strategy='observe-only-v1')
     finally:
         t.close()
+
+
+def test_journal_activity_after_rollback_cannot_be_reported_as_past(tmp_path):
+    t, c, _ = trace(tmp_path)
+    try:
+        c.advance(5)
+        t.record(component='runtime', action='product.tick', status='active')
+        c.advance(-4)
+        with pytest.raises(SupportExportError, match='causal report cutoff'):
+            t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+    finally:
+        t.close()
+
+
+def test_delayed_observation_with_future_original_second_is_rejected(tmp_path):
+    t, c, _ = trace(tmp_path)
+    try:
+        c.advance(5)
+        t.observe(component='agent', action='learning.observed', status='active')
+        c.advance(-4)
+        # The durable write uses rolled-back time; original observation is future.
+        with pytest.raises(SupportExportError, match='causal report cutoff'):
+            t.export_reports(tmp_path, selected_strategy='observe-only-v1')
+    finally:
+        t.close()

@@ -115,6 +115,23 @@ def _seconds(value: str) -> str:
     return value[:19] + "Z"
 
 
+def _verified_report_second(value: object, *, cutoff: datetime) -> datetime:
+    """Reject noncanonical or future UTC seconds, including after clock rewind."""
+    if type(value) is not str or _OBSERVED_SECOND.fullmatch(value) is None:
+        raise SupportExportError("support report second is not canonical UTC")
+    try:
+        second = datetime.strptime(value, "%Y-%m-%dT%H:%M:%SZ").replace(
+            tzinfo=timezone.utc
+        )
+    except ValueError as exc:
+        raise SupportExportError("support report second is invalid") from exc
+    if second.strftime("%Y-%m-%dT%H:%M:%SZ") != value:
+        raise SupportExportError("support report second is not canonical UTC")
+    if second > cutoff:
+        raise SupportExportError("support observation exceeds causal report cutoff")
+    return second
+
+
 def _canonical_component(value: object) -> str:
     if type(value) is not str or value not in _COMPONENT:
         raise ValueError("support component is not an allowed product component")
@@ -391,6 +408,10 @@ class OperatorSupportTrace:
         selection = strategy_spec(selected_strategy)
         selected_workspace = self._resolve_agent_workspace(agent_workspace)
         records = self._collect_records()
+        # Read one cutoff AFTER collecting the durable snapshot. It governs
+        # both event chronology and the independent scientific projection.
+        snapshot_instant = _utc(self._clock)
+        now = snapshot_instant.isoformat().replace("+00:00", "Z")
         activities = []
         seconds: dict[str, dict[str, object]] = {}
         agent_activity = []
@@ -398,12 +419,24 @@ class OperatorSupportTrace:
         for record in records:
             if record.event_type not in {"support.activity", "lifecycle.heartbeat", "lifecycle.startup", "lifecycle.shutdown", "lifecycle.unclean_restart"}:
                 raise SupportExportError("unsupported event in operator support trace")
+            # System-clock rollback must not make a future journal entry
+            # appear causally observed at an earlier export cutoff.
+            try:
+                journal_instant = datetime.fromisoformat(
+                    record.timestamp_utc.replace("Z", "+00:00")
+                )
+            except (ValueError, AttributeError) as exc:
+                raise SupportExportError("support journal time is invalid") from exc
+            if (journal_instant.utcoffset() != timedelta(0)
+                    or journal_instant > snapshot_instant):
+                raise SupportExportError("support journal exceeds causal report cutoff")
             second = _seconds(record.timestamp_utc)
             if record.event_type == "support.activity":
                 observed_second = record.payload.get("observed_second_utc")
                 if observed_second is not None:
                     if type(observed_second) is not str or _OBSERVED_SECOND.fullmatch(observed_second) is None:
                         raise SupportExportError("support activity has an invalid observed second")
+                    _verified_report_second(observed_second, cutoff=snapshot_instant)
                     second = observed_second
             slot = seconds.setdefault(second, {"second_utc": second, "heartbeat": False, "activities": 0})
             if record.event_type == "lifecycle.heartbeat":
@@ -435,9 +468,6 @@ class OperatorSupportTrace:
             left_dt = datetime.fromisoformat(left.replace("Z", "+00:00"))
             right_dt = datetime.fromisoformat(right.replace("Z", "+00:00"))
             missed += max(0, int((right_dt - left_dt).total_seconds()) - 1)
-        # A single causal cutoff for both reports and scientific verification.
-        snapshot_instant = _utc(self._clock)
-        now = snapshot_instant.isoformat().replace("+00:00", "Z")
         # A period with no later heartbeat has no right-hand observation. Do not
         # silently report it as zero missing seconds just because the historical
         # pairwise-gap count can only see gaps BETWEEN two verified heartbeats.
@@ -740,6 +770,23 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
         for instant in (cutoff_instant, generated_instant)
     ) or cutoff_instant != generated_instant:
         raise SupportExportError("report science causal cutoff does not match UTC export")
+    # A matching SHA-256 identifies consistent bytes, NOT truthful chronology:
+    # reject future seconds even after both digests have been recomputed.
+    for collection in (
+        diagnostics.get("seconds"),
+        diagnostics.get("activities"),
+        agents.get("instrumented_agent_activity"),
+    ):
+        if type(collection) is not list:
+            raise SupportExportError("support observation collection is malformed")
+        for entry in collection:
+            if type(entry) is not dict:
+                raise SupportExportError("support observation entry is malformed")
+            _verified_report_second(entry.get("second_utc"), cutoff=generated_instant)
+    for key in ("first_heartbeat_utc", "last_heartbeat_utc"):
+        instant = coverage.get(key)
+        if instant is not None:
+            _verified_report_second(instant, cutoff=generated_instant)
     computed = hashlib.sha256(
         json.dumps(
             {"diagnostics": diagnostics, "agents": agents},

@@ -329,6 +329,21 @@ class RestartRecoveryAuditTests(unittest.TestCase):
         self.assertNotIn(marker, str(trace))
         self.assertTrue(all(value == "external" or value.startswith("audit:") for value in trace))
 
+    def test_forged_module_and_trusted_function_name_do_not_spoof_audit_trace(self):
+        namespace = {"__name__": "autosport.restart_recovery_audit"}
+        exec("def _phase_call():\n    raise ValueError('external-synthetic')\n", namespace)
+        try:
+            namespace["_phase_call"]()
+        except ValueError as exc:
+            trace = exc.__traceback__
+            while trace.tb_next is not None:
+                trace = trace.tb_next
+            self.assertEqual(restart_audit._safe_trace_frame(trace), "external")
+            self.assertEqual(restart_audit._safe_exception_site(exc), "external")
+            self.assertTrue(all(item == "external" for item in restart_audit._safe_exception_trace(exc)))
+        else:
+            self.fail("synthetic external probe did not raise")
+
     def test_nonstring_exception_phase_is_rejected(self):
         marker = "AS11_SYNTHETIC_UNHASHABLE_PHASE_73"
         error = ValueError(marker)

@@ -4,6 +4,7 @@ import hashlib
 import json
 import tempfile
 from pathlib import Path
+from types import FunctionType
 
 from .dataset import ReplayDataset
 from .endurance import EnduranceConfig, run_endurance
@@ -69,14 +70,14 @@ def _safe_exception_detail(exc: BaseException) -> str:
 def _safe_trace_frame(traceback) -> str:
     """Only emit literal, allowlisted audit frame names into exported diagnostics."""
     frame = traceback.tb_frame
-    module_name = frame.f_globals.get("__name__")
     function_name = frame.f_code.co_name
     lineno = traceback.tb_lineno
+    trusted_function = globals().get(function_name) if type(function_name) is str else None
     if (
-        type(module_name) is str
-        and module_name == "autosport.restart_recovery_audit"
-        and type(function_name) is str
+        type(function_name) is str
         and function_name in _TRUSTED_AUDIT_FRAMES
+        and type(trusted_function) is FunctionType
+        and trusted_function.__code__ is frame.f_code
         and type(lineno) is int
         and 0 < lineno <= 1_000_000
     ):

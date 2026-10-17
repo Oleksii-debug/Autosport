@@ -167,3 +167,101 @@ def test_report_pair_rejects_injected_claims_and_schema_even_when_rehashed(tmp_p
             verify_report_pair(diagnostic, agent_path)
     finally:
         trace.close()
+
+
+@pytest.mark.parametrize("channel", ("experiment", "research", "agent"))
+@pytest.mark.parametrize("invalid_time", (
+    "2026-10-18T00:00:01Z", "2026-10-16T00:00:00", "not-a-date",
+))
+def test_report_pair_rejects_rehashed_noncausal_science(
+    tmp_path, channel, invalid_time,
+):
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=lambda: now)
+    try:
+        diagnostic, agent_path = trace.export_reports(
+            tmp_path, selected_strategy="observe-only-v1"
+        )
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agent_path.read_text(encoding="utf-8"))
+        evidence = a["verified_learning_evidence"]
+        if channel == "experiment":
+            evidence["science"].update(
+                state="CANONICAL_REGISTRY_VERIFIED", records_total=1,
+                types=[{"type": "Experiment", "count": 1, "recent": [{
+                    "record_identity_sha256": "a" * 64,
+                    "record_sha256": "b" * 64, "available_at": invalid_time,
+                }]}],
+            )
+        elif channel == "research":
+            evidence["science"].update(
+                state="CANONICAL_REGISTRY_VERIFIED", records_total=0, types=[],
+            )
+            evidence["research_runs"] = {
+                "state": "VERIFIED_SUPERVISOR_SNAPSHOTS", "count": 1,
+                "recent": [{"updated_at": invalid_time}],
+                "status_counts": {"SUCCEEDED": 1},
+            }
+        else:
+            evidence["agent_loop"] = {
+                "state": "VERIFIED_RESTART_SNAPSHOT",
+                "updated_at": invalid_time,
+            }
+        d.pop("report_pair_sha256")
+        a.pop("report_pair_sha256")
+        digest = hashlib.sha256(json.dumps(
+            {"diagnostics": d, "agents": a}, sort_keys=True,
+            ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        d["report_pair_sha256"] = a["report_pair_sha256"] = digest
+        diagnostic.write_text(json.dumps(d), encoding="utf-8")
+        agent_path.write_text(json.dumps(a), encoding="utf-8")
+        with pytest.raises(SupportExportError, match="scientific report"):
+            verify_report_pair(diagnostic, agent_path)
+    finally:
+        trace.close()
+
+
+def test_report_pair_accepts_past_science_with_timezone_offset(tmp_path):
+    now = datetime(2026, 10, 17, tzinfo=timezone.utc)
+    workspace = tmp_path / "workspace"
+    workspace.mkdir()
+    trace = OperatorSupportTrace(workspace, auto_start=False, clock=lambda: now)
+    try:
+        diagnostic, agent_path = trace.export_reports(
+            tmp_path, selected_strategy="observe-only-v1"
+        )
+        d = json.loads(diagnostic.read_text(encoding="utf-8"))
+        a = json.loads(agent_path.read_text(encoding="utf-8"))
+        evidence = a["verified_learning_evidence"]
+        evidence["science"].update(
+            state="CANONICAL_REGISTRY_VERIFIED", records_total=1,
+            types=[{"type": "Experiment", "count": 1, "recent": [{
+                "record_identity_sha256": "a" * 64,
+                "record_sha256": "b" * 64,
+                "available_at": "2026-10-17T01:00:00+02:00",
+            }]}],
+        )
+        evidence["research_runs"] = {
+            "state": "VERIFIED_SUPERVISOR_SNAPSHOTS", "count": 1,
+            "recent": [{"updated_at": "2026-10-16T22:00:00Z"}],
+            "status_counts": {"SUCCEEDED": 1},
+        }
+        evidence["agent_loop"] = {
+            "state": "VERIFIED_RESTART_SNAPSHOT",
+            "updated_at": "2026-10-16T23:15:00Z",
+        }
+        d.pop("report_pair_sha256")
+        a.pop("report_pair_sha256")
+        digest = hashlib.sha256(json.dumps(
+            {"diagnostics": d, "agents": a}, sort_keys=True,
+            ensure_ascii=False, separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        d["report_pair_sha256"] = a["report_pair_sha256"] = digest
+        diagnostic.write_text(json.dumps(d), encoding="utf-8")
+        agent_path.write_text(json.dumps(a), encoding="utf-8")
+        assert verify_report_pair(diagnostic, agent_path) == digest
+    finally:
+        trace.close()

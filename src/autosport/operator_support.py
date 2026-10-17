@@ -930,6 +930,62 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
             }]):
         raise SupportExportError("diagnostic activity coverage contradicts evidence")
 
+    # Verify nested chronological claims, even if both downloadable files
+    # have been rehashed. A paired SHA-256 is not a signature.
+    def check_scientific_time(value: object) -> None:
+        if type(value) is not str:
+            raise SupportExportError("scientific report timestamp is malformed")
+        try:
+            instant = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SupportExportError("scientific report timestamp is invalid") from exc
+        if (instant.tzinfo is None or instant.utcoffset() is None
+                or instant.astimezone(timezone.utc) > generated_instant):
+            raise SupportExportError("scientific report exceeds causal cutoff")
+
+    if science.get("state") == "CANONICAL_REGISTRY_VERIFIED":
+        groups = science.get("types")
+        if type(groups) is not list or len(groups) > 14:
+            raise SupportExportError("scientific report history is malformed")
+        for group in groups:
+            if type(group) is not dict or type(group.get("recent")) is not list:
+                raise SupportExportError("scientific report history is malformed")
+            recent = group["recent"]
+            if (type(group.get("count")) is not int or len(recent) > 25
+                    or not len(recent) <= group["count"] <= 20_000):
+                raise SupportExportError("scientific report counts are malformed")
+            for item in recent:
+                if type(item) is not dict:
+                    raise SupportExportError("scientific report record is malformed")
+                check_scientific_time(item.get("available_at"))
+    elif "types" in science:
+        raise SupportExportError("unverified scientific report carries records")
+
+    research = evidence.get("research_runs")
+    loop = evidence.get("agent_loop")
+    retention = evidence.get("knowledge_retention")
+    if (type(research) is not dict or type(loop) is not dict
+            or type(retention) is not dict
+            or retention.get("status") != "NOT_EVALUATED"):
+        raise SupportExportError("scientific report learning state is malformed")
+    if research.get("state") == "VERIFIED_SUPERVISOR_SNAPSHOTS":
+        recent = research.get("recent")
+        if (science.get("state") != "CANONICAL_REGISTRY_VERIFIED"
+                or type(recent) is not list or len(recent) > 25
+                or type(research.get("count")) is not int
+                or not len(recent) <= research["count"] <= 20_000):
+            raise SupportExportError("scientific report research is malformed")
+        for run in recent:
+            if type(run) is not dict:
+                raise SupportExportError("scientific report research run is malformed")
+            check_scientific_time(run.get("updated_at"))
+    elif research.get("state") not in {"NOT_PRESENT", "NOT_VERIFIED"}:
+        raise SupportExportError("scientific report research status is invalid")
+    if loop.get("state") == "VERIFIED_RESTART_SNAPSHOT":
+        check_scientific_time(loop.get("updated_at"))
+    elif loop.get("state") not in {"NOT_PRESENT", "NOT_VERIFIED"}:
+        raise SupportExportError("scientific report agent state is invalid")
+
     computed = hashlib.sha256(
         json.dumps(
             {"diagnostics": diagnostics, "agents": agents},

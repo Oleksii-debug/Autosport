@@ -45,10 +45,10 @@ def validate_report(report: dict) -> dict:
     if any(report.get(key) is not False for key in FALSE_FLAGS):
         raise InvalidEvidence("product or human attestation flag not explicitly false")
     mode = report.get("probe_mode")
-    if mode not in PROBES:
+    if not isinstance(mode, str) or mode not in PROBES:
         raise InvalidEvidence("unknown probe mode")
     status = report.get("status")
-    if status not in PROBES[mode] | INFRA:
+    if not isinstance(status, str) or status not in PROBES[mode] | INFRA:
         raise InvalidEvidence("mode-incompatible or unknown status")
     for key in ("process_id_matches", "control_type_present", "semantic_focus_matches", "host_focus_claimed"):
         if report.get(key) not in (True, False) or type(report[key]) is not bool:
@@ -59,12 +59,14 @@ def validate_report(report: dict) -> dict:
         if mode == "FocusedElement" and (report["semantic_focus_matches"] is not True or report["host_focus_claimed"] is not True):
             raise InvalidEvidence("positive focus status lacks native+UIA focus witnesses")
     if status == "CONTROL_FOCUSED_UIA_REJECTED":
-        if report.get("focus_reject_reason") not in FOCUS_REJECT_REASONS:
+        reason = report.get("focus_reject_reason")
+        if not isinstance(reason, str) or reason not in FOCUS_REJECT_REASONS:
             raise InvalidEvidence("missing/unknown fixed focus rejection classification")
     elif "focus_reject_reason" in report:
         raise InvalidEvidence("focus rejection classification outside focused rejection")
     if status == "CONTROL_UIA_TIMEOUT" and mode == "FocusedElement":
-        if report.get("last_allowlisted_stage") not in STAGES:
+        stage = report.get("last_allowlisted_stage")
+        if not isinstance(stage, str) or stage not in STAGES:
             raise InvalidEvidence("no bounded focus timeout stage")
     elif "last_allowlisted_stage" in report:
         raise InvalidEvidence("unexpected stage outside focused timeout")

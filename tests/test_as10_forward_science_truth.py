@@ -190,3 +190,24 @@ def test_close_anchor_equal_terminal_root_end_is_not_causal_order() -> None:
     assert not verdict.ok
     assert VerificationCode.COHORT_ROOT_MISMATCH in verdict.codes
     assert ("close_anchor_causal_order", close.close_sha256) in verdict.details
+
+@pytest.mark.parametrize(
+    ("candidate_count", "root_every"),
+    [(6, 5), (7, 2), (9, 2), (34, 3), (39, 7), (50, 3)],
+)
+def test_partial_final_cohort_fixture_preserves_strict_anchor_chronology(
+    candidate_count: int, root_every: int,
+) -> None:
+    """An expanding final cohort must preserve evidence before reveal."""
+    baseline = campaign(
+        states=(DecisionState.NO_BET,) * candidate_count,
+        root_every=root_every,
+    )
+    verdict = verify_campaign(baseline)
+    assert verdict.ok, verdict
+    for previous, successor in zip(
+        baseline.cohort_roots, baseline.cohort_roots[1:]
+    ):
+        assert previous.anchor_upper is not None
+        assert successor.anchor_lower is not None
+        assert previous.anchor_upper < successor.anchor_lower

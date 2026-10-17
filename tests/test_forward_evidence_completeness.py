@@ -125,11 +125,16 @@ def campaign(
         root = build_cohort_root(
             opportunities,
             previous_cohort_root_sha256=previous_root,
-            anchor_lower=BASE + timedelta(seconds=30),
-            anchor_upper=BASE + timedelta(seconds=31),
+            # Final partial prefix commits after the preceding cumulative root.
+            anchor_lower=BASE + timedelta(seconds=30 + 2 * len(opportunities)),
+            anchor_upper=BASE + timedelta(seconds=31 + 2 * len(opportunities)),
         )
         roots.append(root)
 
+    # Keep the original short fixture unchanged, but move both reveal and
+    # close witnesses after larger candidate sets' legitimate root anchors.
+    boundary_second = max(100, 33 + 2 * len(opportunities))
+    close_second = boundary_second + 10
     close = CampaignCloseEnvelope(
         campaign_id=proto.campaign_id,
         protocol_sha256=proto.protocol_sha256,
@@ -138,8 +143,8 @@ def campaign(
         first_sequence=1,
         last_sequence=len(opportunities),
         close_reason="WINDOW_COMPLETE",
-        anchor_lower=BASE + timedelta(seconds=110),
-        anchor_upper=BASE + timedelta(seconds=111),
+        anchor_lower=BASE + timedelta(seconds=close_second),
+        anchor_upper=BASE + timedelta(seconds=close_second + 1),
     )
     boundary = RevealBoundaryReceipt(
         receipt_id="boundary-1",
@@ -149,8 +154,8 @@ def campaign(
         boundary_rule_id="PREMATCH_TO_INPLAY",
         source_receipt_id="boundary-source-1",
         source_sha256=HASH_A,
-        boundary_lower=BASE + timedelta(seconds=100),
-        boundary_upper=BASE + timedelta(seconds=101),
+        boundary_lower=BASE + timedelta(seconds=boundary_second),
+        boundary_upper=BASE + timedelta(seconds=boundary_second + 1),
         uncertainty_basis="provider-state",
     )
     receipts = tuple(

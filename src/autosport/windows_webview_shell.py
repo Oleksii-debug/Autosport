@@ -1130,9 +1130,15 @@ class AutosportWebController:
             return
         session: AutosportSession | None = None
         try:
+            # START and prestart bank readback must share one durable bank origin.
+            # Use the already-verified manifest instead of inventing a second bank.
+            composition = read_product_composition_manifest(workspace)
+            initial_bankroll = (
+                "10000" if composition is None else composition.initial_bankroll
+            )
             session = AutosportSession(
                 workspace,
-                "10000",
+                initial_bankroll,
                 strategy_id=strategy_id,
                 research_plan=plan,
             )

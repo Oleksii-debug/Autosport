@@ -255,7 +255,19 @@ class OperatorSupportTrace:
         action = _canonical_action(action)
         status = _canonical_status(status)
         cycle = _bounded_cycle(cycle)
-        observed_second = _seconds(_utc(self._clock).isoformat().replace("+00:00", "Z"))
+        # A stopped or failed best-effort recorder must not even invoke its
+        # injected clock on the UI/emergency-control path.
+        if self._closed or self._fault is not None:
+            return
+        try:
+            observed_second = _seconds(
+                _utc(self._clock).isoformat().replace("+00:00", "Z")
+            )
+        except Exception:
+            # Clock faults cannot disable emergency controls. Keep the prior
+            # verified journal readable and explicitly report a recorder fault.
+            self._fault = "RECORDER_ERROR"
+            return
         # Never acquire the recorder's disk-I/O lock here. A hung filesystem
         # must not delay keyboard commands or the emergency STOP lane.
         if self._closed or self._fault is not None:
@@ -265,6 +277,10 @@ class OperatorSupportTrace:
         except queue.Full:
             with self._lost_activity_lock:
                 self._lost_activity_count += 1
+        except Exception:
+            # Corrupted queue/instrumentation must fail the diagnostic channel,
+            # not propagate through the operator's control event.
+            self._fault = "RECORDER_ERROR"
 
     def _drain_pending(self) -> None:
         """Only a background worker or export worker invokes durable writes."""

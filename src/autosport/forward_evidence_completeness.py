@@ -232,9 +232,7 @@ class ForwardOpportunityEnvelope:
             "reveal_boundary_receipt_id",
         ):
             _text(getattr(self, name), name)
-        if isinstance(self.candidate_sequence, bool) or not isinstance(
-            self.candidate_sequence, int
-        ) or self.candidate_sequence <= 0:
+        if type(self.candidate_sequence) is not int or self.candidate_sequence <= 0:
             raise ForwardEvidenceCompletenessError(
                 "candidate_sequence must be a positive integer"
             )
@@ -334,7 +332,7 @@ class CohortRootEnvelope:
         _sha256(self.ordered_leaf_sha256, "ordered_leaf_sha256")
         for name in ("first_sequence", "last_sequence", "candidate_count"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if type(value) is not int or value <= 0:
                 raise ForwardEvidenceCompletenessError(
                     f"{name} must be a positive integer"
                 )
@@ -431,7 +429,7 @@ class CampaignCloseEnvelope:
             _sha256(self.predecessor_close_sha256, "predecessor_close_sha256")
         for name in ("final_candidate_count", "first_sequence", "last_sequence"):
             value = getattr(self, name)
-            if isinstance(value, bool) or not isinstance(value, int) or value <= 0:
+            if type(value) is not int or value <= 0:
                 raise ForwardEvidenceCompletenessError(
                     f"{name} must be a positive integer"
                 )
@@ -550,9 +548,7 @@ class CostEvidence:
     all_material_costs_known: bool
 
     def __post_init__(self) -> None:
-        if isinstance(self.candidate_sequence, bool) or not isinstance(
-            self.candidate_sequence, int
-        ) or self.candidate_sequence <= 0:
+        if type(self.candidate_sequence) is not int or self.candidate_sequence <= 0:
             raise ForwardEvidenceCompletenessError(
                 "candidate_sequence must be a positive integer"
             )
@@ -599,6 +595,21 @@ class VerificationResult:
     terminal_root_sha256: str | None
     candidate_count: int
     details: tuple[tuple[str, str], ...] = ()
+
+    @property
+    def verification_scope(self) -> str:
+        """Structural completeness only, not a promotion decision."""
+        return "STRUCTURAL_ONLY"
+
+    @property
+    def external_universe_authority_resolved(self) -> bool:
+        """Caller-supplied receipts cannot prove an exhaustive source universe."""
+        return False
+
+    @property
+    def promotion_ready(self) -> bool:
+        """Forward structural PASS cannot authorize economic promotion."""
+        return False
 
 
 def ordered_leaf_sha256(
@@ -810,16 +821,15 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         codes.append(VerificationCode.RUNTIME_IDENTITY_CONFLICT)
 
     if opportunities:
-        expected_sequences = tuple(
-            range(
-                opportunities[0].candidate_sequence,
-                opportunities[-1].candidate_sequence + 1,
-            )
-        )
         actual_sequences = tuple(
             item.candidate_sequence for item in opportunities
         )
-        if actual_sequences != expected_sequences or actual_sequences[0] != 1:
+        # Compare observed members in O(n); huge sparse sequence values
+        # must yield a negative verdict rather than overflow or allocation.
+        if actual_sequences[0] != 1 or any(
+            sequence != offset
+            for offset, sequence in enumerate(actual_sequences, start=1)
+        ):
             codes.append(VerificationCode.SEQUENCE_GAP)
             details["actual_sequences"] = repr(actual_sequences)
 
@@ -881,6 +891,7 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
     if root_conflict:
         codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
     previous_root_sha256 = _GENESIS
+    previous_anchor_upper: datetime | None = None
     for root in roots:
         if (
             root.campaign_id != protocol.campaign_id
@@ -899,6 +910,14 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         ):
             codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
         latest_observed_upper = max(item.observed_upper for item in prefix)
+        # The successor commits to a predecessor that must already have been
+        # externally anchored. Overlapping intervals cannot establish order.
+        if previous_anchor_upper is not None and (
+            root.anchor_lower is None
+            or previous_anchor_upper > root.anchor_lower
+        ):
+            codes.append(VerificationCode.COHORT_ROOT_MISMATCH)
+            details.setdefault("root_anchor_chain_order", root.cohort_root_sha256)
         if (
             root.anchor_lower is None
             or root.anchor_upper is None
@@ -912,6 +931,7 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
                 root.cohort_root_sha256,
             )
         previous_root_sha256 = root.cohort_root_sha256
+        previous_anchor_upper = root.anchor_upper
 
     terminal_root_sha256 = roots[-1].cohort_root_sha256 if roots else None
     if opportunities and (
@@ -1006,16 +1026,30 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         earliest_root = min(candidate_roots, key=lambda root: root.anchor_upper)
         assert earliest_root.anchor_upper is not None
         if not (
-            earliest_root.anchor_upper
-            < boundary.boundary_lower - evidence.safety_margin
+            # Compare UTC instants without subtracting an enormous timedelta
+            # from a datetime; extreme margins must fail closed.
+            boundary.boundary_lower - earliest_root.anchor_upper
+            > evidence.safety_margin
         ):
             codes.append(VerificationCode.TEMPORAL_ELIGIBILITY_UNKNOWN)
 
-    denominator = tuple(sorted(evidence.denominator_sequences))
+    # Typed denominator identity must not inherit Python's coercive equality:
+    # True == 1, 1.0 == 1, Decimal("1") == 1. Reject mixed/incomparable
+    # values before sorting so malformed evidence yields a failed verdict.
+    denominator_is_exact = (
+        type(evidence.denominator_sequences) is tuple
+        and all(
+            type(sequence) is int and sequence > 0
+            for sequence in evidence.denominator_sequences
+        )
+    )
+    denominator = (
+        tuple(sorted(evidence.denominator_sequences)) if denominator_is_exact else ()
+    )
     expected_denominator = tuple(
         item.candidate_sequence for item in opportunities
     )
-    if denominator != expected_denominator:
+    if not denominator_is_exact or denominator != expected_denominator:
         codes.append(VerificationCode.DENOMINATOR_INCOMPLETE)
 
     costs: dict[int, bool] = {}
@@ -1029,6 +1063,9 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
             costs[item.candidate_sequence] = item.all_material_costs_known
     if cost_conflict:
         codes.append(VerificationCode.EVIDENCE_IDENTITY_CONFLICT)
+    # A cost record outside the frozen universe cannot silently disappear.
+    if costs.keys() - set(expected_denominator):
+        codes.append(VerificationCode.DENOMINATOR_INCOMPLETE)
     if any(not costs.get(sequence, False) for sequence in expected_denominator):
         codes.append(VerificationCode.ECONOMICS_INCOMPLETE)
 

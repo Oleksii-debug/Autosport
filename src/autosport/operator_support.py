@@ -848,6 +848,28 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
             or coverage.get("complete_activity_capture_proven") is not False
             or coverage.get("does_not_prove_os_or_provider_operations") is not True):
         raise SupportExportError("diagnostic recorder status contradicts evidence")
+    # The digest only binds two editable files to each other. Verify every
+    # advertised observation is shaped like the actual allowlisted writer
+    # output even when somebody recomputes the pair digest after tampering.
+    for slot in observed_seconds:
+        if set(slot) != {"second_utc", "heartbeat", "activities"}:
+            raise SupportExportError("diagnostic second fields are not canonical")
+    required_activity = {"second_utc", "component", "action", "status", "sequence"}
+    for entry in activity_rows:
+        keys = set(entry)
+        if keys != required_activity and keys != required_activity | {"cycle"}:
+            raise SupportExportError("diagnostic activity fields are not canonical")
+        try:
+            _canonical_component(entry["component"])
+            _canonical_action(entry["action"])
+            _canonical_status(entry["status"])
+            if "cycle" in entry and _bounded_cycle(entry["cycle"]) is None:
+                raise ValueError("a null cycle is not a writer-produced activity")
+        except ValueError as exc:
+            raise SupportExportError("diagnostic activity is not allowlisted") from exc
+        if type(entry["sequence"]) is not int or entry["sequence"] < 1:
+            raise SupportExportError("diagnostic journal sequence is malformed")
+
     per_second = Counter(row["second_utc"] for row in activity_rows)
     if (sum(row["activities"] for row in observed_seconds) != len(activity_rows)
             or any(row["activities"] != per_second.get(row["second_utc"], 0)

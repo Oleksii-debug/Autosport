@@ -422,6 +422,9 @@ class OperatorSupportTrace:
         from .strategies import available_strategies, strategy_spec
 
         selection = strategy_spec(selected_strategy)
+        # A missing research plan cannot establish a strategy-specific science
+        # identity. ROOT evidence may belong to an unrelated strategy.
+        unconfigured_research = selection.requires_research_plan and not research_plan_loaded
         selected_workspace = self._resolve_agent_workspace(agent_workspace)
         records = self._collect_records()
         # Read one cutoff AFTER collecting the durable snapshot. It governs
@@ -564,23 +567,49 @@ class OperatorSupportTrace:
         # Inventory and science are distinct evidence channels. Their failures
         # must never erase an independently verified process chronology. Do not
         # serialize exception text, private source bytes, or filesystem paths.
-        try:
-            artifacts = self._artifact_inventory(selected_workspace)
-            inventory_failed = False
-        except Exception:
+        if unconfigured_research:
+            # Do not infer memory provenance from shared ROOT inventory.
             artifacts = []
             inventory_failed = True
+        else:
+            try:
+                artifacts = self._artifact_inventory(selected_workspace)
+                inventory_failed = False
+            except Exception:
+                artifacts = []
+                inventory_failed = True
         try:
-            science_evidence = verified_learning_projection(
-                selected_workspace, as_of=snapshot_instant
-            )
+            if unconfigured_research:
+                # Deliberate non-evaluation, not successful empty research.
+                science_evidence = {
+                    "science": {
+                        "state": "NOT_EVALUATED_CONFIGURATION_INCOMPLETE",
+                        "cutoff_utc": snapshot_instant.isoformat(),
+                    },
+                    "research_runs": {"state": "NOT_VERIFIED"},
+                    "agent_loop": {"state": "NOT_VERIFIED"},
+                    "knowledge_retention": {"status": "NOT_EVALUATED"},
+                    "proven_live_model_learning": False,
+                    "economic_improvement_proven_by_this_report": False,
+                    "has_live_execution_authority": False,
+                    "verified_source_sha256": {},
+                }
+            else:
+                science_evidence = verified_learning_projection(
+                    selected_workspace, as_of=snapshot_instant
+                )
             science_state = (
                 science_evidence.get("science") if type(science_evidence) is dict else None
             )
             if (
                 type(science_state) is not dict
-                or science_state.get("state") not in {"NOT_PRESENT", "CANONICAL_REGISTRY_VERIFIED"}
+                or science_state.get("state") not in (
+                    {"NOT_EVALUATED_CONFIGURATION_INCOMPLETE"}
+                    if unconfigured_research
+                    else {"NOT_PRESENT", "CANONICAL_REGISTRY_VERIFIED"}
+                )
                 or science_state.get("cutoff_utc") != snapshot_instant.isoformat()
+                or (unconfigured_research and science_evidence.get("verified_source_sha256") != {})
                 or science_evidence.get("proven_live_model_learning") is not False
                 or science_evidence.get("economic_improvement_proven_by_this_report") is not False
                 or science_evidence.get("has_live_execution_authority") is not False
@@ -624,13 +653,23 @@ class OperatorSupportTrace:
             "verified_learning_evidence": science_evidence,
             "learning_verification": (
                 "SOURCE_VERIFICATION_FAILED_NO_LEARNING_CLAIM"
-                if science_failed else "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE"
+                if science_failed else
+                "NOT_EVALUATED_CONFIGURATION_INCOMPLETE"
+                if unconfigured_research else
+                "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE"
             ),
             "known_limits_uk": (
                 "Наведені цілі — описи оголошених стратегій, а не підтверджені "
                 "внутрішні наміри агентів. Пам’ять показана як наявність артефактів, "
                 "не як прочитаний чи доведено засвоєний зміст. "
                 "Недоступні дії та пропущені секунди не домислюються."
+                + (
+                    " Без дослідницького плану наукові дані вибраної стратегії "
+                    "не оцінювалися. Спільний каталог ROOT може містити "
+                    "дані інших стратегій; його наукові й пам’яттєві "
+                    "артефакти не атрибутуються цьому звіту."
+                    if unconfigured_research else ""
+                )
             ),
             "real_money_execution": False,
             "human_tested": False,
@@ -812,13 +851,38 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
     inventory_failed = coverage.get("artifact_inventory_verification_failed")
     if type(science_failed) is not bool or type(inventory_failed) is not bool:
         raise SupportExportError("support verification flags must be exact booleans")
+    if type(agents.get("research_plan_loaded")) is not bool:
+        raise SupportExportError("research plan status must be an exact boolean")
+    from .strategies import strategy_spec
+    try:
+        selected_spec = strategy_spec(agents.get("current_strategy_id"))
+    except (TypeError, ValueError, KeyError) as exc:
+        raise SupportExportError("report strategy is not canonical") from exc
+    unconfigured_research = (
+        selected_spec.requires_research_plan and agents["research_plan_loaded"] is False
+    )
     if any(evidence.get(key) is not False for key in (
         "proven_live_model_learning",
         "economic_improvement_proven_by_this_report",
         "has_live_execution_authority",
     )):
         raise SupportExportError("report cannot claim proven real learning or execution")
-    if science_failed:
+    if unconfigured_research:
+        if (
+            science_failed
+            or set(science) != {"state", "cutoff_utc"}
+            or science.get("state") != "NOT_EVALUATED_CONFIGURATION_INCOMPLETE"
+            or agents.get("learning_verification") != "NOT_EVALUATED_CONFIGURATION_INCOMPLETE"
+            or agents.get("agent_workspace_scope") != "ROOT"
+            or not inventory_failed
+            or agents.get("memory_and_learning_artifacts") != []
+            or evidence.get("verified_source_sha256") != {}
+            or evidence.get("research_runs") != {"state": "NOT_VERIFIED"}
+            or evidence.get("agent_loop") != {"state": "NOT_VERIFIED"}
+            or evidence.get("knowledge_retention") != {"status": "NOT_EVALUATED"}
+        ):
+            raise SupportExportError("unconfigured strategy cannot claim verified learning")
+    elif science_failed:
         if (
             science.get("state") != "VERIFICATION_FAILED"
             or agents.get("learning_verification") != "SOURCE_VERIFICATION_FAILED_NO_LEARNING_CLAIM"

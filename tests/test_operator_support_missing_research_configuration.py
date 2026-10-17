@@ -109,3 +109,69 @@ def test_invalid_export_directory_is_rejected_without_creating_reports(tmp_path)
         assert not (tmp_path / "Autosport-agents.json").exists()
     finally:
         trace.close()
+
+
+def test_unconfigured_research_never_projects_foreign_root_evidence(tmp_path, monkeypatch):
+    controller, trace = _controller_with_verified_trace(
+        tmp_path, strategy=RESEARCH_STRATEGY_ID
+    )
+    (controller.workspace / "scientific-registry.json").write_text(
+        "OTHER_STRATEGY_PRIVATE_SCIENCE", encoding="utf-8"
+    )
+    calls = []
+
+    def reject_foreign_science(*args, **kwargs):
+        calls.append(args)
+        raise AssertionError("unconfigured strategy must not read ROOT science")
+
+    monkeypatch.setattr(
+        "autosport.operator_support.verified_learning_projection",
+        reject_foreign_science,
+    )
+    try:
+        diagnostics, agents = _assert_two_real_reports(controller, tmp_path)
+        assert not calls
+        assert diagnostics["coverage"]["scientific_evidence_verification_failed"] is False
+        assert diagnostics["coverage"]["artifact_inventory_verification_failed"] is True
+        assert agents["memory_and_learning_artifacts"] == []
+        assert agents["learning_verification"] == "NOT_EVALUATED_CONFIGURATION_INCOMPLETE"
+        assert agents["verified_learning_evidence"]["science"]["state"] == (
+            "NOT_EVALUATED_CONFIGURATION_INCOMPLETE"
+        )
+        assert agents["verified_learning_evidence"]["verified_source_sha256"] == {}
+        assert "OTHER_STRATEGY_PRIVATE_SCIENCE" not in json.dumps(
+            agents, ensure_ascii=False
+        )
+    finally:
+        trace.close()
+
+
+def test_unconfigured_research_cannot_rehash_false_learning_claim(tmp_path):
+    import hashlib
+    from autosport.operator_support import SupportExportError
+
+    controller, trace = _controller_with_verified_trace(
+        tmp_path, strategy=RESEARCH_STRATEGY_ID
+    )
+    try:
+        _assert_two_real_reports(controller, tmp_path)
+        first = tmp_path / "Autosport-diagnostics.json"
+        second = tmp_path / "Autosport-agents.json"
+        d = json.loads(first.read_text(encoding="utf-8"))
+        a = json.loads(second.read_text(encoding="utf-8"))
+        d.pop("report_pair_sha256")
+        a.pop("report_pair_sha256")
+        a["learning_verification"] = "NOT_INFERRED_FROM_CODE_OR_ARTIFACT_PRESENCE"
+        a["verified_learning_evidence"]["science"]["state"] = "CANONICAL_REGISTRY_VERIFIED"
+        digest = hashlib.sha256(json.dumps(
+            {"diagnostics": d, "agents": a},
+            sort_keys=True, ensure_ascii=False,
+            separators=(",", ":"), allow_nan=False,
+        ).encode("utf-8")).hexdigest()
+        d["report_pair_sha256"] = a["report_pair_sha256"] = digest
+        first.write_text(json.dumps(d, ensure_ascii=False), encoding="utf-8")
+        second.write_text(json.dumps(a, ensure_ascii=False), encoding="utf-8")
+        with pytest.raises(SupportExportError, match="unconfigured strategy"):
+            verify_report_pair(first, second)
+    finally:
+        trace.close()

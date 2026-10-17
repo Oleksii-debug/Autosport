@@ -1961,7 +1961,16 @@ class AutosportWebController:
         except (OSError, RuntimeError, TypeError, ValueError):
             return self._fail("Не вдалося визначити каталог експорту.")
         try:
-            selected_agent_workspace = self._product_runtime_target_workspace()
+            # An incomplete research plan still permits incident export, never
+            # runtime execution. The exporter explicitly fences foreign ROOT
+            # science/memory when the selected strategy is unconfigured.
+            if (
+                self.research_plan is None
+                and strategy_spec(self.strategy_id).requires_research_plan
+            ):
+                selected_agent_workspace = self.workspace.resolve(strict=True)
+            else:
+                selected_agent_workspace = self._product_runtime_target_workspace()
         except Exception:
             return self._fail(
                 "Для звіту агентів виберіть завершену конфігурацію стратегії. "

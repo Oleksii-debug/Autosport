@@ -250,6 +250,24 @@ class OperatorStatusAnnouncementBroker:
         )
         if event_schema != self._EVENT_SCHEMA or metadata_schema != self._METADATA_SCHEMA:
             raise OperatorStatusIntegrityError("operator announcement schema mismatch")
+        # PRAGMA table_info does not expose UNIQUE.  A replaced SQLite table
+        # can retain every column while silently losing durable identity fences.
+        required_unique = {("event_id",), ("idempotency_key",)}
+        actual_unique = {
+            tuple(
+                row[0] for row in self._db.execute(
+                    "SELECT name FROM pragma_index_info(?) ORDER BY seqno", (index_name,)
+                )
+            )
+            for _, index_name, is_unique, _, is_partial in self._db.execute(
+                "PRAGMA index_list(events)"
+            )
+            if is_unique == 1 and is_partial == 0
+        }
+        if not required_unique.issubset(actual_unique):
+            raise OperatorStatusIntegrityError(
+                "operator announcement uniqueness schema mismatch"
+            )
 
     def _now(self) -> datetime:
         return _utc(self._clock(), "clock result")

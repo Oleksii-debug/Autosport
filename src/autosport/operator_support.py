@@ -799,6 +799,69 @@ def verify_report_pair(diagnostic_path: str | Path, agent_path: str | Path) -> s
         instant = coverage.get(key)
         if instant is not None:
             _verified_report_second(instant, cutoff=generated_instant)
+
+    # Recomputed hashes cannot certify false heartbeat coverage.
+    observed_seconds = diagnostics["seconds"]
+    activity_rows = diagnostics["activities"]
+    agent_rows = agents["instrumented_agent_activity"]
+    if any(type(row.get("heartbeat")) is not bool or type(row.get("activities")) is not int
+           or row["activities"] < 0 for row in observed_seconds):
+        raise SupportExportError("diagnostic second counters are malformed")
+    stamps = [row["second_utc"] for row in observed_seconds]
+    if stamps != sorted(set(stamps)):
+        raise SupportExportError("diagnostic seconds are not unique and sorted")
+    heartbeats = [row["second_utc"] for row in observed_seconds if row["heartbeat"]]
+    gaps = sum(max(0, int((
+        datetime.fromisoformat(right.replace("Z", "+00:00"))
+        - datetime.fromisoformat(left.replace("Z", "+00:00"))
+    ).total_seconds()) - 1) for left, right in zip(heartbeats, heartbeats[1:]))
+    age = (int((generated_instant - datetime.fromisoformat(
+        heartbeats[-1].replace("Z", "+00:00"))).total_seconds())
+        if heartbeats else None)
+    tail = max(0, age - 1) if age is not None else None
+    for name in ("lost_activity_count", "pending_unflushed_activity_count",
+                 "activity_count", "record_count", "missing_heartbeat_seconds_between_observations"):
+        if type(coverage.get(name)) is not int or coverage[name] < 0:
+            raise SupportExportError("diagnostic counter is invalid")
+    if (coverage.get("first_heartbeat_utc") != (heartbeats[0] if heartbeats else None)
+            or coverage.get("last_heartbeat_utc") != (heartbeats[-1] if heartbeats else None)
+            or coverage["missing_heartbeat_seconds_between_observations"] != gaps
+            or coverage.get("last_verified_heartbeat_age_seconds") != age
+            or coverage.get("tail_seconds_without_verified_heartbeat") != tail):
+        raise SupportExportError("diagnostic heartbeat coverage contradicts evidence")
+    lost = coverage["lost_activity_count"]
+    pending = coverage["pending_unflushed_activity_count"]
+    fault = coverage.get("recorder_fault_present")
+    if type(fault) is not bool:
+        raise SupportExportError("diagnostic recorder fault flag is invalid")
+    expected_status = (
+        "RECORDER_ERROR" if fault else
+        "PARTIAL_DROPPED_EVENTS" if lost else
+        "PARTIAL_PENDING_EVENTS" if pending else
+        "NO_VERIFIED_HEARTBEAT" if not heartbeats else
+        "PARTIAL_HEARTBEAT_GAPS" if gaps or (tail is not None and tail > 0) else
+        "HEALTHY"
+    )
+    if (coverage.get("recorder_status") != expected_status
+            or agents.get("lost_activity_count") != lost
+            or agents.get("pending_unflushed_activity_count") != pending
+            or coverage.get("complete_activity_capture_proven") is not False
+            or coverage.get("does_not_prove_os_or_provider_operations") is not True):
+        raise SupportExportError("diagnostic recorder status contradicts evidence")
+    per_second = Counter(row["second_utc"] for row in activity_rows)
+    if (sum(row["activities"] for row in observed_seconds) != len(activity_rows)
+            or any(row["activities"] != per_second.get(row["second_utc"], 0)
+                   for row in observed_seconds)
+            or any(second not in stamps for second in per_second)
+            or coverage["activity_count"] != len(activity_rows)
+            or coverage["record_count"] < len(activity_rows)
+            or diagnostics.get("status_counts") != dict(Counter(
+                row["status"] for row in activity_rows))
+            or agent_rows != [row for row in activity_rows if row["component"] in {
+                "agent", "strategy", "research", "learning", "memory", "runtime"
+            }]):
+        raise SupportExportError("diagnostic activity coverage contradicts evidence")
+
     computed = hashlib.sha256(
         json.dumps(
             {"diagnostics": diagnostics, "agents": agents},

@@ -125,6 +125,39 @@ def _phase_call(phase: str, callable_, *args, **kwargs):
         raise
 
 
+def _verified_exception_phase(exc: Exception, running_phase: str) -> str:
+    """Accept subphase only when the real audit wrapper recorded it.
+
+    Exception metadata is writable by untrusted code. Even a real _phase_call
+    frame for an unrelated stage cannot override the active audit stage.
+    """
+    try:
+        tagged_phase = exc.__dict__.get("_autosport_restart_phase")
+        if (
+            type(tagged_phase) is not str
+            or tagged_phase not in _ALLOWED_AUDIT_PHASES
+            or (
+                tagged_phase != running_phase
+                and not tagged_phase.startswith(running_phase + ":")
+            )
+        ):
+            return running_phase
+        trace = BaseException.__getattribute__(exc, "__traceback__")
+        for _ in range(128):
+            if trace is None:
+                break
+            frame = trace.tb_frame
+            if (
+                frame.f_code is _phase_call.__code__
+                and frame.f_locals.get("phase") == tagged_phase
+            ):
+                return tagged_phase
+            trace = trace.tb_next
+    except BaseException:
+        pass
+    return running_phase
+
+
 def _fixture_dataset(root: Path) -> ReplayDataset:
     root.mkdir(parents=True, exist_ok=True)
     market = root / "market.jsonl"
@@ -418,14 +451,7 @@ def run_restart_recovery_audit(output_path: str | Path) -> int:
             "nvda_verified": False,
         }
     except Exception as exc:
-        try:
-            tagged_phase = exc.__dict__.get("_autosport_restart_phase")
-        except BaseException:
-            tagged_phase = None
-        failure_phase = (
-            tagged_phase if type(tagged_phase) is str
-            and tagged_phase in _ALLOWED_AUDIT_PHASES else phase
-        )
+        failure_phase = _verified_exception_phase(exc, phase)
         payload = {
             "status": "FAIL",
             "phase": failure_phase,

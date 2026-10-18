@@ -102,6 +102,9 @@ def classify_witness(path: Path, *, started_ns: int) -> str:
 
 
 def _windows_process_alive(pid: int) -> bool:
+    # Win32 PID is a DWORD; ctypes otherwise silently truncates invalid input.
+    if type(pid) is not int or not 0 < pid < 2**32:
+        raise ValueError("invalid Windows PID")
     kernel = ctypes.WinDLL("kernel32", use_last_error=True)
     kernel.OpenProcess.argtypes = (ctypes.c_uint32, ctypes.c_int, ctypes.c_uint32)
     kernel.OpenProcess.restype = ctypes.c_void_p

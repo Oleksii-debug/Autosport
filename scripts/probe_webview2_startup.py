@@ -229,7 +229,7 @@ def main() -> int:
     parser.add_argument("--launch-epoch-ns", type=int, required=True,
                         help="time.time_ns() captured BEFORE launching the package")
     args = parser.parse_args()
-    if (os.name != "nt" or args.pid <= 0 or not args.output.is_absolute()
+    if (os.name != "nt" or not 0 < args.pid < 2**32 or not args.output.is_absolute()
             or args.launch_epoch_ns <= 0 or args.launch_epoch_ns > time.time_ns()):
         parser.error("Windows, positive PID, absolute output and pre-launch timestamp required")
     result = probe(

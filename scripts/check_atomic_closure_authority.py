@@ -643,7 +643,34 @@ def _is_terminal_done(value: str) -> bool:
         + rf"MERGE{state_sep}PENDING|WAIT{state_sep}DEPENDENCY|"
         + rf"НЕ{state_sep}ЗАВЕРШЕНО|[ВУ]{state_sep}РОБОТІ|"
         + rf"ПОВТОРНО{state_sep}ВІДКРИТО|НЕ{state_sep}ПРИЙНЯТО|"
+        + rf"НЕ{state_sep}(?:ВИКОНАНО|ЗАВЕРШЕНО|ПІДТВЕРДЖЕНО|ГОТОВО|ПРИЙНЯТО)|"
+        + rf"НЕВИКОНАНО|НЕЗАВЕРШЕНО|СКАСОВАНО|ВІДХИЛЕНО|"
+        + rf"ПОТРЕБУЄ{state_sep}(?:ПЕРЕВІРКИ|ТЕСТІВ|ДОКАЗІВ)|"
+        + rf"ЧЕКАЄ{state_sep}(?:ЗЛИТТЯ|ПЕРЕВІРКИ|ПРИЙНЯТТЯ)|"
+        + rf"ОЧІКУЄ{state_sep}(?:ЗЛИТТЯ|ПЕРЕВІРКИ|ПРИЙНЯТТЯ)|"
+        + rf"У{state_sep}ПРОЦЕСІ|НЕМАЄ{state_sep}ДОКАЗІВ|"
+        + rf"NOT{state_sep}(?:DONE|IMPLEMENTED|MERGED|VERIFIED|READY|ACCEPTED)|"
+        + rf"NEEDS{state_sep}(?:TESTS|REVIEW|EVIDENCE)|"
+        + rf"AWAITING{state_sep}(?:REVIEW|MERGE|TESTS)|"
+        + rf"PENDING{state_sep}(?:MERGE|REVIEW|TESTS)|"
+        + r"UNVERIFIED|REJECTED|BROKEN|"
         + r"ОЧІКУЄ|ЗАБЛОКОВАНО|ПРИЗУПИНЕНО|ПЕРЕВІРЯЄТЬСЯ)\b",
+        status_projection,
+        re.IGNORECASE,
+    )
+    # A positive description cannot override a later explicit negative qualifier.
+    trailing_negative = re.search(
+        r"(?:[;,():—–/·]|\b(?:АЛЕ|BUT|ТА|AND)\b)\s*(?:АЛЕ|BUT|ТА|AND)?\s*(?:"
+        + rf"НЕ{state_sep}(?:ВИКОНАНО|ЗАВЕРШЕНО|ПІДТВЕРДЖЕНО|ПЕРЕВІРЕНО|ГОТОВО|ПРИЙНЯТО)|"
+        + rf"НЕВИКОНАНО|НЕЗАВЕРШЕНО|СКАСОВАНО|ВІДХИЛЕНО|"
+        + rf"ПОТРЕБУЄ{state_sep}(?:ПЕРЕВІРКИ|ТЕСТІВ|ДОКАЗІВ)|"
+        + rf"ЧЕКАЄ{state_sep}(?:ЗЛИТТЯ|ПЕРЕВІРКИ|ПРИЙНЯТТЯ)|"
+        + rf"ОЧІКУЄ{state_sep}(?:ЗЛИТТЯ|ПЕРЕВІРКИ|ПРИЙНЯТТЯ)|"
+        + rf"NOT{state_sep}(?:DONE|IMPLEMENTED|MERGED|VERIFIED|READY|ACCEPTED)|"
+        + rf"PENDING{state_sep}(?:MERGE|REVIEW|TESTS)|"
+        + rf"AWAITING{state_sep}(?:MERGE|REVIEW|TESTS)|"
+        + rf"NEEDS{state_sep}(?:TESTS|REVIEW|EVIDENCE)|"
+        + r"UNVERIFIED|REJECTED|BROKEN)\b",
         status_projection,
         re.IGNORECASE,
     )
@@ -651,6 +678,7 @@ def _is_terminal_done(value: str) -> bool:
             and bare_machine_state is None
             and bare_snake_state is None
             and bare_nonterminal_phrase is None
+            and trailing_negative is None
             and contradictory_state is None
             and not secondary_nonterminal
             and not re.search(r"\bNOT\s*DONE\b", negative_check, re.IGNORECASE))

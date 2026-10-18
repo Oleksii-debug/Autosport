@@ -775,6 +775,7 @@ class NightResearchCurriculum:
             raw["selected_episode_id"]
             for raw in state["selections"]
             if raw.get("purpose") == CurriculumPurpose.CURRICULUM.value
+            and _instant(raw.get("as_of"), "prior_curriculum_selection.as_of") <= cutoff
         }
         seen: set[str] = set()
         eligible: list[ReplayCandidate] = []

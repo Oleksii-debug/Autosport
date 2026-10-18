@@ -12,7 +12,10 @@ from autosport.windows_update_local_path import UnsafeUpdatePath, require_local_
     "", "x\x00.json", "\\\\server\\share\\file", "//server/share/file",
     "\\\\?\\C:\\temp\\file", "C:relative.zip", "updates/NUL",
     "updates/CON.txt", "updates/con .txt", "updates/COM¹.txt",
-    "updates/LPT9", "updates/a.zip:stream", "updates/b?.zip",
+    "updates/LPT9", "updates/CONIN$", "updates/CONOUT$",
+    "updates/conin$.json", "updates/ConOut$.json",
+    "updates\\CONIN$", "updates/CONOUT$.txt",
+    "updates/a.zip:stream", "updates/b?.zip",
     "updates/trailing.", "updates/trailing ", "updates/control\x1f.zip",
     "updates/../candidate.zip", "../candidate.zip",
     "updates/./candidate.zip", "updates//candidate.zip", "updates\\\\candidate.zip",
@@ -42,3 +45,23 @@ def test_foreign_drive_rejected_off_windows():
     if os.name != "nt":
         with pytest.raises(UnsafeUpdatePath):
             require_local_update_path("C:\\Temp\\update.zip")
+
+
+def test_console_device_prefix_not_overblocked():
+    for value in ("updates/CONIN$-report.json", "updates/CONOUT$-report.json"):
+        assert require_local_update_path(value) == value
+
+
+@pytest.mark.parametrize("value", [
+    "updates/" + "a" * 256,
+    "updates/" + "😀" * 128,
+    "updates/invalid\ud800.zip",
+])
+def test_windows_component_length_and_encoding_fail_closed(value):
+    with pytest.raises(UnsafeUpdatePath):
+        require_local_update_path(value)
+
+
+def test_windows_utf16_limit_preserves_valid_unicode_and_spaces():
+    assert require_local_update_path("updates/" + "😀" * 127) == "updates/" + "😀" * 127
+    assert require_local_update_path("updates/" + "a" * 255) == "updates/" + "a" * 255

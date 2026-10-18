@@ -16,12 +16,13 @@ class UnsafeUpdatePath(ValueError):
 
 
 _RESERVED = frozenset({
-    "con", "prn", "aux", "nul",
+    "con", "prn", "aux", "nul", "conin$", "conout$",
     *(f"com{n}" for n in range(1, 10)),
     *(f"lpt{n}" for n in range(1, 10)),
     "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
 })
 _INVALID = frozenset('<>:"|?*')
+_MAX_WINDOWS_COMPONENT_UTF16_UNITS = 255
 
 
 def require_local_update_path(value: str) -> str:
@@ -50,6 +51,15 @@ def require_local_update_path(value: str) -> str:
         raise UnsafeUpdatePath("drive-relative or foreign drive path is not allowed")
     parts = win.parts[1:] if win.drive or win.root else win.parts
     for part in parts:
+        # Match the canonical release-package Windows component bound. Python
+        # len() counts astral Unicode as one code point while Windows uses
+        # UTF-16 code units; unpaired surrogates are not encodable filenames.
+        try:
+            units = len(part.encode("utf-16-le", "strict")) // 2
+        except UnicodeEncodeError:
+            raise UnsafeUpdatePath("invalid Windows path encoding") from None
+        if units > _MAX_WINDOWS_COMPONENT_UTF16_UNITS:
+            raise UnsafeUpdatePath("Windows path component exceeds filesystem bound")
         if (
             part in (".", "..")
             or part.endswith((".", " "))

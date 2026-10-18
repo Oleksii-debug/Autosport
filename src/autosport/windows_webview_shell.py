@@ -1119,9 +1119,19 @@ class AutosportWebController:
             )
             self.tickets = [text("ui.status.tickets.startup_failure")]
             return
-        workspace = Path(
-            workspace_for_strategy(self.workspace, strategy_id, plan)
-        )
+        try:
+            workspace = Path(
+                workspace_for_strategy(self.workspace, strategy_id, plan)
+            )
+        except Exception as exc:
+            # An unresolvable strategy workspace must not reopen stale PAPER state.
+            self.bank = text(
+                "ui.status.bank.quarantined", workspace=self._active_workspace
+            )
+            self.tickets = [text("ui.status.tickets.startup_failure")]
+            self.status = text("ui.status.startup.recovery_required")
+            self.last_error = _safe_exception_text(exc)
+            return
         self._active_workspace = workspace
         if workspace in self._recovery_required_workspaces:
             self.bank = text("ui.status.bank.quarantined", workspace=workspace)

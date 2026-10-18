@@ -921,7 +921,7 @@ def verify_campaign(evidence: CampaignEvidence) -> VerificationResult:
         if (
             root.anchor_lower is None
             or root.anchor_upper is None
-            or latest_observed_upper > root.anchor_lower
+            or latest_observed_upper >= root.anchor_lower
         ):
             # A commitment cannot causally contain bytes that were not yet
             # observable when its anchor interval began.

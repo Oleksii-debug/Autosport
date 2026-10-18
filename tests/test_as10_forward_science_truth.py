@@ -175,6 +175,28 @@ def test_successor_root_anchor_must_follow_predecessor_interval(
     assert ("root_anchor_chain_order", second.cohort_root_sha256) in verdict.details
 
 
+def test_root_anchor_equal_latest_observation_end_is_not_causal_order() -> None:
+    """Shared interval endpoint cannot prove observation preceded anchoring."""
+    baseline = campaign(states=(DecisionState.NO_BET,))
+    assert verify_campaign(baseline).ok
+    latest_observed_upper = baseline.opportunities[0].observed_upper
+    first_root = replace(
+        baseline.cohort_roots[0],
+        anchor_lower=latest_observed_upper,
+        anchor_upper=latest_observed_upper + timedelta(seconds=1),
+    )
+    close = replace(
+        baseline.closes[0],
+        terminal_cohort_root_sha256=first_root.cohort_root_sha256,
+    )
+    verdict = verify_campaign(
+        replace(baseline, cohort_roots=(first_root,), closes=(close,))
+    )
+    assert not verdict.ok
+    assert VerificationCode.COHORT_ROOT_MISMATCH in verdict.codes
+    assert ("root_anchor_causal_order", first_root.cohort_root_sha256) in verdict.details
+
+
 def test_close_anchor_equal_terminal_root_end_is_not_causal_order() -> None:
     """Close and terminal root cannot be proven ordered at the same instant."""
     baseline = campaign(states=(DecisionState.NO_BET,))

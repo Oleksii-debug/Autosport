@@ -110,7 +110,7 @@ def _windows_process_alive(pid: int) -> bool:
     kernel.CloseHandle.argtypes = (ctypes.c_void_p,)
     kernel.WaitForSingleObject.argtypes = (ctypes.c_void_p, ctypes.c_uint32)
     kernel.WaitForSingleObject.restype = ctypes.c_uint32
-    handle = kernel.OpenProcess(0x1000, 0, pid)
+    handle = kernel.OpenProcess(0x00100000 | 0x1000, 0, pid)  # SYNCHRONIZE | PROCESS_QUERY_LIMITED_INFORMATION
     if not handle:
         error = ctypes.get_last_error()
         if error == 87:  # ERROR_INVALID_PARAMETER: no such process

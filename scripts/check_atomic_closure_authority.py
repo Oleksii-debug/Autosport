@@ -610,7 +610,47 @@ def _is_terminal_done(value: str) -> bool:
         negative_check,
         re.IGNORECASE,
     )
+    # A machine-style workflow state can follow the DONE dash without a
+    # ``Status:`` field.  Such a second uppercase state is not a narrative
+    # acceptance description. Reject any uppercase state vocabulary here,
+    # including future names not present in a fixed negative-state list.
+    # Lowercase prose ("DONE — інтегровано" / "DONE — merged") remains valid.
+    bare_machine_state = re.match(
+        r"^DONE\s*—\s*[A-ZА-ЯІЇЄҐ][A-ZА-ЯІЇЄҐ0-9_]*"
+        r"(?:[ \t-]+[A-ZА-ЯІЇЄҐ0-9_]+)*\b(?=\s*(?:$|[;,.!?—–/:()]))",
+        status_projection,
+    )
+    # Capitalization is not authority: a lowercase machine token or a
+    # Ukrainian/English nonterminal phrase is still an explicit contradiction.
+    # Check snake_case before the projection erases underscores; use the
+    # rendered projection for natural-language statuses and case-fold safely.
+    bare_snake_state = re.match(
+        r"^DONE\s*—\s*[A-Za-zА-Яа-яІіЇїЄєҐґ0-9]+"
+        r"(?:_[A-Za-zА-Яа-яІіЇїЄєҐґ0-9]+)+\b",
+        unicodedata.normalize("NFKC", rendered),
+    )
+    # Rendered status tokens can be separated by punctuation as well as
+    # spaces. A lowercase ``ready-for-audit`` or ``не-завершено`` must not
+    # bypass the fail-closed check merely because it uses hyphens or dots.
+    # Keep the positive DONE marker unchanged; this is rejection-only.
+    # Unicode hyphen/minus/middle-dot variants render as separators too.
+    # A fixed ASCII punctuation class would silently accept a forged
+    # nonterminal status such as DONE — ready‑for‑audit.
+    state_sep = r"[^\w]+"
+    bare_nonterminal_phrase = re.match(
+        r"^DONE\s*—\s*(?:"
+        + rf"READY{state_sep}FOR{state_sep}AUDIT|"
+        + rf"MERGE{state_sep}PENDING|WAIT{state_sep}DEPENDENCY|"
+        + rf"НЕ{state_sep}ЗАВЕРШЕНО|[ВУ]{state_sep}РОБОТІ|"
+        + rf"ПОВТОРНО{state_sep}ВІДКРИТО|НЕ{state_sep}ПРИЙНЯТО|"
+        + r"ОЧІКУЄ|ЗАБЛОКОВАНО|ПРИЗУПИНЕНО|ПЕРЕВІРЯЄТЬСЯ)\b",
+        status_projection,
+        re.IGNORECASE,
+    )
     return (bool(re.match(r"^DONE(?:\s*(?:—|$))", normalized))
+            and bare_machine_state is None
+            and bare_snake_state is None
+            and bare_nonterminal_phrase is None
             and contradictory_state is None
             and not secondary_nonterminal
             and not re.search(r"\bNOT\s*DONE\b", negative_check, re.IGNORECASE))

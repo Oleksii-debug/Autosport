@@ -1951,3 +1951,132 @@ def test_r36_explicit_secondary_terminal_done_remains_valid(tmp_path, secondary)
         f'Статус: DONE — інтегровано; {secondary}', 1,
     )
     assert module.inspect(make_tree(tmp_path, registry, affirmed))['ok'] is True
+
+# r41: an uppercase workflow-state token after DONE's separator is a
+# contradictory second status even without an explicit Status: assignment.
+@pytest.mark.parametrize('secondary', [
+    'READY_FOR_AUDIT',
+    'MERGE_PENDING',
+    'НЕ ЗАВЕРШЕНО',
+    'В РОБОТІ',
+    'WAIT_DEPENDENCY',
+])
+def test_r41_bare_machine_state_after_done_is_not_terminal(tmp_path, secondary):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = ATOMIC.replace(
+        '| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+        '| 2А | WebView2 | DONE — інтегровано |',
+    ).replace(
+        '| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+        f'| 2Б | Navigation | DONE — {secondary} |',
+    ).replace(
+        '| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+        '| 2В | Native STOP | DONE — інтегровано |',
+    )
+    rejected(tmp_path, registry=registry, atomic=atomic)
+
+
+def test_r41_ordinary_accepted_done_description_still_terminal(tmp_path):
+    assert module._is_terminal_done('Статус: DONE — інтегровано')
+    assert module._is_terminal_done('DONE — merged and checked')
+
+# r42: a lowercase workflow-state token and a Ukrainian nonterminal phrase
+# must not become a terminal DONE merely by changing its capitalization.
+@pytest.mark.parametrize('secondary', [
+    'ready_for_audit',
+    'merge_pending',
+    'wait_dependency',
+    'не завершено',
+    'в роботі',
+    'у роботі',
+    'очікує',
+    'заблоковано',
+    'повторно відкрито',
+    'не прийнято',
+    'призупинено',
+    'перевіряється',
+])
+def test_r42_bare_lowercase_nonterminal_cannot_certify_done(tmp_path, secondary):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = ATOMIC.replace(
+        '| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+        '| 2А | WebView2 | DONE — інтегровано |',
+    ).replace(
+        '| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+        f'| 2Б | Navigation | DONE — {secondary} |',
+    ).replace(
+        '| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+        '| 2В | Native STOP | DONE — інтегровано |',
+    )
+    rejected(tmp_path, registry=registry, atomic=atomic)
+
+
+def test_r42_lowercase_nonterminal_recovery_after_restart(tmp_path):
+    import json
+    import subprocess
+    import sys
+    registry, atomic = _terminal_plan6()
+    forged = atomic.replace('Статус: DONE — інтегровано', 'Статус: DONE — не завершено', 1)
+    make_tree(tmp_path, registry, forged)
+    command = [sys.executable, str(SCRIPT), '--resolved-tree', str(tmp_path)]
+    denied = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    assert denied.returncode == 1 and json.loads(denied.stdout)['ok'] is False
+    (tmp_path / module.ATOMIC).write_text(atomic, encoding='utf-8')
+    accepted = subprocess.run(command, capture_output=True, text=True, timeout=15)
+    assert accepted.returncode == 0 and json.loads(accepted.stdout)['ok'] is True
+
+
+# r44: punctuation-separated lowercase workflow states must fail closed.
+@pytest.mark.parametrize('secondary', [
+    'ready-for-audit', 'ready.for.audit', 'ready–for–audit',
+    'merge-pending', 'merge.pending', 'wait-dependency',
+    'не-завершено', 'не.завершено', 'в-роботі', 'у-роботі',
+    'повторно-відкрито', 'не-прийнято',
+])
+def test_r44_punctuated_bare_nonterminal_is_not_done(tmp_path, secondary):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = ATOMIC.replace(
+        '| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+        '| 2А | WebView2 | DONE — інтегровано |',
+    ).replace(
+        '| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+        f'| 2Б | Navigation | DONE — {secondary} |',
+    ).replace(
+        '| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+        '| 2В | Native STOP | DONE — інтегровано |',
+    )
+    rejected(tmp_path, registry=registry, atomic=atomic)
+
+
+def test_r44_punctuation_does_not_reject_ordinary_done_prose():
+    assert module._is_terminal_done('DONE — інтегровано')
+    assert module._is_terminal_done('DONE — merged and checked')
+
+
+# r47: Unicode punctuation must not turn an explicit nonterminal state into
+# a terminal DONE. This exercises visually confusable separators used in
+# machine-style status vocabulary without broadening positive DONE authority.
+@pytest.mark.parametrize('secondary', [
+    'ready‑for‑audit', 'ready‐for‐audit', 'ready−for−audit',
+    'ready·for·audit', 'ready‧for‧audit', 'merge‑pending',
+    'wait−dependency', 'не‑завершено', 'не·завершено',
+    'в‑роботі', 'повторно‑відкрито', 'не‑прийнято',
+])
+def test_r47_unicode_punctuated_nonterminal_is_not_done(tmp_path, secondary):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = ATOMIC.replace(
+        '| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+        '| 2А | WebView2 | DONE — інтегровано |',
+    ).replace(
+        '| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+        f'| 2Б | Navigation | DONE — {secondary} |',
+    ).replace(
+        '| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+        '| 2В | Native STOP | DONE — інтегровано |',
+    )
+    rejected(tmp_path, registry=registry, atomic=atomic)
+
+
+def test_r47_unicode_punctuation_in_normal_done_description_remains_valid():
+    assert module._is_terminal_done('DONE — інтегровано·перевірено')
+    assert module._is_terminal_done('DONE — merged‑and‑checked')

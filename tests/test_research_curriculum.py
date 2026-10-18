@@ -715,3 +715,65 @@ def test_tampered_state_fails_restart(tmp_path):
             ResearchTriggerAdapter(supervisor),
             max_budget_units=8,
         )
+
+def test_historical_confirmation_ignores_future_training_after_reopen(tmp_path):
+    """Historical fixture T1 cannot read durable T2 curriculum exposure."""
+    registry, supervisor, curriculum = _workspace(tmp_path)
+    preferred = _candidate(question_id="question-1", episode_id="7" * 64, priority=9)
+    alternate = _candidate(question_id="question-2", episode_id="8" * 64, priority=2)
+    trained = curriculum.select(
+        (preferred, alternate), purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="causal-fixture-v1", as_of="2026-09-19T03:30:00Z",
+        seed=20, budget_units=1,
+    )
+    assert trained.selected_episode_id == preferred.episode_id
+    reopened = NightResearchCurriculum(
+        curriculum.path, ResearchTriggerAdapter(
+            ResearchSupervisor(supervisor.path, registry)), max_budget_units=8,
+    )
+    historical = reopened.select(
+        (preferred, alternate), purpose=CurriculumPurpose.CONFIRMATORY,
+        selector_policy_version="causal-fixture-v1", as_of="2026-09-19T03:20:00Z",
+        seed=21, budget_units=1,
+    )
+    assert historical.selected_episode_id == preferred.episode_id
+    assert historical.outcome_information_available is False
+
+
+def test_persisted_training_changes_later_confirmation_after_reopen(tmp_path):
+    """Decision contrast is a time-ordered fixture, not profitability evidence."""
+    registry, supervisor, curriculum = _workspace(tmp_path)
+    preferred = _candidate(question_id="question-1", episode_id="9" * 64, priority=9)
+    alternate = _candidate(question_id="question-2", episode_id="a" * 64, priority=2)
+    population = (preferred, alternate)
+    before = curriculum.select(
+        population, purpose=CurriculumPurpose.CONFIRMATORY,
+        selector_policy_version="causal-fixture-v1", as_of="2026-09-19T03:20:00Z",
+        seed=22, budget_units=1,
+    )
+    assert before.selected_episode_id == preferred.episode_id
+    training = curriculum.select(
+        population, purpose=CurriculumPurpose.CURRICULUM,
+        selector_policy_version="causal-fixture-v1", as_of="2026-09-19T03:30:00Z",
+        seed=23, budget_units=1,
+    )
+    assert training.selected_episode_id == preferred.episode_id
+    reopened = NightResearchCurriculum(
+        curriculum.path, ResearchTriggerAdapter(
+            ResearchSupervisor(supervisor.path, registry)), max_budget_units=8,
+    )
+    assert training.selection_id in {
+        record["selection_id"] for record in reopened.snapshot()["selections"]
+    }
+    after = reopened.select(
+        population, purpose=CurriculumPurpose.CONFIRMATORY,
+        selector_policy_version="causal-fixture-v1", as_of="2026-09-19T03:40:00Z",
+        seed=24, budget_units=1,
+    )
+    assert after.selected_episode_id == alternate.episode_id
+    assert reopened.select(
+        population, purpose=CurriculumPurpose.CONFIRMATORY,
+        selector_policy_version="causal-fixture-v1", as_of="2026-09-19T03:40:00Z",
+        seed=24, budget_units=1,
+    ) == after
+    assert len(reopened.snapshot()["selections"]) == 3

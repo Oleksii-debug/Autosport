@@ -3013,77 +3013,97 @@ def launch_windows_shell(
             is runtime_witness_writer_code
         )
 
-    if not runtime_witness_dispatch_intact():
-        raise WindowsWebViewUnavailable(
-            "Autosport runtime witness authority changed before launch"
-        )
+    # Close only a verified canonical bridge on pre-window failure.
+    api: AutosportWebBridge | None = None
 
-    _reject_webview2_environment_overrides()
-
-    try:
-        storage_path = (
-            default_webview_storage_path()
-            if storage_path is None
-            else Path(storage_path)
-        )
-    except (OSError, RuntimeError, TypeError, ValueError) as exc:
-        raise WindowsWebViewUnavailable(
-            "Autosport could not resolve its canonical WebView storage path"
-        ) from exc
-    if not storage_path.is_absolute():
-        raise WindowsWebViewUnavailable(
-            "Autosport WebView storage path must be absolute"
-        )
-    _probe_webview_storage_writable(storage_path)
-
-    try:
-        import webview
-    except Exception as exc:
-        raise WindowsWebViewUnavailable(
-            "pywebview is unavailable; the Windows semantic shell cannot start"
-        ) from exc
-    _reject_pywebview_release_settings(webview)
-
-    asset = web_shell_index_path()
-    if not asset.is_file():
-        raise WindowsWebViewUnavailable(
-            f"Windows semantic shell asset is missing: {asset}"
-        )
-
-    api = _require_canonical_web_bridge_surface(
-        _default_web_bridge() if bridge is None else bridge
-    )
-    api = _require_canonical_web_bridge_controller(api)
-    bind_trusted_window = api._bind_trusted_window
-    close_from_host = api._close_from_host
-    revoke_trust = api._revoke_trust
-    runtime_witness_path_for_controller = api._runtime_witness_path
-    expected_original_url = str(asset)
-    canonical_bridge = True
-    required_renderer = "edgechromium"
-    renderer_observed = False
-    expected_real_url: str | None = None
-    trusted_document_observed = not canonical_bridge
-    trusted_document_violation = False
-    runtime_browser_version: str | None = None
-    runtime_identity_violation = False
-    runtime_witness_published = False
-    runtime_witness_path: Path | None = None
-    if canonical_bridge:
+    def close_pre_window_bridge() -> None:
+        candidate = api if api is not None else bridge
+        if candidate is None:
+            return
         try:
-            runtime_witness_path = runtime_witness_path_for_controller()
-        except WindowsWebBridgeTrustError as exc:
+            verified = _require_canonical_web_bridge_controller(
+                _require_canonical_web_bridge_surface(candidate)
+            )
+            verified._close_from_host()
+        except BaseException:
+            # Preserve the original launch failure and its causal chain.
+            # Never call arbitrary methods on an unverified bridge.
+            pass
+
+    try:
+        if not runtime_witness_dispatch_intact():
             raise WindowsWebViewUnavailable(
-                "Autosport could not bind the WebView2 runtime witness workspace"
+                "Autosport runtime witness authority changed before launch"
+            )
+    
+        _reject_webview2_environment_overrides()
+    
+        try:
+            storage_path = (
+                default_webview_storage_path()
+                if storage_path is None
+                else Path(storage_path)
+            )
+        except (OSError, RuntimeError, TypeError, ValueError) as exc:
+            raise WindowsWebViewUnavailable(
+                "Autosport could not resolve its canonical WebView storage path"
             ) from exc
-        if runtime_witness_path is not None:
+        if not storage_path.is_absolute():
+            raise WindowsWebViewUnavailable(
+                "Autosport WebView storage path must be absolute"
+            )
+        _probe_webview_storage_writable(storage_path)
+    
+        try:
+            import webview
+        except Exception as exc:
+            raise WindowsWebViewUnavailable(
+                "pywebview is unavailable; the Windows semantic shell cannot start"
+            ) from exc
+        _reject_pywebview_release_settings(webview)
+    
+        asset = web_shell_index_path()
+        if not asset.is_file():
+            raise WindowsWebViewUnavailable(
+                f"Windows semantic shell asset is missing: {asset}"
+            )
+    
+        api = _default_web_bridge() if bridge is None else bridge
+        api = _require_canonical_web_bridge_surface(api)
+        api = _require_canonical_web_bridge_controller(api)
+        bind_trusted_window = api._bind_trusted_window
+        close_from_host = api._close_from_host
+        revoke_trust = api._revoke_trust
+        runtime_witness_path_for_controller = api._runtime_witness_path
+        expected_original_url = str(asset)
+        canonical_bridge = True
+        required_renderer = "edgechromium"
+        renderer_observed = False
+        expected_real_url: str | None = None
+        trusted_document_observed = not canonical_bridge
+        trusted_document_violation = False
+        runtime_browser_version: str | None = None
+        runtime_identity_violation = False
+        runtime_witness_published = False
+        runtime_witness_path: Path | None = None
+        if canonical_bridge:
             try:
-                runtime_witness_path.unlink(missing_ok=True)
-            except OSError as exc:
+                runtime_witness_path = runtime_witness_path_for_controller()
+            except WindowsWebBridgeTrustError as exc:
                 raise WindowsWebViewUnavailable(
-                    "Autosport could not invalidate the previous WebView2 runtime witness"
+                    "Autosport could not bind the WebView2 runtime witness workspace"
                 ) from exc
-    window: object | None = None
+            if runtime_witness_path is not None:
+                try:
+                    runtime_witness_path.unlink(missing_ok=True)
+                except OSError as exc:
+                    raise WindowsWebViewUnavailable(
+                        "Autosport could not invalidate the previous WebView2 runtime witness"
+                    ) from exc
+        window: object | None = None
+    except BaseException:
+        close_pre_window_bridge()
+        raise
 
     def verify_initialized_renderer(renderer: object) -> bool:
         nonlocal expected_real_url, renderer_observed, trusted_document_violation

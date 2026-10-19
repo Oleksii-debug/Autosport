@@ -214,8 +214,6 @@ class _SemanticShellParser(HTMLParser):
             self.disabled_fieldset_descendants.add(element_id)
         if tag == "button" and element_id and self._aria_disabled_depths:
             self.aria_disabled_descendants.add(element_id)
-        if (values.get("aria-disabled") or "").strip().lower() == "true":
-            self._aria_disabled_depths.add(len(self._open_tag_stack))
         if tag == "fieldset" and "disabled" in values:
             self._disabled_fieldset_depths.add(len(self._open_tag_stack))
         # Validate static HTML IDREF destinations after the entire document is parsed.
@@ -254,6 +252,8 @@ class _SemanticShellParser(HTMLParser):
             "link", "meta", "param", "source", "track", "wbr",
         }:
             label_target = str(values["for"]) if tag == "label" and values.get("for") else None
+            if (values.get("aria-disabled") or "").strip().lower() == "true":
+                self._aria_disabled_depths.add(len(self._open_tag_stack))
             self._open_tag_stack.append((tag, element_id, label_target, locally_hidden))
 
     def handle_data(self, data: str) -> None:
@@ -329,6 +329,12 @@ def _reject_inaccessible_emergency_stop(
         )
     if "hidden" in attrs or "inert" in attrs:
         failures.append("id=emergency-stop-action: hidden/inert HTML state")
+    if "disabled" in attrs:
+        failures.append("id=emergency-stop-action: native disabled HTML state")
+    if "emergency-stop-action" in parser.aria_disabled_descendants:
+        failures.append("id=emergency-stop-action: inherited aria-disabled HTML state")
+    if "emergency-stop-action" in parser.disabled_fieldset_descendants:
+        failures.append("id=emergency-stop-action: disabled fieldset ancestor")
     for name in ("aria-hidden", "aria-disabled"):
         if name in attrs and (attrs[name] or "").strip().lower() != "false":
             failures.append(

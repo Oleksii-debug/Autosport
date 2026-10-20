@@ -10,6 +10,12 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .windows_update_release_metadata import (
+    attach_update_identity,
+    validate_requested_update_identity,
+    validate_embedded_update_identity,
+)
+
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
 _WINDOWS_RESERVED_NAMES = {
@@ -437,8 +443,14 @@ def build_windows_package(
     restart_recovery_path: str | Path,
     output_zip: str | Path,
     source_sha: str,
+    *,
+    update_version: str | None = None,
+    update_schema: int | None = None,
 ) -> tuple[Path, str]:
     _require_git_commit_sha(source_sha, field="source_sha")
+    validate_requested_update_identity(
+        update_version=update_version, update_schema=update_schema
+    )
     exe_path = Path(exe_path)
     start_file = Path(start_file)
     example_dir = Path(example_dir)
@@ -468,6 +480,9 @@ def build_windows_package(
         "human_tested": False,
         "nvda_verified": False,
     }
+    build_info = attach_update_identity(
+        build_info, update_version=update_version, update_schema=update_schema
+    )
     _write_json(package_dir / "BUILD_INFO.json", build_info)
 
     payload_hashes = {}
@@ -564,6 +579,7 @@ def verify_windows_package(
         raise ValueError("BUILD_INFO product identity mismatch")
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO source_sha does not match exact candidate head")
+    validate_embedded_update_identity(build_info)
     _require_false_truth_labels(build_info, "BUILD_INFO.json")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:

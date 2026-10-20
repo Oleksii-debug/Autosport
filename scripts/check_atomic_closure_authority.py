@@ -1036,9 +1036,14 @@ def _is_terminal_done(value: str) -> bool:
     # Windows PowerShell wrappers report ExitCode/ERRORLEVEL, while CI
     # harnesses may report return code/rc. These are the same process-exit
     # evidence as "exited N" and must fail closed on nonzero values.
+    # Common Windows/Python wrappers use ``returncode=`` or ``exited:``;
+    # both are process outcomes, not a positive gate conclusion.  Consume
+    # the entire numeric token using the existing strict exit-code oracle.
     process_exit = re.compile(
-        r"\b(?:exited\s+|exit\s+(?:code|status)\s*[:=]?\s*|"
+        r"\b(?:(?:process\s+)?exited\s*(?:(?:with\s+)?code\s*|[:=]\s*)?|"
+        r"exit\s+(?:code|status)\s*[:=]?\s*|"
         r"exit[_-]?code\s*[:=]?\s*|return\s+code\s*[:=]?\s*|"
+        r"return[_-]?code\s*[:=]?\s*|"
         r"process\s+returned\s+|returned\s+|"
         r"errorlevel\s*[:=]?\s*|rc\s*[:=]\s*)"
         r"\(?\s*(?P<code>[^\s,;()\[\]{}.!?]+)\s*\)?",
@@ -1087,9 +1092,19 @@ def _is_terminal_done(value: str) -> bool:
             if token.upper().startswith("SIG") or int(token) != 0:
                 return True
         return False
+    # A check summary can omit the colon: ``Windows Candidate exited 1``.
+    # Require an independent semicolon-delimited check clause and an explicit
+    # process-outcome verb; do not scan ordinary completion prose for numbers.
+    bare_exit_clause = re.compile(
+        r"(?:^|;)\s*(?P<label>[\w][\w /()\[\].#@-]{0,159}?)\s+"
+        r"(?P<detail>(?:(?:process\s+)?exited|(?:process\s+)?returned|"
+        r"exit[_ -]?(?:code|status)|return[_ -]?code|errorlevel|rc\s*[:=])\b[^;\r\n]*)",
+        re.IGNORECASE,
+    )
     failed_process_exit = any(
         nonzero_or_ambiguous_exit(match)
-        for match in exit_clause.finditer(matrix_status_projection)
+        for pattern in (exit_clause, bare_exit_clause)
+        for match in pattern.finditer(matrix_status_projection)
     )
     spoofed_failed_gate = _has_spoofed_failed_gate(status_projection)
     unknown_failed_gate = (

@@ -1409,3 +1409,45 @@ def test_r115_signal_failure_blocks_resolved_parent_done(tmp_path):
         .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
                  "| 2В | Native STOP | DONE — merged |"))
     rejected(tmp_path, registry, atomic)
+
+
+# r119: Real CI wrappers report ``returncode``, ``exited:`` and even omit
+# a colon between the check display name and its process result. None may
+# convert an unsuccessful Windows gate into a terminal Section DONE.
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: packaged UIA audit returncode=1",
+    "Windows Candidate: packaged UIA audit returncode: 0xC0000005",
+    "Windows Candidate: packaged UIA audit exited: 1",
+    "Windows Candidate exited 1",
+    "Windows Candidate process exited with code 1",
+    "Organization Policy returned 2",
+])
+def test_r119_process_exit_variants_block_done(summary):
+    assert not module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: packaged UIA audit returncode=0",
+    "Windows Candidate: packaged UIA audit exited: 0",
+    "Windows Candidate exited 0",
+    "Windows Candidate process exited with code 0",
+    "previous Windows Candidate exited 1, repaired",
+    "historical Windows Candidate returned 2, fixed",
+])
+def test_r119_zero_or_historical_exit_does_not_block_done(summary):
+    assert module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+def test_r119_colonless_windows_exit_blocks_parent_done(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = ATOMIC.replace(
+        "| 2А | WebView2 | IN_PROGRESS / NOT DONE |",
+        "| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate exited 1 |",
+    ).replace(
+        "| 2Б | Navigation | IN_PROGRESS / NOT DONE |",
+        "| 2Б | Navigation | DONE — merged |",
+    ).replace(
+        "| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
+        "| 2В | Native STOP | DONE — merged |",
+    )
+    rejected(tmp_path, registry=registry, atomic=atomic)

@@ -18,6 +18,7 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .windows_update_admission import InstalledWindowsProduct
+from . import windows_update_snapshot as _snapshot
 from .windows_update_local_path import UnsafeUpdatePath, require_local_update_path
 from .windows_update_snapshot import (
     WindowsUpdateSnapshot, WindowsUpdateSnapshotError, _native_change_time_100ns,
@@ -139,7 +140,10 @@ def load_pinned_installed_update_authority(
         if _is_redirected_file(entry) or not stat.S_ISREG(entry.st_mode) or not 0 < entry.st_size <= _MAX_MANIFEST_BYTES:
             raise InstalledWindowsTrustError("installed manifest must be a bounded regular file")
         entry_id = _identity(entry)
-        fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        # Use the same native no-follow handle opener as candidate ZIPs.
+        # Windows CRT os.open has no O_NOFOLLOW equivalent and could read a
+        # swapped reparse target before the later inode/attribute check.
+        fd = _snapshot._open_archive_fd(path)
         with _owned_fd_stream(fd) as stream:
             opened = os.fstat(stream.fileno())
             opened_change_time = _native_change_time_100ns(stream.fileno())
@@ -197,7 +201,9 @@ def load_pinned_installed_update_authority(
             != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
         ):
             raise InstalledWindowsTrustError("installed manifest path changed after validation")
-        final_fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        # The post-validation readback is a second trust boundary: do not
+        # reopen via Windows CRT and follow a substituted reparse target.
+        final_fd = _snapshot._open_archive_fd(path)
         with _owned_fd_stream(final_fd) as final_stream:
             final_opened = os.fstat(final_stream.fileno())
             final_change_time = _native_change_time_100ns(final_stream.fileno())

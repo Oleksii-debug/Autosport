@@ -22,6 +22,7 @@ from .windows_update_signature import VerifiedWindowsUpdate
 from .windows_update_local_path import UnsafeUpdatePath, require_local_update_path
 from .windows_update_transaction_plan import preview_windows_update_transaction
 from .windows_update_snapshot import _native_change_time_100ns, _source_parent_identity
+from . import windows_update_snapshot as _snapshot
 
 _MAX_REQUEST_BYTES = 16 * 1024
 _HEX_SHA256 = re.compile(r"[0-9a-f]{64}\Z", re.ASCII)
@@ -100,6 +101,19 @@ def _request_identity(info: os.stat_result) -> tuple[int, int, int, int, int]:
     return info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns, info.st_ctime_ns
 
 
+def _open_request_fd(path: Path) -> int:
+    """No-follow opening for *every* request readback, including on Windows.
+
+    The request is not an archive, but the shared leaf opener implements the
+    required CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT) semantics. Convert
+    native failures to the CLI's sanitized direct-call error boundary.
+    """
+    try:
+        return _snapshot._open_archive_fd(path)
+    except _snapshot.WindowsUpdateSnapshotError:
+        raise UpdateCliError("request file could not be safely opened") from None
+
+
 def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]:
     # Reject path subclasses before __str__/__fspath__ can execute callbacks.
     # This is a direct-call boundary as well as the CLI parser.
@@ -115,8 +129,7 @@ def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]
     # Capture pathname identity BEFORE opening. A held descriptor alone does
     # not prove the user-selected path still identifies that same request.
     entry_before = _request_identity(path.lstat())
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
+    fd = _open_request_fd(path)
     try:
         before = _request_identity(os.fstat(fd))
         before_change = _native_change_time_100ns(fd)
@@ -164,7 +177,7 @@ def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]
     # without following the final symlink and recheck the original handle's
     # ChangeTime before the parsed request can authorize even a diagnostic.
     # This remains a consistency guard, not an installer-grade atomic lock.
-    postparse_fd = os.open(path, flags)
+    postparse_fd = _open_request_fd(path)
     try:
         postparse_opened = _request_identity(os.fstat(postparse_fd))
         postparse_change = _native_change_time_100ns(postparse_fd)
@@ -198,8 +211,7 @@ def _request_witness(path: Path) -> _RequestWitness:
     _reject_redirected_path(path)
     parents = _source_parent_identity(path)
     entry = _request_identity(path.lstat())
-    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-    fd = os.open(path, flags)
+    fd = _open_request_fd(path)
     try:
         opened = _request_identity(os.fstat(fd))
         changed = _native_change_time_100ns(fd)

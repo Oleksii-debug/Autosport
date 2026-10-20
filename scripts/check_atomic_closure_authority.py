@@ -1039,7 +1039,7 @@ def _is_terminal_done(value: str) -> bool:
     process_exit = re.compile(
         r"\b(?:exited\s+|exit\s+(?:code|status)\s*[:=]?\s*|"
         r"exit[_-]?code\s*[:=]?\s*|return\s+code\s*[:=]?\s*|"
-        r"process\s+returned\s+|"
+        r"process\s+returned\s+|returned\s+|"
         r"errorlevel\s*[:=]?\s*|rc\s*[:=]\s*)"
         r"\(?\s*(?P<code>[^\s,;()\[\]{}.!?]+)\s*\)?",
         re.IGNORECASE,
@@ -1065,10 +1065,26 @@ def _is_terminal_done(value: str) -> bool:
         for exit_match in process_exit.finditer(detail):
             token = exit_match.group("code")
             # Consume the complete token: '0xC0000005' must never parse as 0.
+            # A period is sentence punctuation only when it does not start
+            # another numeric/identifier component. Otherwise '0.1' would
+            # be misread as a successful zero exit.
+            suffix = detail[exit_match.end("code"):]
+            if suffix.startswith(".") and len(suffix) > 1 and (suffix[1].isalnum() or suffix[1] == "_"):
+                return True
             # An unparseable exit token is ambiguous, so reject it as well.
             if not re.fullmatch(r"[+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+)", token):
                 return True
             if int(token, 16 if "0x" in token.lower() else 10) != 0:
+                return True
+        # A process terminated by a nonzero signal is not a clean audit,
+        # even when a wrapper misleadingly prints exit code 0. POSIX signal
+        # numbers and symbolic SIG* names are negative evidence only.
+        for signal in re.finditer(
+            r"\b(?:terminated\s+by\s+)?signal\s*[:=]?\s*(?P<signal>[0-9]+|SIG[A-Z0-9]+)\b",
+            detail, re.IGNORECASE,
+        ):
+            token = signal.group("signal")
+            if token.upper().startswith("SIG") or int(token) != 0:
                 return True
         return False
     failed_process_exit = any(

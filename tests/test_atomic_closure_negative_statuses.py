@@ -1368,3 +1368,44 @@ def test_r114_unpunctuated_exitcode_blocks_resolved_parent_done(tmp_path):
         .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
                  "| 2В | Native STOP | DONE — merged |"))
     rejected(tmp_path, registry, atomic)
+
+# r115: Process wrappers can report a bare "returned N", a POSIX signal,
+# or a malformed decimal/hex token. Never parse only the leading zero of
+# "0.1" as successful exit. These are independent gate failures even after
+# an earlier successful CI result.
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: packaged audit returned 1",
+    "Windows Candidate: packaged audit returned 0xC0000005",
+    "Windows Candidate: packaged audit exited 0.1",
+    "Windows Candidate: packaged audit exited 0x0.1",
+    "Windows Candidate: packaged audit ExitCode 0.1",
+    "Windows Candidate: packaged audit exited 0 (signal 11)",
+    "Windows Candidate: packaged audit exited 0, signal 11",
+    "Windows Candidate: packaged audit exited 0 (signal SIGSEGV)",
+])
+def test_r115_malformed_or_signaled_process_cannot_certify_done(summary):
+    assert not module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: packaged audit returned 0",
+    "Windows Candidate: packaged audit exited 0.",
+    "Windows Candidate: packaged audit exited 0x0.",
+    "Windows Candidate: packaged audit exited 0 (signal 0)",
+    "previous Windows Candidate: packaged audit returned 1, repaired",
+    "Windows Candidate: SUCCESS (previous audit exited 0, signal 11, fixed)",
+])
+def test_r115_zero_or_historical_process_remains_nonblocking(summary):
+    assert module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+def test_r115_signal_failure_blocks_resolved_parent_done(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = (ATOMIC
+        .replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |",
+                 "| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: audit exited 0 (signal 11) |")
+        .replace("| 2Б | Navigation | IN_PROGRESS / NOT DONE |",
+                 "| 2Б | Navigation | DONE — merged |")
+        .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
+                 "| 2В | Native STOP | DONE — merged |"))
+    rejected(tmp_path, registry, atomic)

@@ -2008,3 +2008,334 @@ def test_nested_unicode_package_without_redirection_is_accepted(tmp_path):
     with pinned_windows_update_package(source, expected_sha256=digest(b"verified fixture")) as snap:
         assert snap.sha256 == digest(b"verified fixture")
         assert snap.install_authorized is False
+
+
+@pytest.mark.parametrize("unsafe", [
+    r"\\server\share\candidate.zip",
+    "//server/share/candidate.zip",
+    r"\\?\C:\\private\candidate.zip",
+    r"C:drive-relative.zip",
+    "folder/../candidate.zip",
+])
+def test_snapshot_rejects_nonlocal_or_ambiguous_path_before_any_filesystem_access(monkeypatch, unsafe):
+    """Direct snapshot callers must not bypass the CLI's local-only path gate."""
+    import autosport.windows_update_snapshot as snapshot_module
+
+    def forbidden_parent_probe(_path):
+        pytest.fail("untrusted update path reached filesystem inspection")
+
+    monkeypatch.setattr(snapshot_module, "_source_parent_identity", forbidden_parent_probe)
+    with pytest.raises(WindowsUpdateSnapshotError):
+        with pinned_windows_update_package(unsafe, expected_sha256="a" * 64):
+            pytest.fail("untrusted update path was admitted")
+
+
+def test_snapshot_rejects_path_subclass_before_untrusted_fspath_callback():
+    """A direct caller cannot inject a mutable/custom path protocol into admission."""
+    class HostilePath(Path):
+        def __fspath__(self):
+            raise AssertionError("untrusted path callback executed")
+
+    with pytest.raises(WindowsUpdateSnapshotError, match="package path must be a local path"):
+        with pinned_windows_update_package(HostilePath("candidate.zip"), expected_sha256="a" * 64):
+            pytest.fail("subclass was admitted")
+
+
+def test_snapshot_rejects_string_subclass_before_pathname_probe(monkeypatch):
+    """Reject noncanonical source types consistently with installed trust."""
+    class HostileString(str):
+        pass
+
+    import autosport.windows_update_snapshot as snapshot_module
+    def forbidden_parent_probe(_path):
+        pytest.fail("subclass source reached filesystem inspection")
+
+    monkeypatch.setattr(snapshot_module, "_source_parent_identity", forbidden_parent_probe)
+    with pytest.raises(WindowsUpdateSnapshotError, match="package path must be a local path"):
+        with pinned_windows_update_package(HostileString("candidate.zip"), expected_sha256="a" * 64):
+            pytest.fail("subclass was admitted")
+
+
+def test_private_snapshot_recheck_rejects_redirected_parent_after_pin(tmp_path):
+    """A renamed private directory plus symlink must not preserve pin authority.
+
+    The ZIP bytes and inode remain unchanged; only an ancestor becomes a
+    redirection after the initial pin. Restore the directory in finally so
+    the TemporaryDirectory owner can still clean up its own files.
+    """
+    import os
+
+    source = tmp_path / "оновлення.zip"
+    source.write_bytes(b"signed-update-fixture")
+    with pinned_windows_update_package(
+        source, expected_sha256=digest(source.read_bytes())
+    ) as snapshot:
+        parent = snapshot.path.parent
+        relocated = parent.with_name(parent.name + "-moved")
+        parent.rename(relocated)
+        try:
+            try:
+                parent.symlink_to(relocated, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                pytest.skip("directory symlinks unavailable")
+            with pytest.raises(WindowsUpdateSnapshotError, match="ancestor|redirect"):
+                snapshot.recheck()
+        finally:
+            if parent.is_symlink():
+                parent.unlink()
+            relocated.rename(parent)
+        snapshot.recheck()
+
+
+def test_private_snapshot_recheck_rejects_ancestor_swap_during_descriptor_open(tmp_path, monkeypatch):
+    """A parent redirect inserted after the first witness must fail closed."""
+    import os
+    from autosport import windows_update_snapshot as module
+
+    source = tmp_path / "candidate.zip"
+    source.write_bytes(b"same signed bytes")
+    with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())) as snapshot:
+        parent = snapshot.path.parent
+        moved = parent.with_name(parent.name + "-original")
+        original_open = os.open
+        swapped = False
+
+        def swap_at_open(path, flags, *args, **kwargs):
+            nonlocal swapped
+            if Path(path) == snapshot.path and not swapped:
+                parent.rename(moved)
+                try:
+                    parent.symlink_to(moved, target_is_directory=True)
+                except BaseException:
+                    moved.rename(parent)
+                    raise
+                swapped = True
+            return original_open(path, flags, *args, **kwargs)
+
+        try:
+            with monkeypatch.context() as patch:
+                patch.setattr(module.os, "open", swap_at_open)
+                with pytest.raises(WindowsUpdateSnapshotError, match="ancestor|redirect"):
+                    snapshot.recheck()
+        finally:
+            if parent.is_symlink():
+                parent.unlink()
+            if moved.exists():
+                moved.rename(parent)
+        assert swapped
+        snapshot.recheck()
+
+
+def test_zip_resource_preflight_rejects_ancestor_redirect_during_parse(tmp_path, monkeypatch):
+    """A stable ZIP inode cannot excuse a renamed, symlinked ancestor.
+
+    A ZIP descriptor opened before a directory swap still parses the original
+    bytes; the pathname afterwards also resolves to the same inode. Without
+    an ancestor witness the direct resource guard silently returns success.
+    """
+    import zipfile
+    from autosport import windows_update_snapshot as module
+
+    parent = tmp_path / "оригінальний каталог"
+    parent.mkdir()
+    package = parent / "candidate.zip"
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
+    relocated = tmp_path / "переміщений каталог"
+    original_zipfile = zipfile.ZipFile
+    swapped = []
+
+    def redirect_ancestor(file, *args, **kwargs):
+        if not swapped:
+            parent.rename(relocated)
+            try:
+                parent.symlink_to(relocated, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                relocated.rename(parent)
+                pytest.skip("directory symlinks unavailable")
+            swapped.append(True)
+        return original_zipfile(file, *args, **kwargs)
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module.zipfile, "ZipFile", redirect_ancestor)
+            with pytest.raises(WindowsUpdateSnapshotError, match="ancestor|redirect"):
+                module._require_bounded_zip_members(package)
+        assert swapped
+    finally:
+        if parent.is_symlink():
+            parent.unlink()
+        if relocated.exists():
+            relocated.rename(parent)
+    # A restored original tree remains a valid bounded archive.
+    module._require_bounded_zip_members(package)
+
+
+def test_zip_resource_guard_rejects_symlink_leaf_before_open(tmp_path, monkeypatch):
+    """Direct resource guard must not open a redirected leaf even briefly."""
+    import zipfile
+    from autosport import windows_update_snapshot as module
+
+    target = tmp_path / "target.zip"
+    with zipfile.ZipFile(target, "w") as archive:
+        archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
+    link = tmp_path / "alias.zip"
+    try:
+        link.symlink_to(target)
+    except (OSError, NotImplementedError):
+        pytest.skip("file symlinks unavailable")
+
+    original_open = module.Path.open
+    observed = []
+
+    def guarded_open(path, *args, **kwargs):
+        if path == link:
+            observed.append(True)
+            raise AssertionError("redirected leaf was opened")
+        return original_open(path, *args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.Path, "open", guarded_open)
+        with pytest.raises(WindowsUpdateSnapshotError, match="redirect|regular"):
+            module._require_bounded_zip_members(link)
+    assert not observed
+    module._require_bounded_zip_members(target)
+
+
+def test_zip_resource_guard_rejects_leaf_swap_at_open_before_eocd(tmp_path, monkeypatch):
+    """A leaf swapped after lstat must not reach EOCD/central-directory parse."""
+    import zipfile
+    from autosport import windows_update_snapshot as module
+
+    package = tmp_path / "candidate.zip"
+    replacement = tmp_path / "replacement.zip"
+    for path in (package, replacement):
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
+    original_open = module.Path.open
+    original_zipfile = module.zipfile.ZipFile
+    swapped = []
+
+    def replace_during_open(path, *args, **kwargs):
+        if path == package and not swapped:
+            package.unlink()
+            package.symlink_to(replacement)
+            swapped.append(True)
+        return original_open(path, *args, **kwargs)
+
+    def unexpected_parse(*args, **kwargs):
+        raise AssertionError("redirected leaf reached ZIP parser")
+
+    try:
+        with monkeypatch.context() as patch:
+            patch.setattr(module.Path, "open", replace_during_open)
+            patch.setattr(module.zipfile, "ZipFile", unexpected_parse)
+            with pytest.raises(WindowsUpdateSnapshotError, match="redirect|identity|regular"):
+                module._require_bounded_zip_members(package)
+        assert swapped
+    finally:
+        if package.is_symlink():
+            package.unlink()
+    # Repaired pathname still admits an ordinary package.
+    with zipfile.ZipFile(package, "w") as archive:
+        archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
+    module._require_bounded_zip_members(package)
+
+@pytest.mark.parametrize("mutated_field,mutated_value", [
+    ("status", "FAIL"),
+    ("real_money_execution", True),
+    ("autosport_exe_sha256", "b" * 64),
+])
+def test_verified_report_cannot_be_mutated_by_embedded_identity_reader(
+    tmp_path, monkeypatch, release_package, mutated_field, mutated_value,
+):
+    """A later callback must not rewrite an already validated verifier receipt."""
+    from autosport import windows_update_snapshot as module
+
+    source = tmp_path / "candidate.zip"
+    source.write_bytes(b"fixture")
+    report = {
+        "status": "PASS", "source_sha": "a" * 40,
+        "package_sha256": digest(b"fixture"),
+        "real_money_execution": False,
+        "autosport_exe_sha256": "a" * 64,
+    }
+    original = report.copy()
+    monkeypatch.setattr(
+        release_package, "verify_windows_package", lambda *a, **k: report,
+        raising=False,
+    )
+
+    def mutate_after_receipt_validation(*args, **kwargs):
+        report[mutated_field] = mutated_value
+        return {}
+
+    monkeypatch.setattr(module, "_verified_embedded_update_identity", mutate_after_receipt_validation)
+    with pinned_windows_update_package(source, expected_sha256=digest(b"fixture")) as snap:
+        attested = module.verify_pinned_release_package(snap, expected_source_sha="a" * 40)
+    for field, value in original.items():
+        assert attested[field] == value, "the attestation must be a validated immutable-in-time copy"
+
+
+@pytest.mark.parametrize("swap_stage", ["open", "parse"])
+def test_embedded_identity_rejects_ancestor_redirect_during_read(
+    tmp_path, monkeypatch, swap_stage,
+):
+    """The BUILD_INFO reader must bind ancestors even if ZIP bytes/inode agree."""
+    import json
+    import zipfile
+    from autosport import windows_update_snapshot as module
+
+    source = tmp_path / "original.zip"
+    with zipfile.ZipFile(source, "w") as archive:
+        archive.writestr("Autosport-V1/BUILD_INFO.json", json.dumps({
+            "product": "Autosport", "source_sha": "a" * 40,
+            "version": "1.2.3", "update_version": "1.2.3", "update_schema": 1,
+        }))
+    original_open = module.os.open
+    original_zipfile = zipfile.ZipFile
+    with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())) as snap:
+        parent = snap.path.parent
+        relocated = parent.with_name(parent.name + "-relocated")
+        swapped = []
+        opens = []
+
+        def swap_parent():
+            parent.rename(relocated)
+            try:
+                parent.symlink_to(relocated, target_is_directory=True)
+            except (OSError, NotImplementedError):
+                relocated.rename(parent)
+                pytest.skip("directory symlinks unavailable")
+            swapped.append(True)
+
+        def redirect_during_open(path, flags, *args, **kwargs):
+            if Path(path) == snap.path:
+                opens.append(True)
+                # The first open is snapshot.recheck(), the second is BUILD_INFO.
+                if len(opens) == 2:
+                    swap_parent()
+            return original_open(path, flags, *args, **kwargs)
+
+        def redirect_during_parse(file, *args, **kwargs):
+            if not swapped:
+                swap_parent()
+            return original_zipfile(file, *args, **kwargs)
+
+        try:
+            with monkeypatch.context() as patch:
+                if swap_stage == "open":
+                    patch.setattr(module.os, "open", redirect_during_open)
+                else:
+                    patch.setattr(module.zipfile, "ZipFile", redirect_during_parse)
+                with pytest.raises(module.WindowsUpdateSnapshotError, match="^embedded update identity is invalid$"):
+                    module._verified_embedded_update_identity(snap, expected_source_sha="a" * 40)
+            assert swapped, "the adversarial redirect must actually execute"
+        finally:
+            if parent.is_symlink():
+                parent.unlink()
+            if relocated.exists():
+                relocated.rename(parent)
+        assert module._verified_embedded_update_identity(
+            snap, expected_source_sha="a" * 40,
+        ) == {"update_version": "1.2.3", "update_schema": 1}

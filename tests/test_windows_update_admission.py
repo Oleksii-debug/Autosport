@@ -192,3 +192,28 @@ def test_decision_valid_transitions_remain_non_authorizing():
         ("ELIGIBLE_FOR_TRANSACTION_PREPARE", "1.0.0", "2.0.0", 1, 2),
     ):
         assert WindowsUpdateDecision(*args).install_authorized is False
+
+
+def test_unsigned_early_progression_is_policy_only_and_never_grants_signature():
+    from autosport.windows_update_admission import _assess_transition_without_signature
+    old = installed()
+    decision = _assess_transition_without_signature(
+        old, candidate_version="1.2.4", candidate_schema=4,
+        candidate_package_sha256=NEW, supported_schema_migrations=((3, 4),),
+    )
+    assert decision.disposition == "ELIGIBLE_FOR_TRANSACTION_PREPARE"
+    assert decision.install_authorized is False
+    with pytest.raises(WindowsUpdateAdmissionError, match="signature"):
+        assess_windows_update(
+            old, candidate(version="1.2.4", schema=4, signature_verified=False),
+            supported_schema_migrations=((3, 4),),
+        )
+
+
+def test_unsigned_early_progression_does_not_accept_forged_same_version_digest():
+    from autosport.windows_update_admission import _assess_transition_without_signature
+    with pytest.raises(WindowsUpdateAdmissionError, match="same-version"):
+        _assess_transition_without_signature(
+            installed(), candidate_version="1.2.3", candidate_schema=3,
+            candidate_package_sha256=NEW, supported_schema_migrations=(),
+        )

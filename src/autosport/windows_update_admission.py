@@ -106,45 +106,39 @@ class WindowsUpdateDecision:
             raise WindowsUpdateAdmissionError("noncanonical update disposition")
 
 
-def assess_windows_update(
-    installed: InstalledWindowsProduct,
-    candidate: WindowsUpdateCandidate,
-    *,
+def _assess_transition_without_signature(
+    installed: InstalledWindowsProduct, *, candidate_version: str,
+    candidate_schema: int, candidate_package_sha256: str,
     supported_schema_migrations: tuple[tuple[int, int], ...],
 ) -> WindowsUpdateDecision:
-    """Validate only update admission; does not authorize installation.
+    """Evaluate version/schema continuity without claiming signature authority.
 
-    Migration edges must be supplied by the actual installed updater. An edge
-    is permitted only for a one-step forward schema migration; every step from
-    installed.schema to candidate.schema must be explicitly supported.
+    Used to reject impossible transitions *before* expensive package copying.
+    The result is policy-only, never signed evidence or install permission.
+    The full assessor still requires a separately verified signature and digest.
     """
-    if type(installed) is not InstalledWindowsProduct or type(candidate) is not WindowsUpdateCandidate:
-        raise WindowsUpdateAdmissionError("update identities must be canonical product records")
-    # Revalidate because an object can be forged via object.__new__/setattr__.
+    if type(installed) is not InstalledWindowsProduct:
+        raise WindowsUpdateAdmissionError("installed identity must be canonical")
     installed.__post_init__()
-    candidate.__post_init__()
-    if not candidate.signature_verified:
-        raise WindowsUpdateAdmissionError("independent package signature verification is required")
-    if candidate.package_sha256 != candidate.verified_package_sha256:
-        raise WindowsUpdateAdmissionError("package digest differs from independently verified bytes")
     old_version = _version(installed.version)
-    new_version = _version(candidate.version)
+    new_version = _version(candidate_version)
+    candidate_schema = _schema(candidate_schema)
+    candidate_package_sha256 = _sha(candidate_package_sha256)
     if new_version < old_version:
         raise WindowsUpdateAdmissionError("package version downgrade forbidden")
-    if candidate.schema < installed.schema:
+    if candidate_schema < installed.schema:
         raise WindowsUpdateAdmissionError("schema downgrade forbidden")
     if new_version == old_version:
-        if candidate.schema != installed.schema or candidate.package_sha256 != installed.package_sha256:
+        if candidate_schema != installed.schema or candidate_package_sha256 != installed.package_sha256:
             raise WindowsUpdateAdmissionError("same-version replacement or schema change forbidden")
         if type(supported_schema_migrations) is not tuple or supported_schema_migrations:
             raise WindowsUpdateAdmissionError("no-op must not carry migration evidence")
-        return WindowsUpdateDecision("NO_CHANGE", installed.version, candidate.version, installed.schema, candidate.schema)
+        return WindowsUpdateDecision("NO_CHANGE", installed.version, candidate_version, installed.schema, candidate_schema)
     # Migration evidence must be a fully materialized canonical chain. Never
-    # execute a caller-controlled iterator while checking update authority;
-    # generators may hang, mutate state, or hide a late invalid edge.
+    # execute a caller-controlled iterator while checking update authority.
     if type(supported_schema_migrations) is not tuple:
         raise WindowsUpdateAdmissionError("migration evidence must be a canonical tuple")
-    required_steps = candidate.schema - installed.schema
+    required_steps = candidate_schema - installed.schema
     if required_steps > 256 or len(supported_schema_migrations) != required_steps:
         raise WindowsUpdateAdmissionError("migration evidence must exactly match required chain")
     for offset, edge in enumerate(supported_schema_migrations):
@@ -156,4 +150,32 @@ def assess_windows_update(
         expected_start = installed.schema + offset
         if start != expected_start or end != expected_start + 1:
             raise WindowsUpdateAdmissionError("migration chain must be complete, ordered and gap-free")
-    return WindowsUpdateDecision("ELIGIBLE_FOR_TRANSACTION_PREPARE", installed.version, candidate.version, installed.schema, candidate.schema)
+    return WindowsUpdateDecision("ELIGIBLE_FOR_TRANSACTION_PREPARE", installed.version, candidate_version, installed.schema, candidate_schema)
+
+
+def assess_windows_update(
+    installed: InstalledWindowsProduct,
+    candidate: WindowsUpdateCandidate,
+    *,
+    supported_schema_migrations: tuple[tuple[int, int], ...],
+) -> WindowsUpdateDecision:
+    """Validate signed update admission; never authorize installation.
+
+    The transition rules are shared with the cheap unsigned fail-fast check,
+    but only this entry point requires independent signature and byte proof.
+    """
+    if type(installed) is not InstalledWindowsProduct or type(candidate) is not WindowsUpdateCandidate:
+        raise WindowsUpdateAdmissionError("update identities must be canonical product records")
+    installed.__post_init__()
+    candidate.__post_init__()
+    if not candidate.signature_verified:
+        raise WindowsUpdateAdmissionError("independent package signature verification is required")
+    if candidate.package_sha256 != candidate.verified_package_sha256:
+        raise WindowsUpdateAdmissionError("package digest differs from independently verified bytes")
+    return _assess_transition_without_signature(
+        installed,
+        candidate_version=candidate.version,
+        candidate_schema=candidate.schema,
+        candidate_package_sha256=candidate.package_sha256,
+        supported_schema_migrations=supported_schema_migrations,
+    )

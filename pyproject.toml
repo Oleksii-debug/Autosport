@@ -12,9 +12,11 @@ dependencies = ["tk-uia==0.8.0", "APScheduler==3.11.3"]
 [project.optional-dependencies]
 build = ["pyinstaller==6.22.3"]
 test = ["pytest>=8,<9", "hypothesis>=6,<7", "cryptography>=44,<47"]
+update-diagnostic = ["cryptography>=44,<47"]
 
 [project.scripts]
 autosport = "autosport.cli:main"
+autosport-update-diagnostic = "autosport.windows_update_cli:main"
 autosport-product = "autosport.product_entrypoint:main"
 autosport-observe-continuous = "autosport.continuous_observation:main"
 autosport-export-evidence = "autosport.evidence_export:main"

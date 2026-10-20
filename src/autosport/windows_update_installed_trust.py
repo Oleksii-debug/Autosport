@@ -18,9 +18,10 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from .windows_update_admission import InstalledWindowsProduct
+from .windows_update_local_path import UnsafeUpdatePath, require_local_update_path
 from .windows_update_snapshot import (
     WindowsUpdateSnapshot, WindowsUpdateSnapshotError, _native_change_time_100ns,
-    _owned_fd_stream,
+    _owned_fd_stream, _source_parent_identity, _is_redirected_file,
 )
 
 _MAX_MANIFEST_BYTES = 8192
@@ -45,6 +46,7 @@ class PinnedInstalledWindowsAuthority:
     _source_path: Path = field(repr=False)
     _file_identity: tuple[int, int] = field(repr=False)
     _file_metadata: tuple[int, int, int] = field(repr=False)
+    _parent_identity: tuple[tuple[int, int], ...] = field(repr=False)
     _change_time_100ns: int | None = field(default=None, repr=False)
     install_authorized: bool = False
 
@@ -68,6 +70,17 @@ class PinnedInstalledWindowsAuthority:
                 or any(type(part) is not int or part < 0 for part in self._file_metadata)
                 or self._file_metadata[0] == 0 or self._file_metadata[0] > _MAX_MANIFEST_BYTES):
             raise InstalledWindowsTrustError("installed manifest metadata is invalid")
+        if (
+            type(self._parent_identity) is not tuple
+            or not self._parent_identity
+            or any(
+                type(pair) is not tuple or len(pair) != 2
+                or any(type(value) is not int or value < 0 for value in pair)
+                or pair[1] == 0
+                for pair in self._parent_identity
+            )
+        ):
+            raise InstalledWindowsTrustError("installed manifest ancestor identity is invalid")
         if ((self._change_time_100ns is not None and
              (type(self._change_time_100ns) is not int or self._change_time_100ns <= 0))
             or (os.name == "nt" and self._change_time_100ns is None)):
@@ -106,31 +119,42 @@ def load_pinned_installed_update_authority(
         raise InstalledWindowsTrustError("trusted manifest digest must be canonical")
     if type(manifest_path) not in (str, type(Path())):
         raise InstalledWindowsTrustError("installed manifest path must be canonical")
+    # This function can be called directly, outside the CLI's lexical path
+    # admission. Reject UNC, device, drive-relative and ambiguous spellings
+    # before even probing a parent directory for the installed trust root.
+    try:
+        require_local_update_path(os.fspath(manifest_path))
+    except (UnsafeUpdatePath, TypeError, ValueError):
+        raise InstalledWindowsTrustError("installed manifest path is not local and canonical") from None
     # Anchor once: a concurrent cwd change must never retarget installed trust.
     try:
         path = Path(os.path.abspath(os.fspath(manifest_path)))
     except (OSError, UnicodeError, ValueError, TypeError):
         raise InstalledWindowsTrustError("installed manifest path is invalid") from None
     try:
+        # The final manifest may be regular while an ancestor is a junction
+        # or symlink. Bind the entire root-to-parent chain before opening.
+        parent_identity = _source_parent_identity(path)
         entry = path.lstat()
-        if not stat.S_ISREG(entry.st_mode) or not 0 < entry.st_size <= _MAX_MANIFEST_BYTES:
+        if _is_redirected_file(entry) or not stat.S_ISREG(entry.st_mode) or not 0 < entry.st_size <= _MAX_MANIFEST_BYTES:
             raise InstalledWindowsTrustError("installed manifest must be a bounded regular file")
         entry_id = _identity(entry)
         fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
         with _owned_fd_stream(fd) as stream:
             opened = os.fstat(stream.fileno())
             opened_change_time = _native_change_time_100ns(stream.fileno())
-            if not stat.S_ISREG(opened.st_mode) or _identity(opened) != entry_id:
+            if _is_redirected_file(opened) or not stat.S_ISREG(opened.st_mode) or _identity(opened) != entry_id:
                 raise InstalledWindowsTrustError("installed manifest changed while opening")
             data = stream.read(_MAX_MANIFEST_BYTES + 1)
             completed = os.fstat(stream.fileno())
             completed_change_time = _native_change_time_100ns(stream.fileno())
             final_entry = path.lstat()
             if (
-                _identity(completed) != entry_id
+                _source_parent_identity(path) != parent_identity
+                or _identity(completed) != entry_id
                 or completed_change_time != opened_change_time
                 or _identity(final_entry) != entry_id
-                or not stat.S_ISREG(final_entry.st_mode)
+                or not stat.S_ISREG(final_entry.st_mode) or _is_redirected_file(final_entry)
                 or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
                 != (completed.st_size, completed.st_mtime_ns, completed.st_ctime_ns)
                 or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
@@ -158,6 +182,44 @@ def load_pinned_installed_update_authority(
         )
         if data != (json.dumps(parsed, sort_keys=True, separators=(",", ":"), ensure_ascii=True, allow_nan=False) + "\n").encode("ascii"):
             raise InstalledWindowsTrustError("installed manifest JSON is noncanonical")
+        # Parsing/validation occurs after the original descriptor is closed.
+        # On Windows an in-place same-byte rewrite can preserve inode, length
+        # and even mtime while advancing the native file change-time. Reopen
+        # without following links and compare that independent witness too.
+        # This is a preflight consistency check, not an atomic installer lock.
+        final_parent_identity = _source_parent_identity(path)
+        final_path_entry = path.lstat()
+        if (
+            final_parent_identity != parent_identity
+            or not stat.S_ISREG(final_path_entry.st_mode) or _is_redirected_file(final_path_entry)
+            or _identity(final_path_entry) != entry_id
+            or (final_path_entry.st_size, final_path_entry.st_mtime_ns, final_path_entry.st_ctime_ns)
+            != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+        ):
+            raise InstalledWindowsTrustError("installed manifest path changed after validation")
+        final_fd = os.open(path, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0))
+        with _owned_fd_stream(final_fd) as final_stream:
+            final_opened = os.fstat(final_stream.fileno())
+            final_change_time = _native_change_time_100ns(final_stream.fileno())
+            if (
+                _is_redirected_file(final_opened)
+                or not stat.S_ISREG(final_opened.st_mode)
+                or _identity(final_opened) != entry_id
+                or (final_opened.st_size, final_opened.st_mtime_ns, final_opened.st_ctime_ns)
+                != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                or final_change_time != opened_change_time
+                or _source_parent_identity(path) != parent_identity
+            ):
+                raise InstalledWindowsTrustError("installed manifest changed after validation")
+            final_path_entry = path.lstat()
+            if (
+                _is_redirected_file(final_path_entry)
+                or not stat.S_ISREG(final_path_entry.st_mode)
+                or _identity(final_path_entry) != entry_id
+                or (final_path_entry.st_size, final_path_entry.st_mtime_ns, final_path_entry.st_ctime_ns)
+                != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            ):
+                raise InstalledWindowsTrustError("installed manifest path changed during final readback")
         return PinnedInstalledWindowsAuthority(
             installed=installed,
             trusted_public_key=bytes.fromhex(key_hex),
@@ -165,9 +227,10 @@ def load_pinned_installed_update_authority(
             _source_path=path,
             _file_identity=entry_id,
             _file_metadata=(opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns),
+            _parent_identity=parent_identity,
             _change_time_100ns=opened_change_time,
         )
-    except (UnicodeError, ValueError, TypeError, OverflowError, RecursionError) as exc:
+    except (OSError, UnicodeError, ValueError, TypeError, OverflowError, RecursionError):
         raise InstalledWindowsTrustError("installed manifest is invalid") from None
 
 

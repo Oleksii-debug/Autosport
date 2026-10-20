@@ -192,7 +192,7 @@ def test_installed_trust_and_real_ed25519_signed_preflight(tmp_path, monkeypatch
 
 
 def _test_snapshot(tmp_path):
-    from autosport.windows_update_snapshot import WindowsUpdateSnapshot
+    from autosport.windows_update_snapshot import WindowsUpdateSnapshot, _source_parent_identity
     path = tmp_path / "pinned-candidate.zip"
     data = b"pinned test-only candidate"
     path.write_bytes(data)
@@ -201,6 +201,7 @@ def _test_snapshot(tmp_path):
         path, hashlib.sha256(data).hexdigest(), len(data),
         _file_identity=(stat_info.st_dev, stat_info.st_ino),
         _file_metadata=(stat_info.st_size, stat_info.st_mtime_ns, stat_info.st_ctime_ns),
+        _parent_identity=_source_parent_identity(path),
     )
 
 
@@ -618,3 +619,179 @@ def test_installed_lstat_unicode_failure_is_sanitized(tmp_path, monkeypatch):
         load_pinned_installed_update_authority(
             source, expected_manifest_sha256=hashlib.sha256(_bytes()).hexdigest()
         )
+
+
+def test_parent_directory_symlink_does_not_define_installed_trust(tmp_path):
+    raw = _bytes()
+    actual = tmp_path / "actual"
+    actual.mkdir()
+    (actual / "installed.json").write_bytes(raw)
+    redirected = tmp_path / "redirected"
+    try:
+        redirected.symlink_to(actual, target_is_directory=True)
+    except (OSError, NotImplementedError):
+        pytest.skip("filesystem does not permit directory symlinks")
+    with pytest.raises(InstalledWindowsTrustError):
+        load_pinned_installed_update_authority(
+            redirected / "installed.json", expected_manifest_sha256=hashlib.sha256(raw).hexdigest()
+        )
+
+
+def test_parent_directory_same_byte_swap_during_open_is_rejected(tmp_path, monkeypatch):
+    from autosport import windows_update_installed_trust as module
+    raw = _bytes()
+    directory = tmp_path / "installed"
+    directory.mkdir()
+    path = directory / "installed.json"
+    path.write_bytes(raw)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "installed.json").write_bytes(raw)
+    actual_open = module.os.open
+    swapped = False
+
+    def replace_parent_during_open(candidate, flags, *args, **kwargs):
+        nonlocal swapped
+        if not swapped and Path(candidate) == path:
+            swapped = True
+            os.rename(directory, tmp_path / "old-installed")
+            os.rename(replacement, directory)
+        return actual_open(candidate, flags, *args, **kwargs)
+
+    monkeypatch.setattr(module.os, "open", replace_parent_during_open)
+    with pytest.raises(InstalledWindowsTrustError):
+        load_pinned_installed_update_authority(
+            path, expected_manifest_sha256=hashlib.sha256(raw).hexdigest()
+        )
+    assert swapped
+
+
+def test_parent_directory_identity_is_bound_across_manifest_readbacks(tmp_path):
+    raw = _bytes()
+    directory = tmp_path / "installed"
+    directory.mkdir()
+    path = directory / "installed.json"
+    path.write_bytes(raw)
+    digest = hashlib.sha256(raw).hexdigest()
+    before = load_pinned_installed_update_authority(path, expected_manifest_sha256=digest)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "installed.json").write_bytes(raw)
+    os.rename(directory, tmp_path / "old-installed")
+    os.rename(replacement, directory)
+    after = load_pinned_installed_update_authority(path, expected_manifest_sha256=digest)
+    assert before != after, "same-byte parent replacement must invalidate the trust witness"
+
+
+def test_parent_directory_replaced_after_read_during_json_validation_is_rejected(tmp_path, monkeypatch):
+    from autosport import windows_update_installed_trust as module
+    raw = _bytes()
+    directory = tmp_path / "installed"
+    directory.mkdir()
+    path = directory / "installed.json"
+    path.write_bytes(raw)
+    replacement = tmp_path / "replacement"
+    replacement.mkdir()
+    (replacement / "installed.json").write_bytes(raw)
+    actual_loads = module.json.loads
+    swapped = False
+
+    def replace_after_read(*args, **kwargs):
+        nonlocal swapped
+        parsed = actual_loads(*args, **kwargs)
+        if not swapped:
+            swapped = True
+            os.rename(directory, tmp_path / "old-installed")
+            os.rename(replacement, directory)
+        return parsed
+
+    monkeypatch.setattr(module.json, "loads", replace_after_read)
+    with pytest.raises(InstalledWindowsTrustError):
+        load_pinned_installed_update_authority(
+            path, expected_manifest_sha256=hashlib.sha256(raw).hexdigest()
+        )
+    assert swapped
+
+
+def test_regular_cyrillic_parent_directory_remains_supported(tmp_path):
+    directory = tmp_path / "оновлення з пробілами"
+    directory.mkdir()
+    path = directory / "встановлена версія.json"
+    raw = _bytes()
+    first = _load(path, raw)
+    second = load_pinned_installed_update_authority(
+        path, expected_manifest_sha256=hashlib.sha256(raw).hexdigest()
+    )
+    assert first == second
+    assert first.install_authorized is False
+
+
+def test_postparse_native_change_time_mismatch_rejected(tmp_path, monkeypatch):
+    """Windows change-time must be checked after JSON hooks, not only while reading."""
+    from autosport import windows_update_installed_trust as trust
+
+    path = tmp_path / "встановлений стан.json"
+    raw = _bytes()
+    path.write_bytes(raw)
+    original_loads = trust.json.loads
+    parsed = False
+    observed = []
+
+    def loads_and_simulate_concurrent_rewrite(*args, **kwargs):
+        nonlocal parsed
+        result = original_loads(*args, **kwargs)
+        parsed = True
+        return result
+
+    def native_change_time(fd):
+        value = 200 if parsed else 100
+        observed.append(value)
+        return value
+
+    monkeypatch.setattr(trust.json, "loads", loads_and_simulate_concurrent_rewrite)
+    monkeypatch.setattr(trust, "_native_change_time_100ns", native_change_time)
+    with pytest.raises(InstalledWindowsTrustError):
+        load_pinned_installed_update_authority(
+            path, expected_manifest_sha256=hashlib.sha256(raw).hexdigest()
+        )
+    assert parsed and 200 in observed
+
+
+def test_stable_native_change_time_survives_postparse_recheck(tmp_path, monkeypatch):
+    from autosport import windows_update_installed_trust as trust
+
+    path = tmp_path / "каталог з пробілами" / "стан.json"
+    path.parent.mkdir()
+    raw = _bytes()
+    path.write_bytes(raw)
+    observed = []
+
+    def stable_native_change_time(fd):
+        observed.append(fd)
+        return 100
+
+    monkeypatch.setattr(trust, "_native_change_time_100ns", stable_native_change_time)
+    authority = load_pinned_installed_update_authority(
+        path, expected_manifest_sha256=hashlib.sha256(raw).hexdigest()
+    )
+    assert authority._change_time_100ns == 100
+    assert len(observed) >= 3
+
+
+@pytest.mark.parametrize("unsafe", [
+    r"\\server\share\installed.json",
+    "//server/share/installed.json",
+    r"\\?\C:\\private\installed.json",
+    r"C:drive-relative.json",
+    "folder/../installed.json",
+])
+def test_installed_trust_rejects_nonlocal_or_ambiguous_path_before_filesystem_access(monkeypatch, unsafe):
+    """A standalone trust-root reader cannot bypass the CLI path policy."""
+    import autosport.windows_update_installed_trust as trust_module
+
+    def forbidden_parent_probe(_path):
+        pytest.fail("untrusted installed authority path reached filesystem inspection")
+
+    monkeypatch.setattr(trust_module, "_source_parent_identity", forbidden_parent_probe)
+    with pytest.raises(InstalledWindowsTrustError):
+        load_pinned_installed_update_authority(unsafe, expected_manifest_sha256="a" * 64)

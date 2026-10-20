@@ -21,6 +21,8 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Iterator
 
+from .windows_update_local_path import UnsafeUpdatePath, require_local_update_path
+
 _MAX_PACKAGE_BYTES = 2 * 1024 * 1024 * 1024
 _CHUNK_BYTES = 1024 * 1024
 # Bound decompression *before* the canonical verifier reads ZIP member bodies.
@@ -35,6 +37,18 @@ _MAX_COMPRESSION_RATIO = 200
 
 class WindowsUpdateSnapshotError(ValueError):
     """Untrusted update bytes could not be pinned to a stable local snapshot."""
+
+
+def _is_redirected_file(info: os.stat_result) -> bool:
+    """Reject final-file NTFS reparse objects even when st_mode is regular.
+
+    Windows may expose a reparse-point file with a regular-file mode. The
+    reparse attribute must therefore be checked separately from S_ISLNK.
+    """
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
 
 
 def _require_file_identity(info: os.stat_result) -> tuple[int, int]:
@@ -125,6 +139,7 @@ class WindowsUpdateSnapshot:
     _file_identity: tuple[int, int] | None = field(default=None, repr=False, compare=False)
     _file_metadata: tuple[int, int, int] | None = field(default=None, repr=False, compare=False)
     _change_time_100ns: int | None = field(default=None, repr=False, compare=False)
+    _parent_identity: tuple[tuple[int, int], ...] | None = field(default=None, repr=False, compare=False)
 
     def __post_init__(self) -> None:
         if self.install_authorized is not False or type(self.install_authorized) is not bool:
@@ -158,14 +173,31 @@ class WindowsUpdateSnapshot:
             or (os.name == "nt" and self._change_time_100ns is None)
         ):
             raise WindowsUpdateSnapshotError("pinned package snapshot authority is invalid")
+        if (
+            type(self._parent_identity) is not tuple
+            or len(self._parent_identity) != len(self.path.parents)
+            or any(
+                type(pair) is not tuple or len(pair) != 2
+                or type(pair[0]) is not int or pair[0] < 0
+                or type(pair[1]) is not int or pair[1] <= 0
+                for pair in self._parent_identity
+            )
+        ):
+            raise WindowsUpdateSnapshotError("pinned package ancestor authority is invalid")
         digest = hashlib.sha256()
         total = 0
         try:
+            # The private snapshot directory is not exempt from redirected
+            # ancestors. Preserve the entire ancestor identity from creation,
+            # including during the descriptor read, so a renamed directory
+            # cannot be replaced by a symlink to the original inode.
+            if _source_parent_identity(self.path) != self._parent_identity:
+                raise WindowsUpdateSnapshotError("pinned package ancestor changed")
             # Refuse a replacement path (including a same-byte symlink) rather
             # than silently accepting a different filesystem object.
             entry = self.path.lstat()
             entry_identity = _require_file_identity(entry)
-            if not stat.S_ISREG(entry.st_mode):
+            if not stat.S_ISREG(entry.st_mode) or _is_redirected_file(entry):
                 raise WindowsUpdateSnapshotError("pinned package is not a regular file")
             if entry_identity != self._file_identity:
                 raise WindowsUpdateSnapshotError("pinned package file identity changed")
@@ -199,8 +231,10 @@ class WindowsUpdateSnapshot:
                 completed = os.fstat(stream.fileno())
                 completed_change_time = _native_change_time_100ns(stream.fileno())
                 after_entry = self.path.lstat()
+                if _source_parent_identity(self.path) != self._parent_identity:
+                    raise WindowsUpdateSnapshotError("pinned package ancestor changed during recheck")
                 if (
-                    not stat.S_ISREG(after_entry.st_mode)
+                    not stat.S_ISREG(after_entry.st_mode) or _is_redirected_file(after_entry)
                     or _require_file_identity(after_entry) != opened_identity
                     or _require_file_identity(completed) != opened_identity
                     or completed_change_time != self._change_time_100ns
@@ -261,8 +295,19 @@ def pinned_windows_update_package(
         raise WindowsUpdateSnapshotError("expected SHA-256 must be canonical")
     if type(max_bytes) is not int or not 1 <= max_bytes <= _MAX_PACKAGE_BYTES:
         raise WindowsUpdateSnapshotError("invalid package size bound")
-    if not isinstance(source, (str, Path)):
+    # Reject custom str/Path subclasses before their path protocol or string
+    # conversion can run arbitrary callbacks. Installed trust uses the same
+    # exact-type boundary; both direct-call update inputs must agree.
+    if type(source) not in (str, type(Path())):
         raise WindowsUpdateSnapshotError("package path must be a local path")
+    # The snapshot helper is also a public direct-call boundary. Do not rely
+    # on the CLI alone to reject UNC/device/drive-relative aliases: a future
+    # installer or verifier can call this helper without the CLI. Validate the
+    # original spelling before abspath normalizes it or any filesystem probe.
+    try:
+        require_local_update_path(os.fspath(source))
+    except (UnsafeUpdatePath, TypeError, ValueError):
+        raise WindowsUpdateSnapshotError("package source path is not local and canonical") from None
     # Bind a relative caller path to one absolute pathname before the first
     # filesystem operation.  A different thread or callback may change the
     # process cwd between lstat/open/copy; without this anchor, a same-named
@@ -279,7 +324,7 @@ def pinned_windows_update_package(
         parent_identity = _source_parent_identity(path)
         source_entry = path.lstat()
         source_identity = _require_file_identity(source_entry)
-        if stat.S_ISLNK(source_entry.st_mode):
+        if _is_redirected_file(source_entry):
             raise WindowsUpdateSnapshotError("symlink package source forbidden")
         if not stat.S_ISREG(source_entry.st_mode):
             raise WindowsUpdateSnapshotError("source is not a regular package")
@@ -299,7 +344,7 @@ def pinned_windows_update_package(
                 raise WindowsUpdateSnapshotError("package ancestor changed during open")
             before_identity = _require_file_identity(before)
             if (
-                not stat.S_ISREG(opened_entry.st_mode)
+                not stat.S_ISREG(opened_entry.st_mode) or _is_redirected_file(opened_entry)
                 or before_identity != source_identity
                 or before_identity != _require_file_identity(opened_entry)
             ):
@@ -330,7 +375,7 @@ def pinned_windows_update_package(
                 if _source_parent_identity(path) != parent_identity:
                     raise WindowsUpdateSnapshotError("package ancestor changed during copy")
                 if (
-                    not stat.S_ISREG(source_after.st_mode)
+                    not stat.S_ISREG(source_after.st_mode) or _is_redirected_file(source_after)
                     or _require_file_identity(source_after) != before_identity
                     or (source_after.st_size, source_after.st_mtime_ns, source_after.st_ctime_ns)
                     != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
@@ -359,6 +404,7 @@ def pinned_windows_update_package(
                         pinned_stat.st_size, pinned_stat.st_mtime_ns, pinned_stat.st_ctime_ns
                     ),
                     _change_time_100ns=pinned_change_time,
+                    _parent_identity=_source_parent_identity(destination),
                 )
                 snapshot.recheck()
                 yield snapshot
@@ -375,17 +421,43 @@ def _require_bounded_zip_members(path: Path) -> None:
     # central-directory resource claims first; the canonical verifier still
     # validates headers, CRCs, manifests, paths and all actual member bytes.
     try:
+        # The caller normally owns a private pinned snapshot, but this
+        # resource guard can also be invoked directly. A renamed parent
+        # replaced by a symlink to the original directory leaves the ZIP
+        # inode and all leaf metadata unchanged. Bind the full ancestor chain
+        # across the EOCD and central-directory parse, not only the leaf.
+        parent_identity = _source_parent_identity(path)
+        # A direct caller may supply a symlinked ZIP leaf even though the
+        # normal snapshot path is private. Reject it before opening any bytes;
+        # the post-parse check alone is too late to prevent a redirected read.
+        entry_before = path.lstat()
+        if not stat.S_ISREG(entry_before.st_mode) or _is_redirected_file(entry_before):
+            raise WindowsUpdateSnapshotError("redirected or nonregular update archive")
+        entry_identity = _require_file_identity(entry_before)
         # ZipFile eagerly loads the central directory, so bound its size and
         # advertised entry count *before* constructing ZipFile. The canonical
         # release format has one comment-free, single-disk, non-ZIP64 EOCD.
         with path.open("rb") as raw:
+            if _source_parent_identity(path) != parent_identity:
+                raise WindowsUpdateSnapshotError("update archive ancestor changed during open")
             # Hold one descriptor across EOCD validation and ZipFile parsing.
             # Reopening by path here would let a replacement archive bypass
             # the resource limits checked on the original EOCD.
             initial = os.fstat(raw.fileno())
             initial_change = _native_change_time_100ns(raw.fileno())
-            if not stat.S_ISREG(initial.st_mode):
-                raise WindowsUpdateSnapshotError("update archive is not a regular file")
+            entry_opened = path.lstat()
+            if (
+                not stat.S_ISREG(initial.st_mode)
+                or not stat.S_ISREG(entry_opened.st_mode)
+                or _is_redirected_file(entry_opened)
+                or _require_file_identity(initial) != entry_identity
+                or _require_file_identity(entry_opened) != entry_identity
+                or (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns)
+                != (entry_before.st_size, entry_before.st_mtime_ns, entry_before.st_ctime_ns)
+                or (entry_opened.st_size, entry_opened.st_mtime_ns, entry_opened.st_ctime_ns)
+                != (entry_before.st_size, entry_before.st_mtime_ns, entry_before.st_ctime_ns)
+            ):
+                raise WindowsUpdateSnapshotError("update archive identity changed during open")
             raw.seek(0, os.SEEK_END)
             length = raw.tell()
             if length < _ZIP_EOCD.size:
@@ -435,9 +507,11 @@ def _require_bounded_zip_members(path: Path) -> None:
                         raise WindowsUpdateSnapshotError("update archive compression ratio exceeds bound")
             completed = os.fstat(raw.fileno())
             completed_change = _native_change_time_100ns(raw.fileno())
+            if _source_parent_identity(path) != parent_identity:
+                raise WindowsUpdateSnapshotError("update archive ancestor changed during parse")
             current_entry = path.lstat()
             if (
-                not stat.S_ISREG(current_entry.st_mode)
+                not stat.S_ISREG(current_entry.st_mode) or _is_redirected_file(current_entry)
                 or _require_file_identity(initial) != _require_file_identity(completed)
                 or _require_file_identity(initial) != _require_file_identity(current_entry)
                 or initial_change != completed_change
@@ -489,9 +563,16 @@ def _verified_embedded_update_identity(snapshot: WindowsUpdateSnapshot, *, expec
             raise WindowsUpdateSnapshotError("invalid pinned update snapshot")
         snapshot.recheck()
         path = snapshot.path
+        # The inode alone is insufficient: a renamed private directory can be
+        # replaced with a symlink to the *same* inode while BUILD_INFO is read.
+        # Bind the original ancestor chain before and throughout this read.
+        if _source_parent_identity(path) != snapshot._parent_identity:
+            raise WindowsUpdateSnapshotError("embedded update ancestor changed before read")
         flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
         fd = os.open(path, flags)
         with _owned_fd_stream(fd) as stream:
+            if _source_parent_identity(path) != snapshot._parent_identity:
+                raise WindowsUpdateSnapshotError("embedded update ancestor changed during open")
             before = os.fstat(stream.fileno())
             before_change = _native_change_time_100ns(stream.fileno())
             if (
@@ -509,9 +590,11 @@ def _verified_embedded_update_identity(snapshot: WindowsUpdateSnapshot, *, expec
                 raw = archive.read(member)
             after = os.fstat(stream.fileno())
             after_change = _native_change_time_100ns(stream.fileno())
+            if _source_parent_identity(path) != snapshot._parent_identity:
+                raise WindowsUpdateSnapshotError("embedded update ancestor changed during read")
             entry = path.lstat()
             if (
-                not stat.S_ISREG(entry.st_mode)
+                not stat.S_ISREG(entry.st_mode) or _is_redirected_file(entry)
                 or _require_file_identity(after) != snapshot._file_identity
                 or _require_file_identity(entry) != snapshot._file_identity
                 or after_change != snapshot._change_time_100ns
@@ -647,10 +730,15 @@ def verify_pinned_release_package(
         # Never chain verifier internals into a user-visible traceback.
         raise WindowsUpdateSnapshotError("canonical package verification failed") from None
     report = _require_non_authorizing_verifier_report(report)
+    # Freeze the *validated* receipt before any subsequent filesystem check or
+    # metadata-reader callback can mutate the verifier's original dictionary.
+    # This is a value copy: all retained fields have exact primitive types.
+    attested = {key: value for key, value in report.items()
+                if key not in ("update_version", "update_schema")}
     if (
-        report.get("status") != "PASS"
-        or report.get("package_sha256") != snapshot.sha256
-        or report.get("source_sha") != expected_source_sha
+        attested.get("status") != "PASS"
+        or attested.get("package_sha256") != snapshot.sha256
+        or attested.get("source_sha") != expected_source_sha
     ):
         raise WindowsUpdateSnapshotError("canonical verifier did not confirm pinned bytes")
     # Deep verification has already attested every BUILD_INFO byte through
@@ -661,7 +749,5 @@ def verify_pinned_release_package(
         snapshot, expected_source_sha=expected_source_sha,
     )
     snapshot.recheck()
-    attested = {key: value for key, value in report.items()
-                if key not in ("update_version", "update_schema")}
     attested.update(embedded)
     return attested

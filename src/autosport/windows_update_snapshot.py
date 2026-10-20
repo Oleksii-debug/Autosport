@@ -105,9 +105,85 @@ def _query_windows_change_time_100ns(fd: int) -> int:
             raise WindowsUpdateSnapshotError("Windows file change-time unavailable")
         if type(info.ChangeTime) is not int or info.ChangeTime <= 0:
             raise WindowsUpdateSnapshotError("Windows file change-time unavailable")
+        # The handle, not the pathname, is the authoritative reparse witness.
+        # CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT) can open the link object
+        # itself; it must never be accepted as an ordinary update archive.
+        if info.FileAttributes & 0x400:  # FILE_ATTRIBUTE_REPARSE_POINT
+            raise WindowsUpdateSnapshotError("Windows reparse update handle rejected")
         return info.ChangeTime
-    except (OSError, AttributeError, TypeError, ValueError) as exc:
+    except WindowsUpdateSnapshotError:
+        raise
+    except (OSError, AttributeError, TypeError, ValueError, RuntimeError, OverflowError):
+        # Native API wrappers can raise non-OSError failures as well.  Never
+        # leak an OS/CRT diagnostic containing a private path or accept an
+        # archive without its descriptor-bound change-time witness.
         raise WindowsUpdateSnapshotError("Windows file change-time unavailable") from None
+
+
+def _open_windows_archive_fd(path: str | Path) -> int:
+    """Open a ZIP leaf as a Windows *reparse object*, never its target.
+
+    Python's Windows ``os.open`` does not expose POSIX O_NOFOLLOW.  Use
+    CreateFileW(FILE_FLAG_OPEN_REPARSE_POINT) and transfer the native handle
+    to the CRT exactly once.  The subsequent descriptor-bound FileBasicInfo
+    check rejects reparse objects before ZIP parsing.  No fallback to a
+    path-following open is allowed if the native API is unavailable.
+    """
+    try:
+        import ctypes
+        import msvcrt
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create = kernel32.CreateFileW
+        create.argtypes = (
+            wintypes.LPCWSTR, wintypes.DWORD, wintypes.DWORD,
+            ctypes.c_void_p, wintypes.DWORD, wintypes.DWORD, wintypes.HANDLE,
+        )
+        create.restype = wintypes.HANDLE
+        close = kernel32.CloseHandle
+        close.argtypes = (wintypes.HANDLE,)
+        close.restype = wintypes.BOOL
+        handle = create(
+            str(path), 0x80000000, 0x7, None, 3,
+            0x00200000, None,  # FILE_FLAG_OPEN_REPARSE_POINT
+        )
+        if handle in (None, 0, ctypes.c_void_p(-1).value):
+            raise WindowsUpdateSnapshotError("Windows update handle unavailable")
+        try:
+            fd = msvcrt.open_osfhandle(handle, os.O_RDONLY | getattr(os, "O_BINARY", 0))
+            if type(fd) is not int or fd < 0:
+                raise OSError("CRT handle adoption failed")
+        except BaseException as exc:
+            # Adoption did not complete: the native HANDLE remains ours even
+            # on KeyboardInterrupt/SystemExit.  Release it before propagating
+            # process cancellation; never turn cancellation into an update
+            # rejection that a caller could silently retry.
+            try:
+                close(handle)
+            except (OSError, ValueError, TypeError):
+                pass
+            if not isinstance(exc, Exception):
+                raise
+            raise WindowsUpdateSnapshotError("Windows update handle unavailable") from None
+        return fd
+    except WindowsUpdateSnapshotError:
+        raise
+    except (ImportError, OSError, AttributeError, ValueError, TypeError, RuntimeError):
+        raise WindowsUpdateSnapshotError("Windows update handle unavailable") from None
+
+
+def _open_archive_fd(path: Path, *, _platform: str | None = None) -> int:
+    """Single ZIP leaf opener; Windows must never use path-following CRT open.
+
+    The private platform override exists solely for portable dispatch tests.
+    Production calls omit it and always use the actual runtime platform.
+    """
+    platform = os.name if _platform is None else _platform
+    if platform == "nt":
+        return _open_windows_archive_fd(path)
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    return os.open(path, flags)
 
 
 @contextmanager
@@ -203,8 +279,9 @@ class WindowsUpdateSnapshot:
                 raise WindowsUpdateSnapshotError("pinned package file identity changed")
             if (entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns) != self._file_metadata:
                 raise WindowsUpdateSnapshotError("pinned package changed after verification")
-            flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-            fd = os.open(self.path, flags)
+            # Use the same no-follow leaf opener as ZIP preflight. Windows
+            # CRT os.open cannot prevent a reparse-point swap after lstat.
+            fd = _open_archive_fd(self.path)
             with _owned_fd_stream(fd) as stream:
                 opened = os.fstat(stream.fileno())
                 opened_change_time = _native_change_time_100ns(stream.fileno())
@@ -328,8 +405,9 @@ def pinned_windows_update_package(
             raise WindowsUpdateSnapshotError("symlink package source forbidden")
         if not stat.S_ISREG(source_entry.st_mode):
             raise WindowsUpdateSnapshotError("source is not a regular package")
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
+        # Source pinning and embedded metadata both cross a trust boundary.
+        # Never reopen a Windows ZIP via path-following CRT os.open.
+        fd = _open_archive_fd(path)
     except WindowsUpdateSnapshotError:
         raise
     except (OSError, UnicodeError):
@@ -437,7 +515,13 @@ def _require_bounded_zip_members(path: Path) -> None:
         # ZipFile eagerly loads the central directory, so bound its size and
         # advertised entry count *before* constructing ZipFile. The canonical
         # release format has one comment-free, single-disk, non-ZIP64 EOCD.
-        with path.open("rb") as raw:
+        # Open the leaf without following a symlink on platforms exposing
+        # O_NOFOLLOW.  A path.open() after lstat can follow a replacement link
+        # even when a subsequent inode check correctly rejects the receipt:
+        # the untrusted target was already opened.  Keep one owned descriptor
+        # for both the EOCD bound and ZipFile's central-directory parser.
+        fd = _open_archive_fd(path)
+        with _owned_fd_stream(fd) as raw:
             if _source_parent_identity(path) != parent_identity:
                 raise WindowsUpdateSnapshotError("update archive ancestor changed during open")
             # Hold one descriptor across EOCD validation and ZipFile parsing.
@@ -448,6 +532,7 @@ def _require_bounded_zip_members(path: Path) -> None:
             entry_opened = path.lstat()
             if (
                 not stat.S_ISREG(initial.st_mode)
+                or _is_redirected_file(initial)
                 or not stat.S_ISREG(entry_opened.st_mode)
                 or _is_redirected_file(entry_opened)
                 or _require_file_identity(initial) != entry_identity
@@ -512,6 +597,7 @@ def _require_bounded_zip_members(path: Path) -> None:
             current_entry = path.lstat()
             if (
                 not stat.S_ISREG(current_entry.st_mode) or _is_redirected_file(current_entry)
+                or _is_redirected_file(completed)
                 or _require_file_identity(initial) != _require_file_identity(completed)
                 or _require_file_identity(initial) != _require_file_identity(current_entry)
                 or initial_change != completed_change
@@ -568,8 +654,9 @@ def _verified_embedded_update_identity(snapshot: WindowsUpdateSnapshot, *, expec
         # Bind the original ancestor chain before and throughout this read.
         if _source_parent_identity(path) != snapshot._parent_identity:
             raise WindowsUpdateSnapshotError("embedded update ancestor changed before read")
-        flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
-        fd = os.open(path, flags)
+        # Source pinning and embedded metadata both cross a trust boundary.
+        # Never reopen a Windows ZIP via path-following CRT os.open.
+        fd = _open_archive_fd(path)
         with _owned_fd_stream(fd) as stream:
             if _source_parent_identity(path) != snapshot._parent_identity:
                 raise WindowsUpdateSnapshotError("embedded update ancestor changed during open")

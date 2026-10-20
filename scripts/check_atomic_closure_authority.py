@@ -113,16 +113,93 @@ def _mask_fenced_code(text: str) -> str:
                 fence_length = 0
             masked.append(re.sub(r"[^\r\n]", " ", line))
     fenced = "".join(masked)
-    # HTML comments are not rendered Markdown authority. Mask their contents
-    # without shifting heading/table offsets, including unterminated comments.
-    # Fenced blocks were masked first so comment markers inside code examples
-    # cannot hide later legitimate status rows.
-    return re.sub(
-        r"<!--.*?(?:-->|\Z)",
-        lambda match: re.sub(r"[^\r\n]", " ", match.group()),
-        fenced,
-        flags=re.DOTALL,
-    )
+    # HTML comments are invisible, but their delimiters inside a quoted HTML
+    # attribute, escaped Markdown punctuation or a backtick code span are
+    # literal data. A regex can mask real authority rows after such a marker.
+    # Scan in one pass, retaining every source offset and line break.
+    source = fenced
+    masked_chars = list(source)
+    size = len(source)
+    # Pre-index backtick runs so thousands of unmatched inline-code markers
+    # cannot trigger quadratic forward scans in an untrusted 2 MB document.
+    runs: list[tuple[int, int]] = []
+    tick = source.find("`")
+    while tick >= 0:
+        end = tick + 1
+        while end < size and source[end] == "`":
+            end += 1
+        runs.append((tick, end))
+        if len(runs) > 65536:
+            raise AuthorityError("too many inline-code delimiters in authority")
+        tick = source.find("`", end)
+    next_run: dict[int, int] = {}
+    next_by_length: dict[int, int] = {}
+    for start, end in reversed(runs):
+        length = end - start
+        if length in next_by_length:
+            next_run[start] = next_by_length[length]
+        next_by_length[length] = end
+    i = 0
+    while i < size:
+        char = source[i]
+        if char == "`":
+            run_end = i + 1
+            while run_end < size and source[run_end] == "`":
+                run_end += 1
+            # A CommonMark code span exists only with an exact closing run.
+            # Never interpret HTML comment syntax inside that span.
+            i = next_run.get(i, run_end)
+            continue
+        if char != "<":
+            i += 1
+            continue
+        # Backslash-escaped angle brackets are displayed literally by
+        # Markdown and cannot start an invisible HTML comment.
+        backslashes = 0
+        j = i - 1
+        while j >= 0 and source[j] == "\\":
+            backslashes += 1
+            j -= 1
+        if backslashes % 2:
+            i += 1
+            continue
+        if source.startswith("<!--", i):
+            close = source.find("-->", i + 4)
+            end = size if close < 0 else close + 3
+            for j in range(i, end):
+                if source[j] not in "\r\n":
+                    masked_chars[j] = " "
+            i = end
+            continue
+        # A valid HTML tag may contain <!-- or --> in quoted attributes.
+        # Do not interpret these as a comment delimiter. If the tag is
+        # unclosed, leave the source unchanged: it cannot authorize a
+        # canonical status row and downstream parsing remains fail-closed.
+        if i + 1 < size and (source[i + 1].isalpha() or source[i + 1] in "/!?"):
+            quote = None
+            cursor = i + 1
+            tag_limit = min(size, i + 8192)
+            while cursor < tag_limit:
+                current = source[cursor]
+                if quote is not None:
+                    if current == quote:
+                        quote = None
+                elif current in "\"'":
+                    quote = current
+                elif current == ">":
+                    break
+                cursor += 1
+            if cursor >= tag_limit and cursor < size:
+                raise AuthorityError("unbounded HTML tag in authority")
+            if cursor < size:
+                i = cursor + 1
+                continue
+            if "<!--" in source[i:cursor]:
+                # An unterminated tag containing a comment opener has
+                # renderer-dependent semantics. Never let it hide rows.
+                raise AuthorityError("ambiguous HTML comment in authority")
+        i += 1
+    return "".join(masked_chars)
 
 
 def _split_table_cells(line: str) -> list[str]:
@@ -267,7 +344,7 @@ _ATOMIC_KEY_CONFUSABLES = str.maketrans({
 })
 
 
-def _project_inline_link_labels(value: str) -> str:
+def _project_inline_link_labels(value: str, *, preserve_unlinked_brackets: bool = False) -> str:
     """Project Markdown inline-link labels without trusting destinations.
 
     Markdown allows nested parentheses and escaped delimiters in destinations.
@@ -300,7 +377,7 @@ def _project_inline_link_labels(value: str) -> str:
         if close >= len(value):
             # A shortcut reference link may be defined elsewhere in the
             # document. Project its label for negative detection only.
-            result.append(value[pos + 1:close - 1])
+            result.append(value[pos:close] if preserve_unlinked_brackets else value[pos + 1:close - 1])
             pos = close
             continue
         label = value[pos + 1:close - 1]
@@ -311,7 +388,7 @@ def _project_inline_link_labels(value: str) -> str:
         if value[close] != "(":
             # Could be a shortcut reference link. Never let brackets mask
             # an alias or a visible negative terminal status.
-            result.append(label)
+            result.append(value[pos:close] if preserve_unlinked_brackets else label)
             pos = close
             continue
         cursor = close + 1
@@ -435,6 +512,17 @@ class _RenderedHtmlText(HTMLParser):
         self.parts.append(data)
 
     def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        raw = self.get_starttag_text()
+        # CommonMark angle autolinks are *visible* link text, not HTML
+        # elements. HTMLParser otherwise discards <https://.../NOT-DONE>
+        # as a fictitious tag and may certify a contradictory DONE cell.
+        # A real HTML tag with attributes cannot match this bounded form.
+        if raw and re.fullmatch(
+            r"<(?:[A-Za-z][A-Za-z0-9+.-]*:[^\s<>]+|[^\s<>@]+@[^\s<>@]+)>",
+            raw,
+        ):
+            self.parts.append(raw[1:-1])
+            return
         if tag in self._BREAK_TAGS:
             self.parts.append(" ")
 
@@ -512,6 +600,57 @@ def _atomic_statuses(section: str) -> dict[str, list[str]]:
     return result
 
 
+
+# GitHub check conclusions are machine enums. A mixed-script word visually
+# resembling an unsuccessful enum is ambiguous negative evidence, never proof
+# that an earlier DONE was accepted. Only the result token is inspected; a
+# Ukrainian narrative or an explicitly historical check remains valid.
+_UNSUCCESSFUL_GATE_ENUMS = frozenset({
+    "FAILED", "FAILURE", "FAILING", "FAIL", "UNSUCCESSFUL", "PENDING",
+    "SKIPPED", "CANCELLED", "CANCELED", "UNKNOWN", "ERROR", "STALE",
+    "NEUTRAL", "BLOCKED", "QUEUED", "WAITING", "REQUESTED", "SCHEDULED",
+    "COMPLETED", "RETRYING", "INCOMPLETE", "INDETERMINATE", "INVALID",
+    "TIMEOUT", "UNAVAILABLE", "REJECTED", "UNVERIFIED",
+})
+
+
+def _spoofed_unsuccessful_enum(word: str) -> bool:
+    """Recognize mixed-script near-matches without granting positive authority."""
+    word = unicodedata.normalize("NFKC", word).upper()
+    if not (any("A" <= c <= "Z" for c in word)
+            and any(ord(c) > 127 and c.isalpha() for c in word)):
+        return False
+    return any(
+        len(word) == len(candidate) and all(
+            (letter == expected if letter.isascii() else letter.isalpha())
+            for letter, expected in zip(word, candidate)
+        )
+        for candidate in _UNSUCCESSFUL_GATE_ENUMS
+    )
+
+
+def _has_spoofed_failed_gate(value: str) -> bool:
+    """Reject a forged check conclusion, retaining historical exemptions."""
+    for clause in re.split(r"[;→•◆]", value):
+        # Matrix selectors can contain a colon; the *last* colon/equal sign
+        # introduces the result. A check label is never an acceptance token.
+        separator = max(clause.rfind(":"), clause.rfind("="))
+        if separator < 0:
+            continue
+        label = clause[:separator].strip()
+        result = clause[separator + 1:].strip()
+        result = re.sub(r"^(?:conclusion|result)\s*[:=]?\s*", "", result,
+                        flags=re.IGNORECASE)
+        token = re.match(r"([\w-]{3,48})(?=$|[\s,;.!?—–/()])", result)
+        if not token or not _spoofed_unsuccessful_enum(token.group(1)):
+            continue
+        if re.search(r"\b(?:previous|historical|formerly|раніше|попередн\w*)\b",
+                     label, re.IGNORECASE):
+            continue
+        return True
+    return False
+
+
 def _is_terminal_done(value: str) -> bool:
     # A description containing the word DONE is not an acceptance record.
     literal = re.sub(r"^(?:Статус(?: міграції)?\s*:\s*)", "", value).strip()
@@ -536,6 +675,17 @@ def _is_terminal_done(value: str) -> bool:
     # HTML comments do not produce text nodes. Inline tags also have no
     # implicit separator; N<span>OT</span> renders as NOT, not N OT.
     rendered = _project_html_text(rendered)
+    # A status cell with dozens of nested/adjacent bracket qualifiers is
+    # ambiguous authority. Bound the check-name grammar and its backtracking
+    # before parsing; never turn a pathological input into a terminal DONE.
+    # Ordinary matrix jobs use a handful of qualifiers. This is a rejection
+    # guard only and does not grant any new positive closure authority.
+    if rendered.count("[") + rendered.count("(") > 64:
+        return False
+    # Keep non-link bracketed matrix selectors in a second projection.
+    # The primary projection still joins split Markdown labels so negative
+    # states such as N[OT] DONE cannot hide behind source punctuation.
+    matrix_rendered = _project_inline_link_labels(rendered, preserve_unlinked_brackets=True)
     # Preserve Markdown link *labels* and discard hidden destinations. The
     # destination may contain historical NOT-DONE anchors without displaying
     # a negative status; split labels may render as contiguous NOT DONE.
@@ -547,6 +697,8 @@ def _is_terminal_done(value: str) -> bool:
     # intentionally erases punctuation; neither is suitable for labels.
     status_projection = unicodedata.normalize("NFKC", rendered)
     status_projection = re.sub(r"\\([_])", r"\1", status_projection).replace("_", " ")
+    matrix_status_projection = unicodedata.normalize("NFKC", matrix_rendered)
+    matrix_status_projection = re.sub(r"\\([_])", r"\1", matrix_status_projection).replace("_", " ")
     negative_check = "".join(
         char for char in unicodedata.normalize("NFKD", rendered)
         if not unicodedata.category(char).startswith("M")
@@ -674,11 +826,201 @@ def _is_terminal_done(value: str) -> bool:
         status_projection,
         re.IGNORECASE,
     )
+    # A completed-action verb followed immediately by a nonterminal
+    # qualifier is a contradiction even without punctuation or "and".
+    # "DONE — merged not verified" otherwise bypasses the separator-based
+    # guard.  Keep this scoped to an adjacent completion claim so historical
+    # notes ("previous FAILED CI repaired") remain valid.
+    adjacent_negative = re.search(
+        r"\b(?:MERGED|INTEGRATED|ІНТЕГРОВАНО|ПРИЙНЯТО|ЗЛИТО)\s+(?:"
+        r"NOT\s+(?:VERIFIED|ACCEPTED|MERGED|IMPLEMENTED|READY|DONE)|"
+        r"UNVERIFIED|PENDING\s+(?:REVIEW|MERGE|TESTS)|"
+        r"AWAITING\s+(?:REVIEW|MERGE|TESTS)|"
+        r"NEEDS\s+(?:REVIEW|TESTS|EVIDENCE)|"
+        r"НЕ\s+(?:ПЕРЕВІРЕНО|ПІДТВЕРДЖЕНО|ЗАВЕРШЕНО|ПРИЙНЯТО|ВИКОНАНО)|"
+        r"ОЧІКУЄ\s+(?:ПЕРЕВІРКИ|ЗЛИТТЯ|ПРИЙНЯТТЯ))\b",
+        status_projection,
+        re.IGNORECASE,
+    )
+    # A successful CI/Windows Candidate check does not override a failed
+    # independent gate. Keep this named vocabulary aligned with actual
+    # hosted/local acceptance checks (Endurance, UIA, packaging, recovery,
+    # install/update/restart and smoke/E2E). These strings are rejection-only;
+    # they cannot turn an otherwise incomplete Section into DONE.
+    gate_name = (
+        r"(?:(?:WINDOWS\s+)?(?:CI|CANDIDATE|BUILD|ENDURANCE|PACKAGING|"
+        r"SMOKE|E2E|UIA|RECOVERY|INSTALL|UPDATE|RESTART)|"
+        # Other independent product-acceptance gates must not be masked by
+        # an earlier CI success. Keep these rejection-only: a PASS here
+        # cannot itself establish Section completion.
+        r"SECURITY|ACCESSIBILITY|INTEGRITY|RELEASE|MIGRATIONS?|BACKUP|"
+        r"RESTORE|LICENSE|SBOM|DEPENDENC(?:Y|IES)|SAST|SUPPLY\s+CHAIN|"
+        r"TESTS?|ТЕСТИ|ПЕРЕВІРКИ)"
+    )
+    # GitHub check-run *status* is not a successful *conclusion*.  For
+    # example COMPLETED without a SUCCESS conclusion, or REQUESTED/WAITING,
+    # cannot qualify a section. Normalize common hyphen/underscore variants
+    # for rejection only; they never become positive acceptance evidence.
+    state_join = r"[\s_-]+"
+    gate_bad_result = (
+        r"(?:FAILED|FAILURE|FAILING|FAIL|UNSUCCESSFUL|PENDING|SKIPPED|"
+        r"CANCELLED|CANCELED|UNKNOWN|ERROR|STALE|NEUTRAL|BLOCKED|QUEUED|"
+        r"WAITING|REQUESTED|SCHEDULED|COMPLETED|RETRYING|INCOMPLETE|"
+        r"INDETERMINATE|INVALID|TIMEOUT|UNAVAILABLE|"
+        + rf"NOT{state_join}(?:RUN|STARTED|APPLICABLE)|"
+        + rf"REQUIRES{state_join}ACTION|TIMED{state_join}OUT|"
+        + rf"ACTION{state_join}REQUIRED|STARTUP{state_join}FAILURE|"
+        + rf"IN{state_join}PROGRESS|NEEDS{state_join}APPROVAL|"
+        + rf"AWAITING{state_join}APPROVAL|"
+        + r"ПРОВАЛЕНО|НЕ\s+ПРОЙДЕНО|ОЧІКУЮТЬ)"
+    )
+    # Adjacent contradiction: DONE — merged; Endurance: FAILED.
+    adjacent_check_failure = re.search(
+        r"\b(?:MERGED|INTEGRATED|ІНТЕГРОВАНО|ПРИЙНЯТО|ЗЛИТО)\b"
+        r"\s*(?:(?:[,;:—–/]|\bBUT\b|\bАЛЕ\b)\s*)?"
+        + gate_name + r"[\s:=—–]+" + gate_bad_result + r"\b",
+        status_projection,
+        re.IGNORECASE,
+    )
+    # Later contradiction: DONE — merged; CI: SUCCESS; Endurance: FAILED.
+    # The boundary excludes historical narrative like "previous Endurance:
+    # FAILED, repaired" when it is not a new explicit gate clause.
+    later_gate_failure = re.search(
+        # A GFM/HTML status can separate gate clauses with any visible
+        # punctuation or symbol (bullet, middle dot, ampersand, arrow),
+        # not just ASCII sentence punctuation. Match a named gate and a
+        # non-success conclusion only; historical prose remains excluded.
+        r"(?:[^\w\s]|\b(?:BUT|AND|АЛЕ|ТА)\b)\s*"
+        + gate_name + r"[\s:=—–]+" + gate_bad_result + r"\b",
+        status_projection,
+        re.IGNORECASE,
+    )
+    # Rendered HTML breaks and plain whitespace can separate consecutive
+    # independent gate results without punctuation.  A successful check
+    # cannot mask a following failed check merely because the separator was
+    # a space or <br>.  This is rejection-only, never positive evidence.
+    unseparated_followup_failure = re.search(
+        gate_name + r"[\s:=—–]+(?:SUCCESS|PASSED|PASS|ПРОЙДЕНО)\s+"
+        + gate_name + r"[\s:=—–]+" + gate_bad_result + r"\b",
+        status_projection,
+        re.IGNORECASE,
+    )
+    # Do not let a closed vocabulary of gate names silently certify an
+    # unfamiliar GitHub check (e.g. CodeQL, Checks, an organization policy).
+    # A new explicit "Name: FAILED" clause is independent negative evidence
+    # regardless of the name. Historical clauses explicitly marked previous
+    # or historical are not current gate conclusions. This remains a
+    # rejection-only check: no named PASS can establish terminal DONE.
+    any_bad_result = (
+        gate_bad_result[:-1] +
+        r"|CHANGES\s+REQUESTED|REJECTED|UNVERIFIED|NOT\s+VERIFIED)"
+    )
+    # GitHub Actions matrix job display names are not plain words: they may
+    # contain parenthesized OS/Python parameters, commas, dots and bracketed
+    # matrix selectors (e.g. "test (windows-latest, 3.12): FAILURE").  These
+    # characters belong to the check name, not to a narrative exemption.
+    # Keep a bounded name length and require an explicit colon/equal sign;
+    # positive DONE still requires independent authoritative evidence.
+    # Do not admit sentence punctuation into the *outer* label: doing so
+    # would consume "merged. previous CI" as one current check and falsely
+    # reject a repaired historical failure. Matrix punctuation is allowed
+    # only within a single bounded parenthesized/bracketed suffix.
+    check_label = (r"[\w][\w /-]{0,60}?"
+                   # GitHub Actions and third-party checks may append multiple
+                   # matrix/required/policy qualifiers. A fixed suffix count
+                   # makes a third qualifier hide a current FAILED check and
+                   # incorrectly certifies DONE. Each group is length-bounded;
+                   # the status-cell qualifier census above rejects >64.
+                   r"(?:\s*(?:\([^()\r\n]{1,70}\)|\[[^\[\]\r\n]{1,70}\])){0,64}"
+                   # The matrix projection retains unlinked [required] suffixes;
+                   # admit one bounded plain-text trailing qualifier too.
+                   r"(?:\s+[\w-]{1,40})?")
+    generic_failed_clause = re.compile(
+        r"(?:[;,.!?—–/•·&+→◆]|\b(?:AND|BUT|ТА|АЛЕ)\b)\s*"
+        + r"(?P<label>" + check_label + r")\s*(?::|=|→)\s*"
+        + any_bad_result + r"\b",
+        re.IGNORECASE,
+    )
+    generic_failed_followup = re.compile(
+        r"\b(?:SUCCESS|PASSED|PASS|ПРОЙДЕНО)\s+"
+        + r"(?P<label>" + check_label + r")\s*(?::|=|→)\s*"
+        + any_bad_result + r"\b",
+        re.IGNORECASE,
+    )
+    # A GitHub check display name is not limited to alphanumeric tokens:
+    # names such as ``node@20``, ``build #2`` and ``checks::linux`` are
+    # legitimate. The structured matcher above handles nested matrix
+    # parameters; this bounded fallback catches arbitrary punctuation in
+    # an independently delimited check clause. Never let an unknown check
+    # name hide an explicit unsuccessful conclusion behind a prior PASS.
+    # Semicolons separate clauses; the label itself is limited to 160 chars
+    # and cannot consume a later clause. The historical exemption below
+    # still applies to explicitly previous/repaired check evidence.
+    # GitHub's check summaries can use "CodeQL — FAILURE" or
+    # "CodeQL: conclusion FAILURE" rather than "CodeQL: FAILURE".
+    # Require whitespace around dash/slash separators to distinguish them
+    # from ordinary punctuation inside a check's display name.  The label
+    # remains bounded and cannot consume a semicolon-delimited next check.
+    punctuated_failed_clause = re.compile(
+        r"[;→•◆]\s*"
+        + r"(?P<label>[^\r\n;=→]{1,160}?)\s*"
+        + r"(?::|=|→|\s+[—–/-]\s+)\s*"
+        + r"(?:(?:conclusion|result)\s*[:=]?\s*)?"
+        + any_bad_result + r"\b",
+        re.IGNORECASE,
+    )
+    # Some CI summaries omit punctuation between a check name and its
+    # conclusion ("CodeQL FAILURE"). Accept this as *negative* evidence
+    # only at a semicolon-delimited clause boundary. Never treat a bare
+    # successful result as positive authority. Historical qualifiers are
+    # handled by the same explicit-exemption logic below.
+    bare_failed_clause = re.compile(
+        r";\s*(?P<label>[^\r\n;]{1,160}?)\s+"
+        + any_bad_result + r"\b",
+        re.IGNORECASE,
+    )
+    def current_failure(match: re.Match[str]) -> bool:
+        label = match.group("label").strip().casefold()
+        # The punctuation fallback may span an earlier successful check
+        # and a later explicitly historical one within one semicolon clause.
+        # That historical failure is not a current failed conclusion.
+        if re.search(
+            r"\b(?:success|passed|pass|пройдено)\s+"
+            r"(?:and|but|та|але)\s+"
+            r"(?:previous|historical|formerly|раніше|історичн|попередн)",
+            label,
+        ):
+            return False
+        # The SUCCESS-followup matcher may consume an ordinary conjunction
+        # before an explicitly historical label ("and previous CodeQL").
+        # Strip it only when the following word is a historical qualifier;
+        # "and CodeQL: FAILURE" must still block terminal acceptance.
+        label = re.sub(
+            r"^(?:and|but|та|але)\s+(?=(?:previous|historical|formerly|раніше|історичн|попередн))",
+            "", label,
+        )
+        return not label.startswith((
+            "previous ", "historical ", "formerly ",
+            "раніше ", "історичн", "попередн",
+        ))
+    spoofed_failed_gate = _has_spoofed_failed_gate(status_projection)
+    unknown_failed_gate = (
+        any(current_failure(match) for match in generic_failed_clause.finditer(matrix_status_projection))
+        or any(current_failure(match) for match in generic_failed_followup.finditer(matrix_status_projection))
+        or any(current_failure(match) for match in punctuated_failed_clause.finditer(matrix_status_projection))
+        or any(current_failure(match) for match in bare_failed_clause.finditer(matrix_status_projection))
+    )
     return (bool(re.match(r"^DONE(?:\s*(?:—|$))", normalized))
             and bare_machine_state is None
             and bare_snake_state is None
             and bare_nonterminal_phrase is None
             and trailing_negative is None
+            and adjacent_negative is None
+            and adjacent_check_failure is None
+            and later_gate_failure is None
+            and unseparated_followup_failure is None
+            and not unknown_failed_gate
+            and not spoofed_failed_gate
             and contradictory_state is None
             and not secondary_nonterminal
             and not re.search(r"\bNOT\s*DONE\b", negative_check, re.IGNORECASE))

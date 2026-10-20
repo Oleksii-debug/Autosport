@@ -1003,6 +1003,72 @@ def _is_terminal_done(value: str) -> bool:
             "previous ", "historical ", "formerly ",
             "раніше ", "історичн", "попередн",
         ))
+    # A result-first CI summary is still an independent failed gate:
+    # "CI: SUCCESS; FAILURE (CodeQL)" and "FAILED: CodeQL" cannot become
+    # terminal DONE merely because the check name follows its conclusion.
+    # The leading semicolon/arrow/bullet is required so ordinary narrative
+    # or explicitly historical qualifiers do not become a new check result.
+    # This is a negative-only oracle: it never grants completion authority.
+    result_first_failed_gate = re.search(
+        r"(?:^|[;→•◆])\s*(?:FAILED|FAILURE|FAILING|FAIL|UNSUCCESSFUL|"
+        r"PENDING|SKIPPED|CANCELLED|CANCELED|UNKNOWN|ERROR|STALE|"
+        r"NEUTRAL|BLOCKED|QUEUED|WAITING|REQUESTED|SCHEDULED|"
+        r"COMPLETED|RETRYING|INCOMPLETE|INDETERMINATE|INVALID|"
+        r"TIMEOUT|UNAVAILABLE|REJECTED|UNVERIFIED|ACTION[\s_-]+REQUIRED|"
+        r"TIMED[\s_-]+OUT|STARTUP[\s_-]+FAILURE|NOT[\s_-]+RUN|NOT[\s_-]+STARTED)\b\s*"
+        r"(?:\([^()\r\n]{1,100}\)|\[[^\[\]\r\n]{1,100}\]|"
+        r"[:=]\s*[^\r\n;]{1,100}|[—–]\s*[^\r\n;]{1,100})",
+        matrix_status_projection,
+        re.IGNORECASE,
+    )
+    # Windows process failures can be reported as NTSTATUS hex exit codes
+    # (e.g. 0xC0000005), not only decimal.  Do not let a prior CI PASS
+    # authorize DONE when an independent check exits nonzero.  Check labels
+    # are intentionally open-ended: hosted workflows can add a new CodeQL,
+    # signing or organization-specific check without updating this vocabulary.
+    # Semicolons delimit independent check clauses. An overlong clause is
+    # ambiguous rather than a license to ignore an exit after 250 characters.
+    exit_clause = re.compile(
+        r"(?:^|;)\s*(?P<label>[^:;=\r\n]{1,160}?)\s*[:=]\s*"
+        r"(?P<detail>[^;\r\n]*)",
+        re.IGNORECASE,
+    )
+    process_exit = re.compile(
+        r"\b(?:exited\s+|exit\s+(?:code|status)\s*[:=]?\s*)"
+        r"(?P<code>[^\s,;()\[\]{}.!?]+)",
+        re.IGNORECASE,
+    )
+    historical_label = re.compile(
+        r"^(?:previous|historical|formerly|раніше|історичн\w*|попередн\w*)\b",
+        re.IGNORECASE,
+    )
+    historical_resolved_detail = re.compile(
+        r"^\s*(?:SUCCESS|PASSED|PASS)\s*\(\s*"
+        r"(?:previous|historical|formerly)\b[^)]*\b"
+        r"(?:fixed|repaired|resolved)\s*\)\s*$",
+        re.IGNORECASE,
+    )
+    def nonzero_or_ambiguous_exit(match: re.Match[str]) -> bool:
+        label, detail = match.group("label").strip(), match.group("detail")
+        if historical_label.match(label) or historical_resolved_detail.match(detail):
+            return False
+        # A malformed/oversized independent check report is not positive
+        # closure evidence. This also prevents tail-truncation bypasses.
+        if len(detail) > 4096:
+            return True
+        for exit_match in process_exit.finditer(detail):
+            token = exit_match.group("code")
+            # Consume the complete token: '0xC0000005' must never parse as 0.
+            # An unparseable exit token is ambiguous, so reject it as well.
+            if not re.fullmatch(r"[+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+)", token):
+                return True
+            if int(token, 16 if "0x" in token.lower() else 10) != 0:
+                return True
+        return False
+    failed_process_exit = any(
+        nonzero_or_ambiguous_exit(match)
+        for match in exit_clause.finditer(matrix_status_projection)
+    )
     spoofed_failed_gate = _has_spoofed_failed_gate(status_projection)
     unknown_failed_gate = (
         any(current_failure(match) for match in generic_failed_clause.finditer(matrix_status_projection))
@@ -1020,6 +1086,8 @@ def _is_terminal_done(value: str) -> bool:
             and later_gate_failure is None
             and unseparated_followup_failure is None
             and not unknown_failed_gate
+            and result_first_failed_gate is None
+            and not failed_process_exit
             and not spoofed_failed_gate
             and contradictory_state is None
             and not secondary_nonterminal

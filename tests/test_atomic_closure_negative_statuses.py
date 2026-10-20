@@ -1195,3 +1195,100 @@ def test_r103_matrix_conclusion_and_history_do_not_hide_current_spoof(status):
 ])
 def test_r103_non_gate_unicode_or_historical_note_stays_valid(status):
     assert module._is_terminal_done(status)
+
+# r109: result-first check summaries are common in CI aggregators. A green
+# CI result cannot certify DONE when a later independent check is reported
+# as "FAILURE (CodeQL)" rather than "CodeQL: FAILURE".
+@pytest.mark.parametrize('gate', [
+    'FAILURE (CodeQL)',
+    'FAILED [CodeQL]',
+    'SKIPPED (Windows Candidate)',
+    'PENDING (UIA)',
+    'ERROR (Security Audit)',
+    'CANCELLED (Endurance)',
+    'ACTION_REQUIRED (CodeQL)',
+    'TIMED_OUT (Windows Candidate)',
+    'FAILED: CodeQL',
+    'FAILED — CodeQL',
+])
+def test_r109_result_first_failed_check_blocks_done(gate):
+    assert not module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + gate)
+
+
+def test_r109_result_first_failed_check_blocks_resolved_parent_done(tmp_path):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = (ATOMIC
+        .replace('| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+                 '| 2А | WebView2 | DONE — merged; CI: SUCCESS; FAILURE (CodeQL) |')
+        .replace('| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+                 '| 2Б | Navigation | DONE — merged |')
+        .replace('| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+                 '| 2В | Native STOP | DONE — merged |'))
+    rejected(tmp_path, registry, atomic)
+
+
+def test_r109_success_result_first_stays_terminal():
+    assert module._is_terminal_done('DONE — merged; CI: SUCCESS; SUCCESS (CodeQL)')
+
+# r110: live Windows Candidate log at PR #1598 / 74d29aef includes
+# "Packaged Autosport.exe accessibility audit exited 1". A machine gate's
+# nonzero process exit is a failed result even without the word FAILURE.
+@pytest.mark.parametrize('summary', [
+    'Windows Candidate: packaged Autosport.exe accessibility audit exited 1',
+    'Windows Candidate: audit exit status 137',
+    'UIA: probe returned exit code -1',
+    'Windows Candidate: accessibility audit exited 2',
+    'Windows Candidate: SUCCESS (previous run exited 1, fixed) but current audit exited 2',
+    'UIA: exit code 1 (semantic control unavailable)',
+])
+def test_r110_nonzero_named_gate_exit_blocks_done(summary):
+    assert not module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+
+@pytest.mark.parametrize('summary', [
+    'Windows Candidate: accessibility audit exited 0',
+    'previous Windows Candidate: audit exited 1, repaired',
+    'Windows Candidate: SUCCESS (previous run exited 1, fixed)',
+])
+def test_r110_zero_or_explicitly_historical_exit_not_false_failure(summary):
+    assert module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+# r111: Windows native process failures frequently surface as hexadecimal
+# NTSTATUS (e.g. access violation 0xC0000005).  The earlier decimal-only
+# gate matcher silently accepted those failed Windows checks as DONE.
+@pytest.mark.parametrize('summary', [
+    'Windows Candidate: packaged accessibility audit exited 0xC0000005',
+    'Windows Candidate: accessibility audit exit code 0x1',
+    'UIA: process exit status 0x00000001',
+    'Windows Candidate: packaged audit exited -0x1',
+    'CodeQL: analyzer exited 1',
+    'Organization Policy: custom gate exited 0x2',
+    'Windows Candidate: ' + ('diagnostic ' * 30) + ' audit exited 1',
+    'Windows Candidate: audit exit code 0xBADCODE',
+])
+def test_r111_nonzero_hex_unknown_gate_or_long_detail_blocks_done(summary):
+    assert not module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+@pytest.mark.parametrize('summary', [
+    'Windows Candidate: packaged audit exited 0x0',
+    'Windows Candidate: packaged audit exit code 0x00000000',
+    'CodeQL: analyzer exited 0',
+    'Windows Candidate: packaged audit exited 0.',
+    'Windows Candidate: packaged audit exit code 0x00000000.',
+    'previous Windows Candidate: audit exited 0xC0000005, repaired',
+    'Windows Candidate: SUCCESS (previous run exited 0xC0000005, fixed)',
+])
+def test_r111_zero_or_explicitly_historical_exit_remains_nonblocking(summary):
+    assert module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+
+def test_r111_windows_hex_failure_blocks_parent_section_done(tmp_path):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = (ATOMIC
+        .replace('| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+                 '| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: audit exited 0xC0000005 |')
+        .replace('| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+                 '| 2Б | Navigation | DONE — merged |')
+        .replace('| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+                 '| 2В | Native STOP | DONE — merged |'))
+    rejected(tmp_path, registry, atomic)

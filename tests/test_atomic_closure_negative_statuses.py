@@ -1292,3 +1292,44 @@ def test_r111_windows_hex_failure_blocks_parent_section_done(tmp_path):
         .replace('| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
                  '| 2В | Native STOP | DONE — merged |'))
     rejected(tmp_path, registry, atomic)
+
+# r113: PowerShell and Windows process wrappers commonly emit ExitCode,
+# ERRORLEVEL or return code instead of the phrase "exited N". A failed
+# packaged UIA/Windows gate must not be promoted to terminal DONE.
+@pytest.mark.parametrize('summary', [
+    'Windows Candidate: packaged UIA audit ExitCode: 1',
+    'Windows Candidate: accessibility audit exitCode=0xC0000005',
+    'Windows Candidate: accessibility audit exit-code: 2',
+    'Windows Candidate: accessibility audit return code 1',
+    'Windows Candidate: accessibility audit return code: 0x1',
+    'Windows Candidate: accessibility audit ERRORLEVEL 1',
+    'Windows Candidate: accessibility audit ERRORLEVEL=0xC0000005',
+    'Windows Candidate: accessibility audit rc=1',
+    'CodeQL: analyzer exitCode: 3',
+])
+def test_r113_nonzero_windows_process_aliases_block_done(summary):
+    assert not module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+
+@pytest.mark.parametrize('summary', [
+    'Windows Candidate: accessibility audit ExitCode: 0',
+    'Windows Candidate: accessibility audit return code 0',
+    'Windows Candidate: accessibility audit ERRORLEVEL 0',
+    'Windows Candidate: accessibility audit rc=0',
+    'CodeQL: analyzer exitCode: 0x0',
+    'previous Windows Candidate: accessibility audit ExitCode: 1, repaired',
+])
+def test_r113_zero_or_historical_process_aliases_remain_nonblocking(summary):
+    assert module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+
+def test_r113_exitcode_failure_blocks_resolved_parent_done(tmp_path):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = (ATOMIC
+        .replace('| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+                 '| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: UIA audit ExitCode: 1 |')
+        .replace('| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+                 '| 2Б | Navigation | DONE — merged |')
+        .replace('| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+                 '| 2В | Native STOP | DONE — merged |'))
+    rejected(tmp_path, registry, atomic)

@@ -1033,8 +1033,13 @@ def _is_terminal_done(value: str) -> bool:
         r"(?P<detail>[^;\r\n]*)",
         re.IGNORECASE,
     )
+    # Windows PowerShell wrappers report ExitCode/ERRORLEVEL, while CI
+    # harnesses may report return code/rc. These are the same process-exit
+    # evidence as "exited N" and must fail closed on nonzero values.
     process_exit = re.compile(
-        r"\b(?:exited\s+|exit\s+(?:code|status)\s*[:=]?\s*)"
+        r"\b(?:exited\s+|exit\s+(?:code|status)\s*[:=]?\s*|"
+        r"exit[_-]?code\s*[:=]\s*|return\s+code\s*[:=]?\s*|"
+        r"errorlevel\s*[:=]?\s*|rc\s*[:=]\s*)"
         r"(?P<code>[^\s,;()\[\]{}.!?]+)",
         re.IGNORECASE,
     )

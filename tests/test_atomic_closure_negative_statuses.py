@@ -1333,3 +1333,38 @@ def test_r113_exitcode_failure_blocks_resolved_parent_done(tmp_path):
         .replace('| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
                  '| 2В | Native STOP | DONE — merged |'))
     rejected(tmp_path, registry, atomic)
+
+
+# r114: Real-world Windows wrappers also emit an unpunctuated ExitCode,
+# a returned process status, or a parenthesized exit status. Each is a
+# failed independent check even if the earlier CI check was successful.
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: packaged UIA audit ExitCode 1",
+    "Windows Candidate: packaged UIA audit process returned 1",
+    "Windows Candidate: packaged UIA audit process exited (1)",
+    "CodeQL: analyzer ExitCode 0xC0000005",
+])
+def test_r114_nonzero_process_wrapper_variants_block_done(summary):
+    assert not module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: packaged UIA audit ExitCode 0",
+    "Windows Candidate: packaged UIA audit process returned 0",
+    "Windows Candidate: packaged UIA audit process exited (0)",
+    "previous Windows Candidate: packaged UIA audit ExitCode 1, repaired",
+])
+def test_r114_zero_or_historical_wrapper_variants_do_not_block_done(summary):
+    assert module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+def test_r114_unpunctuated_exitcode_blocks_resolved_parent_done(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = (ATOMIC
+        .replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |",
+                 "| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: UIA audit ExitCode 1 |")
+        .replace("| 2Б | Navigation | IN_PROGRESS / NOT DONE |",
+                 "| 2Б | Navigation | DONE — merged |")
+        .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
+                 "| 2В | Native STOP | DONE — merged |"))
+    rejected(tmp_path, registry, atomic)

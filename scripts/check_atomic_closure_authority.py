@@ -1038,9 +1038,10 @@ def _is_terminal_done(value: str) -> bool:
     # evidence as "exited N" and must fail closed on nonzero values.
     process_exit = re.compile(
         r"\b(?:exited\s+|exit\s+(?:code|status)\s*[:=]?\s*|"
-        r"exit[_-]?code\s*[:=]\s*|return\s+code\s*[:=]?\s*|"
+        r"exit[_-]?code\s*[:=]?\s*|return\s+code\s*[:=]?\s*|"
+        r"process\s+returned\s+|"
         r"errorlevel\s*[:=]?\s*|rc\s*[:=]\s*)"
-        r"(?P<code>[^\s,;()\[\]{}.!?]+)",
+        r"\(?\s*(?P<code>[^\s,;()\[\]{}.!?]+)\s*\)?",
         re.IGNORECASE,
     )
     historical_label = re.compile(

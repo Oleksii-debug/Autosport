@@ -5,6 +5,7 @@ import json
 import os
 import re
 import shutil
+import stat
 import struct
 import tempfile
 import zipfile
@@ -88,6 +89,66 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
         )
         + "\n"
     ).encode("utf-8")
+
+
+
+def _require_regular_release_input(path: Path, label: str) -> None:
+    """Never follow a symlink/device as a release input."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError as exc:
+        raise ValueError(f"release {label} must be an existing regular file") from exc
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"release {label} must be a regular non-symlink file")
+
+
+def _require_safe_release_example_tree(example_dir: Path) -> None:
+    """Screen input tree before copytree can read private or nonregular bytes.
+
+    Source-tree pinning remains the responsibility of the existing exact-Git
+    materializer; this boundary prevents direct build callers from silently
+    packaging a symlink target or an excluded private/test-state member.
+    """
+    try:
+        root_mode = example_dir.lstat().st_mode
+    except OSError as exc:
+        raise ValueError("release examples must be an existing directory") from exc
+    if not stat.S_ISDIR(root_mode):
+        raise ValueError("release examples must be a non-symlink directory")
+
+    seen_windows_paths: set[str] = set()
+    root_member = _PACKAGE_PREFIX + "examples/" + example_dir.name
+    _, root_key = _validate_windows_member(root_member)
+    seen_windows_paths.add(root_key)
+    for item in example_dir.rglob("*"):
+        try:
+            item_mode = item.lstat().st_mode
+        except OSError as exc:
+            raise ValueError("release example source changed during preflight") from exc
+        if not (stat.S_ISDIR(item_mode) or stat.S_ISREG(item_mode)):
+            raise ValueError("release examples contain a symlink or nonregular source")
+        member = root_member + "/" + item.relative_to(example_dir).as_posix()
+        _, windows_key = _validate_windows_member(member)
+        if windows_key in seen_windows_paths:
+            raise ValueError("release examples contain a Windows path collision")
+        seen_windows_paths.add(windows_key)
+
+
+def _require_safe_release_inputs(
+    exe_path: Path, start_file: Path, example_dir: Path,
+    diagnostic_path: Path, accessibility_path: Path, keyboard_path: Path,
+    restart_recovery_path: Path,
+) -> None:
+    for label, path in (
+        ("executable", exe_path),
+        ("start guide", start_file),
+        ("diagnostics", diagnostic_path),
+        ("accessibility evidence", accessibility_path),
+        ("keyboard evidence", keyboard_path),
+        ("restart evidence", restart_recovery_path),
+    ):
+        _require_regular_release_input(path, label)
+    _require_safe_release_example_tree(example_dir)
 
 
 def _sorted_package_files(package_dir: Path) -> list[Path]:
@@ -496,6 +557,10 @@ def build_windows_package(
     keyboard_path = Path(keyboard_path)
     restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
+    _require_safe_release_inputs(
+        exe_path, start_file, example_dir, diagnostic_path,
+        accessibility_path, keyboard_path, restart_recovery_path,
+    )
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".autosport-release-stage-",

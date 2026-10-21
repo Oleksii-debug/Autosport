@@ -814,13 +814,13 @@ def main() -> int:
         # Enumerate the actual sealed main EXE CArchive, not merely host wheels.
         # This census is binary-bound, but is deliberately NOT license clearance.
         embedded_inventory = capture_embedded_executable_inventory(
-            trusted_exe, args.source_sha,
+            trusted_exe, args.source_sha, include_nested_pyz=True,
         )
         # The official ZIP also contains Autosport-Data.exe. Qualify its
         # independently sealed CArchive rather than inferring its components
         # from the main executable or installed build-host distributions.
         data_embedded_inventory = capture_embedded_executable_inventory(
-            trusted_data_exe, args.source_sha,
+            trusted_data_exe, args.source_sha, include_nested_pyz=True,
         )
         trusted_diagnostic = _capture_verified_evidence(
             args.diagnostic,

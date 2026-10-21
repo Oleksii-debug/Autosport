@@ -53,6 +53,14 @@ def test_complete_windows_surface_inventory_is_stable_and_truthful() -> None:
     assert settings.target_widget == "owner_economic_authority_button"
     assert settings.blocked_reason_uk is None
 
+    # Help/About was previously a presentation-only navigation placeholder.
+    # It is now an actionable native Open target, while unavailable external
+    # bookmaker actions remain truthfully disabled.
+    help_surface = SURFACE_BY_KEY["help_about"]
+    assert help_surface.phase == "active"
+    assert help_surface.target_widget == "shell_open_button"
+    assert help_surface.blocked_reason_uk is None
+
 
 def test_shell_detail_lines_expose_phase_and_truth_boundaries() -> None:
     for surface in SURFACES:

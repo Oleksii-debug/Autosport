@@ -15,6 +15,12 @@ from typing import Any
 from .release_sbom import validate_direct_dependency_metadata
 from .release_dependency_graph import validate_build_host_dependency_graph
 
+from .windows_update_release_metadata import (
+    attach_update_identity,
+    validate_requested_update_identity,
+    validate_embedded_update_identity,
+)
+
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
 _PREHUMAN_BUILD_VERSION = "0.1.0-v1-prehuman"
@@ -566,6 +572,132 @@ def _validate_source_manifest(value: dict[str, Any], source_sha: str) -> None:
             pinned_versions[package_name] = version
 
 
+
+def _release_source_fingerprint(info: os.stat_result) -> tuple[int, ...]:
+    """File identity and mutation witness, excluding access-time-only changes."""
+    return (
+        info.st_dev, info.st_ino, info.st_mode, info.st_size,
+        info.st_mtime_ns, info.st_ctime_ns,
+    )
+
+
+def _require_release_source_tree_without_links(root: Path) -> dict[str, tuple[int, ...]]:
+    """Return a stable relative-path witness for a regular source tree.
+
+    Source files are subsequently copied using pinned descriptors, not the
+    follow-symlinks behavior of shutil.copytree. The entire witness is checked
+    again after staging to detect changed names, directories or file metadata.
+    """
+    entries: dict[str, tuple[int, ...]] = {}
+
+    def check(path: Path, *, directory: bool) -> None:
+        info = path.lstat()
+        junction = getattr(path, "is_junction", None)
+        if (junction is not None and junction()) or not (
+            stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
+        ):
+            raise ValueError("unsafe release source link or special file")
+        relative = "." if path == root else path.relative_to(root).as_posix()
+        entries[relative] = _release_source_fingerprint(info)
+
+    check(root, directory=True)
+    for current, dirs, files in os.walk(root, topdown=True, followlinks=False):
+        base = Path(current)
+        check(base, directory=True)
+        for name in sorted(dirs):
+            check(base / name, directory=True)
+        for name in sorted(files):
+            check(base / name, directory=False)
+    return entries
+
+
+def _require_release_regular_source(path: Path) -> None:
+    mode = path.lstat().st_mode
+    junction = getattr(path, "is_junction", None)
+    if not stat.S_ISREG(mode) or (junction is not None and junction()):
+        raise ValueError("unsafe release source link or special file")
+
+
+def _copy_release_regular_source(
+    source: Path, destination: Path, *,
+    expected_fingerprint: tuple[int, ...] | None = None,
+) -> None:
+    """Copy pinned regular-file bytes and reject source mutation during read.
+
+    The initial source-tree fingerprint also prevents accepting a different
+    regular inode substituted between inventory and copy. The opened descriptor
+    must agree with the source path before and after the copy.
+    """
+    try:
+        fd = os.open(
+            source, os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+        )
+    except OSError:
+        raise ValueError("unsafe release source open") from None
+    try:
+        opened = os.fstat(fd)
+        current = source.lstat()
+        junction = getattr(source, "is_junction", None)
+        initial = _release_source_fingerprint(opened)
+        if (
+            not stat.S_ISREG(opened.st_mode)
+            or not stat.S_ISREG(current.st_mode)
+            or (junction is not None and junction())
+            or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
+            or (expected_fingerprint is not None and initial != expected_fingerprint)
+        ):
+            raise ValueError("unsafe release source identity changed")
+        with os.fdopen(fd, "rb") as stream:
+            fd = -1  # fdopen owns the descriptor now
+            with destination.open("wb") as output:
+                shutil.copyfileobj(stream, output)
+            # Check while the pinned handle is still alive. A path replacement,
+            # truncate, or in-place rewrite must not publish mixed bytes.
+            final_opened = os.fstat(stream.fileno())
+            final_path = source.lstat()
+            junction = getattr(source, "is_junction", None)
+            if (
+                (junction is not None and junction())
+                or not stat.S_ISREG(final_path.st_mode)
+                or _release_source_fingerprint(final_opened) != initial
+                or _release_source_fingerprint(final_path) != initial
+            ):
+                raise ValueError("unsafe release source changed during copy")
+    finally:
+        if fd >= 0:
+            os.close(fd)
+
+
+def _copy_release_example_tree(
+    source: Path, destination: Path,
+    witness: dict[str, tuple[int, ...]],
+) -> None:
+    """Stage examples without ever dereferencing a source-file symlink.
+
+    Validate member names before reading potentially private source bytes.
+    The final complete source inventory must match the original one.
+    """
+    destination.mkdir(parents=True)
+    for relative in sorted(witness, key=lambda name: (name.count("/"), name)):
+        if relative == ".":
+            continue
+        source_path = source / relative
+        target = destination / relative
+        member = (Path("Autosport-V1") / "examples" / source.name / relative).as_posix()
+        _validate_windows_member(member)
+        info = source_path.lstat()
+        if _release_source_fingerprint(info) != witness[relative]:
+            raise ValueError("unsafe release source changed during staging")
+        if stat.S_ISDIR(info.st_mode):
+            target.mkdir()
+        else:
+            _copy_release_regular_source(
+                source_path, target, expected_fingerprint=witness[relative],
+            )
+    if _require_release_source_tree_without_links(source) != witness:
+        raise ValueError("unsafe release source tree changed during staging")
+
+
 def build_windows_package(
     exe_path: str | Path,
     start_file: str | Path,
@@ -580,6 +712,8 @@ def build_windows_package(
     source_manifest: dict[str, Any] | None = None,
     dependency_metadata: dict[str, Any] | None = None,
     dependency_graph: dict[str, Any] | None = None,
+    update_version: str | None = None,
+    update_schema: int | None = None,
 ) -> tuple[Path, str]:
     _require_git_commit_sha(source_sha, field="source_sha")
     if source_manifest is not None:
@@ -592,6 +726,9 @@ def build_windows_package(
         if source_manifest is None:
             raise ValueError("build-host graph requires source declarations")
         validate_build_host_dependency_graph(dependency_graph, source_manifest)
+    validate_requested_update_identity(
+        update_version=update_version, update_schema=update_schema
+    )
     exe_path = Path(exe_path)
     start_file = Path(start_file)
     example_dir = Path(example_dir)
@@ -604,6 +741,12 @@ def build_windows_package(
         exe_path, start_file, example_dir, diagnostic_path,
         accessibility_path, keyboard_path, restart_recovery_path,
     )
+    for source in (
+        exe_path, start_file, diagnostic_path, accessibility_path,
+        keyboard_path, restart_recovery_path,
+    ):
+        _require_release_regular_source(source)
+    example_witness = _require_release_source_tree_without_links(example_dir)
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".autosport-release-stage-",
@@ -611,13 +754,16 @@ def build_windows_package(
     ) as staging_root:
         package_dir = Path(staging_root) / "Autosport-V1"
         package_dir.mkdir()
-        shutil.copy2(exe_path, package_dir / "Autosport.exe")
-        shutil.copy2(start_file, package_dir / "WINDOWS_START_HERE.txt")
-        shutil.copy2(diagnostic_path, package_dir / "packaged-diagnostic.json")
-        shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
-        shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
-        shutil.copy2(restart_recovery_path, package_dir / "restart-recovery-audit.json")
-        shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
+        _copy_release_regular_source(exe_path, package_dir / "Autosport.exe")
+        _copy_release_regular_source(start_file, package_dir / "WINDOWS_START_HERE.txt")
+        _copy_release_regular_source(diagnostic_path, package_dir / "packaged-diagnostic.json")
+        _copy_release_regular_source(accessibility_path, package_dir / "accessibility-audit.json")
+        _copy_release_regular_source(keyboard_path, package_dir / "keyboard-audit.json")
+        _copy_release_regular_source(restart_recovery_path, package_dir / "restart-recovery-audit.json")
+        _copy_release_example_tree(
+            example_dir, package_dir / "examples" / example_dir.name, example_witness,
+        )
+        _require_release_source_tree_without_links(package_dir)
 
         build_info = {
             "product": "Autosport",
@@ -628,6 +774,9 @@ def build_windows_package(
             "human_tested": False,
             "nvda_verified": False,
         }
+        build_info = attach_update_identity(
+            build_info, update_version=update_version, update_schema=update_schema
+        )
         _write_json(package_dir / "BUILD_INFO.json", build_info)
         if source_manifest is not None:
             _write_json(package_dir / "SOURCE_MANIFEST.json", source_manifest)
@@ -657,10 +806,11 @@ def build_windows_package(
             ("\n".join(lines) + "\n").encode("utf-8")
         )
 
-        archive_members = {
-            (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix(): path.read_bytes()
-            for path in _sorted_package_files(package_dir)
-        }
+        archive_members: dict[str, bytes] = {}
+        for path in _sorted_package_files(package_dir):
+            name = (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix()
+            _validate_windows_member(name)  # reject private/test state before publication
+            archive_members[name] = path.read_bytes()
         writer_sha = _write_canonical_zip(output_zip, archive_members)
         return output_zip, writer_sha
 
@@ -731,10 +881,14 @@ def verify_windows_package(
     build_info = _decode_json_object(members["BUILD_INFO.json"], "BUILD_INFO.json")
     if build_info.get("product") != "Autosport":
         raise ValueError("BUILD_INFO product identity mismatch")
-    if type(build_info.get("version")) is not str or build_info.get("version") != _PREHUMAN_BUILD_VERSION:
-        raise ValueError("BUILD_INFO unsupported or ambiguous prehuman version")
+    # Preserve upstream strict prehuman identity for legacy packages. Explicit
+    # update packages use their separately validated canonical semantic version.
+    if "update_version" not in build_info and "update_schema" not in build_info:
+        if type(build_info.get("version")) is not str or build_info["version"] != _PREHUMAN_BUILD_VERSION:
+            raise ValueError("BUILD_INFO unsupported or ambiguous prehuman version")
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO source_sha does not match exact candidate head")
+    validate_embedded_update_identity(build_info)
     _require_false_truth_labels(build_info, "BUILD_INFO.json")
     if require_source_manifest and "SOURCE_MANIFEST.json" not in members:
         raise ValueError("release package is missing SOURCE_MANIFEST.json")

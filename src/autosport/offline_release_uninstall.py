@@ -10,7 +10,6 @@ import argparse
 import hashlib
 import json
 import os
-import shutil
 import stat
 import tempfile
 import zipfile
@@ -129,6 +128,43 @@ def _installed_members(root: Path, *, expected_source_sha: str, package_sha256: 
     return len(files)
 
 
+def _remove_pinned_inventory(root: Path, trusted_files: dict[str, str]) -> None:
+    """Remove only named, currently regular release files; never recursively delete.
+
+    A late unowned file prevents the final rmdir and remains in quarantine.
+    Partial I/O failure likewise leaves the quarantine for explicit recovery.
+    """
+    directories = {
+        "/".join(name.split("/")[:depth])
+        for name in trusted_files
+        for depth in range(1, len(name.split("/")))
+    }
+    for name in sorted(trusted_files):
+        member = root.joinpath(*name.split("/"))
+        parent = member.parent
+        while parent != root:
+            if not stat.S_ISDIR(parent.lstat().st_mode):
+                raise installation.OfflineInstallError("installed parent changed during uninstall")
+            parent = parent.parent
+        file_stat = member.lstat()
+        if not stat.S_ISREG(file_stat.st_mode) or file_stat.st_nlink != 1:
+            raise installation.OfflineInstallError("installed file changed during uninstall")
+        if installation._sha_file(member) != trusted_files[name]:
+            raise installation.OfflineInstallError("installed bytes changed during uninstall")
+        member.unlink()
+    receipt = root / installation._RECEIPT
+    if not stat.S_ISREG(receipt.lstat().st_mode):
+        raise installation.OfflineInstallError("installed receipt changed during uninstall")
+    receipt.unlink()
+    for name in sorted(directories, key=lambda value: (-value.count("/"), value)):
+        directory = root.joinpath(*name.split("/"))
+        if not stat.S_ISDIR(directory.lstat().st_mode):
+            raise installation.OfflineInstallError("installed directory changed during uninstall")
+        directory.rmdir()
+    # Unknown files or directories added after the last inspection remain intact.
+    root.rmdir()
+
+
 def uninstall_verified_release(
     archive: str | Path,
     destination: str | Path,
@@ -195,13 +231,15 @@ def uninstall_verified_release(
     staged = quarantine / "payload"
     moved = False
     removed = False
+    deletion_started = False
     try:
         installation._publish_directory_no_replace(root, staged)
         moved = True
         # Recheck after the atomic move: never delete newly injected user files.
         if _installed_members(staged, expected_source_sha=source_sha, package_sha256=package_sha, trusted_files=trusted_files) != count:
             raise installation.OfflineInstallError("installed inventory changed before uninstall")
-        shutil.rmtree(staged)
+        deletion_started = True
+        _remove_pinned_inventory(staged, trusted_files)
         removed = True
         return {
             "status": "UNINSTALLED", "files_removed": count,
@@ -209,7 +247,7 @@ def uninstall_verified_release(
             "real_money_execution": False,
         }
     finally:
-        if moved and not removed and staged.exists() and not root.exists():
+        if moved and not deletion_started and staged.exists() and not root.exists():
             # Never replace a competing destination. Keep quarantine if restore is unsafe.
             try:
                 installation._publish_directory_no_replace(staged, root)

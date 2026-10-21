@@ -28,7 +28,7 @@ Usage:
   Autosport-Data.exe run-product [autosport-product arguments]
   Autosport-Data.exe install-release --archive <release.zip> --destination <new-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe verify-installed-release --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
-  Autosport-Data.exe uninstall-release --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
+  Autosport-Data.exe uninstall-release --archive <original-canonical-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>

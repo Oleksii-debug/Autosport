@@ -22,6 +22,7 @@ MAX_TOTAL_BYTES = 512 * 1024 * 1024
 _MANIFEST = "AUTOSPORT_BACKUP_MANIFEST.json"
 _SKIP = frozenset({WorkspaceEconomicLock.FILE_NAME})
 _TIMESTAMP = (1980, 1, 1, 0, 0, 0)
+_WINDOWS_DEVICE_NAMES = frozenset({"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)})
 
 
 class WorkspaceBackupError(ValueError):
@@ -45,7 +46,7 @@ def _safe_relative(name: str) -> PurePosixPath:
     path = PurePosixPath(name)
     if any(part in {"", ".", ".."} for part in name.split("/")) or path.as_posix() != name:
         raise WorkspaceBackupError("noncanonical backup member path")
-    if any(part.endswith(".") or part.endswith(" ") or ":" in part for part in path.parts):
+    if any(part.endswith(".") or part.endswith(" ") or ":" in part or part.split(".", 1)[0].casefold() in _WINDOWS_DEVICE_NAMES for part in path.parts):
         raise WorkspaceBackupError("nonportable backup member name")
     if name == _MANIFEST or any(part in _SKIP for part in path.parts):
         raise WorkspaceBackupError("reserved backup member name")
@@ -127,6 +128,8 @@ def backup_workspace(workspace: str | Path, destination: str | Path) -> dict[str
                     files.append((name, data))
             records = [{"path": name, "size": len(data), "sha256": hashlib.sha256(data).hexdigest()} for name, data in files]
             manifest = {"kind": "autosport.workspace.backup", "schema": SCHEMA, "files": records, "total_bytes": total}
+            if len(_canonical_bytes(manifest)) > 512 * 1024:
+                raise WorkspaceBackupError("backup manifest exceeds verification limit")
             fd, temp_name = tempfile.mkstemp(prefix=".autosport-backup-", suffix=".tmp", dir=target.parent)
             temporary = Path(temp_name)
             os.chmod(temporary, 0o600)

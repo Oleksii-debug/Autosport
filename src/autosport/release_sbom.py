@@ -25,6 +25,15 @@ def _normalize_name(name: str) -> str:
 def _requirements(source_manifest: dict[str, Any]) -> dict[str, dict[str, Any]]:
     if not isinstance(source_manifest, dict):
         raise ValueError("source declarations are required")
+    # Direct and transitive dependency evidence must never be qualified against
+    # an absent, boolean or malformed source identity. Otherwise two absent
+    # identities compare equal in both evidence validators.
+    source_sha = source_manifest.get("source_sha")
+    if (
+        type(source_sha) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+    ):
+        raise ValueError("source declarations require a canonical Git commit SHA")
     result: dict[str, dict[str, Any]] = {}
     for role, key in (
         ("runtime", "declared_runtime_dependencies"),

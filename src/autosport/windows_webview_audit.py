@@ -158,6 +158,14 @@ class _SemanticShellParser(HTMLParser):
         self.renderable_element_text: dict[str, list[str]] = {}
         self.renderable_label_text: dict[str, list[str]] = {}
         self.hidden_ancestor: dict[str, str] = {}
+        # A collapsed panel may supply an implicit label only when the control
+        # and label share its one keyboard-revealable hidden ancestor.
+        self.revealable_panel_controls: dict[str, str] = {}
+        self.disabled_fieldset_descendants: set[str] = set()
+        self._disabled_fieldset_depths: set[int] = set()
+        self.aria_disabled_descendants: set[str] = set()
+        self._aria_disabled_depths: set[int] = set()
+        self.revealable_panel_label_text: dict[tuple[str, str], list[str]] = {}
         self._open_tag_stack: list[tuple[str, str | None, str | None, bool]] = []
 
     def handle_starttag(
@@ -196,6 +204,18 @@ class _SemanticShellParser(HTMLParser):
             if element_id in self.elements:
                 self.duplicate_ids.add(element_id)
             self.elements[element_id] = (tag, values)
+        if element_id and tag in {"input", "select", "textarea", "button"} and not locally_hidden:
+            hidden_frames = [frame for frame in self._open_tag_stack if frame[3]]
+            if len(hidden_frames) == 1:
+                hidden_tag, panel_id, _, _ = hidden_frames[0]
+                if hidden_tag == "div" and panel_id:
+                    self.revealable_panel_controls[element_id] = panel_id
+        if tag == "button" and element_id and self._disabled_fieldset_depths:
+            self.disabled_fieldset_descendants.add(element_id)
+        if tag == "button" and element_id and self._aria_disabled_depths:
+            self.aria_disabled_descendants.add(element_id)
+        if tag == "fieldset" and "disabled" in values:
+            self._disabled_fieldset_depths.add(len(self._open_tag_stack))
         # Validate static HTML IDREF destinations after the entire document is parsed.
         reference_attrs = ("aria-labelledby", "aria-describedby", "aria-controls")
         if tag == "label" and "for" in values:
@@ -232,6 +252,8 @@ class _SemanticShellParser(HTMLParser):
             "link", "meta", "param", "source", "track", "wbr",
         }:
             label_target = str(values["for"]) if tag == "label" and values.get("for") else None
+            if (values.get("aria-disabled") or "").strip().lower() == "true":
+                self._aria_disabled_depths.add(len(self._open_tag_stack))
             self._open_tag_stack.append((tag, element_id, label_target, locally_hidden))
 
     def handle_data(self, data: str) -> None:
@@ -239,6 +261,15 @@ class _SemanticShellParser(HTMLParser):
         # unfiltered text solely for explicit aria-labelledby IDREFs.
         # A hidden ancestor also makes the entire current text node non-renderable.
         hidden_descendant = any(frame[3] for frame in self._open_tag_stack)
+        hidden_frames = [frame for frame in self._open_tag_stack if frame[3]]
+        if len(hidden_frames) == 1:
+            hidden_tag, panel_id, _, _ = hidden_frames[0]
+            if hidden_tag == "div" and panel_id:
+                for _, _, target, _ in self._open_tag_stack:
+                    if target:
+                        self.revealable_panel_label_text.setdefault(
+                            (target, panel_id), []
+                        ).append(data)
         for _, element_id, label_target, locally_hidden in reversed(
             self._open_tag_stack
         ):
@@ -256,6 +287,12 @@ class _SemanticShellParser(HTMLParser):
         for index in range(len(self._open_tag_stack) - 1, -1, -1):
             if self._open_tag_stack[index][0] == tag:
                 del self._open_tag_stack[index:]
+                self._disabled_fieldset_depths = {
+                    depth for depth in self._disabled_fieldset_depths if depth < index
+                }
+                self._aria_disabled_depths = {
+                    depth for depth in self._aria_disabled_depths if depth < index
+                }
                 return
 
 
@@ -292,6 +329,12 @@ def _reject_inaccessible_emergency_stop(
         )
     if "hidden" in attrs or "inert" in attrs:
         failures.append("id=emergency-stop-action: hidden/inert HTML state")
+    if "disabled" in attrs:
+        failures.append("id=emergency-stop-action: native disabled HTML state")
+    if "emergency-stop-action" in parser.aria_disabled_descendants:
+        failures.append("id=emergency-stop-action: inherited aria-disabled HTML state")
+    if "emergency-stop-action" in parser.disabled_fieldset_descendants:
+        failures.append("id=emergency-stop-action: disabled fieldset ancestor")
     for name in ("aria-hidden", "aria-disabled"):
         if name in attrs and (attrs[name] or "").strip().lower() != "false":
             failures.append(
@@ -304,6 +347,78 @@ def _reject_inaccessible_emergency_stop(
     style = "".join((attrs.get("style") or "").lower().split())
     if "display:none" in style or "visibility:hidden" in style:
         failures.append("id=emergency-stop-action: hidden by inline CSS")
+
+
+def _opener_normal_tab_order(opener: dict[str, str | None]) -> bool:
+    value = opener.get("tabindex")
+    if value is None:
+        return True
+    try:
+        return int(value.strip()) == 0
+    except (ValueError, TypeError):
+        return False
+
+
+def _opener_has_nonblank_accessible_name(
+    parser: _SemanticShellParser, opener_id: str, attrs: dict[str, str | None]
+) -> bool:
+    """Check the opener itself, not the hidden control's implicit label."""
+    referenced = attrs.get("aria-labelledby")
+    if referenced is not None:
+        refs = referenced.split()
+        return bool(refs) and all(
+            "".join(parser.element_text.get(ref, [])).strip() for ref in refs
+        )
+    if (attrs.get("aria-label") or "").strip():
+        return True
+    return bool("".join(parser.renderable_element_text.get(opener_id, [])).strip())
+
+
+def _has_revealable_panel_name(
+    parser: _SemanticShellParser, automation_id: str
+) -> bool:
+    panel_id = parser.revealable_panel_controls.get(automation_id)
+    if not panel_id:
+        return False
+    panel = parser.elements.get(panel_id)
+    if not panel or panel[0] != "div":
+        return False
+    attrs = panel[1]
+    style = "".join((attrs.get("style") or "").lower().split())
+    if (
+        "hidden" not in attrs or "inert" in attrs
+        or ("aria-hidden" in attrs and
+            (attrs.get("aria-hidden") or "").strip().lower() != "false")
+        or "display:none" in style or "visibility:hidden" in style
+    ):
+        return False
+    if not "".join(parser.revealable_panel_label_text.get(
+        (automation_id, panel_id), []
+    )).strip():
+        return False
+    for opener_id, (tag, opener) in parser.elements.items():
+        if (
+            tag != "button" or opener.get("type") != "button"
+            or opener.get("aria-controls") != panel_id
+            or opener.get("aria-expanded") != "false"
+            or not _opener_has_nonblank_accessible_name(parser, opener_id, opener)
+            or opener_id in parser.aria_disabled_descendants
+            or opener_id in parser.hidden_ancestor
+            or opener_id in parser.disabled_fieldset_descendants
+            or ("role" in opener and
+                (opener.get("role") or "").strip().lower() != "button")
+            or not _opener_normal_tab_order(opener)
+            or ("aria-disabled" in opener and
+                (opener.get("aria-disabled") or "").strip().lower() != "false")
+            or any(key in opener for key in ("hidden", "inert", "disabled"))
+            or ("aria-hidden" in opener and
+                (opener.get("aria-hidden") or "").strip().lower() != "false")
+            or "display:none" in "".join((opener.get("style") or "").lower().split())
+            or "visibility:hidden" in "".join((opener.get("style") or "").lower().split())
+        ):
+            continue
+        return True
+    return False
 
 
 def _reject_missing_accessible_names(
@@ -334,6 +449,8 @@ def _reject_missing_accessible_names(
         elif (attrs.get("aria-label") or "").strip():
             named = True
         elif "".join(parser.renderable_label_text.get(automation_id, [])).strip():
+            named = True
+        elif _has_revealable_panel_name(parser, automation_id):
             named = True
         else:
             named = tag == "button" and bool(

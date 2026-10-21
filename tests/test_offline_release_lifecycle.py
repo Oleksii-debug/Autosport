@@ -146,5 +146,50 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
             self.assertFalse(list(root.glob(".autosport-uninstall-*")))
 
 
+    def test_canonical_cli_dispatches_verification_and_uninstall(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from autosport.cli import main as cli_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory, digest = self._installed(root)
+            common = [
+                "--destination", str(directory),
+                "--source-sha", self.SOURCE,
+                "--package-sha256", digest,
+            ]
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli_main(["verify-installed-release", *common]), 0)
+            self.assertEqual(json.loads(output.getvalue())["status"], "VERIFIED")
+            output = StringIO()
+            with redirect_stdout(output):
+                self.assertEqual(cli_main(["uninstall-release", *common]), 0)
+            self.assertEqual(json.loads(output.getvalue())["status"], "UNINSTALLED")
+            self.assertFalse(directory.exists())
+
+    def test_canonical_cli_does_not_echo_tampered_release_data(self):
+        from contextlib import redirect_stdout
+        from io import StringIO
+        from autosport.cli import main as cli_main
+
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory, digest = self._installed(root)
+            marker = "private_value_must_not_be_returned"
+            (directory / "private-extra.txt").write_text(marker)
+            output = StringIO()
+            with redirect_stdout(output):
+                status = cli_main([
+                    "uninstall-release", "--destination", str(directory),
+                    "--source-sha", self.SOURCE, "--package-sha256", digest,
+                ])
+            self.assertEqual(status, 3)
+            self.assertIn("FAIL_CLOSED", output.getvalue())
+            self.assertNotIn(marker, output.getvalue())
+            self.assertTrue(directory.exists())
+
+
 if __name__ == "__main__":
     unittest.main()

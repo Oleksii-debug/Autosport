@@ -187,6 +187,25 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self.assertFalse(report["human_tested"])
                 self.assertFalse(report["nvda_verified"])
 
+    def test_unrecognized_critical_provider_gap_is_blocking_and_redacted(self):
+        description = self._passing_description()
+        target = next(
+            widget for widget in description.widgets
+            if widget.automation_id == AUTOMATION_IDS["run_replay"]
+        )
+        secret = "UNTRUSTED_UIA_PROVIDER_GAP_SECRET_20261021"
+        target.gaps = (_Named(secret),)
+        report = self._summarize(description)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertIn(
+            f"automation_id={AUTOMATION_IDS['run_replay']}: blocking gaps=OTHER_GAP",
+            report["failures"],
+        )
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(secret, serialized)
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+
     def test_duplicate_critical_automation_id_fails_closed_without_overwrite(self):
         description = self._passing_description()
         original = next(

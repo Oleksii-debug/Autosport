@@ -11,6 +11,7 @@ import tomllib
 from pathlib import Path, PurePosixPath
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
+from autosport.release_sbom import capture_direct_installed_dependencies
 from autosport.release_package import (
     _require_git_commit_sha,
     build_windows_package,
@@ -681,6 +682,8 @@ _RELEASE_SOURCE_INPUTS = (
     "pyproject.toml",
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
+    "src/autosport/release_sbom.py",
+    "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
 )
@@ -745,6 +748,7 @@ def main() -> int:
     _bind_source_sha_to_checkout(args.source_sha, repo_root=repo_root)
     _require_checkout_matches_exact_source(repo_root, args.source_sha)
     source_manifest = _source_declaration_manifest(repo_root, args.source_sha)
+    dependency_metadata = capture_direct_installed_dependencies(source_manifest)
 
     with tempfile.TemporaryDirectory(prefix="autosport-package-inputs-") as snapshot_root:
         snapshot_dir = Path(snapshot_root)
@@ -803,6 +807,7 @@ def main() -> int:
             args.output,
             args.source_sha,
             source_manifest=source_manifest,
+            dependency_metadata=dependency_metadata,
         )
         binding = bind_portable_data_tool(
             output,
@@ -814,6 +819,7 @@ def main() -> int:
         output,
         expected_source_sha=args.source_sha,
         require_source_manifest=True,
+        require_dependency_metadata=True,
     )
     package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(output)

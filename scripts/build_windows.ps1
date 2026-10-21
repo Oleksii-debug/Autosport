@@ -391,6 +391,7 @@ manifest = json.loads(sys.argv[2])
 required = {
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
+    "src/autosport/release_sbom.py",
     "src/autosport/data_tool_package.py",
 }
 if set(manifest) != required:
@@ -426,6 +427,7 @@ def load_module(name, relative):
     setattr(package, name.rsplit(".", 1)[1], module)
     return module
 
+load_module("autosport.release_sbom", "src/autosport/release_sbom.py")
 load_module("autosport.release_package", "src/autosport/release_package.py")
 load_module("autosport.data_tool_package", "src/autosport/data_tool_package.py")
 script_path, script_data = payloads["scripts/package_windows.py"]
@@ -464,7 +466,7 @@ function python {
     if ($pythonArguments.Count -gt 1) {
       $remaining = @($pythonArguments[1..($pythonArguments.Count - 1)])
     }
-    & $script:pythonExecutable -I -S -c $script:trustedPackageLauncher $script:trustedPackageRoot $script:trustedPackageManifestJson @remaining
+    & $packagingPython -I -c $script:trustedPackageLauncher $script:trustedPackageRoot $script:trustedPackageManifestJson @remaining
     return
   }
   & $script:pythonExecutable @pythonArguments
@@ -1056,6 +1058,7 @@ if ($LASTEXITCODE -ne 0) { throw "Bound restart/recovery evidence verification e
 $trustedPackagePathsJson = ConvertTo-Json -Compress -InputObject @(
   'scripts/package_windows.py',
   'src/autosport/release_package.py',
+  'src/autosport/release_sbom.py',
   'src/autosport/data_tool_package.py'
 )
 $trustedPackageManifestLines = @(& $pythonExecutable -I -S -c $trustedGitSourceOracleLauncher $gitExecutable $repoRoot $sourceSha $trustedPackagePathsJson)
@@ -1068,7 +1071,7 @@ $trustedPackageManifestJson = [string]$trustedPackageManifestLines[0]
 # imported or executed by the package assembly process.
 $trustedPackageArchive = Join-Path $boundArtifactRoot 'trusted-package-source.zip'
 $trustedPackageRoot = Join-Path $boundArtifactRoot 'trusted-package-source'
-& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py
+& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/release_sbom.py src/autosport/data_tool_package.py
 if ($LASTEXITCODE -ne 0) { throw "Exact package source archive exited $LASTEXITCODE" }
 if (Test-Path $trustedPackageRoot) { Remove-Item -LiteralPath $trustedPackageRoot -Recurse -Force }
 New-Item -ItemType Directory -Path $trustedPackageRoot | Out-Null

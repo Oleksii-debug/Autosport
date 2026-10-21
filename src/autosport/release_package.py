@@ -12,6 +12,8 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
+from .release_sbom import validate_direct_dependency_metadata
+
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
 _PREHUMAN_BUILD_VERSION = "0.1.0-v1-prehuman"
@@ -495,6 +497,8 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "pyproject.toml",
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
+    "src/autosport/release_sbom.py",
+    "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
 })
@@ -564,10 +568,15 @@ def build_windows_package(
     source_sha: str,
     *,
     source_manifest: dict[str, Any] | None = None,
+    dependency_metadata: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
     _require_git_commit_sha(source_sha, field="source_sha")
     if source_manifest is not None:
         _validate_source_manifest(source_manifest, source_sha)
+    if dependency_metadata is not None:
+        if source_manifest is None:
+            raise ValueError("dependency metadata requires source declarations")
+        validate_direct_dependency_metadata(dependency_metadata, source_manifest)
     exe_path = Path(exe_path)
     start_file = Path(start_file)
     example_dir = Path(example_dir)
@@ -607,6 +616,8 @@ def build_windows_package(
         _write_json(package_dir / "BUILD_INFO.json", build_info)
         if source_manifest is not None:
             _write_json(package_dir / "SOURCE_MANIFEST.json", source_manifest)
+        if dependency_metadata is not None:
+            _write_json(package_dir / "DIRECT_DEPENDENCY_METADATA.json", dependency_metadata)
 
         payload_hashes = {}
         for path in _sorted_package_files(package_dir):
@@ -642,6 +653,7 @@ def verify_windows_package(
     *,
     expected_source_sha: str,
     require_source_manifest: bool = False,
+    require_dependency_metadata: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -713,6 +725,17 @@ def verify_windows_package(
         _validate_source_manifest(source_manifest, expected_source_sha)
         if members["SOURCE_MANIFEST.json"] != _canonical_json_bytes(source_manifest):
             raise ValueError("SOURCE_MANIFEST is not in canonical JSON representation")
+    if require_dependency_metadata and "DIRECT_DEPENDENCY_METADATA.json" not in members:
+        raise ValueError("release package is missing direct dependency metadata")
+    if "DIRECT_DEPENDENCY_METADATA.json" in members:
+        if "SOURCE_MANIFEST.json" not in members:
+            raise ValueError("direct dependency metadata has no source declarations")
+        direct_metadata = _decode_json_object(
+            members["DIRECT_DEPENDENCY_METADATA.json"], "DIRECT_DEPENDENCY_METADATA.json"
+        )
+        validate_direct_dependency_metadata(direct_metadata, source_manifest)
+        if members["DIRECT_DEPENDENCY_METADATA.json"] != _canonical_json_bytes(direct_metadata):
+            raise ValueError("direct dependency metadata is not canonical JSON")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")

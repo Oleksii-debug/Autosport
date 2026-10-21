@@ -12,7 +12,10 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .release_sbom import validate_direct_dependency_metadata, validate_embedded_executable_inventory
+from .release_sbom import (
+    validate_direct_dependency_metadata, validate_embedded_executable_inventory,
+    validate_dependency_license_evidence,
+)
 from .release_dependency_graph import validate_build_host_dependency_graph
 
 from .windows_update_release_metadata import (
@@ -781,6 +784,8 @@ def build_windows_package(
     source_manifest: dict[str, Any] | None = None,
     dependency_metadata: dict[str, Any] | None = None,
     dependency_graph: dict[str, Any] | None = None,
+    dependency_license_manifest: dict[str, Any] | None = None,
+    dependency_license_members: dict[str, bytes] | None = None,
     embedded_executable_inventory: dict[str, Any] | None = None,
     update_version: str | None = None,
     update_schema: int | None = None,
@@ -798,6 +803,14 @@ def build_windows_package(
         validate_build_host_dependency_graph(dependency_graph, source_manifest)
     if dependency_metadata is not None and dependency_graph is not None:
         _require_dependency_evidence_coherence(dependency_metadata, dependency_graph)
+    if (dependency_license_manifest is None) != (dependency_license_members is None):
+        raise ValueError("license evidence manifest and files must be supplied together")
+    if dependency_license_manifest is not None:
+        if dependency_graph is None:
+            raise ValueError("license evidence requires source-bound dependency graph")
+        validate_dependency_license_evidence(
+            dependency_license_manifest, dependency_graph, dependency_license_members,
+        )
     validate_requested_update_identity(
         update_version=update_version, update_schema=update_schema
     )
@@ -866,6 +879,12 @@ def build_windows_package(
             _write_json(package_dir / "DIRECT_DEPENDENCY_METADATA.json", dependency_metadata)
         if dependency_graph is not None:
             _write_json(package_dir / "DEPENDENCY_GRAPH_METADATA.json", dependency_graph)
+        if dependency_license_manifest is not None:
+            _write_json(package_dir / "DEPENDENCY_LICENSE_EVIDENCE.json", dependency_license_manifest)
+            for relative, payload in sorted(dependency_license_members.items()):
+                target = package_dir.joinpath(*relative.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
 
         payload_hashes = {}
         for path in _sorted_package_files(package_dir):
@@ -904,6 +923,7 @@ def verify_windows_package(
     require_source_manifest: bool = False,
     require_dependency_metadata: bool = False,
     require_dependency_graph: bool = False,
+    require_dependency_license_evidence: bool = False,
     require_embedded_executable_inventory: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
@@ -1010,6 +1030,23 @@ def verify_windows_package(
     if ("DIRECT_DEPENDENCY_METADATA.json" in members
             and "DEPENDENCY_GRAPH_METADATA.json" in members):
         _require_dependency_evidence_coherence(direct_metadata, graph)
+    license_members = {
+        name: contents for name, contents in members.items()
+        if name.startswith("licenses/")
+    }
+    if require_dependency_license_evidence and "DEPENDENCY_LICENSE_EVIDENCE.json" not in members:
+        raise ValueError("release package is missing dependency license evidence")
+    if "DEPENDENCY_LICENSE_EVIDENCE.json" in members:
+        if "DEPENDENCY_GRAPH_METADATA.json" not in members:
+            raise ValueError("license evidence has no dependency graph authority")
+        license_evidence = _decode_json_object(
+            members["DEPENDENCY_LICENSE_EVIDENCE.json"], "DEPENDENCY_LICENSE_EVIDENCE.json"
+        )
+        validate_dependency_license_evidence(license_evidence, graph, license_members)
+        if members["DEPENDENCY_LICENSE_EVIDENCE.json"] != _canonical_json_bytes(license_evidence):
+            raise ValueError("distribution license evidence is not canonical JSON")
+    elif license_members:
+        raise ValueError("release contains unclaimed distribution license files")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")

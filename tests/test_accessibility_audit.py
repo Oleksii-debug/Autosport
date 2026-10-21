@@ -792,5 +792,35 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertNotIn("SECRET_SYNTHETIC", json.dumps(result, ensure_ascii=False))
 
 
+    def test_stood_down_provider_never_mints_machine_pass(self):
+        description = self._passing_description()
+        self.assertEqual(self._summarize(description)["status"], "PASS")
+        private = "SECRET_SYNTHETIC_UIA_PROVIDER_ACCOUNT"
+        description.providers_stood_down_because = "account=" + private
+        report = self._summarize(description)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertIn("UIA provider stood down: details redacted", report["failures"])
+        self.assertEqual(
+            report["providers_stood_down_because"], "provider details redacted"
+        )
+        self.assertNotIn(private, json.dumps(report, ensure_ascii=False))
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+
+    def test_stood_down_secondary_dialog_provider_cannot_hide_behind_main(self):
+        root = self._passing_description()
+        secondary = SimpleNamespace(
+            strategy=_Named("PROVIDED"),
+            widgets=(),
+            provider_trouble=(),
+            providers_stood_down_because="SECRET_DIALOG_PROVIDER",
+        )
+        combined = accessibility_audit._combined_description(root, secondary)
+        report = self._summarize(combined)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertIn("UIA provider stood down: details redacted", report["failures"])
+        self.assertNotIn("SECRET_DIALOG_PROVIDER", json.dumps(report))
+
+
 if __name__ == "__main__":
     unittest.main()

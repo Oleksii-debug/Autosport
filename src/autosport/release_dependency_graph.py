@@ -14,6 +14,11 @@ from typing import Any
 from .release_sbom import _LICENSE, _VERSION, _normalize_name, _requirements
 
 _MAX_COMPONENTS = 256
+# Requirement extras can multiply graph walks without creating new edges.
+# Bound both unique contexts and pending work, not only distribution names.
+_MAX_EXTRA_CONTEXTS_PER_DISTRIBUTION = 64
+_MAX_TOTAL_EXTRA_CONTEXTS = 1024
+_MAX_QUEUED_EXTRA_CONTEXTS = 2048
 _MAX_EDGES = 8192
 _MAX_REQUIREMENTS_PER_DISTRIBUTION = 512
 _MAX_REQUIREMENT_LENGTH = 2048
@@ -111,13 +116,20 @@ def capture_build_host_dependency_graph(
     roots = _requirements(source_manifest)
     queue = deque((name, "") for name in sorted(roots))
     processed: dict[str, set[str]] = {}
+    processed_extra_context_count = 0
     components: dict[str, dict[str, Any]] = {}
     edges = 0
     while queue:
         name, extra = queue.popleft()
         if extra in processed.get(name, set()):
             continue
-        processed.setdefault(name, set()).add(extra)
+        contexts = processed.setdefault(name, set())
+        if len(contexts) >= _MAX_EXTRA_CONTEXTS_PER_DISTRIBUTION:
+            raise ValueError("build-host distribution extra context limit exceeded")
+        contexts.add(extra)
+        processed_extra_context_count += 1
+        if processed_extra_context_count > _MAX_TOTAL_EXTRA_CONTEXTS:
+            raise ValueError("build-host graph extra context limit exceeded")
         if len(processed) > _MAX_COMPONENTS:
             raise ValueError("build-host graph component limit exceeded")
         try:
@@ -188,6 +200,8 @@ def capture_build_host_dependency_graph(
             # Requirements without an extra marker apply in both the base
             # install and every selected extra; always include the base pass.
             for selected_extra in ["", *sorted(requirement.extras)]:
+                if len(queue) >= _MAX_QUEUED_EXTRA_CONTEXTS:
+                    raise ValueError("build-host graph pending extra context limit exceeded")
                 queue.append((child, selected_extra))
     result = {
         "schema_version": 1,

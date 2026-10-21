@@ -485,7 +485,7 @@ def capture_embedded_executable_inventory(
 def _owned_distribution_license_record(record_path: str, name: str, version: str) -> bool:
     if (
         type(record_path) is not str or not (1 <= len(record_path) <= 512)
-        or record_path.startswith(("/", "\\\\")) or "\\\\" in record_path
+        or record_path.startswith(("/", "\\")) or "\\" in record_path
         or any(ord(character) < 32 or ord(character) == 127 for character in record_path)
     ):
         return False

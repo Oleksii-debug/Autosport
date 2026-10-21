@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import os
 import tempfile
 import unittest
 from datetime import datetime, timezone
@@ -526,6 +527,32 @@ class ParlayApiProductSourceTests(unittest.TestCase):
         ):
             with self.assertRaisesRegex(ProductSourceError, "AUTOSPORT_PRODUCT_WORKSPACE"):
                 create_parlay_product_source()
+
+    def test_factory_explicit_workspace_bypasses_only_workspace_environment(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            workspace = root / "strategy-workspace"
+            environment_workspace = root / "different-global-workspace"
+            rights = _write_source_rights_manifest(root)
+            with patch.dict(
+                "os.environ",
+                {
+                    "AUTOSPORT_PARLAY_API_KEY": "test-only-api-key",
+                    "AUTOSPORT_PRODUCT_WORKSPACE": str(environment_workspace),
+                    "AUTOSPORT_PARLAY_SOURCE_RIGHTS_MANIFEST": str(rights),
+                    "AUTOSPORT_PARLAY_LAWFUL_TERMS_REF": "terms:parlayapi:v1",
+                    "AUTOSPORT_PARLAY_RETENTION_REF": "retention:parlayapi:v1",
+                    "AUTOSPORT_MONOTONIC_AUTHORITY_ROOT": str(root / "monotonic-authority"),
+                },
+                clear=True,
+            ):
+                source = create_parlay_product_source(workspace=workspace)
+                self.assertEqual(source.workspace, workspace.resolve(strict=False))
+                self.assertEqual(
+                    os.environ["AUTOSPORT_PRODUCT_WORKSPACE"],
+                    str(environment_workspace),
+                )
+                self.assertIsNotNone(source._source_rights_binding)
 
     def test_factory_requires_secret_and_operator_authority_environment(self) -> None:
         with patch.dict(

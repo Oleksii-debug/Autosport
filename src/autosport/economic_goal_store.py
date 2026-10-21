@@ -9,7 +9,10 @@ non-expanding successor of the already persisted owner contract.
 from __future__ import annotations
 
 from decimal import Decimal, InvalidOperation
+import json
+import os
 from pathlib import Path
+import stat
 from typing import Final
 
 from .economic_goal import (
@@ -26,6 +29,7 @@ from .workspace_lock import WorkspaceEconomicLock
 
 ECONOMIC_GOAL_SCHEMA: Final = "autosport.economic_goal_contract"
 ECONOMIC_GOAL_SCHEMA_VERSION: Final = 1
+_MAX_ECONOMIC_GOAL_BYTES: Final = 128 * 1024
 
 _CONTRACT_KEYS: Final = frozenset(
     {
@@ -80,6 +84,259 @@ _RESTRICTION_FIELDS: Final = (
     "blocked_providers",
     "blocked_markets",
 )
+
+
+def _open_exclusive_write_descriptor(path: Path) -> int:
+    """Create the final owner-authority pathname without following aliases."""
+
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise OSError("platform lacks no-follow economic-goal creation support")
+        return os.open(path, flags | no_follow, 0o600)
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    generic_write = 0x40000000
+    create_new = 1
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel_handle = create_file(
+        str(path),
+        generic_write,
+        0,
+        None,
+        create_new,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        error_code = ctypes.get_last_error()
+        if error_code in (80, 183):  # ERROR_FILE_EXISTS / ERROR_ALREADY_EXISTS
+            raise FileExistsError(
+                error_code,
+                "economic goal authority path already exists",
+                str(path),
+            )
+        raise ctypes.WinError(error_code)
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    try:
+        return msvcrt.open_osfhandle(
+            kernel_handle,
+            os.O_WRONLY | os.O_BINARY,
+        )
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
+
+
+def _exclusive_create_owner_contract(path: Path, payload: dict[str, object]) -> None:
+    """Publish the initial owner authority once, never by pathname replacement."""
+
+    try:
+        encoded = (
+            json.dumps(
+                payload,
+                ensure_ascii=False,
+                indent=2,
+                sort_keys=True,
+                allow_nan=False,
+            )
+            + "\n"
+        ).encode("utf-8")
+    except (TypeError, ValueError, UnicodeError) as exc:
+        raise EconomicGoalContractError(
+            "owner economic goal is not canonical JSON"
+        ) from exc
+    if len(encoded) > _MAX_ECONOMIC_GOAL_BYTES:
+        raise EconomicGoalContractError(
+            "owner economic goal exceeds the bounded authority size"
+        )
+
+    path.parent.mkdir(parents=True, exist_ok=True)
+    descriptor: int | None = None
+    try:
+        descriptor = _open_exclusive_write_descriptor(path)
+        written = 0
+        while written < len(encoded):
+            count = os.write(descriptor, encoded[written:])
+            if count <= 0:
+                raise OSError("economic goal authority write made no progress")
+            written += count
+        os.fsync(descriptor)
+    finally:
+        if descriptor is not None:
+            os.close(descriptor)
+
+
+def _open_read_only_descriptor(path: Path) -> int:
+    """Open the contract pathname without following its final alias."""
+
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0)
+    if os.name != "nt":
+        no_follow = getattr(os, "O_NOFOLLOW", 0)
+        if not no_follow:
+            raise OSError("platform lacks no-follow economic-goal reads")
+        return os.open(path, flags | no_follow)
+
+    import ctypes
+    import msvcrt
+    from ctypes import wintypes
+
+    create_file = ctypes.WinDLL("kernel32", use_last_error=True).CreateFileW
+    create_file.argtypes = (
+        wintypes.LPCWSTR,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        ctypes.c_void_p,
+        wintypes.DWORD,
+        wintypes.DWORD,
+        wintypes.HANDLE,
+    )
+    create_file.restype = wintypes.HANDLE
+
+    generic_read = 0x80000000
+    file_share_read = 0x00000001
+    file_share_write = 0x00000002
+    file_share_delete = 0x00000004
+    open_existing = 3
+    file_attribute_normal = 0x00000080
+    file_flag_open_reparse_point = 0x00200000
+    invalid_handle_value = ctypes.c_void_p(-1).value
+
+    kernel_handle = create_file(
+        str(path),
+        generic_read,
+        file_share_read | file_share_write | file_share_delete,
+        None,
+        open_existing,
+        file_attribute_normal | file_flag_open_reparse_point,
+        None,
+    )
+    if kernel_handle == invalid_handle_value:
+        raise ctypes.WinError(ctypes.get_last_error())
+
+    close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+    close_handle.argtypes = (wintypes.HANDLE,)
+    close_handle.restype = wintypes.BOOL
+    try:
+        return msvcrt.open_osfhandle(kernel_handle, flags)
+    except BaseException:
+        close_handle(kernel_handle)
+        raise
+
+
+def _require_regular_single_link(metadata: os.stat_result) -> None:
+    if not stat.S_ISREG(metadata.st_mode) or metadata.st_nlink != 1:
+        raise EconomicGoalContractError(
+            "persisted economic goal must be a single-link regular non-symlink file"
+        )
+
+
+def _read_canonical_contract_text(path: Path) -> str:
+    """Read one bounded contract image from a stable non-alias pathname."""
+
+    descriptor: int | None = None
+    verification_descriptor: int | None = None
+    final_verification_descriptor: int | None = None
+    try:
+        path_before = path.lstat()
+        _require_regular_single_link(path_before)
+        descriptor = _open_read_only_descriptor(path)
+        opened_before = os.fstat(descriptor)
+        _require_regular_single_link(opened_before)
+
+        chunks: list[bytes] = []
+        total = 0
+        while total <= _MAX_ECONOMIC_GOAL_BYTES:
+            chunk = os.read(
+                descriptor,
+                min(64 * 1024, _MAX_ECONOMIC_GOAL_BYTES + 1 - total),
+            )
+            if not chunk:
+                break
+            chunks.append(chunk)
+            total += len(chunk)
+        if total > _MAX_ECONOMIC_GOAL_BYTES:
+            raise EconomicGoalContractError(
+                "persisted economic goal exceeds the bounded authority size"
+            )
+
+        opened_after = os.fstat(descriptor)
+        _require_regular_single_link(opened_after)
+        if (
+            opened_before.st_size != opened_after.st_size
+            or opened_before.st_mtime_ns != opened_after.st_mtime_ns
+            or opened_before.st_ctime_ns != opened_after.st_ctime_ns
+        ):
+            raise EconomicGoalContractError(
+                "persisted economic goal changed while being read"
+            )
+
+        verification_descriptor = _open_read_only_descriptor(path)
+        verification_stat = os.fstat(verification_descriptor)
+        _require_regular_single_link(verification_stat)
+        if not os.path.sameopenfile(descriptor, verification_descriptor):
+            raise EconomicGoalContractError(
+                "persisted economic goal pathname changed while being read"
+            )
+
+        # Re-check the pathname after the first descriptor identity proof, then
+        # open it one final time. This closes the replace-after-verification-open
+        # window even when an attacker supplies a same-shape regular file.
+        path_after = path.lstat()
+        _require_regular_single_link(path_after)
+        final_verification_descriptor = _open_read_only_descriptor(path)
+        final_verification_stat = os.fstat(final_verification_descriptor)
+        _require_regular_single_link(final_verification_stat)
+        if not os.path.sameopenfile(descriptor, final_verification_descriptor):
+            raise EconomicGoalContractError(
+                "persisted economic goal pathname changed while being read"
+            )
+
+        try:
+            return b"".join(chunks).decode("utf-8")
+        except UnicodeDecodeError as exc:
+            raise EconomicGoalContractError(
+                "persisted economic goal must be valid UTF-8"
+            ) from exc
+    except EconomicGoalContractError:
+        raise
+    except OSError as exc:
+        raise EconomicGoalContractError(
+            "cannot safely read persisted economic goal"
+        ) from exc
+    finally:
+        for candidate in (
+            final_verification_descriptor,
+            verification_descriptor,
+            descriptor,
+        ):
+            if candidate is not None:
+                try:
+                    os.close(candidate)
+                except OSError:
+                    pass
 
 
 def _require_exact_keys(
@@ -270,24 +527,48 @@ class EconomicGoalStore:
         self.path = self.workspace / self.FILE_NAME
 
     def load(self) -> EconomicGoalContract:
+        return economic_goal_from_json(_read_canonical_contract_text(self.path))
+
+    def load_optional(self) -> EconomicGoalContract | None:
+        """Return None only for a genuinely absent pathname.
+
+        Any existing pathname object, including a broken symlink/reparse alias,
+        must cross the canonical verified reader and therefore fail closed rather
+        than being reclassified as missing authority.
+        """
+
         try:
-            text = self.path.read_text(encoding="utf-8")
+            self.path.lstat()
+        except FileNotFoundError:
+            return None
         except OSError as exc:
             raise EconomicGoalContractError(
-                f"cannot read persisted economic goal: {exc}"
+                "cannot inspect persisted economic goal path"
             ) from exc
-        return economic_goal_from_json(text)
+        return self.load()
 
     def initialize_owner(self, contract: EconomicGoalContract) -> None:
-        """Create the first owner contract while holding the economic writer lock."""
+        """Create the first owner contract without any final-path replacement."""
 
+        if not isinstance(contract, EconomicGoalContract):
+            raise TypeError("owner contract must be an EconomicGoalContract")
         with WorkspaceEconomicLock(self.workspace):
-            if self.path.exists():
+            try:
+                _exclusive_create_owner_contract(
+                    self.path,
+                    economic_goal_to_payload(contract),
+                )
+            except FileExistsError as exc:
                 raise EconomicGoalContractError(
                     "persisted economic goal already exists; owner replacement requires "
                     "a separate authority boundary"
-                )
-            atomic_write_json(self.path, economic_goal_to_payload(contract))
+                ) from exc
+            except EconomicGoalContractError:
+                raise
+            except OSError as exc:
+                raise EconomicGoalContractError(
+                    "cannot create persisted economic goal authority"
+                ) from exc
 
     def persist_automatic_successor(self, candidate: EconomicGoalContract) -> None:
         """Publish one machine revision only when durable authority cannot expand."""

@@ -384,6 +384,7 @@ def capture_embedded_executable_inventory(
         # archive start, a compressed member cannot extend beyond the EXE bytes.
         executable_size = snapshot_path.stat().st_size
         components: list[dict[str, Any]] = []
+        packed_ranges: list[tuple[int, int]] = []
         for name, record in sorted(toc.items()):
             if type(record) not in (tuple, list) or len(record) != 5:
                 raise ValueError("malformed executable CArchive member record")
@@ -397,10 +398,18 @@ def capture_embedded_executable_inventory(
                 or type(compressed) not in (bool, int) or compressed not in (False, True, 0, 1)
             ):
                 raise ValueError("malformed executable CArchive member flags")
+            # Distinct TOC names must not alias the same sealed CArchive bytes.
+            # Adjacent spans and zero-length metadata members are permitted.
+            if packed:
+                packed_ranges.append((position, position + packed))
             components.append({
                 "name": name, "typecode": typecode,
                 "packed_bytes": packed, "unpacked_bytes": unpacked,
             })
+        packed_ranges.sort()
+        for previous, following in zip(packed_ranges, packed_ranges[1:]):
+            if previous[1] > following[0]:
+                raise ValueError("embedded CArchive member byte ranges overlap")
         pyz_modules = None
         if include_nested_pyz:
             # Inspect the in-place PyInstaller PYZ TOC through the sealed

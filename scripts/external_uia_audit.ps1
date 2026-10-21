@@ -1477,7 +1477,7 @@ try {
         $report.f8_focus_automation_id = [string]$focusedF8.Current.AutomationId
         $report.keyboard_shortcuts_status = 'PASS'
     } catch {
-        $report.failures += "packaged keyboard shortcut audit failed: $($_.Exception.Message)"
+        $report.failures += 'packaged keyboard shortcut audit failed: focus evidence unavailable'
     }
 
     # Owner/manual details are intentionally hidden in the semantic document at
@@ -1496,7 +1496,7 @@ try {
                 $report.failures += 'automation_id=306: owner economic panel did not become externally inspectable'
             }
         } catch {
-            $report.failures += "owner economic panel open failed: $($_.Exception.Message)"
+            $report.failures += 'owner economic panel open failed: activation evidence unavailable'
         }
     }
 
@@ -1509,7 +1509,7 @@ try {
             $report.failures += 'automation_id=331: manual calculation panel did not become externally inspectable'
         }
     } catch {
-        $report.failures += "manual calculation panel open failed: $($_.Exception.Message)"
+        $report.failures += 'manual calculation panel open failed: activation evidence unavailable'
     }
 
     $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
@@ -1681,7 +1681,7 @@ try {
             $report.emergency_stop_status_text = $confirmedStopText
             $report.emergency_stop_activation_status = 'PASS'
         } catch {
-            $report.failures += "packaged emergency STOP activation audit failed: $($_.Exception.Message)"
+            $report.failures += 'packaged emergency STOP activation audit failed: durable proof unavailable'
         }
     }
 
@@ -1709,7 +1709,7 @@ try {
                 throw "manual disclosure close did not restore focus to automation_id=330"
             }
         } catch {
-            $report.failures += "packaged disclosure focus-handoff audit failed: $($_.Exception.Message)"
+            $report.failures += 'packaged disclosure focus-handoff audit failed: focus evidence unavailable'
         }
     }
 
@@ -1767,7 +1767,7 @@ try {
         Write-ExternalUiaProgress -Stage 'AUDIT_COMPLETE'
     }
 } catch {
-    $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+    $report.failures += 'external UIA audit failed: unexpected automation error'
 } finally {
     # Preserve a bounded count from the actual pre-cleanup UIA search. A vanished
     # launcher with child processes differs from a completely empty process family.

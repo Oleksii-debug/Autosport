@@ -45,13 +45,32 @@ def _sha_file(path: Path) -> str:
     return digest.hexdigest()
 
 
+def _is_redirected_install_path(path: Path) -> bool:
+    """Reject symlinks AND Windows junction/reparse paths without following them.
+
+    Path.is_symlink() alone does not identify Windows directory junctions.
+    This preflight checks existing components; atomic directory publication
+    remains the independent no-replace protection against target races.
+    """
+    try:
+        info = path.lstat()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise OfflineInstallError("install path cannot be safely inspected") from exc
+    return stat.S_ISLNK(info.st_mode) or bool(
+        getattr(info, "st_file_attributes", 0)
+        & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+    )
+
+
 def _safe_root(destination: Path) -> Path:
     if not destination.is_absolute():
         raise OfflineInstallError("install destination must be absolute")
     if destination.parent == destination or not destination.name:
         raise OfflineInstallError("install destination is not a product directory")
     parent = destination.parent
-    if not parent.is_dir() or parent.is_symlink() or destination.is_symlink():
+    if not parent.is_dir() or _is_redirected_install_path(parent) or _is_redirected_install_path(destination):
         raise OfflineInstallError("install parent/destination is unsafe")
     if destination.exists():
         raise OfflineInstallError("existing installation must not be overwritten")
@@ -60,7 +79,7 @@ def _safe_root(destination: Path) -> Path:
     # any verified owner release outside the requested directory hierarchy.
     ancestor = parent
     while True:
-        if ancestor.is_symlink():
+        if _is_redirected_install_path(ancestor):
             raise OfflineInstallError("install path traverses a symlink")
         if ancestor == ancestor.parent:
             break

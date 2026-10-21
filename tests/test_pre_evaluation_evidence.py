@@ -13,6 +13,7 @@ from autosport.pre_evaluation_evidence import (
     PreEvaluationEvidenceAuthority,
     PreEvaluationEvidenceStore,
     PreEvaluationPolicy,
+    PreEvaluationSessionEvidence,
 )
 
 
@@ -289,3 +290,99 @@ def test_failed_atomic_replace_preserves_prior_evidence_and_cleans_only_own_temp
     assert store.load() == original
     assert not list(tmp_path.glob(".evidence.json.*.tmp"))
     assert not (tmp_path / ".evidence.json.tmp").exists()
+
+
+@pytest.mark.parametrize(
+    ("location", "replacement"),
+    (
+        (("schema_version",), True),
+        (("payload", "schema_version"), True),
+        (("payload", "slots", 0, "eligible_for_evaluation"), 1),
+        (("payload", "summary", "candidate_count"), True),
+    ),
+)
+def test_store_rejects_bool_int_semantic_aliases(
+    tmp_path: Path, location: tuple[object, ...], replacement: object,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1", candidate_ids=["c1"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(evidence)
+    raw = json.loads(store.path.read_text(encoding="utf-8"))
+    target = raw
+    for key in location[:-1]:
+        target = target[key]
+    target[location[-1]] = replacement
+    store.path.write_text(json.dumps(raw), encoding="utf-8")
+    with pytest.raises(ValueError):
+        store.load()
+
+
+def test_store_rejects_duplicate_json_keys_at_top_and_nested_depth(
+    tmp_path: Path,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s1", candidate_ids=["c1"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(evidence)
+    canonical = store.path.read_text(encoding="utf-8")
+    store.path.write_text('{"schema_version":1,' + canonical[1:], encoding="utf-8")
+    with pytest.raises(ValueError, match="invalid pre-evaluation evidence file"):
+        store.load()
+
+    store.save(evidence)
+    canonical = store.path.read_text(encoding="utf-8")
+    key = '"candidate_id":"c1"'
+    assert key in canonical
+    store.path.write_text(
+        canonical.replace(key, key + ',"candidate_id":"c1"', 1),
+        encoding="utf-8",
+    )
+    with pytest.raises(ValueError, match="invalid pre-evaluation evidence file"):
+        store.load()
+
+
+def test_mutated_session_cannot_overwrite_last_good_evidence(tmp_path: Path) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    last_good = authority.evaluate_session(
+        session_id="last-good", candidate_ids=["a"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    candidate = authority.evaluate_session(
+        session_id="candidate", candidate_ids=["b"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(last_good)
+    object.__setattr__(candidate, "session_id", "mutated-after-validation")
+    with pytest.raises(ValueError, match="slot session_id mismatch"):
+        store.save(candidate)
+    assert store.load() == last_good
+
+
+def test_store_fences_subclassed_session_before_publication(tmp_path: Path) -> None:
+    class Derived(PreEvaluationSessionEvidence):
+        pass
+
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    canonical = authority.evaluate_session(
+        session_id="s1", candidate_ids=["c1"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    derived = Derived(
+        session_id=canonical.session_id,
+        evaluated_at_ns=canonical.evaluated_at_ns,
+        policy_max_age_ns=canonical.policy_max_age_ns,
+        policy_digest=canonical.policy_digest,
+        slots=canonical.slots,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    with pytest.raises(TypeError, match="exact PreEvaluationSessionEvidence"):
+        store.save(derived)
+    assert not store.path.exists()

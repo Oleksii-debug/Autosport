@@ -10,6 +10,7 @@ import os
 import re
 import stat
 import tempfile
+import zipfile
 from pathlib import Path
 
 from . import release_package
@@ -34,6 +35,71 @@ def _hash_file(path: Path) -> str:
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
             digest.update(chunk)
     return digest.hexdigest()
+
+
+def _independent_original_archive_inventory(
+    archive: str | Path, *, expected_source_sha: str,
+    expected_package_sha256: str,
+) -> dict[str, str]:
+    """Prove deletion scope from independently SHA-pinned canonical ZIP bytes.
+
+    An installed receipt can be changed by anyone with write access to the
+    installation. Its recomputed hashes alone must never authorize deletion
+    of additional user-owned paths.
+    """
+    source = Path(archive)
+    if not _regular_file(source):
+        raise OfflineInstallError("original release archive must be a regular file")
+    if _hash_file(source) != expected_package_sha256:
+        raise OfflineInstallError("original release archive SHA-256 mismatch")
+    try:
+        evidence = release_package.verify_windows_package(
+            source, expected_source_sha=expected_source_sha, require_source_manifest=True,
+        )
+    except (OSError, ValueError, TypeError, RuntimeError, zipfile.BadZipFile) as exc:
+        raise OfflineInstallError("original canonical release verification failed") from exc
+    if (
+        type(evidence) is not dict or evidence.get("status") != "PASS"
+        or evidence.get("source_sha") != expected_source_sha
+        or evidence.get("package_sha256") != expected_package_sha256
+    ):
+        raise OfflineInstallError("original canonical release identity is unverified")
+    inventory: dict[str, str] = {}
+    total = 0
+    try:
+        with zipfile.ZipFile(source) as package:
+            infos = package.infolist()
+            if not 2 <= len(infos) <= _MAX_ENTRIES:
+                raise OfflineInstallError("original release inventory is unsupported")
+            for member in infos:
+                full = member.filename
+                if (
+                    member.is_dir() or not full.startswith("Autosport-V1/")
+                    or member.file_size < 0
+                ):
+                    raise OfflineInstallError("unexpected original release member")
+                name = full[len("Autosport-V1/"):]
+                if not name or name in inventory:
+                    raise OfflineInstallError("duplicate original release member")
+                total += member.file_size
+                if total > 2 * 1024 * 1024 * 1024:
+                    raise OfflineInstallError("original release exceeds size limit")
+                digest = hashlib.sha256()
+                copied = 0
+                with package.open(member) as stream:
+                    for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+                        copied += len(chunk)
+                        if copied > member.file_size:
+                            raise OfflineInstallError("original release member expanded")
+                        digest.update(chunk)
+                if copied != member.file_size:
+                    raise OfflineInstallError("original release member truncated")
+                inventory[name] = digest.hexdigest()
+    except (OSError, EOFError, zipfile.BadZipFile, zipfile.LargeZipFile) as exc:
+        raise OfflineInstallError("unreadable original release inventory") from exc
+    if _hash_file(source) != expected_package_sha256:
+        raise OfflineInstallError("original release archive changed during inspection")
+    return inventory
 
 
 def _inspection_root(destination: str | Path) -> Path:
@@ -145,8 +211,8 @@ def inspect_installed_release(
 
 
 def uninstall_verified_release(
-    destination: str | Path, *, expected_source_sha: str,
-    expected_package_sha256: str,
+    destination: str | Path, *, original_archive: str | Path,
+    expected_source_sha: str, expected_package_sha256: str,
 ) -> dict[str, object]:
     """Move exact product aside, independently re-verify, then delete only listed files.
 
@@ -158,6 +224,17 @@ def uninstall_verified_release(
         root, expected_source_sha=expected_source_sha,
         expected_package_sha256=expected_package_sha256,
     )
+    independently_proven_files = _independent_original_archive_inventory(
+        original_archive, expected_source_sha=expected_source_sha,
+        expected_package_sha256=expected_package_sha256,
+    )
+    receipt = release_package._decode_json_object(
+        (root / _RECEIPT).read_bytes(), "installed-release receipt"
+    )
+    if receipt.get("files") != independently_proven_files:
+        raise OfflineInstallError(
+            "installed receipt is not bound to the original canonical release archive"
+        )
     identity = root.stat()
     staging = Path(tempfile.mkdtemp(
         prefix=".autosport-uninstall-", dir=root.parent
@@ -173,6 +250,13 @@ def uninstall_verified_release(
             moved, expected_source_sha=expected_source_sha,
             expected_package_sha256=expected_package_sha256,
         )
+        # The movable tree's receipt must still match the independently
+        # verified archive inventory before a single named file is deleted.
+        moved_receipt = release_package._decode_json_object(
+            (moved / _RECEIPT).read_bytes(), "installed-release receipt"
+        )
+        if moved_receipt.get("files") != independently_proven_files:
+            raise OfflineInstallError("installed release changed before removal")
         receipt = release_package._decode_json_object(
             (moved / _RECEIPT).read_bytes(), "installed-release receipt"
         )

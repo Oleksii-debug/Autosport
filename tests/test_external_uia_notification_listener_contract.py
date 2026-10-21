@@ -85,7 +85,7 @@ def test_listener_uses_thread_safe_csharp_callback_recorder() -> None:
     assert "AutosportUiaNotificationRecord[] _items" in TEXT
     assert "public int Count" in TEXT
     assert "get { return _count; }" in TEXT
-    assert TEXT.count("System.Runtime.CompilerServices.MethodImplOptions.Synchronized") == 3
+    assert TEXT.count("System.Runtime.CompilerServices.MethodImplOptions.Synchronized") == 4
     assert "lock (_gate)" not in TEXT
     assert "public bool TryDequeue(out AutosportUiaNotificationRecord item)" in TEXT
     assert "using System.Collections.Concurrent;" not in TEXT
@@ -342,3 +342,31 @@ def test_listener_precompiler_failure_has_zero_event_report_shape() -> None:
     assert "events = @()" in startup
     for field in ("real_money_execution", "human_tested", "nvda_verified", "whole_product_complete"):
         assert f"{field} = $false" in startup
+
+
+def test_notification_flood_and_oversized_provider_fields_fail_closed_without_unbounded_buffer():
+    # This is a portable source contract; Windows/real UIA execution is a
+    # separate evidence class and cannot be inferred from this static check.
+    assert "private const int MaxBufferedEvents = 10000;" in TEXT
+    assert "private const int MaxEventTextCharacters = 8192;" in TEXT
+    assert "if (_count >= MaxBufferedEvents ||" in TEXT
+    assert "item.DisplayString.Length > MaxEventTextCharacters" in TEXT
+    assert "item.ActivityId.Length > 256" in TEXT
+    assert "item.SenderAutomationId.Length > 256" in TEXT
+    assert "if (_dropped < int.MaxValue) _dropped++;" in TEXT
+    assert "public int Dropped" in TEXT
+    enqueue = TEXT.split("public void Enqueue(", 1)[1].split("public int Dropped", 1)[0]
+    assert enqueue.index("if (_count >= MaxBufferedEvents ||") < enqueue.index(
+        "if (_count == _items.Length)"
+    )
+    assert "$eventRecords = [System.Collections.Generic.List[object]]::new()" in TEXT
+    assert "while ($eventRecords.Count -lt 10000 -and $recorder.Records.TryDequeue([ref]$raw)) {" in TEXT
+    assert "$eventRecords.Add($record)" in TEXT
+    assert "$report.events = @($eventRecords.ToArray())" in TEXT
+    assert "$report.events += $record" not in TEXT
+    assert "$recorder.Records.Dropped -gt 0 -or $recorder.Records.Count -gt 0" in TEXT
+    assert "UIA notification event capture exceeded safe bounds" in TEXT
+    # Do not promote a truncated capture to a machine PASS.
+    assert "if ($report.failures.Count -eq 0)" in TEXT
+    assert "human_tested = $false" in TEXT
+    assert "nvda_verified = $false" in TEXT

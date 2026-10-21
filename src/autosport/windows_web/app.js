@@ -484,7 +484,7 @@
   function freezeUnverifiedOperatorControls() {
     latestState = null;
     for (const id of [101, 102, 103, 104, 105, 106, 107, 108, 109,
-      328, "owner-confirm", "product-source-select", "product-source-save",
+      328, 333, 335, "owner-confirm", "product-source-select", "product-source-save",
       "product-runtime-start", "product-runtime-stop",
       "update-diagnostic-button", "agent-learning-refresh"]) {
       setDisabledWithFocusFallback(byId(id), true);
@@ -658,6 +658,10 @@
     }
     setTextIfChanged(byId("manual-status"), state.manual.status || "");
     setValueIfChanged(byId(334), state.manual.result || "");
+    // These backend-dispatch controls were frozen on an invalid state read.
+    // Only a newly validated canonical snapshot may make them actionable again.
+    setDisabledWithFocusFallback(byId(333), false);
+    setDisabledWithFocusFallback(byId(335), false);
 
     const productSource = state.product_source || {};
     const sourceSelect = byId("product-source-select");

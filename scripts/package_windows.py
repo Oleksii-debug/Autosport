@@ -51,6 +51,31 @@ _PRIVATE_KEY_BASENAMES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"
 _PRIVATE_KEY_CONTAINER_SUFFIXES = (".key", ".ppk", ".pfx", ".p12")
 
 
+_TEST_STATE_DIRECTORY_NAMES = frozenset({
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "__pycache__",
+})
+_TEST_STATE_BASENAMES = frozenset({
+    ".coverage", "coverage.xml", ".testmondata", "pytestdebug.log",
+})
+
+
+def _test_state_source_path_reason(path: PurePosixPath) -> str | None:
+    """Reject tracked test/build byproducts before release materialization."""
+    if not isinstance(path, PurePosixPath) or not path.parts:
+        raise ValueError("release static payload path must be a concrete PurePosixPath")
+    normalized = tuple(part.casefold() for part in path.parts)
+    if any(part in _TEST_STATE_DIRECTORY_NAMES for part in normalized[:-1]):
+        return "test/build state directory"
+    basename = normalized[-1]
+    if (
+        basename in _TEST_STATE_BASENAMES
+        or basename.startswith(".coverage.")
+        or basename.endswith((".pyc", ".pyo"))
+    ):
+        return "test/build state file"
+    return None
+
+
 def _secret_source_path_reason(path: PurePosixPath) -> str | None:
     """Classify high-confidence local credential/session paths by name only.
 
@@ -89,6 +114,8 @@ def _secret_source_path_reason(path: PurePosixPath) -> str | None:
 def _require_safe_static_release_paths(paths: tuple[PurePosixPath, ...]) -> None:
     for path in paths:
         reason = _secret_source_path_reason(path)
+        if reason is None:
+            reason = _test_state_source_path_reason(path)
         if reason is not None:
             raise ValueError(
                 "release static payload contains forbidden "

@@ -8,6 +8,7 @@ from __future__ import annotations
 
 from importlib import metadata
 import re
+import unicodedata
 from typing import Any
 
 
@@ -199,6 +200,16 @@ def validate_embedded_executable_inventory(
     safe_env_templates = frozenset({
         ".env.example", ".env.sample", ".env.template", ".env.dist",
     })
+    # PyInstaller can extract CArchive names to a case-insensitive Windows
+    # filesystem. Distinct raw TOC names must not alias there, even when the
+    # outer release ZIP and its SHA-256 manifests are individually canonical.
+    windows_names: set[str] = set()
+    windows_devices = frozenset({
+        "con", "prn", "aux", "nul",
+        *(f"com{index}" for index in range(1, 10)),
+        *(f"lpt{index}" for index in range(1, 10)),
+        "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
+    })
     last = None
     for item in components:
         if type(item) is not dict or set(item) != {
@@ -216,7 +227,19 @@ def validate_embedded_executable_inventory(
         if last is not None and name <= last:
             raise ValueError("embedded executable component names are not unique/sorted")
         last = name
-        pieces = tuple(part.casefold() for part in name.replace("\\", "/").split("/"))
+        windows_parts = name.replace("\\", "/").split("/")
+        for segment in windows_parts:
+            if (
+                segment.endswith((" ", "."))
+                or any(ord(char) < 32 or char in '<>:"|?*' for char in segment)
+                or segment.split(".", 1)[0].casefold() in windows_devices
+            ):
+                raise ValueError("embedded executable Windows member name is unsafe")
+        windows_name = unicodedata.normalize("NFC", "/".join(windows_parts)).casefold()
+        if windows_name in windows_names:
+            raise ValueError("embedded executable Windows member names collide")
+        windows_names.add(windows_name)
+        pieces = tuple(part.casefold() for part in windows_parts)
         leaf = pieces[-1]
         if (
             any(part in forbidden_directories for part in pieces[:-1])

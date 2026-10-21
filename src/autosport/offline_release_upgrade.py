@@ -38,6 +38,11 @@ def _transaction_root(destination: Path) -> Path:
     # update fence. Preserve POSIX case sensitivity.
     spelling = os.fspath(destination)
     if isinstance(destination, PureWindowsPath):
+        # Win32 device/extended-length aliases (\\?\C:\... and \\.\C:\...)
+        # can address the same product as C:\... but hash to a different
+        # pending-update namespace. Refuse them rather than permit bypass.
+        if destination.drive.startswith(("\\\\?\\", "\\\\.\\")):
+            raise OfflineInstallError("Windows device namespace update path is unsafe")
         spelling = ntpath.normcase(spelling)
     name = hashlib.sha256(os.fsencode(spelling)).hexdigest()[:24]
     return destination.parent / (".autosport-update-" + name)

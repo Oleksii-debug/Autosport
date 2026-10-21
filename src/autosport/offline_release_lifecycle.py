@@ -13,7 +13,9 @@ import tempfile
 from pathlib import Path
 
 from . import release_package
-from .offline_release_install import OfflineInstallError, _RECEIPT, _safe_root
+from .offline_release_install import (
+    OfflineInstallError, _RECEIPT, _publish_directory_no_replace, _safe_root,
+)
 
 _MAX_RECEIPT_BYTES = 1024 * 1024
 _MAX_ENTRIES = 4096
@@ -198,7 +200,7 @@ def uninstall_verified_release(
                         moved, expected_source_sha=expected_source_sha,
                         expected_package_sha256=expected_package_sha256,
                     )
-                    os.rename(moved, root)
+                    _publish_directory_no_replace(moved, root)
             except (OfflineInstallError, OSError, ValueError):
                 pass
         raise

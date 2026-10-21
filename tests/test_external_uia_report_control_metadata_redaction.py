@@ -12,7 +12,10 @@ def test_exported_automation_id_is_trusted_spec_identity_not_provider_metadata()
     script = _AUDIT.read_text(encoding="utf-8")
     assert "automation_id = [string]$spec.automation_id" in script
     assert "automation_id = [string]$element.Current.AutomationId" not in script
-    assert "automation_id=$($spec.automation_id): duplicate external UIA control identity" in script
+    # The WebView2 enumeration derives the reported ID from the expected spec.
+    # Preserve that provenance and fail-closed duplicate diagnostic invariant.
+    assert "$expectedId = [string]$spec.automation_id" in script
+    assert "automation_id=$($expectedId): duplicate external UIA control identity" in script
 
 
 def test_control_type_mismatches_report_fixed_markers_not_provider_values():

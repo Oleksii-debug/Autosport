@@ -41,8 +41,11 @@ def test_recovery_configuration_error_with_broken_str_stays_fail_closed() -> Non
         "ui.error.recovery.configuration",
         detail=text(
             "ui.error.exception.message_unavailable",
-            exception_type="_BrokenTextError",
+            exception_type="RuntimeError",
         ),
     )
     assert app.status.value == text("ui.status.recovery.configuration_rejected")
     showerror.assert_called_once_with(text("ui.dialog.title"), expected)
+    # RuntimeError is the trusted built-in category; the custom class name is
+    # deliberately not a GUI/log presentation authority.
+    assert "_BrokenTextError" not in showerror.call_args.args[1]

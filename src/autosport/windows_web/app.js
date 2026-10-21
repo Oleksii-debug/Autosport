@@ -344,6 +344,11 @@
       const item = pair[0][pair[1]];
       if (item !== undefined && item !== null && typeof item !== "string") invalid();
     }
+    if (value.agent_overview !== undefined
+      && (!Array.isArray(value.agent_overview)
+          || value.agent_overview.length !== 5
+          || value.agent_overview.some((item) =>
+            typeof item !== "string" || item.length > 600))) invalid();
     if (value.product_source !== undefined && !record(value.product_source)) invalid();
     if (value.product_source && value.product_source.choices !== undefined
       && !Array.isArray(value.product_source.choices)) invalid();
@@ -475,6 +480,7 @@
     const previousStrategy = strategy.value;
     setSelectOptions(strategy, state.strategy_choices || []);
     setValueUnlessFocused(strategy, state.strategy_id || previousStrategy);
+    renderList(byId("agent-overview-list"), state.agent_overview || []);
 
     setValueUnlessFocused(byId(103), String(state.replay_speed));
     setValueUnlessFocused(byId(104), state.live_mode);

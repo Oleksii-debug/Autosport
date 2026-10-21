@@ -1487,6 +1487,19 @@ class AutosportWebController:
                     )
                 ),
                 "strategy_id": self.strategy_id,
+                "agent_overview": [
+                    "Активна стратегія: " + spec.strategy_id,
+                    "Зареєстровані ролі агентів: " + (
+                        ", ".join(spec.agent_names)
+                        if spec.agent_names else "не зареєстровано"
+                    ),
+                    "SHA-256 канонічного складу агентів: "
+                    + spec.agent_composition_sha256,
+                    "Дослідницький план: "
+                    + ("вибрано" if self.research_plan is not None else "не вибрано"),
+                    "Реєстрація ролей не доводить виконання навчання, "
+                    "прибутковість або дозвіл на реальні ставки.",
+                ],
                 "strategy_choices": self._strategy_choices(),
                 "strategy_requires_plan": spec.requires_research_plan,
                 "replay_speed": self.replay_speed,

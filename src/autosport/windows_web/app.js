@@ -339,6 +339,17 @@
     if (value.owner.can_initialize !== undefined
       && typeof value.owner.can_initialize !== "boolean") invalid();
     if (value.manual.operations !== undefined && !Array.isArray(value.manual.operations)) invalid();
+    // An agent identity readback is evidence, not an untrusted model selector.
+    // Reject malformed or forged identity before projecting any operator state.
+    if (!Array.isArray(value.strategy_agent_names)
+      || value.strategy_agent_names.length < 1
+      || value.strategy_agent_names.length > 16
+      || value.strategy_agent_names.some((name) =>
+        typeof name !== "string" || name.length < 1 || name.length > 128
+        || name.trim() !== name)
+      || new Set(value.strategy_agent_names).size !== value.strategy_agent_names.length
+      || typeof value.strategy_agent_composition_sha256 !== "string"
+      || !/^[0-9a-f]{64}$/.test(value.strategy_agent_composition_sha256)) invalid();
     for (const pair of [[value, "status"], [value, "last_error"],
       [value.owner, "summary"], [value.manual, "status"], [value.manual, "result"]]) {
       const item = pair[0][pair[1]];
@@ -370,6 +381,8 @@
   // the separate native emergency STOP and navigation remain available.
   function freezeUnverifiedOperatorControls() {
     latestState = null;
+    setValueIfChanged(byId("strategy-agent-names"), "—");
+    setValueIfChanged(byId("strategy-agent-composition-sha"), "—");
     for (const id of [101, 102, 103, 104, 105, 106, 107, 108, 109,
       328, "owner-confirm", "product-source-select", "product-source-save",
       "product-runtime-start", "product-runtime-stop"]) {
@@ -475,6 +488,10 @@
     const previousStrategy = strategy.value;
     setSelectOptions(strategy, state.strategy_choices || []);
     setValueUnlessFocused(strategy, state.strategy_id || previousStrategy);
+    setValueIfChanged(byId("strategy-agent-names"), state.strategy_agent_names.join(", "));
+    setValueIfChanged(
+      byId("strategy-agent-composition-sha"), state.strategy_agent_composition_sha256,
+    );
 
     setValueUnlessFocused(byId(103), String(state.replay_speed));
     setValueUnlessFocused(byId(104), state.live_mode);
@@ -661,6 +678,8 @@
   });
   byId(106).addEventListener("change", () => {
     invalidateOwnerReview();
+    setValueIfChanged(byId("strategy-agent-names"), "Оновлення складу агентів…");
+    setValueIfChanged(byId("strategy-agent-composition-sha"), "—");
     dispatch("strategy.set", { strategy_id: byId(106).value });
   });
   byId(107).addEventListener("click", () => {

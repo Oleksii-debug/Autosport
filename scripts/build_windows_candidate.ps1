@@ -33,7 +33,7 @@ try {
     try {
       $audit = Get-Content -LiteralPath $auditPath -Raw | ConvertFrom-Json -ErrorAction Stop
       $safeStatus = if ($audit.status -eq 'PASS') { 'PASS' } else { 'FAIL' }
-      $safeStrategy = if ($audit.strategy -eq 'PROVIDER') { 'PROVIDER' } else { 'UNRECOGNIZED' }
+      $safeStrategy = if ($audit.strategy -eq 'PROVIDED') { 'PROVIDED' } else { 'UNRECOGNIZED' }
       $failureCount = @($audit.failures).Count
       Write-Host "packaged_accessibility_status=$safeStatus strategy=$safeStrategy failures=$failureCount"
       if (@($audit.failures) -contains 'unrecognized accessibility audit provider strategy') {

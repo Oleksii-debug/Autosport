@@ -118,3 +118,14 @@ def test_external_uia_audit_rejects_duplicate_critical_automation_ids() -> None:
     assert "$matchedElements.Count -gt 1" in audit
     assert "duplicate external UIA control identity" in audit
     assert "FindFirst(" not in audit
+
+
+def test_external_uia_manual_workbench_lookup_remains_defined_and_unique() -> None:
+    """The duplicate-ID migration must preserve both real manual-dialog consumers."""
+    audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+    assert "function Find-UiaElementForProcessFamily {" in audit
+    assert "$matches = @(Find-UiaElementsForProcessFamily" in audit
+    assert "if ($matches.Count -ne 1) { return $null }" in audit
+    assert "$manualOpen = Find-UiaElementForProcessFamily" in audit
+    assert "$dialogProbe = Find-UiaElementForProcessFamily" in audit
+    assert audit.count("function Find-UiaElementForProcessFamily {") == 1

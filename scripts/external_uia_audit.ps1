@@ -279,7 +279,7 @@ try {
                 $report.failures += 'automation_id=331: manual calculation dialog did not become externally inspectable'
             }
         } catch {
-            $report.failures += "manual calculation dialog open failed: $($_.Exception.Message)"
+            $report.failures += "automation_id=330: manual calculation dialog activation failed"
         }
     }
 
@@ -370,7 +370,7 @@ try {
         $report.status = 'PASS'
     }
 } catch {
-    $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+    $report.failures += 'external UIA audit failed: unexpected automation error'
 } finally {
     if ($null -ne $process) {
         try {

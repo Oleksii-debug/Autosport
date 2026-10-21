@@ -246,6 +246,13 @@ def uninstall_verified_release(
         # recursively delete an entire directory with untrusted extra members.
         for name in sorted(receipt["files"]):
             member = moved / Path(*name.split("/"))
+            # A file may still look regular after a parent directory was
+            # swapped for a symlink. Refuse traversal outside the quarantine.
+            parent = member.parent
+            while parent != moved:
+                if not stat.S_ISDIR(parent.lstat().st_mode):
+                    raise OfflineInstallError("installed parent changed during removal")
+                parent = parent.parent
             if not _regular_file(member) or _hash_file(member) != receipt["files"][name]:
                 raise OfflineInstallError("installed file changed during removal")
             deletion_started = True

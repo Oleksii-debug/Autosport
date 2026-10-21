@@ -212,6 +212,18 @@ def build_parser() -> argparse.ArgumentParser:
     interrupted_recovery.add_argument("--destination", type=Path, required=True)
     interrupted_recovery.add_argument("--source-sha", required=True)
     interrupted_recovery.add_argument("--package-sha256", required=True)
+    for name in ("upgrade-release", "rollback-release", "recover-update-release"):
+        update_command = sub.add_parser(
+            name, help="independently pinned PAPER-only release lifecycle transaction",
+        )
+        update_command.add_argument("--destination", type=Path, required=True)
+        update_command.add_argument("--old-archive", type=Path, required=True)
+        update_command.add_argument("--old-source-sha", required=True)
+        update_command.add_argument("--old-package-sha256", required=True)
+        if name != "recover-update-release":
+            update_command.add_argument("--new-archive", type=Path, required=True)
+            update_command.add_argument("--new-source-sha", required=True)
+            update_command.add_argument("--new-package-sha256", required=True)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -664,6 +676,22 @@ def main(argv: list[str] | None = None) -> int:
             "--source-sha", args.source_sha,
             "--package-sha256", args.package_sha256,
         ])
+    if args.command in {"upgrade-release", "rollback-release", "recover-update-release"}:
+        from .offline_release_upgrade import main as upgrade_main
+        forwarded = [
+            args.command,
+            "--destination", str(args.destination),
+            "--old-archive", str(args.old_archive),
+            "--old-source-sha", args.old_source_sha,
+            "--old-package-sha256", args.old_package_sha256,
+        ]
+        if args.command != "recover-update-release":
+            forwarded.extend([
+                "--new-archive", str(args.new_archive),
+                "--new-source-sha", args.new_source_sha,
+                "--new-package-sha256", args.new_package_sha256,
+            ])
+        return upgrade_main(forwarded)
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

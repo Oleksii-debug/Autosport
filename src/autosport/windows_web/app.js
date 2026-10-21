@@ -344,6 +344,14 @@
       const item = pair[0][pair[1]];
       if (item !== undefined && item !== null && typeof item !== "string") invalid();
     }
+    if (value.agent_learning_busy !== undefined
+      && typeof value.agent_learning_busy !== "boolean") invalid();
+    if (value.agent_learning_evidence !== undefined && (
+      !Array.isArray(value.agent_learning_evidence)
+      || value.agent_learning_evidence.length > 8
+      || value.agent_learning_evidence.some((item) =>
+        typeof item !== "string" || item.length > 600)
+    )) invalid();
     if (value.agent_overview !== undefined
       && (!Array.isArray(value.agent_overview)
           || value.agent_overview.length !== 5
@@ -384,7 +392,7 @@
     for (const id of [101, 102, 103, 104, 105, 106, 107, 108, 109,
       328, "owner-confirm", "product-source-select", "product-source-save",
       "product-runtime-start", "product-runtime-stop",
-      "update-diagnostic-button"]) {
+      "update-diagnostic-button", "agent-learning-refresh"]) {
       setDisabledWithFocusFallback(byId(id), true);
     }
     document.querySelectorAll("[data-owner-field], #327").forEach((node) => {
@@ -488,6 +496,16 @@
     setSelectOptions(strategy, state.strategy_choices || []);
     setValueUnlessFocused(strategy, state.strategy_id || previousStrategy);
     renderList(byId("agent-overview-list"), state.agent_overview || []);
+    renderList(byId("agent-learning-evidence"), state.agent_learning_evidence || []);
+    setTextIfChanged(
+      byId("agent-learning-status"),
+      state.agent_learning_busy === true
+        ? "Підтвердження наукових записів виконується."
+        : "Доступні записи агентів наведено нижче; непідтверджене не вважається навчанням.",
+    );
+    setDisabledWithFocusFallback(
+      byId("agent-learning-refresh"), state.agent_learning_busy === true,
+    );
     const updateInfo = state.update_diagnostic || {};
     setTextIfChanged(
       byId("update-diagnostic-status"),
@@ -705,6 +723,9 @@
   byId(108).addEventListener("click", () => dispatch("recovery.run"));
   byId(109).addEventListener("click", () => {
     dispatch("evidence.export", { path: byId("evidence-path").value });
+  });
+  byId("agent-learning-refresh").addEventListener("click", () => {
+    dispatch("agents.status");
   });
   byId("update-diagnostic-button").addEventListener("click", () => {
     dispatch("update.diagnose", {

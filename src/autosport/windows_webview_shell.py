@@ -16,6 +16,7 @@ from .dataset import ReplayDataset, load_dataset
 from .dataset_worker import OneShotDatasetValidationWorker
 from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
 from .gui_update_diagnostic import OneShotUpdateDiagnosticWorker
+from .gui_learning_status import OneShotLearningStatusWorker
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
 from .operator_source_config import OperatorSourceSelection, OperatorSourceSelectionState
@@ -479,6 +480,8 @@ class AutosportWebController:
         self.evidence_export_worker = OneShotEvidenceExportWorker()
         self.update_diagnostic_worker = OneShotUpdateDiagnosticWorker()
         self.update_diagnostic_status = "Підписане оновлення ще не перевірялось."
+        self.learning_status_worker = OneShotLearningStatusWorker()
+        self.learning_status_lines = ["Перевірку перевірених фактів про навчання не запускали."]
         self.product_worker = ProductGuiWorker()
         self.product_runtime_status = "Тривалий імітаційний режим не запущено."
         self._product_runtime_identity: tuple[Path, str, str] | None = None
@@ -1313,6 +1316,10 @@ class AutosportWebController:
         if update_message is not None:
             self.update_diagnostic_status = update_message.status
 
+        learning_message = self.learning_status_worker.poll()
+        if learning_message is not None:
+            self.learning_status_lines = list(learning_message.lines)
+
         # Drain the current product queue before deriving actionability in state().
         # ProductGuiWorker publishes the terminal message immediately before clearing
         # busy; consuming only one message could therefore re-enable START while a
@@ -1494,6 +1501,8 @@ class AutosportWebController:
                     )
                 ),
                 "strategy_id": self.strategy_id,
+                "agent_learning_evidence": list(self.learning_status_lines),
+                "agent_learning_busy": self.learning_status_worker.busy,
                 "agent_overview": [
                     "Активна стратегія: " + spec.strategy_id,
                     "Зареєстровані ролі агентів: " + (
@@ -1824,6 +1833,29 @@ class AutosportWebController:
         return self._ok(
             text("ui.status.evidence_export.running"),
             focus_id="202",
+        )
+
+    def _action_agent_learning_refresh(
+        self, payload: Mapping[str, Any]
+    ) -> dict[str, Any]:
+        """Read canonical science and AgentLoop records, never train or promote."""
+        if self.learning_status_worker.busy:
+            return self._fail("Перевірка навчання вже виконується.")
+        try:
+            target = self._product_runtime_target_workspace()
+        except Exception:
+            return self._fail(
+                "Оберіть завершену конфігурацію стратегії й потрібний "
+                "дослідницький план перед перевіркою агентів."
+            )
+        if not self.learning_status_worker.start(target):
+            return self._fail("Не вдалося відкрити перевірені записи агентів.")
+        self.learning_status_lines = [
+            "Перевірка підтверджених наукових записів триває."
+        ]
+        return self._ok(
+            "Оновлюються підтверджені факти агентів.",
+            focus_id="agent-learning-status",
         )
 
     def _action_update_diagnostic(self, payload: Mapping[str, Any]) -> dict[str, Any]:
@@ -2194,6 +2226,7 @@ class AutosportWebController:
             "recovery.run": self._action_recovery_run,
             "evidence.export": self._action_evidence_export,
             "update.diagnose": self._action_update_diagnostic,
+            "agents.status": self._action_agent_learning_refresh,
             "product_source.configure": self._action_product_source_configure,
             "product_runtime.start": self._action_product_runtime_start,
             "product_runtime.stop": self._action_product_runtime_stop,
@@ -2315,6 +2348,7 @@ class AutosportWebController:
                 self.recovery_worker,
                 self.evidence_export_worker,
                 self.update_diagnostic_worker,
+                self.learning_status_worker,
             ):
                 self._wait_for_terminal_worker(worker)
 

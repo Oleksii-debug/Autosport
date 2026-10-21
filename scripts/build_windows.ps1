@@ -722,6 +722,8 @@ if ($null -eq ('Autosport.Release.TrustedDirectoryFence' -as [type])) {
   Add-Type -TypeDefinition $trustedDirectoryFenceTypeSource -Language CSharp
 }
 
+# Preserve caller environment even when the isolated PyInstaller build fails.
+$previousSourceDateEpoch = [Environment]::GetEnvironmentVariable('SOURCE_DATE_EPOCH', 'Process')
 $trustedBuildProtected = $false
 $trustedBuildDirectoryLocks = [System.Collections.Generic.List[Microsoft.Win32.SafeHandles.SafeFileHandle]]::new()
 $trustedBuildReadLocks = [System.Collections.Generic.List[System.IO.FileStream]]::new()
@@ -800,9 +802,41 @@ try {
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification before Autosport.exe exited $LASTEXITCODE" }
 
+  # Pin the PE header clock to exact-source Git commit time, not the runner clock.
+  # Python -I isolation is preserved. This does NOT prove full EXE reproducibility.
+  $sourceCommitEpoch = @(& $gitExecutable show -s --format=%ct $sourceSha)
+  if ($LASTEXITCODE -ne 0 -or $sourceCommitEpoch.Count -ne 1 -or
+      [string]$sourceCommitEpoch[0] -notmatch '^[0-9]{9,10}$') {
+    throw 'Exact Git commit has no canonical epoch for reproducible Windows build'
+  }
+  $sourceEpoch64 = [long]::Parse([string]$sourceCommitEpoch[0], [Globalization.CultureInfo]::InvariantCulture)
+  if ($sourceEpoch64 -gt [uint32]::MaxValue) { throw 'Commit timestamp cannot fit PE TimeDateStamp' }
+  $env:SOURCE_DATE_EPOCH = [string]$sourceCommitEpoch[0]
+
+  function Assert-PEBuildEpoch([string] $Executable, [uint32] $ExpectedEpoch) {
+    $stream = [System.IO.File]::OpenRead($Executable)
+    try {
+      $reader = [System.IO.BinaryReader]::new($stream)
+      if ($stream.Length -lt 64 -or $reader.ReadUInt16() -ne 0x5a4d) { throw 'Invalid DOS header' }
+      $stream.Position = 0x3c
+      $peOffset = $reader.ReadUInt32()
+      if ($peOffset -lt 64 -or $peOffset -gt $stream.Length - 24) { throw 'Invalid PE offset' }
+      $stream.Position = $peOffset
+      if ($reader.ReadUInt32() -ne 0x00004550) { throw 'Invalid PE signature' }
+      $stream.Position = $peOffset + 8
+      $actualEpoch = $reader.ReadUInt32()
+      if ($actualEpoch -ne $ExpectedEpoch) {
+        throw "PyInstaller PE TimeDateStamp not source-deterministic: $Executable"
+      }
+    } finally {
+      $stream.Dispose()
+    }
+  }
+
   & $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry
   if ($LASTEXITCODE -ne 0) { throw "Autosport PyInstaller exited $LASTEXITCODE" }
   $builtAutosportExe = Join-Path $pyInstallerDist 'Autosport.exe'
+  Assert-PEBuildEpoch -Executable $builtAutosportExe -ExpectedEpoch ([uint32]$sourceEpoch64)
   python $sourceVerifier --bind-artifact $builtAutosportExe --bound-output $boundAutosportExe --digest-output $autosportDigestPath
   if ($LASTEXITCODE -ne 0) { throw "Autosport.exe artifact binding exited $LASTEXITCODE" }
   $autosportExeSha256 = (Get-Content -LiteralPath $autosportDigestPath -Raw).Trim()
@@ -818,6 +852,7 @@ try {
   & $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console --paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport-Data $trustedDataEntry
   if ($LASTEXITCODE -ne 0) { throw "Autosport-Data PyInstaller exited $LASTEXITCODE" }
   $builtDataExe = Join-Path $pyInstallerDist 'Autosport-Data.exe'
+  Assert-PEBuildEpoch -Executable $builtDataExe -ExpectedEpoch ([uint32]$sourceEpoch64)
   python $sourceVerifier --bind-artifact $builtDataExe --bound-output $boundDataExe --digest-output $dataDigestPath
   if ($LASTEXITCODE -ne 0) { throw "Autosport-Data.exe artifact binding exited $LASTEXITCODE" }
   $dataExeSha256 = (Get-Content -LiteralPath $dataDigestPath -Raw).Trim()
@@ -825,6 +860,7 @@ try {
   $trustedBuildManifestJson | & $pythonExecutable -I -S -c $trustedSourceSnapshotVerifierLauncher $trustedBuildRoot
   if ($LASTEXITCODE -ne 0) { throw "Locked exact build source snapshot verification after Autosport-Data.exe exited $LASTEXITCODE" }
 } finally {
+  [Environment]::SetEnvironmentVariable('SOURCE_DATE_EPOCH', $previousSourceDateEpoch, 'Process')
   try {
     for ($lockIndex = $trustedBuildReadLocks.Count - 1; $lockIndex -ge 0; $lockIndex--) {
       $trustedBuildReadLocks[$lockIndex].Dispose()

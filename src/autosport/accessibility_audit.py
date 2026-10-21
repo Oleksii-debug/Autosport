@@ -97,20 +97,36 @@ _BLOCKING_GAPS = {
     "CANNOT_BE_PRESSED",
     "LEFT_TO_THE_PROXY",
 }
+# UIA provider metadata is untrusted; exported machine evidence must not include
+# arbitrary widget paths, private accessible names or provider error messages.
+_PUBLIC_PATTERNS = frozenset({
+    "INVOKE", "VALUE", "SELECTION", "SELECTION_ITEM", "TEXT",
+    "TOGGLE", "RANGE_VALUE", "SCROLL", "EXPAND_COLLAPSE",
+})
+_PUBLIC_ROLES = frozenset(_EXPECTED_ROLES.values()) | frozenset({
+    "BUTTON", "COMBOBOX", "EDIT",
+})
+_PUBLIC_GAPS = frozenset(_BLOCKING_GAPS)
+
+
+_PUBLIC_AUDIT_ERROR_TYPES = (
+    AssertionError, ConnectionError, FileNotFoundError, KeyError, OSError,
+    PermissionError, RuntimeError, TimeoutError, TypeError, ValueError,
+)
 
 
 def _safe_exception_detail(exc: Exception) -> str:
-    """Render audit failure evidence without trusting exception formatting."""
+    """Return a fixed diagnostic category without exporting arbitrary private text.
 
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = "exception details unavailable"
-    return f"{exception_type}: {rendered}"
+    UI/provider exceptions can contain access tokens, filesystem paths, account
+    identifiers or untrusted type metadata. Accessibility reports are exportable.
+    """
+    error_type = type(exc)
+    category = next(
+        (builtin.__name__ for builtin in _PUBLIC_AUDIT_ERROR_TYPES if error_type is builtin),
+        "Exception",
+    )
+    return f"{category}: details redacted"
 
 
 def _enum_name(value: Any) -> str | None:
@@ -201,30 +217,42 @@ def summarize_description(
 
     for widget in description.widgets:
         automation_id = widget.automation_id
-        if automation_id not in expected_ids:
+        # UIA provider identities are untrusted. Numeric aliases such as
+        # 101.0 and int subclasses must not satisfy a critical int ID.
+        if type(automation_id) is not int or automation_id not in expected_ids:
             continue
-        normalized_automation_id = int(automation_id)
+        normalized_automation_id = automation_id
         if normalized_automation_id in controls:
             failures.append(
-                f"automation_id={normalized_automation_id}: duplicate critical control identity "
-                f"first_path={controls[normalized_automation_id]['path']} "
-                f"duplicate_path={widget.path}"
+                f"automation_id={normalized_automation_id}: duplicate critical control identity"
             )
             continue
-        gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
-        pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
-        role_name = _enum_name(widget.role)
+        observed_gaps = (_enum_name(gap) for gap in widget.gaps)
+        gap_names = sorted({
+            name if name in _PUBLIC_GAPS else "OTHER_GAP"
+            for name in observed_gaps if name
+        })
+        observed_patterns = (_enum_name(pattern) for pattern in widget.patterns)
+        pattern_names = sorted({
+            name if name in _PUBLIC_PATTERNS else "OTHER_PATTERN"
+            for name in observed_patterns if name
+        })
+        observed_role = _enum_name(widget.role)
+        role_name = observed_role if observed_role in _PUBLIC_ROLES else "UNRECOGNIZED"
+        # A whitespace-only or non-text UIA Name is not an accessible label.
+        # Keep exported evidence JSON-serializable even for malformed providers.
+        accessible_name = widget.name if isinstance(widget.name, str) else ""
         controls[normalized_automation_id] = {
-            "path": widget.path,
-            "tk_class": widget.tk_class,
+            "path": "[redacted]",
+            "tk_class": "[redacted]",
             "role": role_name,
-            "name": widget.name,
+            "name": "[present]" if accessible_name.strip() else "",
             "automation_id": normalized_automation_id,
             "patterns": pattern_names,
             "answers_rows": bool(widget.answers_rows),
             "gaps": gap_names,
         }
-        if not widget.name:
+        if not accessible_name.strip():
             failures.append(f"automation_id={normalized_automation_id}: missing accessible name")
         expected_role = _EXPECTED_ROLES[normalized_automation_id]
         if role_name != expected_role:
@@ -232,7 +260,9 @@ def summarize_description(
             failures.append(
                 f"automation_id={normalized_automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
             )
-        blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
+        # Unknown provider gap types cannot be silently treated as a clean
+        # critical control: preserve only a fixed public diagnostic label.
+        blockers = sorted(set(gap_names) & (_BLOCKING_GAPS | {"OTHER_GAP"}))
         if blockers:
             failures.append(
                 f"automation_id={normalized_automation_id}: blocking gaps={','.join(blockers)}"
@@ -283,17 +313,24 @@ def summarize_description(
                 f"automation_id={workbench_result_id}: manual calculation result is not runtime readonly"
             )
 
-    provider_trouble = [str(item) for item in description.provider_trouble]
+    # External UIA errors can include credentials, paths and account data.
+    provider_trouble = ["provider details redacted" for _ in description.provider_trouble]
     if provider_trouble:
-        failures.extend(f"provider trouble: {item}" for item in provider_trouble)
+        failures.extend("provider trouble: details redacted" for _ in provider_trouble)
 
     return {
         "status": "PASS" if not failures else "FAIL",
-        "strategy": _enum_name(description.strategy),
+        "strategy": (
+            "PROVIDER" if _enum_name(description.strategy) == "PROVIDER" else "UNRECOGNIZED"
+        ),
         "critical_controls": [controls[key] for key in sorted(controls)],
         "failures": failures,
         "provider_trouble": provider_trouble,
-        "providers_stood_down_because": description.providers_stood_down_because,
+        "providers_stood_down_because": (
+            "provider details redacted"
+            if description.providers_stood_down_because is not None
+            else None
+        ),
         "evidence_scope": (
             "in-process tk-uia annotation/provider audit plus runtime Tk readonly-state audit "
             "of the packaged Windows GUI and canonical product-shell controls, including the "

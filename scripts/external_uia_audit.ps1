@@ -147,7 +147,7 @@ function Find-UiaElementsForProcessFamily {
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
         $AutomationId
     )
-    $matches = @()
+    $foundMatches = @()
     try {
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         $windows = $desktop.FindAll(
@@ -158,7 +158,7 @@ function Find-UiaElementsForProcessFamily {
             try {
                 if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }
                 if ([string]$window.Current.AutomationId -eq $AutomationId) {
-                    $matches += $window
+                    $foundMatches += $window
                 }
                 $found = $window.FindAll(
                     [System.Windows.Automation.TreeScope]::Descendants,
@@ -167,7 +167,7 @@ function Find-UiaElementsForProcessFamily {
                 foreach ($item in $found) {
                     try {
                         if ($ProcessIds -contains [int]$item.Current.ProcessId) {
-                            $matches += $item
+                            $foundMatches += $item
                         }
                     } catch {
                         # A stale UIA node must never be assumed to be a valid match.
@@ -180,7 +180,7 @@ function Find-UiaElementsForProcessFamily {
     } catch {
         # A failed UIA scan does not create PASS: the caller requires exactly one.
     }
-    return $matches
+    return $foundMatches
 }
 
 $report = [ordered]@{

@@ -275,6 +275,32 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
         self.assertEqual(first_txn, second_txn)
         self.assertEqual(first_txn.name, second_txn.name)
 
+    def test_windows_extended_and_device_aliases_cannot_bypass_update_fence(self):
+        # Both alternate spellings can address the same ordinary C: install.
+        # Reject device-namespace input instead of allocating a second lease.
+        ordinary = PureWindowsPath(r"C:\Apps\Autosport Product")
+        self.assertTrue(ordinary.is_absolute())
+        self.assertTrue(upgrade._transaction_root(ordinary).name.startswith(".autosport-update-"))
+        for alias in (
+            PureWindowsPath(r"\\?\C:\Apps\Autosport Product"),
+            PureWindowsPath(r"\\.\C:\Apps\Autosport Product"),
+            PureWindowsPath(r"\\?\UNC\server\share\Autosport"),
+        ):
+            self.assertTrue(alias.is_absolute())
+            with self.subTest(alias=str(alias)):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "device namespace"
+                ):
+                    upgrade._transaction_root(alias)
+
+    def test_normal_windows_unc_update_namespace_still_supported(self):
+        first = PureWindowsPath(r"\\server\share\Autosport")
+        second = PureWindowsPath(r"\\SERVER\SHARE\AUTOSPORT")
+        self.assertEqual(
+            upgrade._transaction_root(first).name,
+            upgrade._transaction_root(second).name,
+        )
+
     def test_posix_case_distinction_retains_distinct_update_namespace(self):
         with tempfile.TemporaryDirectory() as temp:
             first = Path(temp) / "Autosport"

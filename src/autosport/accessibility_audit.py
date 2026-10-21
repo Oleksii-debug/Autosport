@@ -233,7 +233,7 @@ def summarize_description(
         observed_gaps = (_enum_name(gap) for gap in widget.gaps)
         gap_names = sorted({
             name if name in _PUBLIC_GAPS else "OTHER_GAP"
-            for name in observed_gaps if name
+            for name in observed_gaps
         })
         observed_patterns = (_enum_name(pattern) for pattern in widget.patterns)
         pattern_names = sorted({

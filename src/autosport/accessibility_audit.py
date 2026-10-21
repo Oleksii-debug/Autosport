@@ -169,8 +169,14 @@ def _combined_description(*descriptions: Any) -> Any:
     if not descriptions:
         raise ValueError("at least one UIA description is required")
     first = descriptions[0]
+    # Three distinct real windows are described independently. A degraded
+    # provider on a later dialog must not inherit the root's PROVIDED proof.
+    every_provider_supported = all(
+        _enum_name(description.strategy) == "PROVIDED"
+        for description in descriptions
+    )
     return SimpleNamespace(
-        strategy=first.strategy,
+        strategy=first.strategy if every_provider_supported else "UNRECOGNIZED",
         widgets=tuple(widget for description in descriptions for widget in description.widgets),
         provider_trouble=tuple(
             item for description in descriptions for item in description.provider_trouble

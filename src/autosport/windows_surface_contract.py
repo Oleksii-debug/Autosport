@@ -95,13 +95,18 @@ def load_surface_selection(workspace: str | Path) -> str:
         raw = strict_json_loads(path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, TypeError, ValueError):
         return DEFAULT_SURFACE_KEY
-    key = raw.get("surface_key") if isinstance(raw, dict) else None
-    return key if isinstance(key, str) and key in SURFACE_BY_KEY else DEFAULT_SURFACE_KEY
+    # The stored schema is versioned. Boolean 1 and future versions must not
+    # silently restore an unrelated surface after a format change.
+    if not isinstance(raw, dict) or type(raw.get("version")) is not int or raw["version"] != 1:
+        return DEFAULT_SURFACE_KEY
+    key = raw.get("surface_key")
+    return key if type(key) is str and key in SURFACE_BY_KEY else DEFAULT_SURFACE_KEY
 
 
 def save_surface_selection(workspace: str | Path, surface_key: str) -> bool:
     """Atomically persist only UI navigation state; never raise into domain flow."""
-    if surface_key not in SURFACE_BY_KEY:
+    # Input may be passed through an untrusted bridge before runtime type checks.
+    if type(surface_key) is not str or surface_key not in SURFACE_BY_KEY:
         return False
     path = shell_state_path(workspace)
     try:

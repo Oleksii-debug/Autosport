@@ -85,6 +85,55 @@ def _stub_deep_verifier(monkeypatch: pytest.MonkeyPatch, *, status: str = "PASS"
 
 
 
+def test_strict_stage_neutral_source_manifest_gate_precedes_archive_write(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Production admission rejects older ZIPs before stage-neutral promotion."""
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy)
+
+    def reject_missing_manifest(
+        package: Path, *, expected_source_sha: str, require_source_manifest: bool,
+    ) -> dict[str, object]:
+        assert package == legacy
+        assert expected_source_sha == SOURCE_SHA
+        assert require_source_manifest is True
+        raise ValueError("release package is missing SOURCE_MANIFEST.json")
+
+    monkeypatch.setattr(canonical_release, "verify_windows_package", reject_missing_manifest)
+    with pytest.raises(ValueError, match="missing SOURCE_MANIFEST"):
+        stage_release.repackage_stage_neutral_windows_release(
+            legacy, output, expected_source_sha=SOURCE_SHA,
+            require_source_manifest=True,
+        )
+    assert not output.exists()
+
+
+def test_strict_stage_neutral_cli_forwards_source_manifest_policy(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy)
+
+    def reject_missing_manifest(
+        package: Path, *, expected_source_sha: str, require_source_manifest: bool,
+    ) -> dict[str, object]:
+        assert package == legacy
+        assert expected_source_sha == SOURCE_SHA
+        assert require_source_manifest is True
+        raise ValueError("release package is missing SOURCE_MANIFEST.json")
+
+    monkeypatch.setattr(canonical_release, "verify_windows_package", reject_missing_manifest)
+    with pytest.raises(ValueError, match="missing SOURCE_MANIFEST"):
+        stage_release.main([
+            "--input", str(legacy), "--output", str(output),
+            "--source-sha", SOURCE_SHA, "--require-source-manifest",
+        ])
+    assert not output.exists()
+
+
 def _reseal_legacy_metadata(members: dict[str, bytes]) -> None:
     """Make adversarial fixtures internally checksum-consistent."""
     manifest = {

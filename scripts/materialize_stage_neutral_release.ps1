@@ -194,6 +194,7 @@ raise SystemExit(
             sys.argv[4],
             "--evidence",
             sys.argv[5],
+            "--require-source-manifest",
         ]
     )
 )

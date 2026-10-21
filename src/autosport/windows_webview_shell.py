@@ -1488,6 +1488,11 @@ class AutosportWebController:
                 ),
                 "strategy_id": self.strategy_id,
                 "strategy_choices": self._strategy_choices(),
+                # Canonical StrategySpec binds the exact ordered runtime agent
+                # composition; these fields are a read-only operator projection.
+                # Never use renderer-provided identities for dispatch authority.
+                "strategy_agent_names": list(spec.agent_names),
+                "strategy_agent_composition_sha256": spec.agent_composition_sha256,
                 "strategy_requires_plan": spec.requires_research_plan,
                 "replay_speed": self.replay_speed,
                 "live_mode": self.live_mode,

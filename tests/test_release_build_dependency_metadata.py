@@ -84,3 +84,79 @@ def test_rejects_duplicate_names_and_conflicting_pins():
     bad["declared_build_dependencies"].append("TK_UIA==9.0.0")
     with pytest.raises(ValueError, match="conflicting"):
         capture_direct_installed_dependencies(bad)
+
+
+def _packaging_fixture(root, source_manifest, dependency_metadata):
+    import json
+    from autosport.release_package import build_windows_package
+    exe = root / "Autosport.exe"
+    guide = root / "WINDOWS_START_HERE.txt"
+    sample = root / "sample"
+    sample.mkdir()
+    (sample / "market.jsonl").write_text("{}\\n", encoding="utf-8")
+    exe.write_bytes(b"fake-windows-executable")
+    guide.write_text("start\\n", encoding="utf-8")
+    base = {"status": "PASS", "real_money_execution": False, "human_tested": False, "nvda_verified": False}
+    paths = []
+    for label in ("diagnostic", "accessibility", "keyboard", "restart"):
+        record = dict(base)
+        if label == "restart":
+            record.update({
+                "session_restart_status": "PASS", "transaction_recovery_status": "PASS",
+                "recovery_disposition": "aborted_uncommitted",
+                "process_kill_relaunch_status": "PASS", "process_kill_stage_pid": 101,
+                "process_kill_return_code": -15, "process_recovery_pid": 202,
+                "process_recovery_run_id": "source-test",
+                "process_recovery_disposition": "committed",
+                "process_recovery_registry_status": "completed",
+                "process_recovery_manifest_phase": "completed",
+                "process_recovery_base_paper_book_sha256": "1" * 64,
+                "process_recovery_new_paper_book_sha256": "2" * 64,
+                "process_recovery_base_decision_ledger_sha256": "3" * 64,
+                "process_recovery_new_decision_ledger_sha256": "4" * 64,
+            })
+        path = root / (label + ".json")
+        path.write_text(json.dumps(record), encoding="utf-8")
+        paths.append(path)
+    package, _ = build_windows_package(
+        exe, guide, sample, *paths, root / "release.zip", SHA,
+        source_manifest=source_manifest, dependency_metadata=dependency_metadata,
+    )
+    return package
+
+
+def test_exact_source_bound_metadata_round_trip_and_required_gate(tmp_path):
+    from autosport.release_package import (
+        _SOURCE_MANIFEST_INPUTS, verify_windows_package,
+    )
+    manifest = {
+        **SOURCE,
+        "schema_version": 1,
+        "evidence_class": "SOURCE_DECLARATIONS_ONLY",
+        "source_files_sha256": {path: "0" * 64 for path in _SOURCE_MANIFEST_INPUTS},
+    }
+    with patch("autosport.release_sbom.metadata.distribution", side_effect=_fake_distribution):
+        evidence = capture_direct_installed_dependencies(manifest)
+    package = _packaging_fixture(tmp_path, manifest, evidence)
+    passed = verify_windows_package(
+        package, expected_source_sha=SHA,
+        require_source_manifest=True, require_dependency_metadata=True,
+    )
+    assert passed["status"] == "PASS"
+    assert passed["source_sha"] == SHA
+
+
+def test_release_requires_real_build_host_metadata_in_cli_mode(tmp_path):
+    from autosport.release_package import (
+        _SOURCE_MANIFEST_INPUTS, verify_windows_package,
+    )
+    manifest = {
+        **SOURCE, "schema_version": 1, "evidence_class": "SOURCE_DECLARATIONS_ONLY",
+        "source_files_sha256": {path: "0" * 64 for path in _SOURCE_MANIFEST_INPUTS},
+    }
+    package = _packaging_fixture(tmp_path, manifest, None)
+    with pytest.raises(ValueError, match="missing direct dependency metadata"):
+        verify_windows_package(
+            package, expected_source_sha=SHA,
+            require_source_manifest=True, require_dependency_metadata=True,
+        )

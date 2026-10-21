@@ -216,6 +216,13 @@ def capture_embedded_executable_inventory(
     path = Path(exe_path)
     if not path.is_file() or path.is_symlink():
         raise ValueError("embedded archive source is not a regular executable")
+    # Bind the archive table to the exact bytes independently hashed before
+    # the reader opens its own path. A swapped/replaced executable must not
+    # produce an inventory for one CArchive and a digest for another binary.
+    digest_before = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest_before.update(chunk)
     if reader_factory is None:
         try:
             from PyInstaller.archive.readers import CArchiveReader
@@ -247,6 +254,8 @@ def capture_embedded_executable_inventory(
     with path.open("rb") as stream:
         for chunk in iter(lambda: stream.read(1024 * 1024), b""):
             digest.update(chunk)
+    if digest.digest() != digest_before.digest():
+        raise ValueError("executable changed during CArchive inventory capture")
     result = {
         "schema_version": 1,
         "source_sha": source_sha,

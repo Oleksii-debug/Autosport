@@ -23,10 +23,11 @@ def _source_bytes(*args: str) -> bytes:
     assert sep and revision == SHA
     assert path in package_windows._RELEASE_SOURCE_INPUTS
     if path == "pyproject.toml":
-        return (
-            b'[project]\\ndependencies = ["tk-uia==0.8.0", "APScheduler==3.11.3"]\\n'
-            b'[project.optional-dependencies]\\nbuild = ["pyinstaller==6.22.3"]\\n'
-        ).replace(b"\\\\n", b"\\n")
+        return b"""[project]
+dependencies = ["tk-uia==0.8.0", "APScheduler==3.11.3"]
+[project.optional-dependencies]
+build = ["pyinstaller==6.22.3"]
+"""
     return ("exact tracked bytes for " + path).encode("utf-8")
 
 

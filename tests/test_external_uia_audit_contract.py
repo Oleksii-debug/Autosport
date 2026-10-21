@@ -129,3 +129,18 @@ def test_external_uia_manual_workbench_lookup_remains_defined_and_unique() -> No
     assert "$manualOpen = Find-UiaElementForProcessFamily" in audit
     assert "$dialogProbe = Find-UiaElementForProcessFamily" in audit
     assert audit.count("function Find-UiaElementForProcessFamily {") == 1
+
+
+def test_external_uia_duplicate_scan_does_not_accept_partial_enumeration() -> None:
+    """Stale UIA windows/items must never hide a second matching control."""
+    audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+    scan = audit.split("function Find-UiaElementsForProcessFamily {", 1)[1].split(
+        "function Find-UiaElementForProcessFamily {", 1
+    )[0]
+    assert "$scanFailed = $false" in scan
+    assert scan.count("$scanFailed = $true") == 3
+    assert "if ($scanFailed) { return @() }" in scan
+    assert scan.index("if ($scanFailed) { return @() }") < scan.index(
+        "return $foundMatches"
+    )
+    assert "$matchedElements.Count -gt 1" in audit

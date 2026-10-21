@@ -1456,3 +1456,21 @@ def test_external_uia_chrome_wrapper_defers_to_real_desktop_provider() -> None:
     assert "$ResultQueue.Enqueue" in family
     assert "$script:semanticWorkerTimedOut = $true" in family
     assert "$report.status = 'PASS'" not in family
+
+
+def test_external_uia_report_has_no_raw_exception_text_on_webview2_lineage() -> None:
+    """No untrusted UIA/COM exception details in disk or console evidence."""
+    audit = _audit()
+    assert "Exception.Message" not in audit
+    assert "Exception.GetType().Name" not in audit
+    for expected in (
+        "packaged keyboard shortcut audit failed: focus evidence unavailable",
+        "owner economic panel open failed: activation evidence unavailable",
+        "manual calculation panel open failed: activation evidence unavailable",
+        "packaged emergency STOP activation audit failed: durable proof unavailable",
+        "packaged disclosure focus-handoff audit failed: focus evidence unavailable",
+        "external UIA audit failed: unexpected automation error",
+    ):
+        assert expected in audit
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in audit
+    assert "Write-Host ($report | ConvertTo-Json -Depth 8)" in audit

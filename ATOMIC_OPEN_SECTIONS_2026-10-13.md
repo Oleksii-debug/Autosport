@@ -24,7 +24,7 @@
 | 4А | Reuse accessibility_audit/announcements/keyboard_audit/UIA provenance/evidence export. | Статус міграції: PARTIAL_EXISTING |
 | 4Б | Automate labels/roles/focus/live-region/duplicate-id/malformed-state checks and selectable reports. | Статус: PARTIAL_EXISTING |
 | 4В | Automated evidence never falsely claims physical NVDA verification. | Статус: PARTIAL_EXISTING |
-| 5А | Reuse release_package/windows entry/start guide/build scripts and supply-chain metadata. | Статус міграції: PARTIAL_EXISTING |
+| 5А | Reuse release_package/windows entry/start guide/build scripts and supply-chain metadata. | **DONE — CLOSED_FOR_DEVELOPMENT / TERMINAL (2026-10-21)**. 17/17 exact source/test/build Git blob identities against qualified head `d93d203e867c71aad880f1b2e3d144549e166030`; CI #38148320018 + Windows Candidate #38148320047 SUCCESS; integrated main readback `64542242c4002693f4310bcf25c78966444d4228`; [terminal evidence](docs/PLAN6_SECTION5A_WINDOWS_PACKAGING_REUSE_EVIDENCE.md). Remaining implementation for 5А = 0. 5Б/5В remain open. |
 | 5Б | Deterministic package binds source/dependencies/config/migrations/licenses/SBOM without secrets/test state. | Статус: PARTIAL_EXISTING |
 | 5В | Signing/update primitives qualify on fixture certificate/key material; final delivered signature Plan 8. | Статус: PARTIAL_EXISTING |
 | 6А | Clean install, state migration, update, rollback, uninstall/reinstall and corruption/interruption recovery. | Статус міграції: PARTIAL_EXISTING |

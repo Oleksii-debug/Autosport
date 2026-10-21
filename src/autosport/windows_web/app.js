@@ -287,6 +287,19 @@
   // A rejected durable save must not leave a different selected screen in the
   // focused native selector. A lost response is UNKNOWN, not a rejection: leave
   // that state for explicit reconciliation rather than inventing a rollback.
+  // An explicit rejected config change must never remain selected while the
+  // focused native control skips ordinary server-state refreshes. A missing
+  // bridge response is UNKNOWN, and must not be represented as a rollback.
+  function reconcileRejectedControlSelection(node, requestedValue, result, verifiedValue) {
+    if (
+      result && result.status === "rejected"
+      && typeof verifiedValue === "string"
+      && node.value === requestedValue
+    ) {
+      node.value = verifiedValue;
+    }
+  }
+
   function reconcileRejectedSurfaceSelection(node, requestedKey, result, state) {
     if (
       result && result.status === "rejected"
@@ -712,19 +725,36 @@
   byId(101).addEventListener("click", () => {
     dispatch("dataset.select", { path: byId("dataset-path").value });
   });
-  byId(106).addEventListener("change", () => {
+  byId(106).addEventListener("change", async () => {
+    const control = byId(106);
+    const requested = control.value;
     invalidateOwnerReview();
-    dispatch("strategy.set", { strategy_id: byId(106).value });
+    const result = await dispatch("strategy.set", { strategy_id: requested });
+    reconcileRejectedControlSelection(
+      control, requested, result, latestState && latestState.strategy_id,
+    );
   });
   byId(107).addEventListener("click", () => {
     invalidateOwnerReview();
     dispatch("research_plan.select", { path: byId("research-plan-path").value });
   });
-  byId(103).addEventListener("change", () => {
-    dispatch("replay_speed.set", { speed: Number(byId(103).value) });
+  byId(103).addEventListener("change", async () => {
+    const control = byId(103);
+    const requested = control.value;
+    const result = await dispatch("replay_speed.set", { speed: Number(requested) });
+    reconcileRejectedControlSelection(
+      control, requested, result,
+      latestState && typeof latestState.replay_speed === "number"
+        ? String(latestState.replay_speed) : null,
+    );
   });
-  byId(104).addEventListener("change", () => {
-    dispatch("live_mode.set", { mode: byId(104).value });
+  byId(104).addEventListener("change", async () => {
+    const control = byId(104);
+    const requested = control.value;
+    const result = await dispatch("live_mode.set", { mode: requested });
+    reconcileRejectedControlSelection(
+      control, requested, result, latestState && latestState.live_mode,
+    );
   });
   byId(102).addEventListener("click", () => {
     dispatch("replay.run", {

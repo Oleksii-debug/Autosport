@@ -16,6 +16,7 @@ import stat
 import sys
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
 from . import release_package
@@ -201,7 +202,7 @@ def install_verified_release(
             "package_sha256": expected_package_sha256,
             "file_count": len(file_hashes), "real_money_execution": False,
         }
-    except (OSError, zipfile.BadZipFile, EOFError) as exc:
+    except (OSError, zipfile.BadZipFile, EOFError, zlib.error) as exc:
         raise OfflineInstallError("installation failed without replacing an existing release") from exc
     finally:
         if temp_root is not None:
@@ -220,7 +221,7 @@ def main(argv: list[str] | None = None) -> int:
             args.archive, args.destination, expected_source_sha=args.source_sha,
             expected_package_sha256=args.package_sha256,
         )
-    except (OfflineInstallError, OSError, zipfile.BadZipFile, EOFError, RuntimeError, TypeError, ValueError):
+    except (OfflineInstallError, OSError, zipfile.BadZipFile, EOFError, zlib.error, RuntimeError, TypeError, ValueError):
         print("install=FAIL_CLOSED reason=unsafe_or_unverified_release")
         return 3
     print(json.dumps(receipt, sort_keys=True, separators=(",", ":")))

@@ -49,11 +49,13 @@
   // just because the operator pressed Tab to reach its Save button.
   const pathDraftEdits = new Map();
   const unsavedPathDrafts = new Set();
+  let pendingDatasetValidation = null;
   for (const id of ["dataset-path", "research-plan-path"]) {
     pathDraftEdits.set(id, 0);
     byId(id).addEventListener("input", () => {
       unsavedPathDrafts.add(id);
       pathDraftEdits.set(id, pathDraftEdits.get(id) + 1);
+      if (id === "dataset-path") pendingDatasetValidation = null;
     });
   }
 
@@ -64,12 +66,39 @@
   }
 
   function finalizeConfirmedPathSelection(id, editEpoch, result) {
-    // A rejection or lost bridge reply is not a committed selection. Also
-    // preserve any later edits made while the asynchronous request was pending.
+    if (id === "dataset-path") {
+      // Scheduling the dataset worker is not successful validation.
+      const pending = result && result.dataset_validation_pending;
+      if (result && result.status === "completed"
+          && pending && typeof pending.path === "string" && pending.path
+          && Number.isSafeInteger(pending.after_generation)
+          && pending.after_generation >= 0
+          && pathDraftEdits.get(id) === editEpoch) {
+        pendingDatasetValidation = {
+          path: pending.path,
+          afterGeneration: pending.after_generation,
+          editEpoch,
+        };
+      }
+      return;
+    }
+    // Research-plan binding completes synchronously on the server.
     if (result && result.status === "completed"
         && pathDraftEdits.get(id) === editEpoch) {
       unsavedPathDrafts.delete(id);
     }
+  }
+
+  function confirmValidatedDatasetSelection(state) {
+    const pending = pendingDatasetValidation;
+    if (pending === null
+        || !unsavedPathDrafts.has("dataset-path")
+        || pathDraftEdits.get("dataset-path") !== pending.editEpoch
+        || !Number.isSafeInteger(state.dataset_success_generation)
+        || state.dataset_success_generation <= pending.afterGeneration
+        || state.dataset_path !== pending.path) return;
+    unsavedPathDrafts.delete("dataset-path");
+    pendingDatasetValidation = null;
   }
 
   // A provider/source choice is a pending operator draft, not canonical truth.
@@ -406,6 +435,9 @@
       const item = pair[0][pair[1]];
       if (item !== undefined && item !== null && typeof item !== "string") invalid();
     }
+    if (value.dataset_success_generation !== undefined
+        && (!Number.isSafeInteger(value.dataset_success_generation)
+            || value.dataset_success_generation < 0)) invalid();
     if (value.agent_learning_busy !== undefined
       && typeof value.agent_learning_busy !== "boolean") invalid();
     if (value.agent_learning_evidence !== undefined && (
@@ -550,6 +582,7 @@
 
   function renderState(state) {
     latestState = state;
+    confirmValidatedDatasetSelection(state);
     projectLiveState(state.status, state.last_error);
     projectEmergencyStopState(state.emergency_stop);
 

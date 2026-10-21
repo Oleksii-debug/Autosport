@@ -138,7 +138,7 @@ def install_verified_release(
         payload_root = temp_root / "payload"
         payload_root.mkdir(mode=0o700)
         file_hashes: dict[str, str] = {}
-        windows_keys: set[str] = set()
+        windows_keys: set[str] = {_RECEIPT.casefold()}
         total = 0
         with zipfile.ZipFile(archive) as source:
             infos = source.infolist()

@@ -17,6 +17,7 @@ from pathlib import Path
 from . import release_package
 from .offline_release_install import (
     OfflineInstallError, _RECEIPT, _publish_directory_no_replace, _safe_root,
+    _is_redirected_install_path,
 )
 from .offline_release_lifecycle import (
     _inspection_root, _trusted_archive_inventory, inspect_installed_release,
@@ -99,14 +100,15 @@ def recover_interrupted_uninstall(
     for parent, dirs, names in os.walk(quarantine, topdown=True, followlinks=False):
         prefix_path = Path(parent).relative_to(quarantine)
         prefix = "" if prefix_path == Path(".") else prefix_path.as_posix()
-        if prefix not in expected_dirs:
-            raise OfflineInstallError("unowned quarantine directory")
+        if prefix not in expected_dirs or _is_redirected_install_path(Path(parent)):
+            raise OfflineInstallError("unowned or redirected quarantine directory")
         for dirname in dirs:
             count += 1
             child = Path(parent) / dirname
             rel = "/".join(s for s in (prefix, dirname) if s)
             if (
                 count > 2 * _MAX_ENTRIES or rel not in expected_dirs
+                or _is_redirected_install_path(child)
                 or not stat.S_ISDIR(child.lstat().st_mode)
             ):
                 raise OfflineInstallError("unexpected quarantine subdirectory")
@@ -116,7 +118,7 @@ def recover_interrupted_uninstall(
             rel = "/".join(s for s in (prefix, basename) if s)
             if count > 2 * _MAX_ENTRIES or (
                 rel not in trusted and rel != _RECEIPT
-            ) or not stat.S_ISREG(child.lstat().st_mode):
+            ) or _is_redirected_install_path(child) or not stat.S_ISREG(child.lstat().st_mode):
                 raise OfflineInstallError("unknown or unsafe quarantine file")
             discovered.add(rel)
             if rel != _RECEIPT:
@@ -133,7 +135,8 @@ def recover_interrupted_uninstall(
             member.parent.mkdir(parents=True, exist_ok=True)
             ancestor = member.parent
             while ancestor != quarantine:
-                if not stat.S_ISDIR(ancestor.lstat().st_mode):
+                if (_is_redirected_install_path(ancestor)
+                        or not stat.S_ISDIR(ancestor.lstat().st_mode)):
                     raise OfflineInstallError("quarantine ancestor is not a real directory")
                 ancestor = ancestor.parent
             with original.open("Autosport-V1/" + name) as reader, member.open("xb") as writer:

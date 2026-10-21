@@ -326,11 +326,11 @@ try {
         }
         $record = [ordered]@{
             key = $spec.key
-            automation_id = [string]$element.Current.AutomationId
+            automation_id = [string]$spec.automation_id
             expected_name = $spec.name
             # Only the trusted expected label (or a fixed failure marker) is exported.
             name = $(if ($currentName -eq [string]$spec.name) { [string]$spec.name } else { '[redacted mismatch]' })
-            control_type = $controlType
+            control_type = $(if ($controlType -eq [string]$spec.expected_control_type) { [string]$spec.expected_control_type } else { '[redacted mismatch]' })
             expected_control_type = $spec.expected_control_type
             keyboard_focusable = $focusable
             keyboard_focus_required_by_external_gate = [bool]$spec.require_external_focus
@@ -348,7 +348,7 @@ try {
             $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch"
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$spec.expected_control_type) -and $controlType -ne [string]$spec.expected_control_type) {
-            $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch expected='$($spec.expected_control_type)' actual='$controlType'"
+            $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch"
         }
         if ([bool]$spec.require_external_focus -and -not $focusable) {
             $report.failures += "automation_id=$($spec.automation_id): not externally keyboard-focusable"

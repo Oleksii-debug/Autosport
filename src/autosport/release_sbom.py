@@ -178,6 +178,27 @@ def validate_embedded_executable_inventory(
     components = payload["components"]
     if type(components) is not list or not (1 <= len(components) <= 20000):
         raise ValueError("embedded executable inventory is empty or unbounded")
+    # The ZIP member classifier protects files outside the PE, but a secret
+    # hidden *inside* the PyInstaller CArchive bypasses ZIP path screening.
+    # A sealed binary containing such members is not a distributable package,
+    # even when its hashes and census JSON have been recomputed.
+    forbidden_directories = frozenset({
+        ".aws", ".azure", ".mozilla", ".ssh", ".pytest_cache",
+        ".mypy_cache", ".ruff_cache", ".tox", "__pycache__",
+        "user data", "htmlcov", ".hypothesis", ".nox",
+    })
+    forbidden_files = frozenset({
+        ".env", ".envrc", ".pypirc", "application_default_credentials.json",
+        "cookies", "cookies.json", "cookies.sqlite", "credentials",
+        "credentials.json", "key3.db", "key4.db", "local state",
+        "login data", "logins.json", "oauth_credentials.json",
+        "secrets.json", "secrets.toml", "token.json", "web data",
+        ".coverage", "coverage.xml", ".testmondata", "pytestdebug.log",
+        "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+    })
+    safe_env_templates = frozenset({
+        ".env.example", ".env.sample", ".env.template", ".env.dist",
+    })
     last = None
     for item in components:
         if type(item) is not dict or set(item) != {
@@ -195,6 +216,24 @@ def validate_embedded_executable_inventory(
         if last is not None and name <= last:
             raise ValueError("embedded executable component names are not unique/sorted")
         last = name
+        pieces = tuple(part.casefold() for part in name.replace("\\", "/").split("/"))
+        leaf = pieces[-1]
+        if (
+            any(part in forbidden_directories for part in pieces[:-1])
+            or leaf in forbidden_files
+            or (leaf.startswith(".env.") and leaf not in safe_env_templates)
+            or (leaf.startswith("client_secret") and leaf.endswith(".json"))
+            or leaf.startswith(".coverage.")
+            or leaf.endswith((".pyc", ".pyo", ".pfx", ".p12", ".ppk", ".key"))
+            or leaf.endswith((".session", ".session-journal"))
+            or (
+                leaf.endswith(".pem")
+                and ("private" in leaf or leaf[:-4] in {
+                    "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+                })
+            )
+        ):
+            raise ValueError("embedded executable contains forbidden private/test state")
         if type(code) is not str or not _re.fullmatch(r"[A-Za-z0-9]", code):
             raise ValueError("embedded executable component typecode is invalid")
         for key in ("packed_bytes", "unpacked_bytes"):

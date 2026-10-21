@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unicodedata import category as unicode_category
 from typing import Any
 
 import tk_uia
@@ -203,6 +204,20 @@ def _open_owner_economic_dialog_for_audit(app: WindowsAutosportApp) -> Any:
     return created[0]
 
 
+def _has_visible_accessible_text(value: str) -> bool:
+    """Reject UIA labels made only of invisible formatting/combining characters.
+
+    Unicode format controls and combining marks are not independently readable
+    names, even if str.strip() leaves them intact. Real localized text with
+    such characters remains valid. Never export provider-controlled Name text.
+    """
+    return any(
+        not character.isspace()
+        and unicode_category(character)[0] not in {"C", "M", "Z"}
+        for character in value
+    )
+
+
 def summarize_description(
     description: Any,
     *,
@@ -242,21 +257,22 @@ def summarize_description(
         })
         observed_role = _enum_name(widget.role)
         role_name = observed_role if observed_role in _PUBLIC_ROLES else "UNRECOGNIZED"
-        # A whitespace-only or non-text UIA Name is not an accessible label.
+        # Invisible Unicode-only or non-text UIA Name is not an accessible label.
         # Keep exported evidence JSON-serializable even for malformed providers.
         accessible_name = widget.name if isinstance(widget.name, str) else ""
+        name_present = _has_visible_accessible_text(accessible_name)
         rows_exposed = widget.answers_rows is True
         controls[normalized_automation_id] = {
             "path": "[redacted]",
             "tk_class": "[redacted]",
             "role": role_name,
-            "name": "[present]" if accessible_name.strip() else "",
+            "name": "[present]" if name_present else "",
             "automation_id": normalized_automation_id,
             "patterns": pattern_names,
             "answers_rows": rows_exposed,
             "gaps": gap_names,
         }
-        if not accessible_name.strip():
+        if not name_present:
             failures.append(f"automation_id={normalized_automation_id}: missing accessible name")
         expected_role = _EXPECTED_ROLES[normalized_automation_id]
         if role_name != expected_role:

@@ -942,6 +942,8 @@ $dataExe = $boundDataExe
 if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing Autosport-Data.exe' }
 & $dataExe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTEXITCODE" }
+& $dataExe install-release --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe install-release --help exited $LASTEXITCODE" }
 & $dataExe compare-strategies --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $dataExe walk-forward-evaluate --help | Out-Null

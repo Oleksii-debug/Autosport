@@ -698,6 +698,31 @@ def _copy_release_example_tree(
         raise ValueError("unsafe release source tree changed during staging")
 
 
+def _require_dependency_evidence_coherence(
+    direct_metadata: dict[str, Any],
+    dependency_graph: dict[str, Any],
+) -> None:
+    """Reject contradictory claims about the same build-host distribution.
+
+    Both evidence objects must already have passed their separate strict
+    source-bound schema validators. This check does NOT elevate either
+    build-host inventory into a bundled executable SBOM or license clearance.
+    """
+    graph_by_name = {
+        component["name"]: component
+        for component in dependency_graph["components"]
+    }
+    for direct in direct_metadata["distributions"]:
+        component = graph_by_name.get(direct["name"])
+        if component is None or (
+            component["version"] != direct["version"]
+            or component["direct_roles"] != direct["roles"]
+            or component["license_expression"] != direct["license_expression"]
+            or component["license_evidence"] != direct["license_evidence"]
+        ):
+            raise ValueError("direct and transitive build-host evidence disagree")
+
+
 def build_windows_package(
     exe_path: str | Path,
     start_file: str | Path,
@@ -726,6 +751,8 @@ def build_windows_package(
         if source_manifest is None:
             raise ValueError("build-host graph requires source declarations")
         validate_build_host_dependency_graph(dependency_graph, source_manifest)
+    if dependency_metadata is not None and dependency_graph is not None:
+        _require_dependency_evidence_coherence(dependency_metadata, dependency_graph)
     validate_requested_update_identity(
         update_version=update_version, update_schema=update_schema
     )
@@ -919,6 +946,9 @@ def verify_windows_package(
         validate_build_host_dependency_graph(graph, source_manifest)
         if members["DEPENDENCY_GRAPH_METADATA.json"] != _canonical_json_bytes(graph):
             raise ValueError("build-host dependency graph is not canonical JSON")
+    if ("DIRECT_DEPENDENCY_METADATA.json" in members
+            and "DEPENDENCY_GRAPH_METADATA.json" in members):
+        _require_dependency_evidence_coherence(direct_metadata, graph)
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")

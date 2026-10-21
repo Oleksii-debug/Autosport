@@ -1611,10 +1611,10 @@ try {
         }
         $report.controls += $record
 
-        if ($currentName -ne $spec.name) {
+        if ($currentName -cne [string]$spec.name) {
             $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch"
         }
-        if (-not [string]::IsNullOrWhiteSpace([string]$spec.expected_control_type) -and $controlType -ne [string]$spec.expected_control_type) {
+        if (-not [string]::IsNullOrWhiteSpace([string]$spec.expected_control_type) -and $controlType -cne [string]$spec.expected_control_type) {
             $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch"
         }
         if ([bool]$spec.require_external_focus -and -not $focusable) {

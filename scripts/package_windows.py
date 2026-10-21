@@ -12,7 +12,7 @@ import tomllib
 from pathlib import Path, PurePosixPath
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
-from autosport.release_sbom import capture_direct_installed_dependencies
+from autosport.release_sbom import capture_direct_installed_dependencies, capture_embedded_executable_inventory
 from autosport.release_dependency_graph import capture_build_host_dependency_graph
 from autosport.windows_pe_integrity import validate_pe32plus_amd64
 from autosport.release_package import (
@@ -810,6 +810,11 @@ def main() -> int:
         # arbitrary MZ stub nor a wrong-architecture DLL may reach the final ZIP.
         _require_executable_pe32plus(trusted_exe)
         _require_executable_pe32plus(trusted_data_exe)
+        # Enumerate the actual sealed main EXE CArchive, not merely host wheels.
+        # This census is binary-bound, but is deliberately NOT license clearance.
+        embedded_inventory = capture_embedded_executable_inventory(
+            trusted_exe, args.source_sha,
+        )
         trusted_diagnostic = _capture_verified_evidence(
             args.diagnostic,
             args.diagnostic_sha256,
@@ -848,6 +853,7 @@ def main() -> int:
             source_manifest=source_manifest,
             dependency_metadata=dependency_metadata,
             dependency_graph=dependency_graph,
+            embedded_executable_inventory=embedded_inventory,
         )
         binding = bind_portable_data_tool(
             output,
@@ -861,6 +867,7 @@ def main() -> int:
         require_source_manifest=True,
         require_dependency_metadata=True,
         require_dependency_graph=True,
+        require_embedded_executable_inventory=True,
     )
     package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(output)

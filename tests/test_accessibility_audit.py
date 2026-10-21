@@ -242,7 +242,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         # but none independently labels a screen-reader control.
         for bad_name in (
             "\u200b", "\u200d\u2060", "\ufeff",
-            "\u0301", "\x00", " \u200b\\t",
+            "\u0301", "\x00", " \u200b\t",
         ):
             with self.subTest(name=repr(bad_name)):
                 description = self._passing_description()

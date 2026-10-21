@@ -944,6 +944,10 @@ if (-not (Test-Path $dataExe -PathType Leaf)) { throw 'Packaged build is missing
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe help exited $LASTEXITCODE" }
 & $dataExe install-release --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe install-release --help exited $LASTEXITCODE" }
+& $dataExe verify-installed-release --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe verify-installed-release --help exited $LASTEXITCODE" }
+& $dataExe uninstall-release --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe uninstall-release --help exited $LASTEXITCODE" }
 & $dataExe compare-strategies --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $dataExe walk-forward-evaluate --help | Out-Null
@@ -1132,6 +1136,10 @@ if ($extractedDataExeSha -ne $buildInfo.autosport_data_exe_sha256) { throw 'Fres
 
 & $extractedDataExe --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited $LASTEXITCODE" }
+& $extractedDataExe verify-installed-release --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe verify-installed-release --help exited $LASTEXITCODE" }
+& $extractedDataExe uninstall-release --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe uninstall-release --help exited $LASTEXITCODE" }
 & $extractedDataExe compare-strategies --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe compare-strategies --help exited $LASTEXITCODE" }
 & $extractedDataExe walk-forward-evaluate --help | Out-Null

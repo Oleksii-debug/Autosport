@@ -1,5 +1,9 @@
 import json
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
+from threading import Barrier, Lock
+
+import autosport.pre_evaluation_evidence as evidence_module
 
 import pytest
 
@@ -221,3 +225,67 @@ def test_resolver_identity_mismatch_and_duplicate_request_fail_closed() -> None:
             resolver=lambda _: facts("a"),
             evaluated_at_ns=1000,
         )
+
+
+def test_parallel_writers_use_unique_temporary_files_and_complete_envelopes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Reproduce the shared .tmp race from predecessor PR #2207 on current main."""
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = [
+        authority.evaluate_session(
+            session_id=session_id,
+            candidate_ids=[candidate_id],
+            resolver=lambda name: facts(name),
+            evaluated_at_ns=1000,
+        )
+        for session_id, candidate_id in (("s-a", "a"), ("s-b", "b"))
+    ]
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    original_replace = evidence_module.os.replace
+    rendezvous = Barrier(2)
+    seen: list[Path] = []
+    lock = Lock()
+
+    def concurrent_replace(source, destination):
+        with lock:
+            seen.append(Path(source))
+        rendezvous.wait(timeout=5)
+        return original_replace(source, destination)
+
+    monkeypatch.setattr(evidence_module.os, "replace", concurrent_replace)
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        list(executor.map(store.save, evidence))
+
+    assert len(seen) == 2 and seen[0] != seen[1]
+    assert all(source.parent == tmp_path for source in seen)
+    assert store.load() in evidence
+    assert not list(tmp_path.glob(".evidence.json.*.tmp"))
+    assert not (tmp_path / ".evidence.json.tmp").exists()
+
+
+def test_failed_atomic_replace_preserves_prior_evidence_and_cleans_only_own_temp(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    original = authority.evaluate_session(
+        session_id="last-good", candidate_ids=["a"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    replacement = authority.evaluate_session(
+        session_id="new", candidate_ids=["b"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(original)
+
+    def fail_replace(_source, _destination):
+        raise OSError("simulated publication failure")
+
+    monkeypatch.setattr(evidence_module.os, "replace", fail_replace)
+    with pytest.raises(OSError, match="simulated publication failure"):
+        store.save(replacement)
+
+    assert store.load() == original
+    assert not list(tmp_path.glob(".evidence.json.*.tmp"))
+    assert not (tmp_path / ".evidence.json.tmp").exists()

@@ -12,7 +12,10 @@ import tomllib
 from pathlib import Path, PurePosixPath
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
-from autosport.release_sbom import capture_direct_installed_dependencies, capture_embedded_executable_inventory
+from autosport.release_sbom import (
+    capture_direct_installed_dependencies, capture_embedded_executable_inventory,
+    capture_dependency_license_evidence,
+)
 from autosport.release_dependency_graph import capture_build_host_dependency_graph
 from autosport.windows_pe_integrity import validate_pe32plus_amd64
 from autosport.release_package import (
@@ -785,6 +788,9 @@ def main() -> int:
     source_manifest = _source_declaration_manifest(repo_root, args.source_sha)
     dependency_metadata = capture_direct_installed_dependencies(source_manifest)
     dependency_graph = capture_build_host_dependency_graph(source_manifest)
+    dependency_license_manifest, dependency_license_members = (
+        capture_dependency_license_evidence(dependency_graph)
+    )
 
     with tempfile.TemporaryDirectory(prefix="autosport-package-inputs-") as snapshot_root:
         snapshot_dir = Path(snapshot_root)
@@ -860,6 +866,8 @@ def main() -> int:
             source_manifest=source_manifest,
             dependency_metadata=dependency_metadata,
             dependency_graph=dependency_graph,
+            dependency_license_manifest=dependency_license_manifest,
+            dependency_license_members=dependency_license_members,
             embedded_executable_inventory=embedded_inventory,
         )
         binding = bind_portable_data_tool(
@@ -875,6 +883,7 @@ def main() -> int:
         require_source_manifest=True,
         require_dependency_metadata=True,
         require_dependency_graph=True,
+        require_dependency_license_evidence=True,
         require_embedded_executable_inventory=True,
     )
     package_sha = _require_verified_package_digest(binding, release_verification)

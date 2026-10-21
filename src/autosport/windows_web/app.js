@@ -348,6 +348,13 @@
     if (value.product_source && value.product_source.choices !== undefined
       && !Array.isArray(value.product_source.choices)) invalid();
     if (value.product_runtime !== undefined && !record(value.product_runtime)) invalid();
+    // Native selects dereference each option before other panels finish painting.
+    // Reject corrupt child collections in advance, not halfway through renderState.
+    for (const options of [value.surfaces, value.strategy_choices,
+      value.manual.operations, value.product_source && value.product_source.choices]) {
+      if (options !== undefined && options !== null
+        && (!Array.isArray(options) || options.some((item) => !record(item)))) invalid();
+    }
     if (value.product_runtime) {
       if (value.product_runtime.economic_snapshot !== undefined
         && !record(value.product_runtime.economic_snapshot)) invalid();

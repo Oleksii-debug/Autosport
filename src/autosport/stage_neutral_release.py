@@ -140,8 +140,10 @@ def _validate_manifest(
     if manifest_payload is None:
         raise ValueError(f"{label} is missing PACKAGE_MANIFEST.json")
     manifest = _decode_json_object(manifest_payload, "PACKAGE_MANIFEST.json")
-    if manifest.get("schema_version") != 1 or not isinstance(
-        manifest.get("files"), dict
+    if (
+        type(manifest.get("schema_version")) is not int
+        or manifest["schema_version"] != 1
+        or not isinstance(manifest.get("files"), dict)
     ):
         raise ValueError("PACKAGE_MANIFEST.json schema is invalid")
 

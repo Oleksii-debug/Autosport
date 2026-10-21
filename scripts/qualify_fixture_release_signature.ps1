@@ -91,7 +91,7 @@ try {
             $trustedPin = [System.Convert]::ToHexString(
                 $digestCalculator.ComputeHash($publicCertificate.RawData)).ToLowerInvariant()
         } finally { $digestCalculator.Dispose() }
-        $admission = & (Join-Path $PSScriptRoot 'verify_release_update_signature.ps1') -PackagePath $resolvedPackage -SourceSha $SourceSha -ExpectedPackageSha256 $observedSha -PublicCertificatePath $publicPath -SignaturePath $signaturePath -PinnedPublicCertificateSha256 $trustedPin
+        $admission = & (Join-Path $PSScriptRoot 'verify_release_update_signature.ps1') -PackagePath $archive -SourceSha $SourceSha -ExpectedPackageSha256 $observedSha -PublicCertificatePath $publicPath -SignaturePath $signaturePath -PinnedPublicCertificateSha256 $trustedPin
         if ($admission -notlike 'release-update-signature=PASS*') {
             throw 'Fixture signing failed independent update-signature admission'
         }

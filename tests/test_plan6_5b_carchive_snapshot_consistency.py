@@ -13,7 +13,7 @@ SOURCE = "a" * 40
 def test_reader_cannot_attribute_temporary_foreign_toc_to_sealed_exe(tmp_path: Path) -> None:
     exe = tmp_path / "Autosport.exe"
     original = b"sealed-original" + b"\0" * 4096
-    foreign = b"foreign-binary" + b"\0" * 4096
+    foreign = b"foreign-binary!" + b"\0" * 4096
     assert len(original) == len(foreign)
     exe.write_bytes(original)
 

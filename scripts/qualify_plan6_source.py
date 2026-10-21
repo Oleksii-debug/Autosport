@@ -22,6 +22,7 @@ GROUPS = (
         "tests/test_external_uia_semantic_readiness_contract.py",
     )),
     ("release_integrity", (
+        "tests/test_plan6_5b_binary_module_attribution_release.py",
         "tests/test_plan6_5b_carchive_snapshot_consistency.py",
         "tests/test_plan6_5b_carchive_span_nonoverlap.py",
         "tests/test_plan6_5b_config_migration_source_binding.py",
@@ -38,6 +39,7 @@ GROUPS = (
         "tests/test_plan6_5b_second_executable_inventory.py",
         "tests/test_plan6_5b_source_sha_evidence_boundary.py",
         "tests/test_plan6_source_qualifier.py",
+        "tests/test_release_binary_attribution.py",
         "tests/test_release_build_dependency_metadata.py",
         "tests/test_release_package_source_identity.py",
     )),

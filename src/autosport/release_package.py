@@ -224,6 +224,12 @@ def _write_canonical_zip(package_zip: Path, members: dict[str, bytes]) -> str:
                     compresslevel=9,
                 )
 
+        # A writer must not publish a ZIP that the canonical verifier rejects.
+        # Inspect the completed central directory while output is still private;
+        # no caller-visible archive exists if the resource contract fails.
+        authored.seek(0)
+        with zipfile.ZipFile(authored, "r") as completed_archive:
+            _require_release_zip_resource_bounds(completed_archive.infolist())
         authored.seek(0)
         fd, tmp_name = tempfile.mkstemp(
             prefix=f".{package_zip.name}.",

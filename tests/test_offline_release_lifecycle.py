@@ -157,6 +157,47 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
                 self._uninstall(directory, digest)
             self.assertEqual(external.read_text(), "owner state")
 
+    def test_symlinked_parent_in_quarantine_never_unlinks_external_file(self):
+        """Reject a directory swap after the second inventory verification."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory, digest = self._installed(root)
+            outside = root / "outside-owner-data"
+            outside.mkdir()
+            outside_file = outside / "demo.json"
+            outside_file.write_bytes(b"{}")
+            probe = root / "symlink-probe"
+            try:
+                probe.symlink_to(outside, target_is_directory=True)
+                probe.unlink()
+            except (OSError, NotImplementedError):
+                self.skipTest("directory symlinks not available")
+            decoder = lifecycle.release_package._decode_json_object
+            seen = [0]
+
+            def inject_after_second_check(payload, label):
+                result = decoder(payload, label)
+                seen[0] += 1
+                if seen[0] == 3:
+                    staging = list(root.glob(".autosport-uninstall-*"))
+                    self.assertEqual(len(staging), 1)
+                    moved = staging[0] / "verified-product"
+                    (moved / "examples").rename(root / "preserved-original-examples")
+                    (moved / "examples").symlink_to(outside, target_is_directory=True)
+                return result
+
+            with patch.object(
+                lifecycle.release_package, "_decode_json_object",
+                side_effect=inject_after_second_check,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "installed parent changed during removal"
+                ):
+                    self._uninstall(directory, digest)
+            self.assertEqual(seen[0], 3)
+            self.assertEqual(outside_file.read_bytes(), b"{}")
+            self.assertTrue((root / "preserved-original-examples" / "demo.json").is_file())
+
     def test_second_check_failure_restores_intact_original(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

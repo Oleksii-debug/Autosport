@@ -555,6 +555,8 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "src/autosport/monotonic_workspace_authority.py",
     "src/autosport/release_dependency_graph.py",
     "src/autosport/windows_pe_integrity.py",
+    "src/autosport/windows_update_admission.py",
+    "src/autosport/windows_update_release_metadata.py",
     "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",

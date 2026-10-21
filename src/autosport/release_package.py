@@ -681,14 +681,23 @@ def verify_windows_package(
 
 
 _RELEASE_PRIVATE_OR_TEST_DIRECTORIES = frozenset({
-    ".aws", ".ssh", ".pytest_cache", ".mypy_cache", ".ruff_cache",
-    ".tox", "__pycache__", "user data",
+    ".aws", ".azure", ".mozilla", ".ssh", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".tox", "__pycache__", "user data",
 })
 _RELEASE_PRIVATE_OR_TEST_FILES = frozenset({
-    ".env", ".envrc", ".pypirc", "token.json", "logins.json",
-    "secrets.json", "secrets.toml", "credentials", "cookies",
-    "login data", ".coverage", "coverage.xml", ".testmondata",
-    "pytestdebug.log", "id_ed25519", "id_rsa",
+    ".env", ".envrc", ".pypirc", "application_default_credentials.json",
+    "cookies", "cookies.json", "cookies.sqlite", "credentials",
+    "credentials.json", "key3.db", "key4.db", "local state",
+    "login data", "logins.json", "oauth_credentials.json",
+    "secrets.json", "secrets.toml", "token.json", "web data",
+    ".coverage", "coverage.xml", ".testmondata", "pytestdebug.log",
+    "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+})
+_RELEASE_SAFE_ENV_TEMPLATES = frozenset({
+    ".env.example", ".env.sample", ".env.template", ".env.dist",
+})
+_RELEASE_PRIVATE_KEY_STEMS = frozenset({
+    "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
 })
 
 
@@ -707,9 +716,15 @@ def _require_release_member_without_private_or_test_state(
     leaf = components[-1]
     if (
         leaf in _RELEASE_PRIVATE_OR_TEST_FILES
+        or (leaf.startswith(".env.") and leaf not in _RELEASE_SAFE_ENV_TEMPLATES)
+        or (leaf.startswith("client_secret") and leaf.endswith(".json"))
         or leaf.startswith(".coverage.")
         or leaf.endswith((".pyc", ".pyo", ".pfx", ".p12", ".ppk", ".key"))
         or leaf.endswith((".session", ".session-journal"))
+        or (
+            leaf.endswith(".pem")
+            and ("private" in leaf or leaf[:-4] in _RELEASE_PRIVATE_KEY_STEMS)
+        )
     ):
         raise ValueError("release package contains forbidden private/test state file")
 

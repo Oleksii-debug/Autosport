@@ -112,7 +112,9 @@ def upgrade_verified_paper_release(
             pass
         raise
     original = root.stat()
-    root.rename(previous)
+    # Atomic no-replace is required here too: on POSIX rename() can silently
+    # replace an empty quarantine directory created by a concurrent worker.
+    _publish_directory_no_replace(root, previous)
     if (previous.stat().st_dev, previous.stat().st_ino) != (
         original.st_dev, original.st_ino
     ):
@@ -171,7 +173,9 @@ def rollback_verified_paper_release(
         expected_package_sha256=new_package_sha256,
     )
     original = root.stat()
-    root.rename(rejected)
+    # Do not allow a concurrent newly-created quarantine directory to be
+    # replaced by the installed product on POSIX.
+    _publish_directory_no_replace(root, rejected)
     if (rejected.stat().st_dev, rejected.stat().st_ino) != (
         original.st_dev, original.st_ino
     ):

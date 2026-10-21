@@ -18,6 +18,10 @@ This is the live status authority for the new architecture.
 
 Only the unique `Section | State` rows in each active plan table determine work selection. Dated checkpoint notes and historical PR/test snapshots must not generate a second status for the same section. Do not reopen terminal DONE from earlier QUALIFYING/OPEN chronology; reopen only on evidenced regression, invalid closure evidence, changed acceptance contract or breaking integration. Plan 6 Section 2 stays IN_PROGRESS_NOT_DONE; its single latest authoritative table row is retained.
 
+## 2026-10-21 terminal skip-list readback (no new Section status)
+
+Previously accepted Plan 6 atomic `DONE` items **1А, 1Б, 1В, 3Б, 3В, 4А, 4В, 5А, 5В, 6В** are now explicitly protected by [SECTION_CLOSURE_IMMUTABILITY.md](SECTION_CLOSURE_IMMUTABILITY.md), integrated via [PR #2338](https://github.com/Oleksii-debug/Autosport/pull/2338). Independent postmerge readback at `main@a6ba757c5cdfc364be3525cbbb43d02a717a55f3` verified all ten `DONE_IMMUTABLE` entries (blob `78b02a1ed57be26fadbdd94908b5e62261ca81e7`). This is a **coordination/registry lock only**, not a newly implemented or newly tested Section. The unique Plan tables below remain the exclusive status authority. Plan 6 §2А–2В, §3А, §4Б, §5Б, §6А–6Б, §7А–7В, Plan 7 and Plan 8 retain their unfinished/external states; no full-product, real-money, installer or physical NVDA verification is claimed.
+
 ## Migrated accepted / active state
 
 ### Plan 1 — Data / causality / replay / outcomes

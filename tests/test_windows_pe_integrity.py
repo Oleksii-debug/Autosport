@@ -572,23 +572,23 @@ def test_official_package_preflight_requires_semantically_valid_amd64(tmp_path):
         package_windows._require_executable_pe32plus(exe)
 
     exe.write_bytes(b"MZ" + b"\x00" * 1024)
-    with pytest.raises(ValueError, match="PE32\+ semantic preflight"):
+    with pytest.raises(ValueError, match=r"PE32\+ semantic preflight"):
         package_windows._require_executable_pe32plus(exe)
 
     invalid_arch = bytearray(build_valid_pe())
     struct.pack_into("<H", invalid_arch, 0x84, 0x14C)  # I386, not AMD64
     exe.write_bytes(invalid_arch)
-    with pytest.raises(ValueError, match="PE32\+ semantic preflight"):
+    with pytest.raises(ValueError, match=r"PE32\+ semantic preflight"):
         package_windows._require_executable_pe32plus(exe)
 
     dll = bytearray(build_valid_pe())
     struct.pack_into("<H", dll, 0x84 + 18, 0x2022)  # IMAGE_FILE_DLL
     exe.write_bytes(dll)
-    with pytest.raises(ValueError, match="PE32\+ semantic preflight"):
+    with pytest.raises(ValueError, match=r"PE32\+ semantic preflight"):
         package_windows._require_executable_pe32plus(exe)
 
     exe.write_bytes(b"")
-    with pytest.raises(ValueError, match="PE32\+ semantic preflight"):
+    with pytest.raises(ValueError, match=r"PE32\+ semantic preflight"):
         package_windows._require_executable_pe32plus(exe)
 
 
@@ -607,7 +607,7 @@ def test_official_preflight_inspects_hash_pinned_copy_not_mutable_path(tmp_path)
     )
     source.write_bytes(b"MZ" + b"\x00" * 128)
     package_windows._require_executable_pe32plus(snapshot)
-    with pytest.raises(ValueError, match="PE32\+ semantic preflight"):
+    with pytest.raises(ValueError, match=r"PE32\+ semantic preflight"):
         package_windows._require_executable_pe32plus(source)
 
 

@@ -146,3 +146,115 @@ def capture_direct_installed_dependencies(
     }
     validate_direct_dependency_metadata(result, source_manifest)
     return result
+
+
+# An executable CArchive TOC is stronger evidence than the *build host* wheel
+# registry: it is read from the actual sealed binary. It is still NOT a
+# complete SBOM, evidence of package-to-wheel attribution, or license clearance.
+def validate_embedded_executable_inventory(
+    payload: dict[str, Any], *, source_sha: str, executable_sha256: str,
+) -> None:
+    import re as _re
+    if (
+        type(source_sha) is not str
+        or _re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
+        or type(executable_sha256) is not str
+        or _re.fullmatch(r"[0-9a-f]{64}", executable_sha256) is None
+    ):
+        raise ValueError("invalid embedded inventory source/executable identity")
+    if (
+        type(payload) is not dict
+        or set(payload) != {
+            "schema_version", "source_sha", "executable_sha256",
+            "evidence_class", "components",
+        }
+        or type(payload["schema_version"]) is not int
+        or payload["schema_version"] != 1
+        or payload["source_sha"] != source_sha
+        or payload["executable_sha256"] != executable_sha256
+        or payload["evidence_class"] != "EMBEDDED_PYINSTALLER_CARCHIVE_TOC_ONLY"
+    ):
+        raise ValueError("embedded executable inventory identity/schema mismatch")
+    components = payload["components"]
+    if type(components) is not list or not (1 <= len(components) <= 20000):
+        raise ValueError("embedded executable inventory is empty or unbounded")
+    last = None
+    for item in components:
+        if type(item) is not dict or set(item) != {
+            "name", "typecode", "packed_bytes", "unpacked_bytes",
+        }:
+            raise ValueError("embedded executable component schema is invalid")
+        name, code = item["name"], item["typecode"]
+        if (
+            type(name) is not str or not (1 <= len(name) <= 512)
+            or "\x00" in name or name.startswith(("/", "\\"))
+            or any(segment in ("", ".", "..") for segment in name.replace("\\", "/").split("/"))
+            or _re.match(r"^[A-Za-z]:", name)
+        ):
+            raise ValueError("embedded executable component name is unsafe")
+        if last is not None and name <= last:
+            raise ValueError("embedded executable component names are not unique/sorted")
+        last = name
+        if type(code) is not str or not _re.fullmatch(r"[A-Za-z0-9]", code):
+            raise ValueError("embedded executable component typecode is invalid")
+        for key in ("packed_bytes", "unpacked_bytes"):
+            size = item[key]
+            if type(size) is not int or size < 0 or size > (1 << 35):
+                raise ValueError("embedded executable component size is invalid")
+
+
+def capture_embedded_executable_inventory(
+    exe_path: "str | Path", source_sha: str, *, reader_factory: Any = None,
+) -> dict[str, Any]:
+    """Census names/typecodes/sizes inside the *shipped EXE*, not host wheels.
+
+    The caller must first seal the PE file by SHA-256. The reader is used only
+    for a nonextracting TOC read, never to execute/archive-expand its members.
+    """
+    import hashlib
+    from pathlib import Path
+    path = Path(exe_path)
+    if not path.is_file() or path.is_symlink():
+        raise ValueError("embedded archive source is not a regular executable")
+    if reader_factory is None:
+        try:
+            from PyInstaller.archive.readers import CArchiveReader
+        except ImportError as exc:
+            raise ValueError("PyInstaller archive reader is unavailable") from exc
+        reader_factory = CArchiveReader
+    try:
+        reader = reader_factory(str(path))
+        toc = reader.toc
+    except Exception as exc:
+        raise ValueError("unable to inspect executable PyInstaller CArchive") from exc
+    if type(toc) is not dict or not 1 <= len(toc) <= 20000:
+        raise ValueError("executable has no bounded CArchive member table")
+    components: list[dict[str, Any]] = []
+    for name, record in sorted(toc.items()):
+        if type(record) not in (tuple, list) or len(record) != 5:
+            raise ValueError("malformed executable CArchive member record")
+        position, packed, unpacked, compressed, typecode = record
+        if (
+            type(position) is not int or position < 0
+            or type(compressed) not in (bool, int) or compressed not in (False, True, 0, 1)
+        ):
+            raise ValueError("malformed executable CArchive member flags")
+        components.append({
+            "name": name, "typecode": typecode,
+            "packed_bytes": packed, "unpacked_bytes": unpacked,
+        })
+    digest = hashlib.sha256()
+    with path.open("rb") as stream:
+        for chunk in iter(lambda: stream.read(1024 * 1024), b""):
+            digest.update(chunk)
+    result = {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "executable_sha256": digest.hexdigest(),
+        "evidence_class": "EMBEDDED_PYINSTALLER_CARCHIVE_TOC_ONLY",
+        "components": components,
+    }
+    validate_embedded_executable_inventory(
+        result, source_sha=source_sha, executable_sha256=digest.hexdigest(),
+    )
+    return result

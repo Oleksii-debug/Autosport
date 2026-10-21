@@ -183,6 +183,19 @@ function Find-UiaElementsForProcessFamily {
     return $foundMatches
 }
 
+function Find-UiaElementForProcessFamily {
+    param(
+        [int[]]$ProcessIds,
+        [string]$AutomationId
+    )
+    # The manual workbench opener and dialog (330/331) use the singular
+    # lookup. Reject missing OR duplicate controls rather than selecting
+    # an arbitrary UIA match after the shared duplicate-detection change.
+    $matches = @(Find-UiaElementsForProcessFamily -ProcessIds $ProcessIds -AutomationId $AutomationId)
+    if ($matches.Count -ne 1) { return $null }
+    return $matches[0]
+}
+
 $report = [ordered]@{
     status = 'FAIL'
     source = 'external_windows_uia_client'

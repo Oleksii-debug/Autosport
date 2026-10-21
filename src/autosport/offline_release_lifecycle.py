@@ -17,6 +17,7 @@ from pathlib import Path
 from . import release_package
 from .offline_release_install import (
     OfflineInstallError, _RECEIPT, _publish_directory_no_replace, _safe_root,
+    _is_redirected_install_path,
 )
 
 _MAX_RECEIPT_BYTES = 1024 * 1024
@@ -109,6 +110,21 @@ def _trusted_archive_inventory(
         raise OfflineInstallError("original archive could not be verified") from exc
 
 
+def _assert_release_parents_unredirected(root: Path, member: Path) -> None:
+    """Refuse nested symlinks and Windows junctions before accessing release bytes."""
+    ancestor = member.parent
+    while ancestor != root:
+        if _is_redirected_install_path(ancestor):
+            raise OfflineInstallError("release member parent is redirected")
+        try:
+            mode = ancestor.lstat().st_mode
+        except OSError as exc:
+            raise OfflineInstallError("release member parent is unavailable") from exc
+        if not stat.S_ISDIR(mode):
+            raise OfflineInstallError("release member parent is not a real directory")
+        ancestor = ancestor.parent
+
+
 def inspect_installed_release(
     destination: str | Path, *, archive: str | Path,
     expected_source_sha: str, expected_package_sha256: str,
@@ -175,20 +191,24 @@ def inspect_installed_release(
         for index in range(1, len(parts)):
             permitted_dirs.add("/".join(parts[:index]))
         member = root.joinpath(*parts)
-        if not _regular_file(member) or _hash_file(member) != digest:
+        _assert_release_parents_unredirected(root, member)
+        if (_is_redirected_install_path(member) or not _regular_file(member)
+                or _hash_file(member) != digest):
             raise OfflineInstallError("installed release has missing or modified bytes")
     actual_names = {_RECEIPT}
     count = 0
     for parent, subdirs, filenames in os.walk(root, topdown=True, followlinks=False):
         relative_dir = Path(parent).relative_to(root)
         prefix = "" if relative_dir == Path(".") else relative_dir.as_posix()
-        if prefix not in permitted_dirs:
-            raise OfflineInstallError("unowned installed-release directory")
+        if prefix not in permitted_dirs or _is_redirected_install_path(Path(parent)):
+            raise OfflineInstallError("unowned or redirected installed-release directory")
         for dirname in subdirs:
             count += 1
             candidate = Path(parent) / dirname
             key = "/".join(part for part in (prefix, dirname) if part)
-            if count > 2 * _MAX_ENTRIES or candidate.is_symlink() or key not in permitted_dirs:
+            if (count > 2 * _MAX_ENTRIES or _is_redirected_install_path(candidate)
+                    or not stat.S_ISDIR(candidate.lstat().st_mode)
+                    or key not in permitted_dirs):
                 raise OfflineInstallError("unexpected installed-release directory")
         for filename in filenames:
             count += 1
@@ -196,7 +216,7 @@ def inspect_installed_release(
                 raise OfflineInstallError("installed-release inventory exceeds safe limit")
             candidate = Path(parent) / filename
             relative = "/".join(part for part in (prefix, filename) if part)
-            if not _regular_file(candidate):
+            if _is_redirected_install_path(candidate) or not _regular_file(candidate):
                 raise OfflineInstallError("unsafe installed-release filesystem entry")
             actual_names.add(relative)
     if actual_names != set(files) | {_RECEIPT}:
@@ -249,12 +269,9 @@ def uninstall_verified_release(
             member = moved / Path(*name.split("/"))
             # A file may still look regular after a parent directory was
             # swapped for a symlink. Refuse traversal outside the quarantine.
-            parent = member.parent
-            while parent != moved:
-                if not stat.S_ISDIR(parent.lstat().st_mode):
-                    raise OfflineInstallError("installed parent changed during removal")
-                parent = parent.parent
-            if not _regular_file(member) or _hash_file(member) != receipt["files"][name]:
+            _assert_release_parents_unredirected(moved, member)
+            if (_is_redirected_install_path(member) or not _regular_file(member)
+                    or _hash_file(member) != receipt["files"][name]):
                 raise OfflineInstallError("installed file changed during removal")
             deletion_started = True
             member.unlink()
@@ -265,7 +282,10 @@ def uninstall_verified_release(
             for i in range(1, len(name.split("/")))
         }
         for name in sorted(dirs, key=lambda value: (-value.count("/"), value)):
-            (moved / Path(*name.split("/"))).rmdir()
+            directory = moved / Path(*name.split("/"))
+            if _is_redirected_install_path(directory):
+                raise OfflineInstallError("installed directory redirected during removal")
+            directory.rmdir()
         moved.rmdir()
         return {**result, "status": "UNINSTALLED"}
     except Exception:

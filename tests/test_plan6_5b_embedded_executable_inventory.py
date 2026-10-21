@@ -27,7 +27,7 @@ class Reader:
 
 def test_actual_executable_digest_and_bounded_archive_members(tmp_path: Path) -> None:
     exe = tmp_path / "Autosport.exe"
-    exe.write_bytes(b"sealed-test-executable")
+    exe.write_bytes(b"sealed-test-executable" + b"\0" * 4096)
     result = capture_embedded_executable_inventory(exe, SOURCE, reader_factory=Reader)
     assert result["source_sha"] == SOURCE
     assert result["evidence_class"] == "EMBEDDED_PYINSTALLER_CARCHIVE_TOC_ONLY"
@@ -39,21 +39,21 @@ def test_actual_executable_digest_and_bounded_archive_members(tmp_path: Path) ->
     validate_embedded_executable_inventory(
         result, source_sha=SOURCE, executable_sha256=result["executable_sha256"],
     )
-    exe.write_bytes(b"candidate-changed")
+    exe.write_bytes(b"candidate-changed" + b"\0" * 4096)
     updated = capture_embedded_executable_inventory(exe, SOURCE, reader_factory=Reader)
     assert updated["executable_sha256"] != result["executable_sha256"]
 
 
 def test_executable_mutation_during_toc_capture_fails_closed(tmp_path: Path) -> None:
     exe = tmp_path / "Autosport.exe"
-    exe.write_bytes(b"candidate")
+    exe.write_bytes(b"candidate" + b"\0" * 4096)
 
     class SwappingReader(Reader):
         def __init__(self, path: str) -> None:
             super().__init__(path)
             # Same-length mutation after initial SHA read and while the archive
             # reader is enumerating records: TOC and final digest cannot mix.
-            Path(path).write_bytes(b"candidaXe")
+            Path(path).write_bytes(b"candidaXe" + b"\0" * 4096)
 
     with pytest.raises(ValueError, match="changed during CArchive inventory"):
         capture_embedded_executable_inventory(
@@ -76,7 +76,7 @@ def test_executable_mutation_during_toc_capture_fails_closed(tmp_path: Path) -> 
 ])
 def test_rejects_forged_unsafe_or_unbounded_archive_census(tmp_path: Path, change) -> None:
     exe = tmp_path / "Autosport.exe"
-    exe.write_bytes(b"candidate")
+    exe.write_bytes(b"candidate" + b"\0" * 4096)
     captured = capture_embedded_executable_inventory(exe, SOURCE, reader_factory=Reader)
     tampered = deepcopy(captured)
     change(tampered)
@@ -95,8 +95,26 @@ def test_rejects_forged_unsafe_or_unbounded_archive_census(tmp_path: Path, chang
 ])
 def test_malformed_carchive_is_rejected(tmp_path: Path, toc) -> None:
     exe = tmp_path / "Autosport.exe"
-    exe.write_bytes(b"candidate")
+    exe.write_bytes(b"candidate" + b"\0" * 4096)
     with pytest.raises(ValueError):
+        capture_embedded_executable_inventory(
+            exe, SOURCE, reader_factory=lambda _: SimpleNamespace(toc=toc),
+        )
+
+
+@pytest.mark.parametrize("toc", [
+    {"beyond_end": (4096, 100, 100, False, "b")},
+    {"oversize": (1, 8192, 8192, True, "b")},
+    {"bool_position": (True, 1, 1, False, "b")},
+    {"bool_packed": (0, True, 1, False, "b")},
+    {"bool_unpacked": (0, 1, True, False, "b")},
+])
+def test_carchive_cannot_advertise_data_outside_sealed_executable(
+    tmp_path: Path, toc,
+) -> None:
+    exe = tmp_path / "Autosport.exe"
+    exe.write_bytes(b"\0" * 4096)
+    with pytest.raises(ValueError, match="malformed executable CArchive member flags"):
         capture_embedded_executable_inventory(
             exe, SOURCE, reader_factory=lambda _: SimpleNamespace(toc=toc),
         )

@@ -27,6 +27,7 @@ JOURNEY_CONTROLS = {
     "live.refresh": "105",
     "recovery.run": "108",
     "evidence.export": "109",
+    "agents.status": "agent-learning-refresh",
     "update.diagnose": "update-diagnostic-button",
     "product_source.configure": "product-source-save",
     "product_runtime.start": "product-runtime-start",

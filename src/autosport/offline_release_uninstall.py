@@ -7,6 +7,7 @@ requirements; this operation grants no LIVE bookmaker capability.
 from __future__ import annotations
 
 import argparse
+import hashlib
 import json
 import os
 import shutil
@@ -46,7 +47,7 @@ def _existing_product_root(root: Path) -> Path:
     return root
 
 
-def _installed_members(root: Path, *, expected_source_sha: str, package_sha256: str) -> int:
+def _installed_members(root: Path, *, expected_source_sha: str, package_sha256: str, trusted_files: dict[str, str]) -> int:
     root = _existing_product_root(root)
     receipt_path = root / installation._RECEIPT
     try:
@@ -75,6 +76,8 @@ def _installed_members(root: Path, *, expected_source_sha: str, package_sha256: 
     files = receipt["files"]
     if type(files) is not dict or not 2 <= len(files) <= installation._MAX_FILES:
         raise installation.OfflineInstallError("invalid installed file inventory")
+    if files != trusted_files:
+        raise installation.OfflineInstallError("installed receipt differs from verified archive inventory")
     if "Autosport.exe" not in files or "BUILD_INFO.json" not in files:
         raise installation.OfflineInstallError("missing installed product identity")
 
@@ -153,7 +156,38 @@ def uninstall_verified_release(
         or verified.get("package_sha256") != package_sha
     ):
         raise installation.OfflineInstallError("original release ZIP not independently verified")
-    count = _installed_members(root, expected_source_sha=source_sha, package_sha256=package_sha)
+    # Never trust the unsigned installed receipt alone to authorize deletion.
+    # Reconstruct the exact canonical ZIP inventory from independently pinned bytes.
+    trusted_files: dict[str, str] = {}
+    with zipfile.ZipFile(archive_path) as package:
+        infos = package.infolist()
+        if not 2 <= len(infos) <= installation._MAX_FILES:
+            raise installation.OfflineInstallError("invalid source release inventory")
+        total = 0
+        for member in infos:
+            if member.is_dir() or not member.filename.startswith(installation._PREFIX):
+                raise installation.OfflineInstallError("unexpected release member")
+            name = member.filename[len(installation._PREFIX):]
+            if not name or name in trusted_files or member.file_size < 0:
+                raise installation.OfflineInstallError("duplicate or unsupported release member")
+            total += member.file_size
+            if total > installation._MAX_TOTAL_BYTES:
+                raise installation.OfflineInstallError("release exceeds installed byte limit")
+            digest = hashlib.sha256()
+            copied = 0
+            with package.open(member) as source:
+                for chunk in iter(lambda: source.read(1024 * 1024), b""):
+                    copied += len(chunk)
+                    if copied > member.file_size:
+                        raise installation.OfflineInstallError("release member exceeded declared size")
+                    digest.update(chunk)
+            if copied != member.file_size:
+                raise installation.OfflineInstallError("truncated release member")
+            trusted_files[name] = digest.hexdigest()
+    count = _installed_members(
+        root, expected_source_sha=source_sha, package_sha256=package_sha,
+        trusted_files=trusted_files,
+    )
     if installation._sha_file(archive_path) != package_sha:
         raise installation.OfflineInstallError("original release ZIP changed during verification")
 
@@ -165,7 +199,7 @@ def uninstall_verified_release(
         installation._publish_directory_no_replace(root, staged)
         moved = True
         # Recheck after the atomic move: never delete newly injected user files.
-        if _installed_members(staged, expected_source_sha=source_sha, package_sha256=package_sha) != count:
+        if _installed_members(staged, expected_source_sha=source_sha, package_sha256=package_sha, trusted_files=trusted_files) != count:
             raise installation.OfflineInstallError("installed inventory changed before uninstall")
         shutil.rmtree(staged)
         removed = True

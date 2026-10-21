@@ -135,16 +135,19 @@ function Find-UiaRootForProcessFamily {
     return $null
 }
 
-function Find-UiaElementForProcessFamily {
+function Find-UiaElementsForProcessFamily {
     param(
         [int[]]$ProcessIds,
         [string]$AutomationId
     )
 
+    # Return every matching element, not FindFirst: duplicated AutomationIds
+    # must fail the external packaged UIA gate rather than silently pass.
     $condition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
         $AutomationId
     )
+    $matches = @()
     try {
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         $windows = $desktop.FindAll(
@@ -152,18 +155,32 @@ function Find-UiaElementForProcessFamily {
             [System.Windows.Automation.Condition]::TrueCondition
         )
         foreach ($window in $windows) {
-            if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }
-            if ([string]$window.Current.AutomationId -eq $AutomationId) { return $window }
-            $element = $window.FindFirst(
-                [System.Windows.Automation.TreeScope]::Descendants,
-                $condition
-            )
-            if ($null -ne $element) { return $element }
+            try {
+                if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }
+                if ([string]$window.Current.AutomationId -eq $AutomationId) {
+                    $matches += $window
+                }
+                $found = $window.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    $condition
+                )
+                foreach ($item in $found) {
+                    try {
+                        if ($ProcessIds -contains [int]$item.Current.ProcessId) {
+                            $matches += $item
+                        }
+                    } catch {
+                        # A stale UIA node must never be assumed to be a valid match.
+                    }
+                }
+            } catch {
+                # A window can disappear while the provider refreshes.
+            }
         }
     } catch {
-        # The UIA tree may change while a dialog opens; bounded callers retry.
+        # A failed UIA scan does not create PASS: the caller requires exactly one.
     }
-    return $null
+    return $matches
 }
 
 $report = [ordered]@{
@@ -249,11 +266,16 @@ try {
     }
 
     foreach ($spec in $expected) {
-        $element = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId ([string]$spec.automation_id)
-        if ($null -eq $element) {
+        $matchedElements = @(Find-UiaElementsForProcessFamily -ProcessIds $lastFamilyIds -AutomationId ([string]$spec.automation_id))
+        if ($matchedElements.Count -eq 0) {
             $report.failures += "automation_id=$($spec.automation_id): not found by external UIA client"
             continue
         }
+        if ($matchedElements.Count -gt 1) {
+            $report.failures += "automation_id=$($spec.automation_id): duplicate external UIA control identity"
+            continue
+        }
+        $element = $matchedElements[0]
 
         $currentName = [string]$element.Current.Name
         $controlType = [string]$element.Current.ControlType.ProgrammaticName

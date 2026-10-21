@@ -17,6 +17,7 @@ from .offline_release_install import (
 )
 from .offline_release_lifecycle import (
     _inspection_root, _trusted_archive_inventory, inspect_installed_release,
+    uninstall_verified_release,
 )
 from .windows_update_admission import _schema, _version
 
@@ -174,13 +175,54 @@ def rollback_verified_paper_release(
 
 
 
+
+def finalize_verified_paper_update(
+    destination: str | Path, *,
+    old_archive: str | Path, old_source_sha: str, old_package_sha256: str,
+    new_archive: str | Path, new_source_sha: str, new_package_sha256: str,
+) -> dict[str, object]:
+    """Dispose only a separately verified obsolete product, never user files.
+
+    An exact active product and one exact previous/rejected product are
+    independently reverified. Unknown transaction contents stop disposal.
+    """
+    root = _inspection_root(destination)
+    txn = _inspection_root(_transaction_root(root))
+    entries = {item.name for item in txn.iterdir()}
+    if entries == {"previous"}:
+        active = (new_archive, new_source_sha, new_package_sha256)
+        obsolete = txn / "previous"
+        discarded = (old_archive, old_source_sha, old_package_sha256)
+    elif entries == {"rejected-current"} or entries == {"candidate"}:
+        active = (old_archive, old_source_sha, old_package_sha256)
+        obsolete = txn / next(iter(entries))
+        discarded = (new_archive, new_source_sha, new_package_sha256)
+    else:
+        raise OfflineInstallError("unknown or ambiguous update transaction state")
+    inspect_installed_release(
+        root, archive=active[0],
+        expected_source_sha=active[1], expected_package_sha256=active[2],
+    )
+    inspect_installed_release(
+        obsolete, archive=discarded[0],
+        expected_source_sha=discarded[1], expected_package_sha256=discarded[2],
+    )
+    uninstall_verified_release(
+        obsolete, archive=discarded[0],
+        expected_source_sha=discarded[1], expected_package_sha256=discarded[2],
+    )
+    txn.rmdir()
+    return {"status": "PAPER_UPDATE_FINALIZED", "source_sha": active[1],
+            "real_money_execution": False}
+
+
 def main(argv: list[str] | None = None) -> int:
     """Operator-only PAPER update tooling; failures never echo private paths."""
     import argparse
     import json
 
     parser = argparse.ArgumentParser(description="Independently pinned PAPER-only release transaction")
-    parser.add_argument("action", choices=("upgrade-release", "rollback-release", "recover-update-release"))
+    parser.add_argument("action", choices=("upgrade-release", "rollback-release", "recover-update-release", "finalize-update-release"))
     parser.add_argument("--destination", type=Path, required=True)
     parser.add_argument("--old-archive", type=Path, required=True)
     parser.add_argument("--old-source-sha", required=True)
@@ -206,8 +248,9 @@ def main(argv: list[str] | None = None) -> int:
                 "new_package_sha256": args.new_package_sha256,
             }
             operation = (
-                upgrade_verified_paper_release
-                if args.action == "upgrade-release" else rollback_verified_paper_release
+                upgrade_verified_paper_release if args.action == "upgrade-release"
+                else rollback_verified_paper_release if args.action == "rollback-release"
+                else finalize_verified_paper_update
             )
             report = operation(args.destination, **old, **new)
     except (OfflineInstallError, OSError, ValueError, TypeError, RuntimeError, zipfile.BadZipFile):

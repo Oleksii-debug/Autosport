@@ -39,6 +39,19 @@ class Plan6QualifierTests(unittest.TestCase):
                          "nvda_verified", "real_money_execution", "whole_product_complete"):
                 self.assertIs(report[flag], False)
 
+    def test_untracked_test_hook_rejected(self):
+        """An untracked conftest.py can alter pytest despite unchanged tracked HEAD."""
+        def git_status(root, *args):
+            if args[:2] == ("rev-parse", "--verify"):
+                return self.SHA
+            if args[:2] == ("status", "--porcelain"):
+                return "?? tests/conftest.py" if "--untracked-files=all" in args else ""
+            raise AssertionError(f"unexpected Git call: {args!r}")
+
+        with patch.object(qualifier, "_git", side_effect=git_status):
+            with self.assertRaisesRegex(ValueError, "untracked"):
+                qualifier._identity(Path("."))
+
     def test_changed_head_fails(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

@@ -560,6 +560,50 @@ def validate_dependency_license_evidence(
         raise ValueError("distribution license evidence includes unclaimed members")
 
 
+def _read_sealed_license_text(path: "Path") -> bytes:
+    """Reject swapped/unbounded license sources before sealing release evidence.
+
+    A path.lstat() followed by Path.read_bytes() permits a replacement between
+    the metadata check and the actual read. On both Windows and POSIX, bind the
+    opened descriptor to the original and final file identities. O_NOFOLLOW
+    provides an additional symlink fence where the platform supports it.
+    """
+    import os
+    import stat
+
+    def identity(info: os.stat_result) -> tuple[int, int, int, int]:
+        return (info.st_dev, info.st_ino, info.st_size, info.st_mtime_ns)
+
+    before = path.lstat()
+    if not stat.S_ISREG(before.st_mode) or not 1 <= before.st_size <= 262144:
+        raise ValueError("distribution license source is not a bounded regular file")
+    flags = os.O_RDONLY | getattr(os, "O_BINARY", 0) | getattr(os, "O_NOFOLLOW", 0)
+    descriptor = os.open(path, flags)
+    try:
+        opened = os.fstat(descriptor)
+        if not stat.S_ISREG(opened.st_mode) or identity(opened) != identity(before):
+            raise ValueError("distribution license source changed before read")
+        chunks: list[bytes] = []
+        remaining = 262145  # max legal size plus one sentinel byte
+        while remaining:
+            chunk = os.read(descriptor, remaining)
+            if not chunk:
+                break
+            chunks.append(chunk)
+            remaining -= len(chunk)
+        payload = b"".join(chunks)
+        if (
+            identity(os.fstat(descriptor)) != identity(opened)
+            or identity(path.lstat()) != identity(before)
+        ):
+            raise ValueError("distribution license source changed during read")
+    finally:
+        os.close(descriptor)
+    if not 1 <= len(payload) <= 262144 or b"\x00" in payload:
+        raise ValueError("distribution license source is not bounded plain text")
+    return payload
+
+
 def capture_dependency_license_evidence(
     dependency_graph: dict[str, Any],
 ) -> tuple[dict[str, Any], dict[str, bytes]]:
@@ -569,7 +613,6 @@ def capture_dependency_license_evidence(
     Source/binary attribution remains a separate Plan 6 §5Б acceptance gate.
     """
     import hashlib
-    import stat
     from pathlib import Path
 
     components = dependency_graph.get("components")
@@ -623,14 +666,9 @@ def capture_dependency_license_evidence(
         for source_name, record in sorted(candidates):
             path = Path(dist.locate_file(record))
             try:
-                mode = path.lstat().st_mode
-                if not stat.S_ISREG(mode) or path.stat().st_size > 262144:
-                    raise ValueError("distribution license source is not a bounded regular file")
-                payload = path.read_bytes()
+                payload = _read_sealed_license_text(path)
             except OSError as exc:
                 raise ValueError("distribution license source became unavailable") from exc
-            if not (1 <= len(payload) <= 262144) or b"\x00" in payload:
-                raise ValueError("distribution license source is not bounded plain text")
             total_bytes += len(payload)
             if total_bytes > 8 * 1024 * 1024:
                 raise ValueError("distribution licenses exceed overall size budget")

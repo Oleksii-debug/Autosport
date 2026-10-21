@@ -1576,3 +1576,40 @@ def test_r127_variable_failure_blocks_aggregate_parent_done(tmp_path):
         .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
                  "| 2В | Native STOP | DONE — merged |"))
     rejected(tmp_path, registry=registry, atomic=atomic)
+
+# r135: A successful CI banner cannot override a separate process crash or
+# structured gate conclusion. Both were previously accepted as terminal DONE.
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: PASS; process killed by SIGKILL",
+    "Windows Candidate: PASS; process terminated by SIGSEGV",
+    "Windows Candidate: PASS; process was killed by signal 9",
+    'Windows Candidate: PASS; {"status": "failure"}',
+    'Windows Candidate: PASS; {"conclusion": "skipped"}',
+    'Windows Candidate: PASS; {"status": "in_progress"}',
+    'Windows Candidate: PASS; {"conclusion": null}',
+])
+def test_r135_separate_process_crash_or_structured_gate_blocks_done(summary):
+    assert not module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: PASS; signal: 0",
+    'Windows Candidate: PASS; {"status": "success"}',
+    'Windows Candidate: PASS; {"conclusion": "success"}',
+    'previous Windows Candidate: {"status": "failure"} repaired',
+    'previous Windows Candidate: process killed by SIGKILL repaired',
+])
+def test_r135_clean_or_historical_diagnostic_is_not_current_failure(summary):
+    assert module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+def test_r135_structured_gate_failure_blocks_aggregate_parent_done(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = (ATOMIC
+        .replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |",
+                 '| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: PASS; {"conclusion": "skipped"} |')
+        .replace("| 2Б | Navigation | IN_PROGRESS / NOT DONE |",
+                 "| 2Б | Navigation | DONE — merged |")
+        .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
+                 "| 2В | Native STOP | DONE — merged |"))
+    rejected(tmp_path, registry, atomic)

@@ -1089,7 +1089,7 @@ def _is_terminal_done(value: str) -> bool:
         # even when a wrapper misleadingly prints exit code 0. POSIX signal
         # numbers and symbolic SIG* names are negative evidence only.
         for signal in re.finditer(
-            r"\b(?:(?:terminated|killed)\s+by\s+(?:signal\s*)?|"
+            r"\b(?:(?:process\s+)?(?:was\s+)?(?:terminated|killed)\s+by\s+(?:signal\s*)?|"
             r"signal\s*[:=]?\s*)(?P<signal>[0-9]+|SIG[A-Z0-9]+)\b",
             detail, re.IGNORECASE,
         ):
@@ -1120,6 +1120,15 @@ def _is_terminal_done(value: str) -> bool:
         r"[\"'](?P<key>exit[ _-]?(?:code|status)|return[ _-]?(?:code|value)|"
         r"errorlevel|last[ _-]?exit[ _-]?code|process[.]?exit[ _-]?(?:code|status)|"
         r"rc|signal)[\"']\s*:\s*"
+        r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^,;\s}\])]+)",
+        re.IGNORECASE,
+    )
+    # A structured CI diagnostic may report a failed/pending gate after a
+    # successful banner. A standalone JSON status/conclusion is not ordinary
+    # prose: only an explicitly successful terminal value can coexist with
+    # source-level DONE. This is rejection-only; it never grants acceptance.
+    structured_gate_key = re.compile(
+        r"[\"'](?:status|conclusion)[\"']\s*:\s*"
         r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^,;\s}\])]+)",
         re.IGNORECASE,
     )
@@ -1166,6 +1175,14 @@ def _is_terminal_done(value: str) -> bool:
             ):
                 independent_process_failure = True
                 break
+        # A separate {"status":"failure"} or {"conclusion":"skipped"}
+        # invalidates a preceding CI: PASS. Unknown/missing terminal values
+        # are ambiguous and therefore fail closed.
+        for gate in structured_gate_key.finditer(clause):
+            conclusion = gate.group("value").strip().strip("\"'").casefold()
+            if conclusion not in {"success", "pass", "passed"}:
+                independent_process_failure = True
+                break
         if independent_process_failure:
             break
     # A semicolon may separate an exit-code clause from its crash signal,
@@ -1174,7 +1191,7 @@ def _is_terminal_done(value: str) -> bool:
     # deliberately stops at semicolons.
     bare_signal_failure = re.search(
         r"(?:^|;)\s*(?:signal\s*[:=]?\s*|"
-        r"(?:terminated|killed)\s+by\s+(?:signal\s*)?)"
+        r"(?:process\s+)?(?:was\s+)?(?:terminated|killed)\s+by\s+(?:signal\s*)?)"
         r"(?:SIG[A-Z0-9]+|[1-9][0-9]*)\b",
         matrix_status_projection, re.IGNORECASE,
     ) is not None

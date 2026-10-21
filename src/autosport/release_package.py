@@ -5,11 +5,14 @@ import json
 import os
 import re
 import shutil
+import stat
 import struct
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
+
+from .release_sbom import validate_direct_dependency_metadata
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
@@ -89,6 +92,65 @@ def _canonical_json_bytes(payload: dict[str, Any]) -> bytes:
         + "\n"
     ).encode("utf-8")
 
+
+
+def _require_regular_release_input(path: Path, label: str) -> None:
+    """Never follow a symlink/device as a release input."""
+    try:
+        mode = path.lstat().st_mode
+    except OSError as exc:
+        raise ValueError(f"release {label} must be an existing regular file") from exc
+    if not stat.S_ISREG(mode):
+        raise ValueError(f"release {label} must be a regular non-symlink file")
+
+
+def _require_safe_release_example_tree(example_dir: Path) -> None:
+    """Screen input tree before copytree can read private or nonregular bytes.
+
+    Source-tree pinning remains the responsibility of the existing exact-Git
+    materializer; this boundary prevents direct build callers from silently
+    packaging a symlink target or an excluded private/test-state member.
+    """
+    try:
+        root_mode = example_dir.lstat().st_mode
+    except OSError as exc:
+        raise ValueError("release examples must be an existing directory") from exc
+    if not stat.S_ISDIR(root_mode):
+        raise ValueError("release examples must be a non-symlink directory")
+
+    seen_windows_paths: set[str] = set()
+    root_member = _PACKAGE_PREFIX + "examples/" + example_dir.name
+    _, root_key = _validate_windows_member(root_member)
+    seen_windows_paths.add(root_key)
+    for item in example_dir.rglob("*"):
+        try:
+            item_mode = item.lstat().st_mode
+        except OSError as exc:
+            raise ValueError("release example source changed during preflight") from exc
+        if not (stat.S_ISDIR(item_mode) or stat.S_ISREG(item_mode)):
+            raise ValueError("release examples contain a symlink or nonregular source")
+        member = root_member + "/" + item.relative_to(example_dir).as_posix()
+        _, windows_key = _validate_windows_member(member)
+        if windows_key in seen_windows_paths:
+            raise ValueError("release examples contain a Windows path collision")
+        seen_windows_paths.add(windows_key)
+
+
+def _require_safe_release_inputs(
+    exe_path: Path, start_file: Path, example_dir: Path,
+    diagnostic_path: Path, accessibility_path: Path, keyboard_path: Path,
+    restart_recovery_path: Path,
+) -> None:
+    for label, path in (
+        ("executable", exe_path),
+        ("start guide", start_file),
+        ("diagnostics", diagnostic_path),
+        ("accessibility evidence", accessibility_path),
+        ("keyboard evidence", keyboard_path),
+        ("restart evidence", restart_recovery_path),
+    ):
+        _require_regular_release_input(path, label)
+    _require_safe_release_example_tree(example_dir)
 
 def _sorted_package_files(package_dir: Path) -> list[Path]:
     return sorted(
@@ -435,6 +497,16 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "pyproject.toml",
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
+    "src/autosport/release_sbom.py",
+    # Bind the shipped operator configuration and durable on-disk schema
+    # authorities to the same immutable exact-Git release source declaration.
+    "src/autosport/windows_entry.py",
+    "src/autosport/windows_layout.py",
+    "src/autosport/paths.py",
+    "src/autosport/storage.py",
+    "src/autosport/workspace_lock.py",
+    "src/autosport/monotonic_workspace_authority.py",
+    "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
 })
@@ -459,17 +531,37 @@ def _validate_source_manifest(value: dict[str, Any], source_sha: str) -> None:
     for digest in source_files.values():
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("SOURCE_MANIFEST source digest is invalid")
+    # Distribution identities follow PEP 503 normalization, not spelling:
+    # tk-uia, tk_uia and TK.UIA all address the same installed distribution.
+    # Recomputable ZIP hashes must not disguise aliases or conflicting pins.
+    pinned_versions: dict[str, str] = {}
     for field in ("declared_runtime_dependencies", "declared_build_dependencies"):
         dependencies = value[field]
         if not isinstance(dependencies, list) or not dependencies:
             raise ValueError("SOURCE_MANIFEST dependency declaration is missing")
         if dependencies != sorted(set(dependencies)):
             raise ValueError("SOURCE_MANIFEST dependency declaration is not unique/sorted")
+        names_in_scope: set[str] = set()
         for requirement in dependencies:
-            if not isinstance(requirement, str) or not re.fullmatch(
-                r"[A-Za-z][A-Za-z0-9_.-]*==[0-9][A-Za-z0-9_.+-]*", requirement
-            ):
+            match = (
+                re.fullmatch(
+                    r"([A-Za-z][A-Za-z0-9_.-]*)==([0-9][A-Za-z0-9_.+-]*)",
+                    requirement,
+                )
+                if isinstance(requirement, str)
+                else None
+            )
+            if match is None:
                 raise ValueError("SOURCE_MANIFEST dependency is not exactly pinned")
+            package_name = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+            version = match.group(2)
+            if package_name in names_in_scope:
+                raise ValueError("SOURCE_MANIFEST contains normalized dependency aliases")
+            names_in_scope.add(package_name)
+            previous_version = pinned_versions.get(package_name)
+            if previous_version is not None and previous_version != version:
+                raise ValueError("SOURCE_MANIFEST contains conflicting dependency versions")
+            pinned_versions[package_name] = version
 
 
 def build_windows_package(
@@ -484,10 +576,15 @@ def build_windows_package(
     source_sha: str,
     *,
     source_manifest: dict[str, Any] | None = None,
+    dependency_metadata: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
     _require_git_commit_sha(source_sha, field="source_sha")
     if source_manifest is not None:
         _validate_source_manifest(source_manifest, source_sha)
+    if dependency_metadata is not None:
+        if source_manifest is None:
+            raise ValueError("dependency metadata requires source declarations")
+        validate_direct_dependency_metadata(dependency_metadata, source_manifest)
     exe_path = Path(exe_path)
     start_file = Path(start_file)
     example_dir = Path(example_dir)
@@ -496,6 +593,10 @@ def build_windows_package(
     keyboard_path = Path(keyboard_path)
     restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
+    _require_safe_release_inputs(
+        exe_path, start_file, example_dir, diagnostic_path,
+        accessibility_path, keyboard_path, restart_recovery_path,
+    )
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".autosport-release-stage-",
@@ -523,6 +624,8 @@ def build_windows_package(
         _write_json(package_dir / "BUILD_INFO.json", build_info)
         if source_manifest is not None:
             _write_json(package_dir / "SOURCE_MANIFEST.json", source_manifest)
+        if dependency_metadata is not None:
+            _write_json(package_dir / "DIRECT_DEPENDENCY_METADATA.json", dependency_metadata)
 
         payload_hashes = {}
         for path in _sorted_package_files(package_dir):
@@ -558,6 +661,7 @@ def verify_windows_package(
     *,
     expected_source_sha: str,
     require_source_manifest: bool = False,
+    require_dependency_metadata: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -629,6 +733,17 @@ def verify_windows_package(
         _validate_source_manifest(source_manifest, expected_source_sha)
         if members["SOURCE_MANIFEST.json"] != _canonical_json_bytes(source_manifest):
             raise ValueError("SOURCE_MANIFEST is not in canonical JSON representation")
+    if require_dependency_metadata and "DIRECT_DEPENDENCY_METADATA.json" not in members:
+        raise ValueError("release package is missing direct dependency metadata")
+    if "DIRECT_DEPENDENCY_METADATA.json" in members:
+        if "SOURCE_MANIFEST.json" not in members:
+            raise ValueError("direct dependency metadata has no source declarations")
+        direct_metadata = _decode_json_object(
+            members["DIRECT_DEPENDENCY_METADATA.json"], "DIRECT_DEPENDENCY_METADATA.json"
+        )
+        validate_direct_dependency_metadata(direct_metadata, source_manifest)
+        if members["DIRECT_DEPENDENCY_METADATA.json"] != _canonical_json_bytes(direct_metadata):
+            raise ValueError("direct dependency metadata is not canonical JSON")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")

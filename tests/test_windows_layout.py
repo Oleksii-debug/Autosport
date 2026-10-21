@@ -190,6 +190,51 @@ def test_shell_target_requires_a_real_widget_before_open_is_authorized():
     assert app.shell_open_button.state == "normal"
 
 
+def test_shell_open_disables_stale_destroyed_native_targets():
+    class SurfaceKey:
+        def get(self):
+            return "paper_bank"
+
+    class OpenButton:
+        def __init__(self):
+            self.state = None
+
+        def configure(self, **kwargs):
+            self.state = kwargs["state"]
+
+    class App:
+        shell_surface_key = SurfaceKey()
+        shell_open_button = OpenButton()
+
+    class NativeTarget:
+        def __init__(self, alive=True, failure=False):
+            self.alive = alive
+            self.failure = failure
+
+        def winfo_exists(self):
+            if self.failure:
+                raise RuntimeError("stale Tk interpreter")
+            return int(self.alive)
+
+    app = App()
+    widget = NativeTarget(alive=True)
+    app.bank_summary = widget
+    assert _surface_target_widget(app, "paper_bank") is widget
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "normal"
+
+    # The native window can disappear without the app attribute being cleared.
+    widget.alive = False
+    assert _surface_target_widget(app, "paper_bank") is None
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "disabled"
+
+    app.bank_summary = NativeTarget(failure=True)
+    assert _surface_target_widget(app, "paper_bank") is None
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "disabled"
+
+
 def test_owner_economic_creation_is_closed_for_strategies_without_goal_aware_sizing():
     class App:
         workspace = "."

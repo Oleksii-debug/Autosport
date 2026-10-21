@@ -29,6 +29,7 @@ def test_materializer_wires_exact_stage_neutral_release_contract() -> None:
     assert "spec_from_file_location" in script
     assert "-m autosport.stage_neutral_release" not in script
     assert "$env:PYTHONPATH" not in script
+    assert '"--require-source-manifest"' in script
     assert "package_sha256" in script
     assert "Get-FileHash" in script
     assert "real_money_execution -ne $false" in script

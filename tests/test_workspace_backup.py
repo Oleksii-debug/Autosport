@@ -155,3 +155,34 @@ def test_backup_rejects_windows_case_colliding_files(tmp_path: Path) -> None:
     with pytest.raises(WorkspaceBackupError, match="case-colliding"):
         backup_workspace(root, tmp_path / "private.zip")
     assert not (tmp_path / "private.zip").exists()
+
+
+def test_restore_publication_never_replaces_racing_empty_directory(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """An attacker/concurrent process may create the destination after preflight.
+
+    POSIX os.rename(stage, existing_empty_dir) would silently replace it.
+    The publication primitive must reject even an empty existing directory.
+    """
+    from autosport import workspace_backup as backup_module
+
+    source = tmp_path / "source"
+    source.mkdir()
+    (source / "ledger.json").write_text('{"paper":"untouched"}', encoding="utf-8")
+    backup = tmp_path / "private.zip"
+    backup_workspace(source, backup)
+
+    target = tmp_path / "destination"
+    publish = backup_module._publish_new_workspace
+
+    def concurrent_creation(stage: Path, destination: Path) -> None:
+        destination.mkdir()
+        publish(stage, destination)
+
+    monkeypatch.setattr(backup_module, "_publish_new_workspace", concurrent_creation)
+    with pytest.raises(WorkspaceBackupError, match="already exists"):
+        restore_workspace(backup, target)
+    assert target.is_dir()
+    assert list(target.iterdir()) == []
+    assert not list(tmp_path.glob(".autosport-restoring-*"))

@@ -12,7 +12,7 @@ import zipfile
 from pathlib import Path, PurePosixPath
 from typing import Any
 
-from .release_sbom import validate_direct_dependency_metadata
+from .release_sbom import validate_direct_dependency_metadata, validate_embedded_executable_inventory
 from .release_dependency_graph import validate_build_host_dependency_graph
 
 from .windows_update_release_metadata import (
@@ -780,6 +780,7 @@ def build_windows_package(
     source_manifest: dict[str, Any] | None = None,
     dependency_metadata: dict[str, Any] | None = None,
     dependency_graph: dict[str, Any] | None = None,
+    embedded_executable_inventory: dict[str, Any] | None = None,
     update_version: str | None = None,
     update_schema: int | None = None,
 ) -> tuple[Path, str]:
@@ -848,6 +849,16 @@ def build_windows_package(
             build_info, update_version=update_version, update_schema=update_schema
         )
         _write_json(package_dir / "BUILD_INFO.json", build_info)
+        if embedded_executable_inventory is not None:
+            validate_embedded_executable_inventory(
+                embedded_executable_inventory,
+                source_sha=source_sha,
+                executable_sha256=build_info["autosport_exe_sha256"],
+            )
+            _write_json(
+                package_dir / "EMBEDDED_EXECUTABLE_INVENTORY.json",
+                embedded_executable_inventory,
+            )
         if source_manifest is not None:
             _write_json(package_dir / "SOURCE_MANIFEST.json", source_manifest)
         if dependency_metadata is not None:
@@ -892,6 +903,7 @@ def verify_windows_package(
     require_source_manifest: bool = False,
     require_dependency_metadata: bool = False,
     require_dependency_graph: bool = False,
+    require_embedded_executable_inventory: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -1000,6 +1012,18 @@ def verify_windows_package(
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")
+    if require_embedded_executable_inventory and "EMBEDDED_EXECUTABLE_INVENTORY.json" not in members:
+        raise ValueError("release package is missing embedded executable inventory")
+    if "EMBEDDED_EXECUTABLE_INVENTORY.json" in members:
+        inventory = _decode_json_object(
+            members["EMBEDDED_EXECUTABLE_INVENTORY.json"],
+            "EMBEDDED_EXECUTABLE_INVENTORY.json",
+        )
+        validate_embedded_executable_inventory(
+            inventory, source_sha=expected_source_sha, executable_sha256=exe_sha,
+        )
+        if members["EMBEDDED_EXECUTABLE_INVENTORY.json"] != _canonical_json_bytes(inventory):
+            raise ValueError("embedded executable inventory is not canonical JSON")
 
     manifest = _decode_json_object(
         members["PACKAGE_MANIFEST.json"],

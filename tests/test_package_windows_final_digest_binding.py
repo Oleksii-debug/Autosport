@@ -13,6 +13,18 @@ from scripts import package_windows
 class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
     SOURCE_SHA = "a" * 40
 
+    def setUp(self) -> None:
+        # Digest-binding tests use a synthetic SHA and stub the prior source
+        # admission stage. Source manifest parsing/validation has own tests.
+        source_manifest = {"schema_version": 1, "source_sha": self.SOURCE_SHA}
+        source_patch = patch.object(
+            package_windows,
+            "_source_declaration_manifest",
+            return_value=source_manifest,
+        )
+        source_patch.start()
+        self.addCleanup(source_patch.stop)
+
     @staticmethod
     def _argv(root: Path) -> list[str]:
         hashes = {

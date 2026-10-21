@@ -68,6 +68,35 @@ def test_safe_static_templates_and_product_files_remain_allowed(path: str) -> No
     package_windows._require_safe_static_release_paths((candidate,))
 
 
+@pytest.mark.parametrize(
+    ("path", "reason"),
+    [
+        (".pytest_cache/v/cache/lastfailed", "test/build state directory"),
+        ("__pycache__/cache.cpython-311.pyc", "test/build state directory"),
+        (".mypy_cache/status.json", "test/build state directory"),
+        (".ruff_cache/file", "test/build state directory"),
+        (".tox/py311/state", "test/build state directory"),
+        ("reports/.coverage", "test/build state file"),
+        ("reports/.coverage.parallel", "test/build state file"),
+        ("reports/coverage.xml", "test/build state file"),
+        ("models/compiled.pyc", "test/build state file"),
+        ("models/compiled.pyo", "test/build state file"),
+    ],
+)
+def test_tracked_test_state_is_not_release_payload(path: str, reason: str) -> None:
+    candidate = PurePosixPath(path)
+    assert package_windows._test_state_source_path_reason(candidate) == reason
+    with pytest.raises(ValueError, match="release static payload contains forbidden"):
+        package_windows._require_safe_static_release_paths((candidate,))
+
+
+@pytest.mark.parametrize("path", ["manifest.json", "results.json", "notes/session_notes.md", "docs/public-certificate.pem"])
+def test_product_evidence_not_mistaken_for_test_state(path: str) -> None:
+    candidate = PurePosixPath(path)
+    assert package_windows._test_state_source_path_reason(candidate) is None
+    package_windows._require_safe_static_release_paths((candidate,))
+
+
 def _make_release_fixture(
     tmp_path: Path,
     *,
@@ -115,6 +144,26 @@ def test_tracked_secret_artifact_fails_before_static_materialization(
             snapshot_dir=snapshot_dir,
         )
 
+    assert not (snapshot_dir / "exact-source-static").exists()
+
+
+@pytest.mark.parametrize(
+    "path",
+    ["__pycache__/cached.pyc", ".pytest_cache/v/cache/nodeids", "reports/.coverage"],
+)
+def test_tracked_test_state_rejected_before_static_payload_materialization(
+    tmp_path: Path, path: str
+) -> None:
+    repo, source_sha = _make_release_fixture(tmp_path, extra_relative=path)
+    snapshot_dir = tmp_path / "snapshot"
+    with pytest.raises(ValueError, match="test/build state"):
+        package_windows._materialize_exact_static_payload(
+            repo_root=repo,
+            source_sha=source_sha,
+            start_file=repo / "WINDOWS_START_HERE.txt",
+            example_dir=repo / "examples" / "tt_demo",
+            snapshot_dir=snapshot_dir,
+        )
     assert not (snapshot_dir / "exact-source-static").exists()
 
 

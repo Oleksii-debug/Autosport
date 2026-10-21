@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import tempfile
@@ -12,6 +13,7 @@ from typing import Any
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
+_PREHUMAN_BUILD_VERSION = "0.1.0-v1-prehuman"
 _WINDOWS_RESERVED_NAMES = {
     "con",
     "prn",
@@ -427,6 +429,49 @@ def _require_process_recovery_evidence(payload: dict[str, Any], label: str) -> N
         raise ValueError(f"{label} does not prove promoted Decision Ledger state")
 
 
+# This records immutable source declarations only. It is not an installed-wheel
+# SBOM, signing proof or claim that third-party licenses were accepted.
+_SOURCE_MANIFEST_INPUTS = frozenset({
+    "pyproject.toml",
+    "scripts/package_windows.py",
+    "src/autosport/release_package.py",
+    "scripts/build_windows_candidate.ps1",
+    ".github/workflows/windows-build.yml",
+})
+
+
+def _validate_source_manifest(value: dict[str, Any], source_sha: str) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "source_sha", "evidence_class",
+        "source_files_sha256", "declared_runtime_dependencies",
+        "declared_build_dependencies",
+    }:
+        raise ValueError("SOURCE_MANIFEST schema is invalid")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise ValueError("SOURCE_MANIFEST schema is invalid")
+    if value["source_sha"] != source_sha:
+        raise ValueError("SOURCE_MANIFEST source SHA does not match BUILD_INFO")
+    if value["evidence_class"] != "SOURCE_DECLARATIONS_ONLY":
+        raise ValueError("SOURCE_MANIFEST evidence scope is invalid")
+    source_files = value["source_files_sha256"]
+    if not isinstance(source_files, dict) or set(source_files) != _SOURCE_MANIFEST_INPUTS:
+        raise ValueError("SOURCE_MANIFEST source input set is invalid")
+    for digest in source_files.values():
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("SOURCE_MANIFEST source digest is invalid")
+    for field in ("declared_runtime_dependencies", "declared_build_dependencies"):
+        dependencies = value[field]
+        if not isinstance(dependencies, list) or not dependencies:
+            raise ValueError("SOURCE_MANIFEST dependency declaration is missing")
+        if dependencies != sorted(set(dependencies)):
+            raise ValueError("SOURCE_MANIFEST dependency declaration is not unique/sorted")
+        for requirement in dependencies:
+            if not isinstance(requirement, str) or not re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9_.-]*==[0-9][A-Za-z0-9_.+-]*", requirement
+            ):
+                raise ValueError("SOURCE_MANIFEST dependency is not exactly pinned")
+
+
 def build_windows_package(
     exe_path: str | Path,
     start_file: str | Path,
@@ -437,8 +482,12 @@ def build_windows_package(
     restart_recovery_path: str | Path,
     output_zip: str | Path,
     source_sha: str,
+    *,
+    source_manifest: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
     _require_git_commit_sha(source_sha, field="source_sha")
+    if source_manifest is not None:
+        _validate_source_manifest(source_manifest, source_sha)
     exe_path = Path(exe_path)
     start_file = Path(start_file)
     example_dir = Path(example_dir)
@@ -464,7 +513,7 @@ def build_windows_package(
 
         build_info = {
             "product": "Autosport",
-            "version": "0.1.0-v1-prehuman",
+            "version": _PREHUMAN_BUILD_VERSION,
             "source_sha": source_sha,
             "autosport_exe_sha256": sha256_file(package_dir / "Autosport.exe"),
             "real_money_execution": False,
@@ -472,6 +521,8 @@ def build_windows_package(
             "nvda_verified": False,
         }
         _write_json(package_dir / "BUILD_INFO.json", build_info)
+        if source_manifest is not None:
+            _write_json(package_dir / "SOURCE_MANIFEST.json", source_manifest)
 
         payload_hashes = {}
         for path in _sorted_package_files(package_dir):
@@ -506,6 +557,7 @@ def verify_windows_package(
     package_zip: str | Path,
     *,
     expected_source_sha: str,
+    require_source_manifest: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -565,9 +617,18 @@ def verify_windows_package(
     build_info = _decode_json_object(members["BUILD_INFO.json"], "BUILD_INFO.json")
     if build_info.get("product") != "Autosport":
         raise ValueError("BUILD_INFO product identity mismatch")
+    if type(build_info.get("version")) is not str or build_info.get("version") != _PREHUMAN_BUILD_VERSION:
+        raise ValueError("BUILD_INFO unsupported or ambiguous prehuman version")
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO source_sha does not match exact candidate head")
     _require_false_truth_labels(build_info, "BUILD_INFO.json")
+    if require_source_manifest and "SOURCE_MANIFEST.json" not in members:
+        raise ValueError("release package is missing SOURCE_MANIFEST.json")
+    if "SOURCE_MANIFEST.json" in members:
+        source_manifest = _decode_json_object(members["SOURCE_MANIFEST.json"], "SOURCE_MANIFEST.json")
+        _validate_source_manifest(source_manifest, expected_source_sha)
+        if members["SOURCE_MANIFEST.json"] != _canonical_json_bytes(source_manifest):
+            raise ValueError("SOURCE_MANIFEST is not in canonical JSON representation")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")
@@ -680,6 +741,55 @@ def verify_windows_package(
     }
 
 
+_RELEASE_PRIVATE_OR_TEST_DIRECTORIES = frozenset({
+    ".aws", ".azure", ".mozilla", ".ssh", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".tox", "__pycache__", "user data",
+})
+_RELEASE_PRIVATE_OR_TEST_FILES = frozenset({
+    ".env", ".envrc", ".pypirc", "application_default_credentials.json",
+    "cookies", "cookies.json", "cookies.sqlite", "credentials",
+    "credentials.json", "key3.db", "key4.db", "local state",
+    "login data", "logins.json", "oauth_credentials.json",
+    "secrets.json", "secrets.toml", "token.json", "web data",
+    ".coverage", "coverage.xml", ".testmondata", "pytestdebug.log",
+    "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+})
+_RELEASE_SAFE_ENV_TEMPLATES = frozenset({
+    ".env.example", ".env.sample", ".env.template", ".env.dist",
+})
+_RELEASE_PRIVATE_KEY_STEMS = frozenset({
+    "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+})
+
+
+def _require_release_member_without_private_or_test_state(
+    relative_path: PurePosixPath,
+) -> None:
+    """Reject forbidden package bytes even if a ZIP's hashes were recomputed.
+
+    Build-time Git-tree screening is not sufficient: the verifier is also used
+    on externally supplied and repacked archives. Never trust a self-consistent
+    manifest to authorize cached tests or local credential material.
+    """
+    components = tuple(part.casefold() for part in relative_path.parts)
+    if any(part in _RELEASE_PRIVATE_OR_TEST_DIRECTORIES for part in components[:-1]):
+        raise ValueError("release package contains forbidden private/test state directory")
+    leaf = components[-1]
+    if (
+        leaf in _RELEASE_PRIVATE_OR_TEST_FILES
+        or (leaf.startswith(".env.") and leaf not in _RELEASE_SAFE_ENV_TEMPLATES)
+        or (leaf.startswith("client_secret") and leaf.endswith(".json"))
+        or leaf.startswith(".coverage.")
+        or leaf.endswith((".pyc", ".pyo", ".pfx", ".p12", ".ppk", ".key"))
+        or leaf.endswith((".session", ".session-journal"))
+        or (
+            leaf.endswith(".pem")
+            and ("private" in leaf or leaf[:-4] in _RELEASE_PRIVATE_KEY_STEMS)
+        )
+    ):
+        raise ValueError("release package contains forbidden private/test state file")
+
+
 def _validate_windows_member(name: str) -> tuple[str, str]:
     """Return canonical relative/member key or reject a path unsafe for Windows extraction."""
 
@@ -713,6 +823,7 @@ def _validate_windows_member(name: str) -> tuple[str, str]:
         if device_stem in _WINDOWS_RESERVED_NAMES:
             raise ValueError(f"release package contains reserved Windows device name: {name}")
         normalized_parts.append(component.casefold())
+    _require_release_member_without_private_or_test_state(relative_path)
     return relative, "/".join(normalized_parts)
 
 

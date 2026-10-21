@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import Any, Iterable
 
 from .integrity import atomic_write_json, durable_path_lock, sha256_file
+from .json_integrity import strict_json_loads
 from .learning_environment import EvidenceTruth
 from .participant_identity import (
     EntityKind,
@@ -1372,8 +1373,8 @@ class OpponentIntelligenceStore:
     def _load(self) -> None:
         try:
             raw_bytes = self.path.read_bytes()
-            raw = json.loads(raw_bytes.decode("utf-8"))
-        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            raw = strict_json_loads(raw_bytes.decode("utf-8"))
+        except (OSError, UnicodeDecodeError, ValueError) as exc:
             raise OpponentIntelligenceError(
                 f"cannot load opponent intelligence store: {exc}"
             ) from exc

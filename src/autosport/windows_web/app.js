@@ -322,6 +322,57 @@
     stateProjectionEpoch += 1;
   }
 
+  // The bridge is not trusted to return a complete semantic UI snapshot.
+  // Reject malformed state before any control, warning, or bankroll is repainted.
+  function validateOperatorSnapshot(value) {
+    const record = (item) => item !== null && typeof item === "object" && !Array.isArray(item);
+    const invalid = () => { throw new Error("Некоректний стан інтерфейсу."); };
+    if (!record(value) || !record(value.owner) || !record(value.manual)) invalid();
+    for (const key of ["surfaces", "strategy_choices", "surface_details",
+      "live_quotes", "tickets", "evaluation", "log"]) {
+      if (value[key] !== undefined && !Array.isArray(value[key])) invalid();
+    }
+    for (const key of ["lines", "review_lines"]) {
+      if (value.owner[key] !== undefined && !Array.isArray(value.owner[key])) invalid();
+    }
+    if (value.owner.defaults !== undefined && !record(value.owner.defaults)) invalid();
+    if (value.owner.can_initialize !== undefined
+      && typeof value.owner.can_initialize !== "boolean") invalid();
+    if (value.manual.operations !== undefined && !Array.isArray(value.manual.operations)) invalid();
+    for (const pair of [[value, "status"], [value, "last_error"],
+      [value.owner, "summary"], [value.manual, "status"], [value.manual, "result"]]) {
+      const item = pair[0][pair[1]];
+      if (item !== undefined && item !== null && typeof item !== "string") invalid();
+    }
+    if (value.product_source !== undefined && !record(value.product_source)) invalid();
+    if (value.product_source && value.product_source.choices !== undefined
+      && !Array.isArray(value.product_source.choices)) invalid();
+    if (value.product_runtime !== undefined && !record(value.product_runtime)) invalid();
+    if (value.product_runtime) {
+      if (value.product_runtime.economic_snapshot !== undefined
+        && !record(value.product_runtime.economic_snapshot)) invalid();
+      for (const key of ["can_start", "can_stop"]) {
+        const flag = value.product_runtime[key];
+        if (flag !== undefined && typeof flag !== "boolean") invalid();
+      }
+    }
+    return value;
+  }
+
+  // A broken state refresh invalidates previously actionable PAPER controls;
+  // the separate native emergency STOP and navigation remain available.
+  function freezeUnverifiedOperatorControls() {
+    latestState = null;
+    for (const id of [101, 102, 103, 104, 105, 106, 107, 108, 109,
+      328, "owner-confirm", "product-source-select", "product-source-save",
+      "product-runtime-start", "product-runtime-stop"]) {
+      setDisabledWithFocusFallback(byId(id), true);
+    }
+    document.querySelectorAll("[data-owner-field], #327").forEach((node) => {
+      setDisabledWithFocusFallback(node, true);
+    });
+  }
+
   async function apiState() {
     if (!globalThis.pywebview || !globalThis.pywebview.api) {
       throw new Error("Внутрішній канал застосунку недоступний.");
@@ -330,7 +381,7 @@
     if (!response || response.ok !== true || !response.state) {
       throw new Error("Стан продукту недоступний.");
     }
-    return response.state;
+    return validateOperatorSnapshot(response.state);
   }
 
   async function dispatch(actionId, payload = {}, options = {}) {
@@ -560,6 +611,7 @@
         } catch (_error) {
           if (refreshClosed) break;
           if (requestEpoch === stateProjectionEpoch) {
+            freezeUnverifiedOperatorControls();
             if (unconfirmedDispatchResult) {
               setTextIfChanged(statusNode, "Не вдалося оновити стан застосунку.");
             } else {

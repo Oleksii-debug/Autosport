@@ -72,6 +72,15 @@
     }
   }
 
+  // A provider/source choice is a pending operator draft, not canonical truth.
+  // In particular, an unconfigured source has selected_id="", so the native
+  // select must not silently show the first real source as already selected.
+  const sourceSelectionDraft = { epoch: 0, dirty: false };
+  byId("product-source-select").addEventListener("change", () => {
+    sourceSelectionDraft.epoch += 1;
+    sourceSelectionDraft.dirty = true;
+  });
+
   function hasFocusedReadback(node) {
     const active = document.activeElement;
     if (!(active instanceof HTMLElement)) return false;
@@ -620,8 +629,10 @@
     const productSource = state.product_source || {};
     const sourceSelect = byId("product-source-select");
     setSelectOptions(sourceSelect, productSource.choices || []);
-    if (productSource.selected_id) {
-      setValueUnlessFocused(sourceSelect, productSource.selected_id);
+    if (!sourceSelectionDraft.dirty) {
+      // Empty is meaningful: no source has been configured. A select with
+      // no matching empty option then has selectedIndex=-1, not first source.
+      setValueUnlessFocused(sourceSelect, productSource.selected_id || "");
     }
     setValueIfChanged(
       byId("product-source-status"),
@@ -816,10 +827,30 @@
       request_path: byId("update-request-path").value,
     });
   });
-  byId("product-source-save").addEventListener("click", () => {
-    dispatch("product_source.configure", {
-      source_id: byId("product-source-select").value,
+  byId("product-source-save").addEventListener("click", async () => {
+    const sourceSelect = byId("product-source-select");
+    const requestedId = sourceSelect.value;
+    const editEpoch = sourceSelectionDraft.epoch;
+    const result = await dispatch("product_source.configure", {
+      source_id: requestedId,
     });
+    if (sourceSelectionDraft.epoch !== editEpoch) return;
+    if (result && result.status === "completed") {
+      sourceSelectionDraft.dirty = false;
+      // Publish only the backend's newly confirmed selection; do not use the
+      // optimistic local choice as a persisted setting.
+      await refreshState();
+    } else if (result && result.status === "rejected") {
+      const verified = latestState && latestState.product_source
+        && latestState.product_source.selected_id;
+      // A failed state readback is not evidence for a fabricated rollback.
+      if (typeof verified === "string") {
+        sourceSelectionDraft.dirty = false;
+        sourceSelect.value = verified;
+      }
+    }
+    // No reply / UNKNOWN retains the draft and the persistent warning;
+    // never present a lost bridge reply as successful configuration.
   });
   byId("product-runtime-start").addEventListener("click", () => {
     dispatch("product_runtime.start");

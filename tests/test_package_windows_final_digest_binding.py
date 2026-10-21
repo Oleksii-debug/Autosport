@@ -24,6 +24,23 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
         )
         source_patch.start()
         self.addCleanup(source_patch.stop)
+        # This suite is only about final-package SHA binding. The independent
+        # direct/graph dependency admission is tested in dedicated suites and
+        # requires genuine build-host pins, which synthetic SHA fixtures lack.
+        # Stub *both* build-host capture boundaries explicitly, not the final
+        # digest verifiers whose failure/order semantics we exercise here.
+        direct_patch = patch.object(
+            package_windows, "capture_direct_installed_dependencies",
+            return_value={"evidence_class": "TEST_ONLY_DIRECT_DEPENDENCIES"},
+        )
+        graph_patch = patch.object(
+            package_windows, "capture_build_host_dependency_graph",
+            return_value={"evidence_class": "TEST_ONLY_REQUIREMENT_GRAPH"},
+        )
+        direct_patch.start()
+        graph_patch.start()
+        self.addCleanup(direct_patch.stop)
+        self.addCleanup(graph_patch.stop)
 
     @staticmethod
     def _argv(root: Path) -> list[str]:

@@ -1,3 +1,4 @@
+import mmap
 import random
 import struct
 
@@ -342,6 +343,19 @@ def test_certificate_record_alignment_padding_must_be_zero() -> None:
     validate_pe32plus_amd64(bytes(blob))
     blob[cert_offset + 15] = 0x7E
     assert_rejected(bytes(blob), "WIN_CERTIFICATE alignment padding")
+
+
+def test_readonly_mapped_image_matches_immutable_bytes(tmp_path):
+    # Official packaging passes mmap(ACCESS_READ), not bytes. This test would
+    # have failed on main immediately after PR #2408, blocking both EXEs.
+    for two_sections in (False, True):
+        binary = build_valid_pe(two_sections=two_sections)
+        path = tmp_path / ("two.exe" if two_sections else "one.exe")
+        path.write_bytes(binary)
+        with path.open("rb") as source:
+            with mmap.mmap(source.fileno(), 0, access=mmap.ACCESS_READ) as mapped:
+                actual = validate_pe32plus_amd64(mapped)
+        assert actual == validate_pe32plus_amd64(binary)
 
 
 def test_non_bytes_input_rejected():

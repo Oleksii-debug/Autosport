@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import mmap
 import struct
 from typing import Iterable
 
@@ -150,12 +151,17 @@ def _validate_certificate_table_records(data: bytes, offset: int, size: int) -> 
 def validate_pe32plus_amd64(data: bytes, policy: PEPolicy = PEPolicy()) -> PEInfo:
     """Validate a bounded Windows x64 PE32+ application image.
 
+    Accept immutable bytes or the official packager's read-only file-backed mmap.
+    Callers must pin the mapped snapshot's SHA and prevent concurrent mutation.
     This is a fail-closed structural/semantic release oracle, not a replacement for
     Windows loader execution, Authenticode verification, AV scanning, or human/NVDA
     acceptance.
     """
-    if not isinstance(data, bytes):
-        _fail("image must be immutable bytes")
+    # The official package verifier maps its exact SHA-pinned executable read-only.
+    # Accept this buffer-protocol type without copying the entire PE into RAM;
+    # retain the original rejection of bytearray and arbitrary mutable objects.
+    if not isinstance(data, (bytes, mmap.mmap)):
+        _fail("image must be immutable bytes or a trusted file-backed mmap")
     if len(data) < 64:
         _fail("file too small for DOS header")
     if data[:2] != b"MZ":

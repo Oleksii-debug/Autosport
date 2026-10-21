@@ -45,6 +45,33 @@
     if (document.activeElement !== node && node.value !== text) node.value = text;
   }
 
+  // The 250 ms snapshot poll must not erase a typed but unsubmitted file path
+  // just because the operator pressed Tab to reach its Save button.
+  const pathDraftEdits = new Map();
+  const unsavedPathDrafts = new Set();
+  for (const id of ["dataset-path", "research-plan-path"]) {
+    pathDraftEdits.set(id, 0);
+    byId(id).addEventListener("input", () => {
+      unsavedPathDrafts.add(id);
+      pathDraftEdits.set(id, pathDraftEdits.get(id) + 1);
+    });
+  }
+
+  function renderCanonicalPathUnlessDraft(id, value) {
+    if (!unsavedPathDrafts.has(id)) {
+      setValueUnlessFocused(byId(id), value);
+    }
+  }
+
+  function finalizeConfirmedPathSelection(id, editEpoch, result) {
+    // A rejection or lost bridge reply is not a committed selection. Also
+    // preserve any later edits made while the asynchronous request was pending.
+    if (result && result.status === "completed"
+        && pathDraftEdits.get(id) === editEpoch) {
+      unsavedPathDrafts.delete(id);
+    }
+  }
+
   function hasFocusedReadback(node) {
     const active = document.activeElement;
     if (!(active instanceof HTMLElement)) return false;
@@ -521,8 +548,8 @@
     setTextIfChanged(byId("active-workspace-value"), state.active_workspace || "—");
     setValueIfChanged(byId(205), state.bank || "");
     setTextIfChanged(byId("dataset-summary"), state.dataset_summary || "");
-    setValueUnlessFocused(byId("dataset-path"), state.dataset_path || "");
-    setValueUnlessFocused(byId("research-plan-path"), state.research_plan_path || "");
+    renderCanonicalPathUnlessDraft("dataset-path", state.dataset_path || "");
+    renderCanonicalPathUnlessDraft("research-plan-path", state.research_plan_path || "");
     setTextIfChanged(byId("research-plan-summary"), state.research_plan_summary || "");
 
     const strategy = byId(106);
@@ -730,8 +757,11 @@
     return mapping[byId(301).value] || 304;
   }
 
-  byId(101).addEventListener("click", () => {
-    dispatch("dataset.select", { path: byId("dataset-path").value });
+  byId(101).addEventListener("click", async () => {
+    const editEpoch = pathDraftEdits.get("dataset-path");
+    const path = byId("dataset-path").value;
+    const result = await dispatch("dataset.select", { path });
+    finalizeConfirmedPathSelection("dataset-path", editEpoch, result);
   });
   byId(106).addEventListener("change", async () => {
     const control = byId(106);
@@ -742,9 +772,12 @@
       control, requested, result, latestState && latestState.strategy_id,
     );
   });
-  byId(107).addEventListener("click", () => {
+  byId(107).addEventListener("click", async () => {
     invalidateOwnerReview();
-    dispatch("research_plan.select", { path: byId("research-plan-path").value });
+    const editEpoch = pathDraftEdits.get("research-plan-path");
+    const path = byId("research-plan-path").value;
+    const result = await dispatch("research_plan.select", { path });
+    finalizeConfirmedPathSelection("research-plan-path", editEpoch, result);
   });
   byId(103).addEventListener("change", async () => {
     const control = byId(103);

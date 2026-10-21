@@ -484,7 +484,15 @@
           true,
         );
         setHiddenIfChanged(dispatchUncertainAck, false);
-        focusOperatorTarget(errorNode);
+        // A delayed failed bridge response must not steal focus after the
+        // operator has continued keyboard navigation. Keep the assertive
+        // message and UNKNOWN acknowledgment visible in either case.
+        if (
+          operatorFocusEpoch === focusEpochAtRequest
+          && document.activeElement === focusedElementAtRequest
+        ) {
+          focusOperatorTarget(errorNode);
+        }
       }
       return null;
     }

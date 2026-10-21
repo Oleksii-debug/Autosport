@@ -210,6 +210,13 @@ def validate_embedded_executable_inventory(
         *(f"lpt{index}" for index in range(1, 10)),
         "com¹", "com²", "com³", "lpt¹", "lpt²", "lpt³",
     })
+    # CArchive entries are decompressed by the shipped runtime. The outer ZIP
+    # budget does not bound the sum of embedded, decompressed members. Enforce
+    # one aggregate resource fence for both main and Data executables.
+    max_total_packed = 1 << 30
+    max_total_unpacked = 1 << 32
+    total_packed = 0
+    total_unpacked = 0
     last = None
     for item in components:
         if type(item) is not dict or set(item) != {
@@ -263,6 +270,10 @@ def validate_embedded_executable_inventory(
             size = item[key]
             if type(size) is not int or size < 0 or size > (1 << 35):
                 raise ValueError("embedded executable component size is invalid")
+        total_packed += item["packed_bytes"]
+        total_unpacked += item["unpacked_bytes"]
+        if total_packed > max_total_packed or total_unpacked > max_total_unpacked:
+            raise ValueError("embedded executable archive size budget exceeded")
 
 
 def capture_embedded_executable_inventory(

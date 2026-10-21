@@ -19,7 +19,7 @@
 | 2Б | One predictable navigation model, headings/landmarks/controls/status, keyboard-first operation and text alternatives. | Статус: IN_PROGRESS / NOT DONE |
 | 2В | Native emergency controls remain reachable if WebView/browser surface fails. | Статус: IN_PROGRESS / NOT DONE |
 | 3А | Cover launch/config/source status/research/paper portfolio/risk/agent/models/STOP/recovery/settings/export/update flows. | Статус міграції: PARTIAL_EXISTING |
-| 3Б | Unsupported external bookmaker actions visibly unavailable, not blockers for PAPER/SHADOW product. | Статус: PARTIAL_EXISTING |
+| 3Б | Unsupported external bookmaker actions visibly unavailable, not blockers for PAPER/SHADOW product. | **DONE — CLOSED_FOR_DEVELOPMENT / TERMINAL (2026-10-21)**. Canonical Windows shell shows unavailable bookmaker/opportunities with reason and disabled Open; PAPER/SHADOW available. 11/11 source/test Git blobs byte-identical to qualified `d93d203e867c71aad880f1b2e3d144549e166030` (CI #38148320018, Windows Candidate #38148320047 SUCCESS). Integrated source main `ae8376d1f35da65313fac45fe7efbca214575c35`. [Evidence](docs/PLAN6_SECTION3B_BOOKMAKER_UNAVAILABLE_REUSE_EVIDENCE.md). 3А/3В/WebView2 still open. |
 | 3В | Focus restoration, error recovery and actionable status are deterministic. | Статус: PARTIAL_EXISTING |
 | 4А | Reuse accessibility_audit/announcements/keyboard_audit/UIA provenance/evidence export. | Статус міграції: PARTIAL_EXISTING |
 | 4Б | Automate labels/roles/focus/live-region/duplicate-id/malformed-state checks and selectable reports. | Статус: PARTIAL_EXISTING |

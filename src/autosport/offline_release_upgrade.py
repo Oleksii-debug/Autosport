@@ -171,3 +171,51 @@ def rollback_verified_paper_release(
         raise
     return {"status": "ROLLED_BACK_PAPER_ONLY", "source_sha": old_source_sha,
             "rejected_release_path": str(rejected), "real_money_execution": False}
+
+
+
+def main(argv: list[str] | None = None) -> int:
+    """Operator-only PAPER update tooling; failures never echo private paths."""
+    import argparse
+    import json
+
+    parser = argparse.ArgumentParser(description="Independently pinned PAPER-only release transaction")
+    parser.add_argument("action", choices=("upgrade-release", "rollback-release", "recover-update-release"))
+    parser.add_argument("--destination", type=Path, required=True)
+    parser.add_argument("--old-archive", type=Path, required=True)
+    parser.add_argument("--old-source-sha", required=True)
+    parser.add_argument("--old-package-sha256", required=True)
+    parser.add_argument("--new-archive", type=Path)
+    parser.add_argument("--new-source-sha")
+    parser.add_argument("--new-package-sha256")
+    args = parser.parse_args(argv)
+    old = {
+        "old_archive": args.old_archive,
+        "old_source_sha": args.old_source_sha,
+        "old_package_sha256": args.old_package_sha256,
+    }
+    try:
+        if args.action == "recover-update-release":
+            report = recover_update_gap(args.destination, **old)
+        else:
+            if not all((args.new_archive, args.new_source_sha, args.new_package_sha256)):
+                raise OfflineInstallError("new release identity is required")
+            new = {
+                "new_archive": args.new_archive,
+                "new_source_sha": args.new_source_sha,
+                "new_package_sha256": args.new_package_sha256,
+            }
+            operation = (
+                upgrade_verified_paper_release
+                if args.action == "upgrade-release" else rollback_verified_paper_release
+            )
+            report = operation(args.destination, **old, **new)
+    except (OfflineInstallError, OSError, ValueError, TypeError, RuntimeError, zipfile.BadZipFile):
+        print("release_update=FAIL_CLOSED reason=unsafe_or_unverified_release")
+        return 3
+    print(json.dumps(report, sort_keys=True, separators=(",", ":")))
+    return 0
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())

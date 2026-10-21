@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 from unittest.mock import patch
 
 from autosport import offline_release_install as install
@@ -260,6 +260,28 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual(
                 (upgrade._transaction_root(dest) / "previous" / "Autosport.exe").read_bytes(),
                 self.OLD.encode(),
+            )
+
+
+    def test_windows_case_alias_uses_one_pending_update_namespace(self):
+        # A case-only alternate spelling is the same Windows installation,
+        # and must not evade the sibling pending-update transaction fence.
+        first = PureWindowsPath("C:/Apps/AutoSport Product")
+        second = PureWindowsPath(r"c:\\apps\\AUTOSPORT PRODUCT")
+        self.assertNotEqual(str(first), str(second))
+        self.assertEqual(first, second)
+        first_txn = upgrade._transaction_root(first)
+        second_txn = upgrade._transaction_root(second)
+        self.assertEqual(first_txn, second_txn)
+        self.assertEqual(first_txn.name, second_txn.name)
+
+    def test_posix_case_distinction_retains_distinct_update_namespace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            first = Path(temp) / "Autosport"
+            second = Path(temp) / "autosport"
+            self.assertNotEqual(
+                upgrade._transaction_root(first).name,
+                upgrade._transaction_root(second).name,
             )
 
 

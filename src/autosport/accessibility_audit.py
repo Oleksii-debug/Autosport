@@ -220,17 +220,20 @@ def summarize_description(
         gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
         pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
         role_name = _enum_name(widget.role)
+        # A whitespace-only or non-text UIA Name is not an accessible label.
+        # Keep exported evidence JSON-serializable even for malformed providers.
+        accessible_name = widget.name if isinstance(widget.name, str) else ""
         controls[normalized_automation_id] = {
             "path": widget.path,
             "tk_class": widget.tk_class,
             "role": role_name,
-            "name": widget.name,
+            "name": accessible_name,
             "automation_id": normalized_automation_id,
             "patterns": pattern_names,
             "answers_rows": bool(widget.answers_rows),
             "gaps": gap_names,
         }
-        if not widget.name:
+        if not accessible_name.strip():
             failures.append(f"automation_id={normalized_automation_id}: missing accessible name")
         expected_role = _EXPECTED_ROLES[normalized_automation_id]
         if role_name != expected_role:

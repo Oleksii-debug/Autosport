@@ -29,7 +29,8 @@ def test_absent_scientific_evidence_is_not_misreported_as_training(tmp_path):
         assert worker.start(tmp_path)
         result = _result(worker)
     assert "0" in result.lines[1]
-    assert "немає" in result.lines[4]
+    assert "0" in result.lines[2]
+    assert "немає" in result.lines[-1]
     assert worker.busy is False
 
 

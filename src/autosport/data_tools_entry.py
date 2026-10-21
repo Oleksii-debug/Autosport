@@ -30,6 +30,7 @@ Usage:
   Autosport-Data.exe install-release --archive <release.zip> --destination <new-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe verify-installed-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe uninstall-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
+  Autosport-Data.exe recover-uninstall-release --quarantine <interrupted-quarantine-folder> --archive <original-release.zip> --destination <original-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
@@ -50,6 +51,7 @@ Commands:
   install-release           Install verified canonical PAPER release to a NEW folder using independent SHA anchors, without replacing existing files.
   verify-installed-release  Compare installed PAPER files and receipt to the independently pinned original release ZIP.
   uninstall-release         Remove only a fully matching inventoried PAPER release, refusing unowned user data or modified files.
+  recover-uninstall-release Restore an interrupted uninstall from an independently pinned original PAPER ZIP; preserve unknown private data.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
   export-evidence            Export the canonical deterministic metadata-only workspace evidence manifest.
   verify-evidence            Verify an exported evidence manifest against the current canonical workspace evidence.
@@ -121,6 +123,10 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.cli import main as cli_main
 
         return cli_main([command, *forwarded])
+    if command == "recover-uninstall-release":
+        from autosport.offline_release_recovery import main as recovery_main
+
+        return recovery_main(forwarded)
     if command == "repair-workspace":
         from autosport.cli import main as cli_main
 

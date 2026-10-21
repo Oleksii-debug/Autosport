@@ -948,6 +948,8 @@ if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe install-release --
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe verify-installed-release --help exited $LASTEXITCODE" }
 & $dataExe uninstall-release --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe uninstall-release --help exited $LASTEXITCODE" }
+& $dataExe recover-uninstall-release --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe recover-uninstall-release --help exited $LASTEXITCODE" }
 & $dataExe diagnose-update --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe diagnose-update --help exited $LASTEXITCODE" }
 & $dataExe compare-strategies --help | Out-Null
@@ -1142,6 +1144,8 @@ if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe help exited
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe verify-installed-release --help exited $LASTEXITCODE" }
 & $extractedDataExe uninstall-release --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe uninstall-release --help exited $LASTEXITCODE" }
+& $extractedDataExe recover-uninstall-release --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe recover-uninstall-release --help exited $LASTEXITCODE" }
 & $extractedDataExe diagnose-update --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe diagnose-update --help exited $LASTEXITCODE" }
 & $extractedDataExe compare-strategies --help | Out-Null

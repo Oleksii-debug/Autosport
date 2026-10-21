@@ -49,6 +49,9 @@ _PACKAGE_SNAPSHOT_MEMORY_LIMIT = 8 * 1024 * 1024
 _ZIP_MAX_MEMBER_UNCOMPRESSED = 512 * 1024 * 1024
 _ZIP_MAX_TOTAL_UNCOMPRESSED = 1024 * 1024 * 1024
 _ZIP_MAX_TOTAL_COMPRESSED = 1024 * 1024 * 1024
+# A canonical archive has bounded ZIP headers in addition to compressed members.
+# Never spool arbitrarily large hostile input before central-directory preflight.
+_ZIP_MAX_WIRE_BYTES = _ZIP_MAX_TOTAL_COMPRESSED + 16 * 1024 * 1024
 _ZIP_MAX_MEMBERS = 4096
 _ZIP_MAX_COMPRESSION_RATIO = 4096
 _ZIP_CREATE_SYSTEM = 3
@@ -890,7 +893,11 @@ def verify_windows_package(
         max_size=_PACKAGE_SNAPSHOT_MEMORY_LIMIT,
         mode="w+b",
     ) as snapshot:
+        wire_bytes = 0
         for chunk in iter(lambda: source.read(1024 * 1024), b""):
+            wire_bytes += len(chunk)
+            if wire_bytes > _ZIP_MAX_WIRE_BYTES:
+                raise ValueError("release ZIP wire byte limit exceeded before snapshot publication")
             digest.update(chunk)
             snapshot.write(chunk)
         package_sha = digest.hexdigest()

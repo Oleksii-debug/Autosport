@@ -17,6 +17,11 @@ from .economic_goal import EconomicGoalContract
 from .economic_goal_provenance import provenance_for
 from .economic_goal_store import economic_goal_from_payload, economic_goal_to_payload
 from .paper import PaperBook
+from .paper_drawdown_evidence import (
+    DRAW_DOWN_ECONOMIC_BASIS,
+    DRAW_DOWN_HISTORY_MODE,
+    DRAW_DOWN_INITIAL_EQUITY_POINT_ID,
+)
 from .risk import PaperRiskPolicy
 
 
@@ -24,7 +29,7 @@ RISK_REPORT_SCHEMA = "autosport.paper-risk-report.v4"
 RISK_REPORT_SCOPE_PAPER_ONLY = "PAPER_ONLY"
 DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY = "REALIZED_SETTLED_EQUITY_DRAWDOWN"
 RISK_OF_RUIN_STATUS_UNKNOWN = "UNKNOWN_REQUIRES_PROVENANCE_BOUND_EVIDENCE"
-_INITIAL_EQUITY_POINT_ID = "paper-initial-bankroll"
+_INITIAL_EQUITY_POINT_ID = DRAW_DOWN_INITIAL_EQUITY_POINT_ID
 
 
 @dataclass(frozen=True, slots=True)
@@ -54,6 +59,13 @@ class PaperRiskReport:
     schema: str
     scope: str
     drawdown_metric_class: str
+    drawdown_economic_basis: str
+    drawdown_history_mode: str
+    drawdown_net_cost_evidence_complete: bool
+    marked_equity_drawdown_supported: bool
+    drawdown_capital_at_risk_included: bool
+    stress_drawdown_included: bool
+    drawdown_as_known_at_supported: bool
     includes_live_execution_exposure: bool
     live_execution_headroom_authoritative: bool
     portfolio_risk_state_sha256: str
@@ -148,19 +160,23 @@ def _historical_max_drawdown(book: PaperBook) -> _HistoricalMaxDrawdown | None:
                 drawdown = running_peak - equity
             if drawdown < 0:
                 return None
+            if running_peak > 0:
+                # Fractional drawdown is a distinct historical maximum from the
+                # maximum absolute-money drawdown. Preserve the canonical risk
+                # precision, exponent bounds and deterministic ratio rounding.
+                ratio_context = PaperRiskPolicy._decimal_context()
+                ratio_context.traps[Inexact] = False
+                with localcontext(ratio_context):
+                    drawdown_fraction = drawdown / running_peak
+                if (
+                    maximum_fraction is None
+                    or drawdown_fraction > maximum_fraction
+                ):
+                    maximum_fraction = drawdown_fraction
+            else:
+                maximum_fraction = None
             if drawdown > maximum:
                 maximum = drawdown
-                if running_peak > 0:
-                    # This fraction is descriptive evidence, not money/risk
-                    # enforcement arithmetic. Preserve the canonical risk precision,
-                    # exponent bounds and rounding while allowing the deterministic
-                    # rounded representation required for recurring ratios.
-                    ratio_context = PaperRiskPolicy._decimal_context()
-                    ratio_context.traps[Inexact] = False
-                    with localcontext(ratio_context):
-                        maximum_fraction = drawdown / running_peak
-                else:
-                    maximum_fraction = None
                 maximum_peak_id = running_peak_id
                 maximum_trough_id = point_id
 
@@ -284,6 +300,13 @@ def build_paper_risk_report(
         schema=RISK_REPORT_SCHEMA,
         scope=RISK_REPORT_SCOPE_PAPER_ONLY,
         drawdown_metric_class=DRAWDOWN_METRIC_REALIZED_SETTLED_EQUITY,
+        drawdown_economic_basis=DRAW_DOWN_ECONOMIC_BASIS,
+        drawdown_history_mode=DRAW_DOWN_HISTORY_MODE,
+        drawdown_net_cost_evidence_complete=False,
+        marked_equity_drawdown_supported=False,
+        drawdown_capital_at_risk_included=False,
+        stress_drawdown_included=False,
+        drawdown_as_known_at_supported=False,
         includes_live_execution_exposure=False,
         live_execution_headroom_authoritative=False,
         portfolio_risk_state_sha256=after_sha256,

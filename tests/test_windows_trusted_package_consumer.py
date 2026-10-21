@@ -22,7 +22,12 @@ def _trusted_package_launcher_source() -> str:
 
 def _write_snapshot(root: Path) -> dict[str, str]:
     files = {
+        "src/autosport/workspace_lock.py": (
+            "def _open_read_only_descriptor(path):\n"
+            "    return 7\n"
+        ),
         "src/autosport/release_package.py": (
+            "from autosport.workspace_lock import _open_read_only_descriptor\n"
             "def _require_git_commit_sha(value, *, field):\n"
             "    return value\n"
             "def build_windows_package(*args, **kwargs):\n"
@@ -115,13 +120,59 @@ def test_trusted_package_launcher_rejects_mutated_import_before_execution(tmp_pa
     assert not marker.exists()
 
 
+def test_trusted_package_launcher_rejects_mutated_release_lock_before_execution(
+    tmp_path: Path,
+) -> None:
+    launcher = _trusted_package_launcher_source()
+    root = tmp_path / "trusted-package-source"
+    manifest = _write_snapshot(root)
+    marker = tmp_path / "marker.txt"
+    hostile_marker = tmp_path / "hostile-lock.txt"
+    imported_module = root / "src" / "autosport" / "workspace_lock.py"
+    imported_module.write_text(
+        "from pathlib import Path\n"
+        f"Path({str(hostile_marker)!r}).write_text('executed', encoding='utf-8')\n"
+        "def _open_read_only_descriptor(path):\n"
+        "    return 99\n",
+        encoding="utf-8",
+    )
+
+    completed = subprocess.run(
+        [
+            sys.executable,
+            "-I",
+            "-S",
+            "-c",
+            launcher,
+            str(root),
+            json.dumps(manifest, sort_keys=True, separators=(",", ":")),
+            str(marker),
+        ],
+        capture_output=True,
+        text=True,
+    )
+
+    assert completed.returncode != 0
+    assert "trusted package source SHA-256 mismatch" in completed.stderr
+    assert not hostile_marker.exists()
+    assert not marker.exists()
+
+
 def test_windows_build_materializes_exact_package_consumer_after_final_source_gate() -> None:
     script = _BUILD_SCRIPT.read_text(encoding="utf-8")
 
     final_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs"
     archive = (
         "& $gitExecutable archive --format=zip \"--output=$trustedPackageArchive\" $sourceSha -- "
-        "scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py"
+        "scripts/package_windows.py src/autosport/workspace_lock.py src/autosport/release_package.py src/autosport/data_tool_package.py"
+    )
+    trusted_paths_block = (
+        "$trustedPackagePathsJson = ConvertTo-Json -Compress -InputObject @(\n"
+        "  'scripts/package_windows.py',\n"
+        "  'src/autosport/workspace_lock.py',\n"
+        "  'src/autosport/release_package.py',\n"
+        "  'src/autosport/data_tool_package.py'\n"
+        ")"
     )
     package_command = "python scripts/package_windows.py `"
     isolated_runner = (
@@ -135,8 +186,13 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     launcher = _trusted_package_launcher_source()
 
     assert final_gate_index < archive_index < package_index
+    assert trusted_paths_block in script
     assert isolated_runner in script
     assert "$trustedPackageLauncher = @'" in script
     assert "sys.path.insert" not in launcher
+    assert 'load_module("autosport.workspace_lock", "src/autosport/workspace_lock.py")' in launcher
+    assert launcher.index('load_module("autosport.workspace_lock"') < launcher.index(
+        'load_module("autosport.release_package"'
+    )
     assert 'load_module("autosport.release_package", "src/autosport/release_package.py")' in launcher
     assert 'load_module("autosport.data_tool_package", "src/autosport/data_tool_package.py")' in launcher

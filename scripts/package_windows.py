@@ -815,6 +815,12 @@ def main() -> int:
         embedded_inventory = capture_embedded_executable_inventory(
             trusted_exe, args.source_sha,
         )
+        # The official ZIP also contains Autosport-Data.exe. Qualify its
+        # independently sealed CArchive rather than inferring its components
+        # from the main executable or installed build-host distributions.
+        data_embedded_inventory = capture_embedded_executable_inventory(
+            trusted_data_exe, args.source_sha,
+        )
         trusted_diagnostic = _capture_verified_evidence(
             args.diagnostic,
             args.diagnostic_sha256,
@@ -859,6 +865,7 @@ def main() -> int:
             output,
             trusted_data_exe,
             expected_base_package_sha256=base_digest,
+            data_executable_inventory=data_embedded_inventory,
         )
 
     release_verification = verify_windows_package(
@@ -870,7 +877,9 @@ def main() -> int:
         require_embedded_executable_inventory=True,
     )
     package_sha = _require_verified_package_digest(binding, release_verification)
-    data_verification = verify_portable_data_tool(output)
+    data_verification = verify_portable_data_tool(
+        output, require_data_executable_inventory=True,
+    )
     _require_verified_package_digest(binding, data_verification)
     verification = dict(release_verification)
     verification.update(data_verification)

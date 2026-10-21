@@ -22,7 +22,7 @@ class NvdaAcceptanceEvidenceTests(unittest.TestCase):
         data_exe = b"fake-autosport-data-exe-for-evidence-contract"
         build_info = {
             "product": "Autosport",
-            "version": "test",
+            "version": "0.1.0-v1-prehuman",
             "source_sha": source_sha,
             "autosport_exe_sha256": hashlib.sha256(exe).hexdigest(),
             "autosport_data_exe_sha256": hashlib.sha256(data_exe).hexdigest(),

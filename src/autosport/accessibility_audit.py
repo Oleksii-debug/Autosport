@@ -231,8 +231,6 @@ def summarize_description(
             )
             continue
         observed_gaps = (_enum_name(gap) for gap in widget.gaps)
-        # An empty or None provider gap is malformed evidence, not a clean UIA control.
-        # Preserve only the fixed public category; never export provider-supplied text.
         gap_names = sorted({
             name if name in _PUBLIC_GAPS else "OTHER_GAP"
             for name in observed_gaps

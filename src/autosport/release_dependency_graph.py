@@ -11,8 +11,6 @@ from collections import deque
 from importlib import metadata
 from typing import Any
 
-from packaging.requirements import InvalidRequirement, Requirement
-
 from .release_sbom import _LICENSE, _VERSION, _normalize_name, _requirements
 
 _MAX_COMPONENTS = 256
@@ -61,8 +59,8 @@ def validate_build_host_dependency_graph(
         required = item["requires"]
         if (
             not isinstance(required, list)
-            or required != sorted(set(required))
             or any(not isinstance(dep, str) or _normalize_name(dep) != dep for dep in required)
+            or required != sorted(set(required))
         ):
             raise ValueError("build-host graph edges are invalid or unsorted")
         total_edges += len(required)
@@ -106,6 +104,10 @@ def capture_build_host_dependency_graph(
     This rejects unresolved/mismatched requirements and never infers that a
     build-host distribution is embedded in Autosport.exe.
     """
+    # Packaging is required by the Windows build toolchain, not by the
+    # product runtime or consumers that only verify stored evidence.
+    from packaging.requirements import InvalidRequirement, Requirement
+
     roots = _requirements(source_manifest)
     queue = deque((name, "") for name in sorted(roots))
     processed: dict[str, set[str]] = {}
@@ -183,7 +185,9 @@ def capture_build_host_dependency_graph(
                 edges += 1
                 if edges > _MAX_EDGES:
                     raise ValueError("build-host graph edge limit exceeded")
-            for selected_extra in sorted(requirement.extras) or [""]:
+            # Requirements without an extra marker apply in both the base
+            # install and every selected extra; always include the base pass.
+            for selected_extra in ["", *sorted(requirement.extras)]:
                 queue.append((child, selected_extra))
     result = {
         "schema_version": 1,

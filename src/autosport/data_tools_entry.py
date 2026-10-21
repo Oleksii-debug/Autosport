@@ -35,6 +35,8 @@ Usage:
   Autosport-Data.exe rollback-release --destination <installed-folder> --old-archive <old.zip> --old-source-sha <old-git-sha> --old-package-sha256 <old-zip-sha> --new-archive <new.zip> --new-source-sha <new-git-sha> --new-package-sha256 <new-zip-sha>
   Autosport-Data.exe recover-update-release --destination <installed-folder> --old-archive <old.zip> --old-source-sha <old-git-sha> --old-package-sha256 <old-zip-sha>
   Autosport-Data.exe finalize-update-release --destination <installed-folder> --old-archive <old.zip> --old-source-sha <old-git-sha> --old-package-sha256 <old-zip-sha> --new-archive <new.zip> --new-source-sha <new-git-sha> --new-package-sha256 <new-zip-sha>
+  Autosport-Data.exe backup-workspace --workspace <workspace-path> --output <private-backup.zip>
+  Autosport-Data.exe restore-workspace --archive <private-backup.zip> --destination <new-workspace-path>
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
@@ -60,6 +62,8 @@ Commands:
   rollback-release          Restore independently verified prior PAPER product; quarantine rejected new release.
   recover-update-release    Restore old PAPER product after interrupted update left installation folder absent.
   finalize-update-release   Remove only independently verified obsolete product to permit a future update.
+  backup-workspace           Create a private, SHA-256 inventoried canonical workspace ZIP using the Plan 5 economic lock.
+  restore-workspace          Verify the complete private backup and restore only to a NEW empty workspace path.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
   export-evidence            Export the canonical deterministic metadata-only workspace evidence manifest.
   verify-evidence            Verify an exported evidence manifest against the current canonical workspace evidence.
@@ -139,6 +143,12 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.offline_release_upgrade import main as upgrade_main
 
         return upgrade_main([command, *forwarded])
+    if command in {"backup-workspace", "restore-workspace"}:
+        # Reuse the canonical private, fully verified workspace backup/restore.
+        # No second Windows-only data or migration authority is introduced.
+        from autosport.cli import main as cli_main
+
+        return cli_main([command, *forwarded])
     if command == "repair-workspace":
         from autosport.cli import main as cli_main
 

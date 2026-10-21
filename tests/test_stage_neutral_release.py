@@ -766,3 +766,49 @@ def test_stage_neutral_fails_closed_on_reinjected_ci_qa(tmp_path: Path) -> None:
             package_zip, expected_source_sha=SOURCE_SHA,
             expected_members=converted, expected_writer_sha=digest,
         )
+
+
+def test_stage_release_metadata_rejects_duplicate_keys_at_any_depth() -> None:
+    """Independent JSON readers must never choose different release truth."""
+    for raw in (
+        b'{"nvda_verified":true,"nvda_verified":false}',
+        b'{"files":{"Autosport.exe":"a","Autosport.exe":"b"}}',
+    ):
+        with pytest.raises(ValueError, match="duplicate JSON keys"):
+            stage_release._decode_json_object(raw, "release metadata")
+
+
+@pytest.mark.parametrize("value", [b"NaN", b"Infinity", b"-Infinity"])
+def test_stage_release_rejects_nonstandard_json_constants(value: bytes) -> None:
+    with pytest.raises(ValueError, match="non-JSON constant"):
+        stage_release._decode_json_object(
+            b'{"nvda_verified":' + value + b"}", "BUILD_INFO.json",
+        )
+
+
+def test_stage_release_rejects_resealed_duplicate_build_truth_before_output(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Even checksum-consistent input may carry contradictory duplicate keys."""
+    _stub_deep_verifier(monkeypatch)
+    members = _legacy_members()
+    payload = members["BUILD_INFO.json"].rstrip()
+    assert payload.endswith(b"}")
+    members["BUILD_INFO.json"] = payload[:-1] + b', "real_money_execution": false}'
+    _reseal_legacy_metadata(members)
+    legacy = tmp_path / stage_release.LEGACY_ARCHIVE_NAME
+    output = tmp_path / stage_release.STAGE_NEUTRAL_ARCHIVE_NAME
+    _write_legacy_package(legacy, members)
+    with pytest.raises(ValueError, match="duplicate JSON keys"):
+        stage_release.repackage_stage_neutral_windows_release(
+            legacy, output, expected_source_sha=SOURCE_SHA,
+        )
+    assert not output.exists()
+
+
+def test_stage_release_accepts_valid_canonical_metadata() -> None:
+    payload = b'{"build":{"name":"Autosport"},"real_money_execution":false}'
+    assert stage_release._decode_json_object(payload, "BUILD_INFO.json") == {
+        "build": {"name": "Autosport"},
+        "real_money_execution": False,
+    }

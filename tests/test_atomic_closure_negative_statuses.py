@@ -1613,3 +1613,36 @@ def test_r135_structured_gate_failure_blocks_aggregate_parent_done(tmp_path):
         .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
                  "| 2В | Native STOP | DONE — merged |"))
     rejected(tmp_path, registry, atomic)
+
+# r140: OOM termination is a failed runner/process, even when a wrapper
+# emitted an earlier PASS. Kubernetes reports OOMKilled without SIG* or an
+# exit code; hosted Windows/Linux wrappers may say "killed by OOM killer".
+@pytest.mark.parametrize('summary', [
+    'Windows Candidate: PASS; OOMKilled',
+    'Windows Candidate: PASS; process killed by OOM killer',
+    'Windows Candidate: PASS; process killed by the OOM killer',
+    'Windows Candidate: PASS (OOMKilled)',
+])
+def test_r140_current_oom_termination_never_certifies_done(summary):
+    assert not module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+
+@pytest.mark.parametrize('summary', [
+    'previous Windows Candidate: OOMKilled repaired',
+    'historical Windows Candidate: process killed by OOM killer, fixed',
+    'Windows Candidate: PASS (previous OOMKilled repaired)',
+])
+def test_r140_historical_repaired_oom_not_current_failure(summary):
+    assert module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+
+def test_r140_oom_termination_blocks_parent_done(tmp_path):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = (ATOMIC
+        .replace('| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+                 '| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: PASS; OOMKilled |')
+        .replace('| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+                 '| 2Б | Navigation | DONE — merged |')
+        .replace('| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+                 '| 2В | Native STOP | DONE — merged |'))
+    rejected(tmp_path, registry, atomic)

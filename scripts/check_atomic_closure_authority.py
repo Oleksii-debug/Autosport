@@ -1158,6 +1158,22 @@ def _is_terminal_done(value: str) -> bool:
         clause = clause.strip()
         if historical_label.match(clause):
             continue
+        # OOM termination is an unsuccessful runner/process outcome even if
+        # the wrapper printed PASS first. Kubernetes may report OOMKilled
+        # without a signal/exit code; other runners spell out the OOM killer.
+        # An explicitly repaired historical parenthetical is not current CI.
+        oom_context = re.sub(
+            r"\(\s*(?:previous|historical|formerly)\b[^)]{0,200}"
+            r"\b(?:fixed|repaired|resolved)\s*\)",
+            "", clause, flags=re.IGNORECASE,
+        )
+        if re.search(
+            r"\b(?:OOMKilled|(?:process\s+)?killed\s+by\s+"
+            r"(?:the\s+)?OOM\s+killer)\b",
+            oom_context, re.IGNORECASE,
+        ):
+            independent_process_failure = True
+            break
         # Standalone outcomes must begin their clause, not appear inside
         # narrative about a repaired failure.
         standalone = process_exit.match(clause)

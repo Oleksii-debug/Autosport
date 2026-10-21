@@ -144,3 +144,15 @@ def test_external_uia_duplicate_scan_does_not_accept_partial_enumeration() -> No
         "return $foundMatches"
     )
     assert "$matchedElements.Count -gt 1" in audit
+
+
+def test_external_uia_export_never_includes_untrusted_exception_messages() -> None:
+    """Machine/JSON/console evidence must not echo UIA/COM exception details."""
+    audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+
+    assert "Exception.Message" not in audit
+    assert "$_.Exception.GetType().Name" not in audit
+    assert 'automation_id=330: manual calculation dialog activation failed' in audit
+    assert "external UIA audit failed: unexpected automation error" in audit
+    assert "if ($report.status -ne 'PASS')" in audit
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in audit

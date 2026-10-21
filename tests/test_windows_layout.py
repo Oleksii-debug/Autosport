@@ -235,6 +235,45 @@ def test_shell_open_disables_stale_destroyed_native_targets():
     assert app.shell_open_button.state == "disabled"
 
 
+def test_shell_open_fails_closed_for_invalid_surface_selection():
+    class SurfaceKey:
+        value = "paper_bank"
+
+        def get(self):
+            return self.value
+
+    class OpenButton:
+        def __init__(self):
+            self.state = None
+
+        def configure(self, **kwargs):
+            self.state = kwargs["state"]
+
+    class App:
+        def __init__(self):
+            self.shell_surface_key = SurfaceKey()
+            self.shell_open_button = OpenButton()
+            self.bank_summary = object()
+
+    app = App()
+    healthy_widget = app.bank_summary
+    assert _surface_target_widget(app, "paper_bank") is healthy_widget
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "normal"
+
+    for malformed in ("unknown-surface", "", None, [], {}, 1, True):
+        assert _surface_target_widget(app, malformed) is None
+        app.shell_surface_key.value = malformed
+        refresh_windows_shell_open_availability(app)
+        assert app.shell_open_button.state == "disabled"
+
+    # The stale selection did not poison the legitimate PAPER navigation.
+    app.shell_surface_key.value = "paper_bank"
+    assert _surface_target_widget(app, "paper_bank") is healthy_widget
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "normal"
+
+
 def test_owner_economic_creation_is_closed_for_strategies_without_goal_aware_sizing():
     class App:
         workspace = "."

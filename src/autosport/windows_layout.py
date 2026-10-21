@@ -221,7 +221,14 @@ def compact_surface_heights(app: Any) -> None:
 
 def _surface_target_widget(app: Any, surface_key: str) -> Any | None:
     """Return only a live target exposed by the current native product shell."""
-    target_name = SURFACE_BY_KEY[surface_key].target_widget
+    # The selected key can outlive a rebuilt shell or arrive from a stale
+    # presentation bridge. A malformed key must never crash native navigation.
+    if type(surface_key) is not str:
+        return None
+    surface = SURFACE_BY_KEY.get(surface_key)
+    if surface is None:
+        return None
+    target_name = surface.target_widget
     if target_name is None:
         return None
     widget = getattr(app, target_name, None)

@@ -30,7 +30,7 @@ class OneShotLearningStatusWorker:
             return self._busy
 
     def start(self, workspace: Path) -> bool:
-        if type(workspace) is not Path or not workspace.is_absolute():
+        if not isinstance(workspace, Path) or not workspace.is_absolute():
             return False
         with self._lock:
             if self._busy:

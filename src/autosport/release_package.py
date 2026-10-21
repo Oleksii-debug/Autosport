@@ -437,6 +437,7 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "pyproject.toml",
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
+    "src/autosport/release_sbom.py",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
 })

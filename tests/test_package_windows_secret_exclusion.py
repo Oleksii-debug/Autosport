@@ -76,6 +76,10 @@ def test_safe_static_templates_and_product_files_remain_allowed(path: str) -> No
         (".mypy_cache/status.json", "test/build state directory"),
         (".ruff_cache/file", "test/build state directory"),
         (".tox/py311/state", "test/build state directory"),
+        (".hypothesis/examples/123", "test/build state directory"),
+        (".nox/tests/bin/python", "test/build state directory"),
+        ("reports/htmlcov/index.html", "test/build state directory"),
+        ("REPORTS/HTMLCOV/status.json", "test/build state directory"),
         ("reports/.coverage", "test/build state file"),
         ("reports/.coverage.parallel", "test/build state file"),
         ("reports/coverage.xml", "test/build state file"),
@@ -149,7 +153,10 @@ def test_tracked_secret_artifact_fails_before_static_materialization(
 
 @pytest.mark.parametrize(
     "path",
-    ["__pycache__/cached.pyc", ".pytest_cache/v/cache/nodeids", "reports/.coverage"],
+    [
+        "__pycache__/cached.pyc", ".pytest_cache/v/cache/nodeids", "reports/.coverage",
+        ".hypothesis/examples/123", ".nox/tests/state", "reports/htmlcov/index.html",
+    ],
 )
 def test_tracked_test_state_rejected_before_static_payload_materialization(
     tmp_path: Path, path: str

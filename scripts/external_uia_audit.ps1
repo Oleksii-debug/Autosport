@@ -1593,10 +1593,10 @@ try {
         $childStats = Get-SemanticChildStats -Element $element -AllowedTypes @($spec.child_types)
         $record = [ordered]@{
             key = $spec.key
-            automation_id = [string]$element.Current.AutomationId
+            automation_id = [string]$spec.automation_id
             expected_name = $spec.name
-            name = $currentName
-            control_type = $controlType
+            name = $(if ($currentName -ceq [string]$spec.name) { [string]$spec.name } else { '[redacted mismatch]' })
+            control_type = $(if ($controlType -ceq [string]$spec.expected_control_type) { [string]$spec.expected_control_type } else { '[redacted mismatch]' })
             expected_control_type = $spec.expected_control_type
             keyboard_focusable = $focusable
             keyboard_focus_required_by_external_gate = [bool]$spec.require_external_focus
@@ -1612,10 +1612,10 @@ try {
         $report.controls += $record
 
         if ($currentName -ne $spec.name) {
-            $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch expected='$($spec.name)' actual='$currentName'"
+            $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch"
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$spec.expected_control_type) -and $controlType -ne [string]$spec.expected_control_type) {
-            $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch expected='$($spec.expected_control_type)' actual='$controlType'"
+            $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch"
         }
         if ([bool]$spec.require_external_focus -and -not $focusable) {
             $report.failures += "automation_id=$($spec.automation_id): not externally keyboard-focusable"
@@ -1888,6 +1888,27 @@ try {
                 }
             } catch {}
         }
+    }
+    # Keep UIA validation in memory; scrub provider-controlled names and
+    # workspace paths before either PASS or FAIL is serialized to JSON/stdout.
+    foreach ($field in @(
+        'launch_working_directory',
+        'runtime_witness_path',
+        'emergency_stop_journal_path',
+        'root_name',
+        'duplicate_launch_dialog_title',
+        'emergency_stop_status_text',
+        'live_region_event_text',
+        'runtime_browser_version'
+    )) {
+        if ($null -ne $report[$field]) {
+            $report[$field] = '[redacted]'
+        }
+    }
+    if ($null -ne $report.live_region_event_automation_id) {
+        $report.live_region_event_automation_id = if (
+            $report.live_region_event_automation_id -ceq 'emergency-stop-status'
+        ) { 'emergency-stop-status' } else { '[redacted mismatch]' }
     }
     $report | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $Output -Encoding utf8
 }

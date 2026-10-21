@@ -2,7 +2,7 @@
 from pathlib import Path
 
 from autosport.windows_webview_shell import AutosportWebController
-from autosport.strategy_registry import strategy_spec
+from autosport.strategies import strategy_spec
 
 WEB_ROOT = Path(__file__).resolve().parents[1] / "src" / "autosport" / "windows_web"
 

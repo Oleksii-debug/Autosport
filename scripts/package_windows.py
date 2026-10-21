@@ -56,6 +56,9 @@ _PRIVATE_KEY_CONTAINER_SUFFIXES = (".key", ".ppk", ".pfx", ".p12")
 
 _TEST_STATE_DIRECTORY_NAMES = frozenset({
     ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "__pycache__",
+    # Recorded property-based examples, nox environments and HTML coverage
+    # reports are test-run byproducts, not operator demonstration data.
+    ".hypothesis", ".nox", "htmlcov",
 })
 _TEST_STATE_BASENAMES = frozenset({
     ".coverage", "coverage.xml", ".testmondata", "pytestdebug.log",

@@ -309,6 +309,17 @@ def validate_embedded_executable_inventory(
             ):
                 raise ValueError("nested PYZ module names must be safe and sorted")
             last_module = name
+            # The outer CArchive private/test-state exclusion does not
+            # cover Python modules nested inside its PYZ. A releasable
+            # PAPER executable must not silently contain test frameworks
+            # or test packages merely because they were frozen as modules.
+            # Check exact dotted name segments, not substrings: e.g.
+            # "contest" and "hypothesis_engine" remain ordinary modules.
+            if any(
+                segment.casefold() in {"test", "tests", "pytest", "hypothesis", "nox"}
+                for segment in name.split(".")
+            ):
+                raise ValueError("nested PYZ contains non-release test modules")
             windows_name = name.casefold()
             if windows_name in windows_modules:
                 raise ValueError("nested PYZ module names collide on Windows")

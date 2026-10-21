@@ -457,3 +457,181 @@ def capture_embedded_executable_inventory(
             result, source_sha=source_sha, executable_sha256=digest.hexdigest(),
         )
         return result
+
+
+# This is a bounded copy of build-host distribution LICENSE/NOTICE text only.
+# Its evidence class deliberately does not claim that the distribution is
+# embedded in either executable or that the copyright/license is cleared.
+def validate_dependency_license_evidence(
+    manifest: dict[str, Any],
+    dependency_graph: dict[str, Any],
+    license_members: dict[str, bytes],
+) -> None:
+    import hashlib
+
+    if (
+        type(manifest) is not dict
+        or set(manifest) != {"schema_version", "source_sha", "evidence_class", "distributions"}
+        or type(manifest["schema_version"]) is not int
+        or manifest["schema_version"] != 1
+        or manifest["source_sha"] != dependency_graph.get("source_sha")
+        or manifest["evidence_class"] != "BUILD_HOST_LICENSE_TEXT_ONLY_NOT_CLEARANCE"
+        or type(dependency_graph.get("components")) is not list
+        or type(license_members) is not dict
+    ):
+        raise ValueError("distribution license evidence schema/source mismatch")
+    components = dependency_graph["components"]
+    if not (1 <= len(components) <= 256):
+        raise ValueError("license evidence has an invalid source graph")
+    expected = {item["name"]: item["version"] for item in components}
+    entries = manifest["distributions"]
+    if type(entries) is not list or len(entries) != len(expected):
+        raise ValueError("distribution license evidence is incomplete")
+    actual_members: set[str] = set()
+    total_bytes = 0
+    last = None
+    for item in entries:
+        if type(item) is not dict or set(item) != {"name", "version", "files", "license_review"}:
+            raise ValueError("distribution license entry schema is invalid")
+        name = item["name"]
+        if (
+            type(name) is not str or name not in expected
+            or (last is not None and name <= last)
+            or item["version"] != expected[name]
+        ):
+            raise ValueError("distribution license identity/order mismatch")
+        last = name
+        files = item["files"]
+        if type(files) is not list or len(files) > 16:
+            raise ValueError("distribution license file count is unbounded")
+        if item["license_review"] != (
+            "TEXT_PRESENT_REVIEW_REQUIRED" if files else "TEXT_ABSENT_REVIEW_REQUIRED"
+        ):
+            raise ValueError("distribution license evidence cannot claim clearance")
+        for index, record in enumerate(files):
+            if type(record) is not dict or set(record) != {"path", "sha256", "record_path"}:
+                raise ValueError("distribution license file entry is invalid")
+            path = f"licenses/{name}/{index:03d}.txt"
+            if record["path"] != path or path in actual_members:
+                raise ValueError("distribution license file path is ambiguous")
+            raw_path = record["record_path"]
+            if (
+                type(raw_path) is not str or not (1 <= len(raw_path) <= 512)
+                or "\\" in raw_path or raw_path.startswith("/")
+                or any(part in ("", ".", "..") for part in raw_path.split("/"))
+                or not any(part.endswith(".dist-info") for part in raw_path.split("/")[:-1])
+            ):
+                raise ValueError("distribution license origin path is unsafe")
+            digest = record["sha256"]
+            if type(digest) is not str or re.fullmatch("[0-9a-f]{64}", digest) is None:
+                raise ValueError("distribution license digest is invalid")
+            payload = license_members.get(path)
+            if type(payload) is not bytes or not (1 <= len(payload) <= 262144):
+                raise ValueError("distribution license text is missing or unbounded")
+            if b"\x00" in payload:
+                raise ValueError("distribution license text is not a text file")
+            total_bytes += len(payload)
+            if total_bytes > 8 * 1024 * 1024:
+                raise ValueError("distribution license evidence total size is unbounded")
+            if hashlib.sha256(payload).hexdigest() != digest:
+                raise ValueError("distribution license file hash mismatch")
+            actual_members.add(path)
+    if set(license_members) != actual_members:
+        raise ValueError("distribution license evidence includes unclaimed members")
+
+
+def capture_dependency_license_evidence(
+    dependency_graph: dict[str, Any],
+) -> tuple[dict[str, Any], dict[str, bytes]]:
+    """Capture safe distribution .dist-info license text from the build interpreter.
+
+    Missing/unknown files are represented as REVIEW_REQUIRED, not legal approval.
+    Source/binary attribution remains a separate Plan 6 §5Б acceptance gate.
+    """
+    import hashlib
+    import stat
+    from pathlib import Path
+
+    components = dependency_graph.get("components")
+    if (
+        type(components) is not list or not 1 <= len(components) <= 256
+        or type(dependency_graph.get("source_sha")) is not str
+        or re.fullmatch("[0-9a-f]{40}", dependency_graph["source_sha"]) is None
+    ):
+        raise ValueError("license capture requires a bounded source-bound graph")
+    members: dict[str, bytes] = {}
+    entries: list[dict[str, Any]] = []
+    total_bytes = 0
+    for component in components:
+        name, version = component["name"], component["version"]
+        if type(name) is not str or _normalize_name(name) != name:
+            raise ValueError("license capture distribution name is invalid")
+        try:
+            dist = metadata.distribution(name)
+        except metadata.PackageNotFoundError as exc:
+            raise ValueError("license capture distribution is not installed") from exc
+        actual_name = dist.metadata.get("Name")
+        if (
+            type(actual_name) is not str or _normalize_name(actual_name) != name
+            or dist.version != version
+        ):
+            raise ValueError("license capture distribution differs from source graph")
+        candidates = []
+        for entry in dist.files or ():
+            source_name = str(entry).replace("\\", "/")
+            parts = source_name.split("/")
+            leaf = parts[-1]
+            stem = leaf.split(".", 1)[0].upper()
+            allowed_name = (
+                leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+                or (
+                    stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+                    and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
+                )
+            )
+            if (
+                1 <= len(source_name) <= 512
+                and all(part not in ("", ".", "..") for part in parts)
+                and all(":" not in part and "\\x00" not in part for part in parts)
+                and any(part.endswith(".dist-info") for part in parts[:-1])
+                and allowed_name
+            ):
+                candidates.append((source_name, entry))
+        if len(candidates) > 16:
+            raise ValueError("distribution has unbounded license-file candidates")
+        files = []
+        for source_name, record in sorted(candidates):
+            path = Path(dist.locate_file(record))
+            try:
+                mode = path.lstat().st_mode
+                if not stat.S_ISREG(mode) or path.stat().st_size > 262144:
+                    raise ValueError("distribution license source is not a bounded regular file")
+                payload = path.read_bytes()
+            except OSError as exc:
+                raise ValueError("distribution license source became unavailable") from exc
+            if not (1 <= len(payload) <= 262144) or b"\x00" in payload:
+                raise ValueError("distribution license source is not bounded plain text")
+            total_bytes += len(payload)
+            if total_bytes > 8 * 1024 * 1024:
+                raise ValueError("distribution licenses exceed overall size budget")
+            member = f"licenses/{name}/{len(files):03d}.txt"
+            members[member] = payload
+            files.append({
+                "path": member,
+                "sha256": hashlib.sha256(payload).hexdigest(),
+                "record_path": source_name,
+            })
+        entries.append({
+            "name": name, "version": version, "files": files,
+            "license_review": (
+                "TEXT_PRESENT_REVIEW_REQUIRED" if files else "TEXT_ABSENT_REVIEW_REQUIRED"
+            ),
+        })
+    result = {
+        "schema_version": 1,
+        "source_sha": dependency_graph["source_sha"],
+        "evidence_class": "BUILD_HOST_LICENSE_TEXT_ONLY_NOT_CLEARANCE",
+        "distributions": entries,
+    }
+    validate_dependency_license_evidence(result, dependency_graph, members)
+    return result, members

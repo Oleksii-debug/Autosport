@@ -284,6 +284,19 @@
     }
   }
 
+  // A rejected durable save must not leave a different selected screen in the
+  // focused native selector. A lost response is UNKNOWN, not a rejection: leave
+  // that state for explicit reconciliation rather than inventing a rollback.
+  function reconcileRejectedSurfaceSelection(node, requestedKey, result, state) {
+    if (
+      result && result.status === "rejected"
+      && state && typeof state.surface_key === "string"
+      && node.value === requestedKey
+    ) {
+      node.value = state.surface_key;
+    }
+  }
+
   function ownerValues() {
     const values = {};
     document.querySelectorAll("[data-owner-field]").forEach((node) => {
@@ -744,8 +757,13 @@
     dispatch("product_runtime.stop");
   });
 
-  byId(301).addEventListener("change", () => {
-    dispatch("surface.select", { surface_key: byId(301).value });
+  byId(301).addEventListener("change", async () => {
+    const navigation = byId(301);
+    const requestedKey = navigation.value;
+    const result = await dispatch("surface.select", { surface_key: requestedKey });
+    // refreshState preserves a focused selector during ordinary polling, so
+    // explicitly undo only a confirmed rejection, not an UNKNOWN result.
+    reconcileRejectedSurfaceSelection(navigation, requestedKey, result, latestState);
   });
   byId(303).addEventListener("click", () => {
     focusOperatorTarget(byId(selectedSurfaceTarget()));

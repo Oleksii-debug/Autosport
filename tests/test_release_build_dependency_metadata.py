@@ -190,7 +190,9 @@ def test_binary_bound_inventory_roundtrip_and_missing_required_gate(tmp_path):
         require_embedded_executable_inventory=True,
     )["status"] == "PASS"
 
-    package_without_inventory = _packaging_fixture(tmp_path, manifest, None)
+    without_dir = tmp_path / "without-inventory"
+    without_dir.mkdir()
+    package_without_inventory = _packaging_fixture(without_dir, manifest, None)
     with pytest.raises(ValueError, match="missing embedded executable inventory"):
         verify_windows_package(
             package_without_inventory, expected_source_sha=SHA,

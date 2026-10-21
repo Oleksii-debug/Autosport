@@ -160,6 +160,35 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_combined_window_descriptions_reject_secondary_provider_strategy(self):
+        # A valid main window must not mask an untrusted owner dialog or
+        # manual workbench description when all controls look otherwise valid.
+        root = self._passing_description()
+        extra = SimpleNamespace(
+            strategy=_Named("PROVIDED"),
+            widgets=(),
+            provider_trouble=(),
+            providers_stood_down_because=None,
+        )
+        self.assertEqual(
+            self._summarize(accessibility_audit._combined_description(root, extra))["status"],
+            "PASS",
+        )
+        secret_marker = "SYNTHETIC_PRIVATE_PROVIDER_STRATEGY"
+        for bad_strategy in (None, _Named(secret_marker), _Named("PROVIDER")):
+            with self.subTest(strategy=type(bad_strategy).__name__):
+                extra.strategy = bad_strategy
+                merged = accessibility_audit._combined_description(root, extra)
+                report = self._summarize(merged)
+                serialized = json.dumps(report, ensure_ascii=False)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertEqual(report["strategy"], "UNRECOGNIZED")
+                self.assertIn("unrecognized accessibility audit provider strategy", report["failures"])
+                self.assertNotIn(secret_marker, serialized)
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+                self.assertFalse(report["real_money_execution"])
+
     def test_old_provider_label_is_not_a_real_tk_uia_strategy(self):
         # tk-uia 0.8.0's enum is PROVIDED, not PROVIDER; a typo must fail.
         description = self._passing_description()

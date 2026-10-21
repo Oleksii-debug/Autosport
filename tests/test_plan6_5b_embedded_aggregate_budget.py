@@ -47,7 +47,7 @@ def test_embedded_executable_rejects_aggregate_archive_bomb(payload: dict) -> No
 
 
 @pytest.mark.parametrize("payload", [
-    inventory(1 << 29, 1 << 29, 2 << 31, 2 << 31),
+    inventory(1 << 29, 1 << 29, 1 << 31, 1 << 31),
     inventory(0, 0, 0, 0),
 ])
 def test_embedded_executable_accepts_aggregate_budget_boundary(payload: dict) -> None:

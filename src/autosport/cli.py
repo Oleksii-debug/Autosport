@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
+import zipfile
 from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
@@ -568,7 +569,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "backup-workspace":
         try:
             report = backup_workspace(args.workspace or default_workspace(), args.output)
-        except (WorkspaceBackupError, OSError, RuntimeError, ValueError):
+        except (WorkspaceBackupError, OSError, RuntimeError, ValueError, TypeError, EOFError, zipfile.BadZipFile, zipfile.LargeZipFile):
             print("backup=FAIL_CLOSED reason=unsafe_workspace_or_archive")
             return 3
         print(f"backup=OK files={report['file_count']} bytes={report['total_bytes']} sha256={report['archive_sha256']} private_data=true")
@@ -576,7 +577,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "restore-workspace":
         try:
             report = restore_workspace(args.archive, args.destination)
-        except (WorkspaceBackupError, OSError, RuntimeError, ValueError):
+        except (WorkspaceBackupError, OSError, RuntimeError, ValueError, TypeError, EOFError, zipfile.BadZipFile, zipfile.LargeZipFile):
             print("restore=FAIL_CLOSED reason=unsafe_workspace_or_archive")
             return 3
         print(f"restore=OK files={report['file_count']} bytes={report['total_bytes']} private_data=true real_money_execution=false")

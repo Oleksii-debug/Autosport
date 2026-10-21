@@ -160,6 +160,33 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_whitespace_and_malformed_critical_accessible_names_fail_closed(self):
+        for bad_name in (" \t\u00a0", object()):
+            with self.subTest(name_type=type(bad_name).__name__):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == AUTOMATION_IDS["run_replay"]
+                )
+                target.name = bad_name
+                report = self._summarize(description)
+
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={AUTOMATION_IDS['run_replay']}: missing accessible name",
+                    report["failures"],
+                )
+                # Machine-readable evidence must remain serializable when a
+                # malformed provider does not return a text UIA Name.
+                json.dumps(report, ensure_ascii=False)
+                found = next(
+                    control for control in report["critical_controls"]
+                    if control["automation_id"] == AUTOMATION_IDS["run_replay"]
+                )
+                self.assertIsInstance(found["name"], str)
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+
     def test_duplicate_critical_automation_id_fails_closed_without_overwrite(self):
         description = self._passing_description()
         original = next(

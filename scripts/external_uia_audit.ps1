@@ -148,6 +148,7 @@ function Find-UiaElementsForProcessFamily {
         $AutomationId
     )
     $foundMatches = @()
+    $scanFailed = $false
     try {
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         $windows = $desktop.FindAll(
@@ -170,16 +171,20 @@ function Find-UiaElementsForProcessFamily {
                             $foundMatches += $item
                         }
                     } catch {
-                        # A stale UIA node must never be assumed to be a valid match.
+                        # Partial enumeration could hide a duplicate critical ID.
+                        $scanFailed = $true
                     }
                 }
             } catch {
-                # A window can disappear while the provider refreshes.
+                # A disappearing window invalidates completeness of this scan.
+                $scanFailed = $true
             }
         }
     } catch {
-        # A failed UIA scan does not create PASS: the caller requires exactly one.
+        # Never return one apparent match from an incomplete UIA scan.
+        $scanFailed = $true
     }
+    if ($scanFailed) { return @() }
     return $foundMatches
 }
 

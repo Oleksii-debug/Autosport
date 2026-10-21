@@ -26,6 +26,7 @@ Usage:
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
   Autosport-Data.exe observe-continuous [autosport-observe-continuous arguments]
   Autosport-Data.exe run-product [autosport-product arguments]
+  Autosport-Data.exe diagnose-update <local-request.json>  (read-only signed preflight; never installs)
   Autosport-Data.exe install-release --archive <release.zip> --destination <new-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe verify-installed-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe uninstall-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
@@ -45,6 +46,7 @@ Commands:
   compare-strategies         Compare compatible completed paper strategy runs on the same sealed replay identity.
   observe-continuous         Run the existing canonical bounded read-only observation service; network opt-in, environment credentials, durable status and stop semantics remain owned by autosport.continuous_observation.
   run-product                Run the existing canonical autonomous product runtime through autosport.product_entrypoint; arguments and exit status are delegated unchanged.
+  diagnose-update            Run the canonical signed offline Windows update preflight and migration preview. This never installs or authorizes an update.
   install-release           Install verified canonical PAPER release to a NEW folder using independent SHA anchors, without replacing existing files.
   verify-installed-release  Compare installed PAPER files and receipt to the independently pinned original release ZIP.
   uninstall-release         Remove only a fully matching inventoried PAPER release, refusing unowned user data or modified files.
@@ -107,6 +109,10 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.product_entrypoint import main as product_main
 
         return product_main(forwarded)
+    if command == "diagnose-update":
+        from autosport.windows_update_cli import main as update_diagnostic_main
+
+        return update_diagnostic_main(forwarded)
     if command == "install-release":
         from autosport.offline_release_install import main as installer_main
 

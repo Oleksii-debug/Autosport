@@ -36,17 +36,28 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
             )
         return destination, digest
 
-    def _verify(self, directory: Path, digest: str) -> dict:
-        return lifecycle.inspect_installed_release(
-            directory, expected_source_sha=self.SOURCE,
-            expected_package_sha256=digest,
+    def _trusted_verifier(self, digest: str):
+        return patch.object(
+            lifecycle.release_package, "verify_windows_package",
+            return_value={"status": "PASS", "source_sha": self.SOURCE,
+                          "package_sha256": digest},
         )
 
+    def _verify(self, directory: Path, digest: str) -> dict:
+        with self._trusted_verifier(digest):
+            return lifecycle.inspect_installed_release(
+                directory, archive=directory.parent / "source.zip",
+                expected_source_sha=self.SOURCE,
+                expected_package_sha256=digest,
+            )
+
     def _uninstall(self, directory: Path, digest: str) -> dict:
-        return lifecycle.uninstall_verified_release(
-            directory, expected_source_sha=self.SOURCE,
-            expected_package_sha256=digest,
-        )
+        with self._trusted_verifier(digest):
+            return lifecycle.uninstall_verified_release(
+                directory, archive=directory.parent / "source.zip",
+                expected_source_sha=self.SOURCE,
+                expected_package_sha256=digest,
+            )
 
     def test_verifies_only_exact_pinned_installed_bytes(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -69,6 +80,27 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
             self.assertFalse(directory.exists())
             self.assertTrue((root / "source.zip").exists())
             self.assertFalse(list(root.glob(".autosport-uninstall-*")))
+
+    def test_forged_receipt_cannot_authorize_deletion_of_owner_file(self):
+        """An installed receipt can never enlarge independently pinned ZIP inventory."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory, digest = self._installed(root)
+            private = directory / "owner-bankroll-secret.db"
+            private.write_bytes(b"preserve_owner_bytes")
+            receipt_path = directory / ".autosport-installed-release.json"
+            receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+            receipt["files"][private.name] = hashlib.sha256(private.read_bytes()).hexdigest()
+            receipt_path.write_text(
+                json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+                encoding="utf-8",
+            )
+            with self.assertRaisesRegex(
+                install.OfflineInstallError, "inventory differs from original release"
+            ):
+                self._uninstall(directory, digest)
+            self.assertEqual(private.read_bytes(), b"preserve_owner_bytes")
+            self.assertTrue((directory / "Autosport.exe").is_file())
 
     def test_rejects_unowned_user_data_without_uninstall(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -94,7 +126,7 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             directory, digest = self._installed(root)
-            with self.assertRaisesRegex(install.OfflineInstallError, "trusted anchors"):
+            with self.assertRaisesRegex(install.OfflineInstallError, "original release archive"):
                 self._uninstall(directory, "f" * 64)
             self.assertTrue(directory.exists())
 
@@ -155,16 +187,17 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
             root = Path(tmp)
             directory, digest = self._installed(root)
             common = [
+                "--archive", str(root / "source.zip"),
                 "--destination", str(directory),
                 "--source-sha", self.SOURCE,
                 "--package-sha256", digest,
             ]
             output = StringIO()
-            with redirect_stdout(output):
+            with self._trusted_verifier(digest), redirect_stdout(output):
                 self.assertEqual(cli_main(["verify-installed-release", *common]), 0)
             self.assertEqual(json.loads(output.getvalue())["status"], "VERIFIED")
             output = StringIO()
-            with redirect_stdout(output):
+            with self._trusted_verifier(digest), redirect_stdout(output):
                 self.assertEqual(cli_main(["uninstall-release", *common]), 0)
             self.assertEqual(json.loads(output.getvalue())["status"], "UNINSTALLED")
             self.assertFalse(directory.exists())
@@ -180,9 +213,10 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
             marker = "private_value_must_not_be_returned"
             (directory / "private-extra.txt").write_text(marker)
             output = StringIO()
-            with redirect_stdout(output):
+            with self._trusted_verifier(digest), redirect_stdout(output):
                 status = cli_main([
-                    "uninstall-release", "--destination", str(directory),
+                    "uninstall-release", "--archive", str(root / "source.zip"),
+                    "--destination", str(directory),
                     "--source-sha", self.SOURCE, "--package-sha256", digest,
                 ])
             self.assertEqual(status, 3)

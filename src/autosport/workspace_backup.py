@@ -191,6 +191,9 @@ def _validated_members(source: Path) -> tuple[list[tuple[str, bytes]], int]:
         for name in names:
             if name != _MANIFEST:
                 _safe_relative(name)
+        # Reject an oversized declared manifest before decompressing untrusted ZIP data.
+        if archive.getinfo(_MANIFEST).file_size > 512 * 1024:
+            raise WorkspaceBackupError("oversized backup manifest")
         raw_manifest = archive.read(_MANIFEST)
         if len(raw_manifest) > 512 * 1024:
             raise WorkspaceBackupError("oversized backup manifest")

@@ -479,6 +479,36 @@ def capture_embedded_executable_inventory(
         return result
 
 
+def _owned_distribution_license_record(record_path: str, name: str, version: str) -> bool:
+    if (
+        type(record_path) is not str or not (1 <= len(record_path) <= 512)
+        or record_path.startswith(("/", "\\")) or "\\" in record_path
+        or any(ord(character) < 32 or ord(character) == 127 for character in record_path)
+    ):
+        return False
+    parts = record_path.split("/")
+    if len(parts) < 2 or any(not part or part in (".", "..") or ":" in part for part in parts):
+        return False
+    folder = parts[0]
+    if not folder.endswith(".dist-info") or "-" not in folder[:-10]:
+        return False
+    distribution_name, distribution_version = folder[:-10].rsplit("-", 1)
+    try:
+        if _normalize_name(distribution_name) != name or distribution_version != version:
+            return False
+    except ValueError:
+        return False
+    leaf = parts[-1]
+    stem = leaf.split(".", 1)[0].upper()
+    return (
+        leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+        or (
+            stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+            and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
+        )
+    )
+
+
 # This is a bounded copy of build-host distribution LICENSE/NOTICE text only.
 # Its evidence class deliberately does not claim that the distribution is
 # embedded in either executable or that the copyright/license is cleared.
@@ -539,7 +569,7 @@ def validate_dependency_license_evidence(
                 type(raw_path) is not str or not (1 <= len(raw_path) <= 512)
                 or "\\" in raw_path or raw_path.startswith("/")
                 or any(part in ("", ".", "..") for part in raw_path.split("/"))
-                or not any(part.endswith(".dist-info") for part in raw_path.split("/")[:-1])
+                or not _owned_distribution_license_record(raw_path, name, item["version"])
             ):
                 raise ValueError("distribution license origin path is unsafe")
             digest = record["sha256"]
@@ -659,6 +689,8 @@ def capture_dependency_license_evidence(
                 and any(part.endswith(".dist-info") for part in parts[:-1])
                 and allowed_name
             ):
+                if not _owned_distribution_license_record(source_name, name, version):
+                    raise ValueError("distribution license RECORD origin mismatches owner/version")
                 candidates.append((source_name, entry))
         if len(candidates) > 16:
             raise ValueError("distribution has unbounded license-file candidates")

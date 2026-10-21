@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 from autosport.release_sbom import capture_direct_installed_dependencies
 from autosport.release_dependency_graph import capture_build_host_dependency_graph
+from autosport.release_embedded_inventory import capture_pyinstaller_member_catalog
 from autosport.release_package import (
     _require_git_commit_sha,
     build_windows_package,
@@ -693,6 +694,7 @@ _RELEASE_SOURCE_INPUTS = (
     "src/autosport/workspace_lock.py",
     "src/autosport/monotonic_workspace_authority.py",
     "src/autosport/release_dependency_graph.py",
+    "src/autosport/release_embedded_inventory.py",
     "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
@@ -760,6 +762,7 @@ def main() -> int:
     source_manifest = _source_declaration_manifest(repo_root, args.source_sha)
     dependency_metadata = capture_direct_installed_dependencies(source_manifest)
     dependency_graph = capture_build_host_dependency_graph(source_manifest)
+    embedded_inventory = capture_pyinstaller_member_catalog(args.exe, args.source_sha)
 
     with tempfile.TemporaryDirectory(prefix="autosport-package-inputs-") as snapshot_root:
         snapshot_dir = Path(snapshot_root)
@@ -820,6 +823,7 @@ def main() -> int:
             source_manifest=source_manifest,
             dependency_metadata=dependency_metadata,
             dependency_graph=dependency_graph,
+            embedded_inventory=embedded_inventory,
         )
         binding = bind_portable_data_tool(
             output,
@@ -833,6 +837,7 @@ def main() -> int:
         require_source_manifest=True,
         require_dependency_metadata=True,
         require_dependency_graph=True,
+        require_embedded_inventory=True,
     )
     package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(output)

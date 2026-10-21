@@ -215,7 +215,7 @@ def summarize_description(
     controls: dict[int, dict[str, Any]] = {}
     failures: list[str] = []
     strategy = _enum_name(description.strategy)
-    if strategy != "PROVIDER":
+    if strategy != "PROVIDED":
         failures.append("unrecognized accessibility audit provider strategy")
 
     for widget in description.widgets:
@@ -324,7 +324,7 @@ def summarize_description(
 
     return {
         "status": "PASS" if not failures else "FAIL",
-        "strategy": "PROVIDER" if strategy == "PROVIDER" else "UNRECOGNIZED",
+        "strategy": "PROVIDED" if strategy == "PROVIDED" else "UNRECOGNIZED",
         "critical_controls": [controls[key] for key in sorted(controls)],
         "failures": failures,
         "provider_trouble": provider_trouble,

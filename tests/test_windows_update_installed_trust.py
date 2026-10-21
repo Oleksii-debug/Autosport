@@ -795,3 +795,48 @@ def test_installed_trust_rejects_nonlocal_or_ambiguous_path_before_filesystem_ac
     monkeypatch.setattr(trust_module, "_source_parent_identity", forbidden_parent_probe)
     with pytest.raises(InstalledWindowsTrustError):
         load_pinned_installed_update_authority(unsafe, expected_manifest_sha256="a" * 64)
+
+
+def test_installed_manifest_fdopen_and_close_failure_stays_sanitized(tmp_path, monkeypatch):
+    """A secondary close-wrapper failure cannot expose installed trust paths."""
+    import os
+    import traceback
+    from autosport import windows_update_installed_trust as module
+
+    manifest = tmp_path / "особисті дані" / "installed.json"
+    manifest.parent.mkdir()
+    data = _bytes()
+    manifest.write_bytes(data)
+    real_open, real_fdopen, real_close = os.open, os.fdopen, os.close
+    owned = []
+
+    def capture_open(path, *args, **kwargs):
+        fd = real_open(path, *args, **kwargs)
+        if os.fspath(path) == os.fspath(manifest):
+            owned.append(fd)
+        return fd
+
+    def fail_fdopen(fd, *args, **kwargs):
+        if owned and fd == owned[-1]:
+            raise OSError("PRIVATE_MANIFEST_PATH fdopen failed")
+        return real_fdopen(fd, *args, **kwargs)
+
+    def close_then_fail(fd):
+        real_close(fd)
+        if owned and fd == owned[-1]:
+            raise RuntimeError("PRIVATE_CLOSE_PATH close wrapper failed")
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module.os, "open", capture_open)
+        patch.setattr(module.os, "fdopen", fail_fdopen)
+        patch.setattr(module.os, "close", close_then_fail)
+        with pytest.raises(module.InstalledWindowsTrustError, match="could not be read") as error:
+            module.load_pinned_installed_update_authority(
+                manifest, expected_manifest_sha256=hashlib.sha256(data).hexdigest()
+            )
+    assert len(owned) == 1
+    with pytest.raises(OSError):
+        os.fstat(owned[0])
+    formatted = "".join(traceback.format_exception(error.value))
+    assert "PRIVATE_MANIFEST_PATH" not in formatted
+    assert "PRIVATE_CLOSE_PATH" not in formatted

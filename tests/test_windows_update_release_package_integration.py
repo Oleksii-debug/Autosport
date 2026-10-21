@@ -1,8 +1,8 @@
 """Run in full Autosport repository after release_package integration patch.
 
 These tests deliberately exercise the *real* canonical ZIP writer/verifier,
-not a mocked package report. In the standalone A3 checkpoint, that existing
-module is absent; full-repository CI must execute this suite before merge.
+not a mocked package report. The canonical release writer is mandatory:
+missing it is a collection failure, never a skipped acceptance gate.
 """
 
 from __future__ import annotations
@@ -13,7 +13,9 @@ from pathlib import Path
 
 import pytest
 
-release_package = pytest.importorskip("autosport.release_package")
+# This is an acceptance gate, not an optional standalone smoke test.
+# A missing canonical writer must fail CI rather than silently skip 15 cases.
+from autosport import release_package
 from autosport.windows_update_snapshot import (  # noqa: E402
     pinned_windows_update_package,
     verify_pinned_release_package,
@@ -275,8 +277,15 @@ def test_real_release_without_update_identity_cannot_be_signed_into_update(tmp_p
     from autosport.windows_update_preflight import (
         WindowsUpdatePreflightError, preflight_signed_windows_update,
     )
-    args, _package, _installed, private = _signed_real_release_case(tmp_path)
-    legacy = _build(tmp_path)
+    args, signed_package, _installed, private = _signed_real_release_case(tmp_path)
+    signed_bytes = signed_package.read_bytes()
+    # Keep the signed candidate immutable while building a separate legacy
+    # package. Reusing tmp_path overwrote the candidate and made this negative
+    # admission test fail at fixture setup before reaching the real verifier.
+    legacy_root = tmp_path / "legacy release"
+    legacy_root.mkdir()
+    legacy = _build(legacy_root)
+    assert signed_package.read_bytes() == signed_bytes
     args["expected_package_sha256"] = hashlib.sha256(legacy.read_bytes()).hexdigest()
     from autosport.windows_update_signature import _signed_statement
     args["signature"] = private.sign(_signed_statement(

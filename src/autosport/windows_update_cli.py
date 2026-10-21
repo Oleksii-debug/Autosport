@@ -9,6 +9,7 @@ No command here downloads, installs, signs or updates.
 from __future__ import annotations
 
 import argparse
+from contextlib import contextmanager
 import json
 import os
 import re
@@ -114,6 +115,32 @@ def _open_request_fd(path: Path) -> int:
         raise UpdateCliError("request file could not be safely opened") from None
 
 
+
+@contextmanager
+def _owned_request_fd(path: Path):
+    """Own the request descriptor without masking cancellation on cleanup.
+
+    A native/CRT close wrapper may raise a path-bearing non-OSError after
+    releasing its handle. On normal exit, this invalidates the diagnostic;
+    during KeyboardInterrupt/SystemExit or another primary failure, preserve
+    that original exception. Never print a native exception or its context.
+    """
+    fd = _open_request_fd(path)
+    try:
+        yield fd
+    except BaseException:
+        try:
+            os.close(fd)
+        except Exception:
+            pass
+        raise
+    else:
+        try:
+            os.close(fd)
+        except Exception:
+            raise UpdateCliError("request descriptor close failed") from None
+
+
 def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]:
     # Reject path subclasses before __str__/__fspath__ can execute callbacks.
     # This is a direct-call boundary as well as the CLI parser.
@@ -129,8 +156,7 @@ def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]
     # Capture pathname identity BEFORE opening. A held descriptor alone does
     # not prove the user-selected path still identifies that same request.
     entry_before = _request_identity(path.lstat())
-    fd = _open_request_fd(path)
-    try:
+    with _owned_request_fd(path) as fd:
         before = _request_identity(os.fstat(fd))
         before_change = _native_change_time_100ns(fd)
         if before != entry_before:
@@ -150,8 +176,6 @@ def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]
             or len(data) != before[2]
         ):
             raise UpdateCliError("request changed while being read")
-    finally:
-        os.close(fd)
     try:
         result = json.loads(
             data.decode("utf-8", "strict"), object_pairs_hook=_no_duplicate_keys,
@@ -177,8 +201,7 @@ def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]
     # without following the final symlink and recheck the original handle's
     # ChangeTime before the parsed request can authorize even a diagnostic.
     # This remains a consistency guard, not an installer-grade atomic lock.
-    postparse_fd = _open_request_fd(path)
-    try:
+    with _owned_request_fd(path) as postparse_fd:
         postparse_opened = _request_identity(os.fstat(postparse_fd))
         postparse_change = _native_change_time_100ns(postparse_fd)
         postparse_entry = _request_identity(path.lstat())
@@ -190,8 +213,6 @@ def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]
             or _source_parent_identity(path) != parents_before
         ):
             raise UpdateCliError("request changed after parsing")
-    finally:
-        os.close(postparse_fd)
     # Return the final post-parse witness *with* the parsed bytes. Capturing
     # a new baseline in run() would leave a gap: the operator path could be
     # replaced between parsing and the first downstream consistency check.
@@ -211,8 +232,7 @@ def _request_witness(path: Path) -> _RequestWitness:
     _reject_redirected_path(path)
     parents = _source_parent_identity(path)
     entry = _request_identity(path.lstat())
-    fd = _open_request_fd(path)
-    try:
+    with _owned_request_fd(path) as fd:
         opened = _request_identity(os.fstat(fd))
         changed = _native_change_time_100ns(fd)
         leaf = _request_identity(path.lstat())
@@ -220,8 +240,6 @@ def _request_witness(path: Path) -> _RequestWitness:
         if (entry != opened or leaf != entry
                 or _source_parent_identity(path) != parents):
             raise UpdateCliError("request changed during consistency witness")
-    finally:
-        os.close(fd)
     return parents, opened, changed
 
 

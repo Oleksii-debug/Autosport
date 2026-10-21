@@ -161,7 +161,9 @@ def _open_windows_archive_fd(path: str | Path) -> int:
             # rejection that a caller could silently retry.
             try:
                 close(handle)
-            except (OSError, ValueError, TypeError):
+            except Exception:
+                # Cleanup failure must not replace the original cancellation
+                # or leak a native wrapper diagnostic containing a private path.
                 pass
             if not isinstance(exc, Exception):
                 raise
@@ -169,7 +171,7 @@ def _open_windows_archive_fd(path: str | Path) -> int:
         return fd
     except WindowsUpdateSnapshotError:
         raise
-    except (ImportError, OSError, AttributeError, ValueError, TypeError, RuntimeError):
+    except (ImportError, OSError, AttributeError, ValueError, TypeError, RuntimeError, OverflowError):
         raise WindowsUpdateSnapshotError("Windows update handle unavailable") from None
 
 
@@ -199,7 +201,10 @@ def _owned_fd_stream(fd: int) -> Iterator[object]:
     except BaseException:
         try:
             os.close(fd)
-        except OSError:
+        except Exception:
+            # fdopen did not take ownership. A secondary descriptor-close
+            # failure (including native wrapper RuntimeError/ValueError)
+            # must not mask the primary error or process cancellation.
             pass
         raise
     with stream:

@@ -103,7 +103,9 @@ _PUBLIC_PATTERNS = frozenset({
     "INVOKE", "VALUE", "SELECTION", "SELECTION_ITEM", "TEXT",
     "TOGGLE", "RANGE_VALUE", "SCROLL", "EXPAND_COLLAPSE",
 })
-_PUBLIC_ROLES = frozenset(_EXPECTED_ROLES.values())
+_PUBLIC_ROLES = frozenset(_EXPECTED_ROLES.values()) | frozenset({
+    "BUTTON", "COMBOBOX", "EDIT",
+})
 _PUBLIC_GAPS = frozenset(_BLOCKING_GAPS)
 
 

@@ -313,7 +313,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         # A punctuation mark or icon is visible, but it cannot name the
         # critical replay action. Preserve report redaction and machine truth.
         target_id = AUTOMATION_IDS["run_replay"]
-        for name in ("...", "—", "★", "⁉️", "\\u200b!!!"):
+        for name in ("...", "—", "★", "⁉️", "\u200b!!!"):
             with self.subTest(name=repr(name)):
                 description = self._passing_description()
                 control = next(

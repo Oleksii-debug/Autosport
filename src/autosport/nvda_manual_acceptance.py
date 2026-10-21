@@ -1,0 +1,1691 @@
+"""Durable manual-attestation ledger for physical Windows + NVDA review.
+
+This module records explicit human-review decisions for an exact transcript/candidate.
+It deliberately does not promote HUMAN_TESTED or NVDA_VERIFIED. Consumers that
+eventually own release truth must re-resolve this ledger and apply their separate
+manual reviewer-identity/trust policy instead of trusting caller booleans or refs.
+"""
+
+from __future__ import annotations
+
+from collections import OrderedDict
+from dataclasses import dataclass, field
+from datetime import datetime, timezone
+from enum import Enum
+import hashlib
+import json
+import os
+from pathlib import Path
+import re
+from typing import Any
+
+from .nvda_human_acceptance import (
+    STATUS_STRUCTURALLY_COMPLETE,
+    NvdaHumanAcceptanceError,
+    validate_human_nvda_acceptance_transcript,
+    verify_human_nvda_acceptance_structural_result,
+)
+from .workspace_lock import (
+    WorkspaceEconomicLock,
+    WorkspaceEconomicLockBusyError,
+    WorkspaceEconomicLockError,
+)
+
+
+SCHEMA_VERSION = 2
+ANCHOR_SCHEMA_VERSION = 1
+_PENDING_SCHEMA_VERSION = 1
+PROTOCOL_VERSION = "autosport-physical-nvda-manual-review-v2"
+EVENT_TYPE = "MANUAL_NVDA_DECISION"
+
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
+_GIT_COMMIT_SHA_RE = re.compile(r"^[0-9a-f]{40}$")
+_MAX_TEXT_LENGTH = 16_384
+_MAX_LIVE_RESOLUTIONS = 256
+
+_EVENT_KEYS = frozenset(
+    {
+        "schema_version",
+        "event_type",
+        "sequence",
+        "previous_sha256",
+        "payload",
+        "event_sha256",
+    }
+)
+_PAYLOAD_KEYS = frozenset(
+    {
+        "decision_id",
+        "decision",
+        "reviewer_ref",
+        "reviewer_attestation_sha256",
+        "reviewed_at",
+        "protocol_version",
+        "transcript_sha256",
+        "artifact_sha256",
+        "source_sha",
+        "structural_status",
+        "structural_human_tester_attestation_sha256",
+        "webview2_runtime_browser_version",
+        "webview2_runtime_witness_sha256",
+        "windows_version",
+        "nvda_version",
+    }
+)
+_ANCHOR_KEYS = frozenset(
+    {
+        "anchor_schema_version",
+        "ledger_schema_version",
+        "event_count",
+        "ledger_root_sha256",
+        "anchor_sha256",
+    }
+)
+_PENDING_KEYS = frozenset(
+    {
+        "pending_schema_version",
+        "prior_event_count",
+        "prior_root_sha256",
+        "event",
+        "pending_sha256",
+    }
+)
+
+
+class NvdaManualAcceptanceError(RuntimeError):
+    """Base error for durable physical-NVDA manual-review evidence."""
+
+
+class NvdaManualAcceptanceIntegrityError(NvdaManualAcceptanceError):
+    """Raised when durable manual-review evidence is malformed or inconsistent."""
+
+
+class NvdaManualAcceptanceStateError(NvdaManualAcceptanceError):
+    """Raised when a manual-review operation cannot safely proceed."""
+
+
+class ManualNvdaDecision(str, Enum):
+    ACCEPT_PHYSICAL_NVDA = "ACCEPT_PHYSICAL_NVDA"
+    REJECT_PHYSICAL_NVDA = "REJECT_PHYSICAL_NVDA"
+
+
+@dataclass(frozen=True, slots=True)
+class ManualNvdaDecisionRecord:
+    """One validated record re-resolved from the durable ledger.
+
+    This object is descriptive, not a transferable truth token. Positive product
+    truth must be re-resolved from the ledger for the exact candidate.
+    """
+
+    sequence: int
+    decision_id: str
+    decision: ManualNvdaDecision
+    reviewer_ref: str
+    reviewer_attestation_sha256: str
+    reviewed_at: str
+    protocol_version: str
+    transcript_sha256: str
+    artifact_sha256: str
+    source_sha: str
+    structural_status: str
+    structural_human_tester_attestation_sha256: str
+    webview2_runtime_browser_version: str
+    webview2_runtime_witness_sha256: str
+    windows_version: str
+    nvda_version: str
+    event_sha256: str
+
+
+_MANUAL_NVDA_RESOLUTION_FIELD_NAMES = (
+    "record",
+    "accepted_manual_decision",
+    "reviewer_identity_verified",
+    "human_tested",
+    "nvda_verified",
+    "manual_truth_promotion_required",
+    "real_money_execution",
+    "whole_product_complete",
+)
+
+
+def _build_manual_nvda_resolution_meta():
+    sealed: set[type] = set()
+    protected = frozenset(_MANUAL_NVDA_RESOLUTION_FIELD_NAMES)
+
+    class _ManualNvdaResolutionMeta(type):
+        def __setattr__(cls, name: str, value: object) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "manual NVDA resolution authority surface is sealed: " + name
+                )
+            super().__setattr__(name, value)
+
+        def __delattr__(cls, name: str) -> None:
+            if cls in sealed and name in protected:
+                raise TypeError(
+                    "manual NVDA resolution authority surface is sealed: " + name
+                )
+            super().__delattr__(name)
+
+        @classmethod
+        def seal(mcls, cls: type) -> None:
+            sealed.add(cls)
+
+    return _ManualNvdaResolutionMeta
+
+
+_ManualNvdaResolutionMeta = _build_manual_nvda_resolution_meta()
+del _build_manual_nvda_resolution_meta
+
+
+@dataclass(frozen=True, slots=True, init=False)
+class ManualNvdaAcceptanceResolution(metaclass=_ManualNvdaResolutionMeta):
+    """Resolver-issued current manual decision for one exact candidate.
+
+    Recording an explicit manual ACCEPT is not, by itself, proof of reviewer
+    identity. Until a separate canonical release authority composes that trust
+    boundary, HUMAN_TESTED and NVDA_VERIFIED remain hard false here.
+    """
+
+    record: ManualNvdaDecisionRecord
+    accepted_manual_decision: bool
+    reviewer_identity_verified: bool = field(default=False, init=False)
+    human_tested: bool = field(default=False, init=False)
+    nvda_verified: bool = field(default=False, init=False)
+    manual_truth_promotion_required: bool = field(default=True, init=False)
+    real_money_execution: bool = field(default=False, init=False)
+    whole_product_complete: bool = field(default=False, init=False)
+
+    def __init__(self, *args: object, **kwargs: object) -> None:
+        raise NvdaManualAcceptanceStateError(
+            "ManualNvdaAcceptanceResolution is resolver-issued only"
+        )
+
+    def __init_subclass__(cls, **kwargs: object) -> None:
+        raise TypeError("ManualNvdaAcceptanceResolution may not be subclassed")
+
+
+_ManualNvdaResolutionMeta.seal(ManualNvdaAcceptanceResolution)
+del _ManualNvdaResolutionMeta
+
+
+@dataclass(frozen=True, slots=True)
+class _IssuedResolutionWitness:
+    resolution: ManualNvdaAcceptanceResolution
+    fingerprint: str
+    ledger: object
+    path: object
+    anchor_path: object
+    pending_path: object
+    lock_path: object
+    ledger_type: object
+    reader_method_witnesses: object
+    writer_lock_type: object
+    writer_lock_method_witnesses: object
+    reader_global_witnesses: object
+    events_reader: object
+    events_reader_code: object
+
+
+def _make_resolution_witness_registry():
+    issued = OrderedDict()
+    maximum_live = _MAX_LIVE_RESOLUTIONS
+    witness_type = _IssuedResolutionWitness
+
+    def register(
+        *,
+        resolution: ManualNvdaAcceptanceResolution,
+        fingerprint: str,
+        ledger: object,
+        path: object,
+        anchor_path: object,
+        pending_path: object,
+        lock_path: object,
+        ledger_type: object,
+        reader_method_witnesses: object,
+        writer_lock_type: object,
+        writer_lock_method_witnesses: object,
+        reader_global_witnesses: object,
+        events_reader: object,
+        events_reader_code: object,
+    ) -> None:
+        while len(issued) >= maximum_live:
+            issued.popitem(last=False)
+        issued[id(resolution)] = witness_type(
+            resolution=resolution,
+            fingerprint=fingerprint,
+            ledger=ledger,
+            path=path,
+            anchor_path=anchor_path,
+            pending_path=pending_path,
+            lock_path=lock_path,
+            ledger_type=ledger_type,
+            reader_method_witnesses=reader_method_witnesses,
+            writer_lock_type=writer_lock_type,
+            writer_lock_method_witnesses=writer_lock_method_witnesses,
+            reader_global_witnesses=reader_global_witnesses,
+            events_reader=events_reader,
+            events_reader_code=events_reader_code,
+        )
+
+    def lookup(resolution: object) -> _IssuedResolutionWitness | None:
+        return issued.get(id(resolution))
+
+    return register, lookup
+
+
+_REGISTER_RESOLUTION_WITNESS, _LOOKUP_RESOLUTION_WITNESS = (
+    _make_resolution_witness_registry()
+)
+del _make_resolution_witness_registry
+
+
+def _canonical(value: object) -> str:
+    try:
+        return json.dumps(
+            value,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        )
+    except (TypeError, ValueError, UnicodeEncodeError) as exc:
+        raise NvdaManualAcceptanceIntegrityError(
+            "value is not canonical JSON"
+        ) from exc
+
+
+def _digest(value: object) -> str:
+    return hashlib.sha256(_canonical(value).encode("utf-8")).hexdigest()
+
+
+def _parse_json_object(raw: str, *, what: str) -> dict[str, Any]:
+    def pairs(items: list[tuple[str, Any]]) -> dict[str, Any]:
+        result: dict[str, Any] = {}
+        for key, value in items:
+            if key in result:
+                raise NvdaManualAcceptanceIntegrityError(
+                    f"duplicate JSON key {key!r}"
+                )
+            result[key] = value
+        return result
+
+    try:
+        value = json.loads(
+            raw,
+            object_pairs_hook=pairs,
+            parse_constant=lambda token: (_ for _ in ()).throw(
+                NvdaManualAcceptanceIntegrityError(
+                    f"non-finite JSON constant {token!r}"
+                )
+            ),
+        )
+    except NvdaManualAcceptanceIntegrityError:
+        raise
+    except (json.JSONDecodeError, UnicodeDecodeError) as exc:
+        raise NvdaManualAcceptanceIntegrityError(f"invalid {what} JSON") from exc
+    if type(value) is not dict:
+        raise NvdaManualAcceptanceIntegrityError(f"{what} must be a JSON object")
+    return value
+
+
+def _require_text(name: str, value: object) -> str:
+    if type(value) is not str or not value or value.strip() != value:
+        raise NvdaManualAcceptanceStateError(
+            f"{name} must be non-empty canonical text"
+        )
+    if len(value) > _MAX_TEXT_LENGTH:
+        raise NvdaManualAcceptanceStateError(f"{name} is too long")
+    if "\x00" in value:
+        raise NvdaManualAcceptanceStateError(f"{name} must not contain NUL")
+    try:
+        value.encode("utf-8")
+    except UnicodeEncodeError as exc:
+        raise NvdaManualAcceptanceStateError(
+            f"{name} must be UTF-8 encodable"
+        ) from exc
+    return value
+
+
+def _require_sha256(name: str, value: object) -> str:
+    if type(value) is not str or _SHA256_RE.fullmatch(value) is None:
+        raise NvdaManualAcceptanceStateError(
+            f"{name} must be exactly 64 lowercase hexadecimal characters"
+        )
+    return value
+
+
+def _require_git_commit_sha(name: str, value: object) -> str:
+    if type(value) is not str or _GIT_COMMIT_SHA_RE.fullmatch(value) is None:
+        raise NvdaManualAcceptanceStateError(
+            f"{name} must be exactly 40 lowercase hexadecimal Git commit characters"
+        )
+    return value
+
+
+def _require_canonical_utc(name: str, value: object) -> str:
+    raw = _require_text(name, value)
+    try:
+        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except ValueError as exc:
+        raise NvdaManualAcceptanceStateError(
+            f"{name} must be canonical UTC ISO-8601"
+        ) from exc
+    if parsed.tzinfo is None or parsed.utcoffset() is None:
+        raise NvdaManualAcceptanceStateError(
+            f"{name} must be timezone-aware canonical UTC"
+        )
+    canonical = parsed.astimezone(timezone.utc).isoformat(timespec="microseconds")
+    if raw != canonical:
+        raise NvdaManualAcceptanceStateError(
+            f"{name} must use canonical UTC +00:00 with microseconds"
+        )
+    return raw
+
+
+def _require_protocol(value: object) -> str:
+    protocol = _require_text("protocol_version", value)
+    if protocol != PROTOCOL_VERSION:
+        raise NvdaManualAcceptanceStateError(
+            f"protocol_version must equal {PROTOCOL_VERSION}"
+        )
+    return protocol
+
+
+def _install_structural_result_authority():
+    validate = validate_human_nvda_acceptance_transcript
+    verify = verify_human_nvda_acceptance_structural_result
+    validate_code = validate.__code__
+    verify_code = verify.__code__
+
+    def structural_result(
+        transcript: object,
+        *,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
+    ):
+        if (
+            validate_human_nvda_acceptance_transcript is not validate
+            or verify_human_nvda_acceptance_structural_result is not verify
+            or getattr(validate, "__code__", None) is not validate_code
+            or getattr(verify, "__code__", None) is not verify_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "physical NVDA structural validator authority changed"
+            )
+        artifact = _require_sha256(
+            "expected_artifact_sha256", expected_artifact_sha256
+        )
+        source = _require_git_commit_sha("expected_source_sha", expected_source_sha)
+        runtime_witness = _require_sha256(
+            "expected_webview2_runtime_witness_sha256",
+            expected_webview2_runtime_witness_sha256,
+        )
+        try:
+            result = validate(
+                transcript,
+                expected_artifact_sha256=artifact,
+                expected_source_sha=source,
+                expected_webview2_runtime_witness_sha256=runtime_witness,
+            )
+            return verify(
+                result,
+                expected_artifact_sha256=artifact,
+                expected_source_sha=source,
+                expected_webview2_runtime_witness_sha256=runtime_witness,
+            )
+        except NvdaHumanAcceptanceError as exc:
+            raise NvdaManualAcceptanceStateError(
+                "physical NVDA transcript did not pass canonical structural validation"
+            ) from exc
+
+    return structural_result
+
+
+_structural_result = _install_structural_result_authority()
+del _install_structural_result_authority
+
+def _decision_payload(
+    *,
+    structural,
+    decision: ManualNvdaDecision,
+    reviewer_ref: str,
+    reviewer_attestation: str,
+    reviewed_at: str,
+    protocol_version: str,
+) -> dict[str, Any]:
+    if not isinstance(decision, ManualNvdaDecision):
+        raise TypeError("decision must be ManualNvdaDecision")
+    reviewer = _require_text("reviewer_ref", reviewer_ref)
+    attestation = _require_text("reviewer_attestation", reviewer_attestation)
+    reviewed = _require_canonical_utc("reviewed_at", reviewed_at)
+    protocol = _require_protocol(protocol_version)
+    body = {
+        "decision": decision.value,
+        "reviewer_ref": reviewer,
+        "reviewer_attestation_sha256": hashlib.sha256(
+            attestation.encode("utf-8")
+        ).hexdigest(),
+        "reviewed_at": reviewed,
+        "protocol_version": protocol,
+        "transcript_sha256": structural.transcript_sha256,
+        "artifact_sha256": structural.artifact_sha256,
+        "source_sha": structural.source_sha,
+        "structural_status": structural.status,
+        "structural_human_tester_attestation_sha256": (
+            structural.human_tester_attestation_sha256
+        ),
+        "webview2_runtime_browser_version": (
+            structural.webview2_runtime_browser_version
+        ),
+        "webview2_runtime_witness_sha256": (
+            structural.webview2_runtime_witness_sha256
+        ),
+        "windows_version": structural.windows_version,
+        "nvda_version": structural.nvda_version,
+    }
+    decision_id = "manual-nvda-decision-v2-" + _digest(
+        {"schema": "autosport.manual_nvda_decision", **body}
+    )
+    return {"decision_id": decision_id, **body}
+
+
+def _record_from_event(event: dict[str, Any]) -> ManualNvdaDecisionRecord:
+    if frozenset(event) != _EVENT_KEYS:
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA ledger event schema is invalid"
+        )
+    if event["schema_version"] != SCHEMA_VERSION:
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA ledger schema version is invalid"
+        )
+    if event["event_type"] != EVENT_TYPE:
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA ledger event type is invalid"
+        )
+    if type(event["sequence"]) is not int or event["sequence"] < 0:
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA ledger event sequence is invalid"
+        )
+    previous = event["previous_sha256"]
+    if previous is not None and (
+        type(previous) is not str or _SHA256_RE.fullmatch(previous) is None
+    ):
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA ledger predecessor digest is invalid"
+        )
+    payload = event["payload"]
+    if type(payload) is not dict or frozenset(payload) != _PAYLOAD_KEYS:
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA decision payload schema is invalid"
+        )
+
+    try:
+        decision_id = _require_text("decision_id", payload["decision_id"])
+        if not decision_id.startswith("manual-nvda-decision-v2-"):
+            raise NvdaManualAcceptanceStateError(
+                "decision_id has an invalid namespace"
+            )
+        digest_part = decision_id.removeprefix("manual-nvda-decision-v2-")
+        _require_sha256("decision_id digest", digest_part)
+        decision = ManualNvdaDecision(payload["decision"])
+        reviewer_ref = _require_text("reviewer_ref", payload["reviewer_ref"])
+        reviewer_attestation_sha256 = _require_sha256(
+            "reviewer_attestation_sha256",
+            payload["reviewer_attestation_sha256"],
+        )
+        reviewed_at = _require_canonical_utc(
+            "reviewed_at", payload["reviewed_at"]
+        )
+        protocol_version = _require_protocol(payload["protocol_version"])
+        transcript_sha256 = _require_sha256(
+            "transcript_sha256", payload["transcript_sha256"]
+        )
+        artifact_sha256 = _require_sha256(
+            "artifact_sha256", payload["artifact_sha256"]
+        )
+        source_sha = _require_git_commit_sha("source_sha", payload["source_sha"])
+        if payload["structural_status"] != STATUS_STRUCTURALLY_COMPLETE:
+            raise NvdaManualAcceptanceStateError(
+                "structural_status is not canonical"
+            )
+        structural_attestation = _require_sha256(
+            "structural_human_tester_attestation_sha256",
+            payload["structural_human_tester_attestation_sha256"],
+        )
+        webview2_runtime_browser_version = _require_text(
+            "webview2_runtime_browser_version",
+            payload["webview2_runtime_browser_version"],
+        )
+        webview2_runtime_witness_sha256 = _require_sha256(
+            "webview2_runtime_witness_sha256",
+            payload["webview2_runtime_witness_sha256"],
+        )
+        windows_version = _require_text(
+            "windows_version", payload["windows_version"]
+        )
+        nvda_version = _require_text("nvda_version", payload["nvda_version"])
+    except (KeyError, ValueError, TypeError, NvdaManualAcceptanceStateError) as exc:
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA decision payload is invalid"
+        ) from exc
+
+    expected_decision_id = "manual-nvda-decision-v2-" + _digest(
+        {
+            "schema": "autosport.manual_nvda_decision",
+            **{key: payload[key] for key in payload if key != "decision_id"},
+        }
+    )
+    if decision_id != expected_decision_id:
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA decision identity does not match payload"
+        )
+
+    body = {key: event[key] for key in event if key != "event_sha256"}
+    expected_event_sha = _digest(body)
+    event_sha = event["event_sha256"]
+    if type(event_sha) is not str or event_sha != expected_event_sha:
+        raise NvdaManualAcceptanceIntegrityError(
+            "manual NVDA ledger event digest mismatch"
+        )
+
+    return ManualNvdaDecisionRecord(
+        sequence=event["sequence"],
+        decision_id=decision_id,
+        decision=decision,
+        reviewer_ref=reviewer_ref,
+        reviewer_attestation_sha256=reviewer_attestation_sha256,
+        reviewed_at=reviewed_at,
+        protocol_version=protocol_version,
+        transcript_sha256=transcript_sha256,
+        artifact_sha256=artifact_sha256,
+        source_sha=source_sha,
+        structural_status=payload["structural_status"],
+        structural_human_tester_attestation_sha256=structural_attestation,
+        webview2_runtime_browser_version=webview2_runtime_browser_version,
+        webview2_runtime_witness_sha256=webview2_runtime_witness_sha256,
+        windows_version=windows_version,
+        nvda_version=nvda_version,
+        event_sha256=event_sha,
+    )
+
+
+def _resolution_fingerprint(resolution: ManualNvdaAcceptanceResolution) -> str:
+    if type(resolution) is not ManualNvdaAcceptanceResolution:
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution must be the exact canonical type"
+        )
+    record = resolution.record
+    if type(record) is not ManualNvdaDecisionRecord:
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution record type is invalid"
+        )
+    if (
+        type(resolution.accepted_manual_decision) is not bool
+        or resolution.accepted_manual_decision
+        is not (record.decision is ManualNvdaDecision.ACCEPT_PHYSICAL_NVDA)
+    ):
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution decision projection is invalid"
+        )
+    hard_false = {
+        "reviewer_identity_verified": resolution.reviewer_identity_verified,
+        "human_tested": resolution.human_tested,
+        "nvda_verified": resolution.nvda_verified,
+        "real_money_execution": resolution.real_money_execution,
+        "whole_product_complete": resolution.whole_product_complete,
+    }
+    if any(type(value) is not bool or value is not False for value in hard_false.values()):
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution cannot promote protected truth"
+        )
+    if (
+        type(resolution.manual_truth_promotion_required) is not bool
+        or resolution.manual_truth_promotion_required is not True
+    ):
+        raise NvdaManualAcceptanceStateError(
+            "manual NVDA resolution must require separate truth promotion"
+        )
+    return _digest(
+        {
+            "record": {
+                "sequence": record.sequence,
+                "decision_id": record.decision_id,
+                "decision": record.decision.value,
+                "reviewer_ref": record.reviewer_ref,
+                "reviewer_attestation_sha256": record.reviewer_attestation_sha256,
+                "reviewed_at": record.reviewed_at,
+                "protocol_version": record.protocol_version,
+                "transcript_sha256": record.transcript_sha256,
+                "artifact_sha256": record.artifact_sha256,
+                "source_sha": record.source_sha,
+                "structural_status": record.structural_status,
+                "structural_human_tester_attestation_sha256": (
+                    record.structural_human_tester_attestation_sha256
+                ),
+                "webview2_runtime_browser_version": (
+                    record.webview2_runtime_browser_version
+                ),
+                "webview2_runtime_witness_sha256": (
+                    record.webview2_runtime_witness_sha256
+                ),
+                "windows_version": record.windows_version,
+                "nvda_version": record.nvda_version,
+                "event_sha256": record.event_sha256,
+            },
+            "accepted_manual_decision": resolution.accepted_manual_decision,
+            **hard_false,
+            "manual_truth_promotion_required": (
+                resolution.manual_truth_promotion_required
+            ),
+        }
+    )
+
+
+def _make_resolution_verifier(lookup_witness):
+    fingerprint_for = _resolution_fingerprint
+    fingerprint_code = fingerprint_for.__code__
+    resolution_type = ManualNvdaAcceptanceResolution
+    require_sha256 = _require_sha256
+    require_sha256_code = require_sha256.__code__
+    require_git_commit_sha = _require_git_commit_sha
+    require_git_commit_sha_code = require_git_commit_sha.__code__
+
+    def verify_manual_nvda_acceptance_resolution(
+        resolution: object,
+        *,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
+        expected_transcript_sha256: str,
+    ) -> ManualNvdaAcceptanceResolution:
+        """Verify one live resolver-issued projection for an exact candidate."""
+
+        if (
+            _resolution_fingerprint is not fingerprint_for
+            or getattr(fingerprint_for, "__code__", None) is not fingerprint_code
+            or ManualNvdaAcceptanceResolution is not resolution_type
+            or _require_sha256 is not require_sha256
+            or getattr(require_sha256, "__code__", None) is not require_sha256_code
+            or _require_git_commit_sha is not require_git_commit_sha
+            or getattr(require_git_commit_sha, "__code__", None)
+            is not require_git_commit_sha_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution verifier authority changed"
+            )
+        artifact = require_sha256(
+            "expected_artifact_sha256", expected_artifact_sha256
+        )
+        source_sha = require_git_commit_sha(
+            "expected_source_sha", expected_source_sha
+        )
+        runtime_witness_sha = require_sha256(
+            "expected_webview2_runtime_witness_sha256",
+            expected_webview2_runtime_witness_sha256,
+        )
+        transcript_sha = require_sha256(
+            "expected_transcript_sha256", expected_transcript_sha256
+        )
+        if type(resolution) is not resolution_type:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution must be the exact canonical type"
+            )
+        issued = lookup_witness(resolution)
+        if issued is None or issued.resolution is not resolution:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution is not a live resolver-issued authority"
+            )
+        fingerprint = fingerprint_for(resolution)
+        if fingerprint != issued.fingerprint:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution changed after issuance"
+            )
+        record = resolution.record
+        if (
+            record.artifact_sha256 != artifact
+            or record.source_sha != source_sha
+            or record.webview2_runtime_witness_sha256 != runtime_witness_sha
+            or record.transcript_sha256 != transcript_sha
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution does not match the expected candidate"
+            )
+
+        issued_ledger = issued.ledger
+        issued_ledger_type = issued.ledger_type
+
+        def require_issued_reader_graph() -> None:
+            if (
+                type(issued_ledger) is not issued_ledger_type
+                or issued_ledger.path is not issued.path
+                or issued_ledger._anchor_path is not issued.anchor_path
+                or issued_ledger._pending_path is not issued.pending_path
+                or issued_ledger._lock_path is not issued.lock_path
+                or issued.events_reader.__globals__.get("_ManualNvdaWriterLock")
+                is not issued.writer_lock_type
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution ledger authority changed after issuance"
+                )
+            for (
+                name,
+                expected_descriptor,
+                expected_callable,
+                expected_code,
+            ) in issued.reader_method_witnesses:
+                current_descriptor = issued_ledger_type.__dict__.get(name)
+                current_callable = getattr(issued_ledger_type, name, None)
+                if (
+                    current_descriptor is not expected_descriptor
+                    or current_callable is not expected_callable
+                    or getattr(current_callable, "__code__", None) is not expected_code
+                    or name in vars(issued_ledger)
+                ):
+                    raise NvdaManualAcceptanceStateError(
+                        "manual NVDA resolution ledger reader changed after issuance: "
+                        + name
+                    )
+            for name, expected_value, expected_code in issued.reader_global_witnesses:
+                current_value = issued.events_reader.__globals__.get(name)
+                if (
+                    current_value is not expected_value
+                    or (
+                        expected_code is not None
+                        and getattr(current_value, "__code__", None)
+                        is not expected_code
+                    )
+                ):
+                    raise NvdaManualAcceptanceStateError(
+                        "manual NVDA resolution reader dependency changed after issuance: "
+                        + name
+                    )
+            for (
+                name,
+                expected_callable,
+                expected_code,
+            ) in issued.writer_lock_method_witnesses:
+                current_callable = getattr(issued.writer_lock_type, name, None)
+                if (
+                    current_callable is not expected_callable
+                    or getattr(current_callable, "__code__", None)
+                    is not expected_code
+                ):
+                    raise NvdaManualAcceptanceStateError(
+                        "manual NVDA resolution writer-lock dispatch changed after issuance: "
+                        + name
+                    )
+            if (
+                issued_ledger_type.events is not issued.events_reader
+                or getattr(issued.events_reader, "__code__", None)
+                is not issued.events_reader_code
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution ledger authority changed after issuance"
+                )
+
+        require_issued_reader_graph()
+        current_records = issued.events_reader(issued_ledger)
+        require_issued_reader_graph()
+        current_matching = [
+            current
+            for current in current_records
+            if (
+                current.protocol_version == record.protocol_version
+                and current.transcript_sha256 == record.transcript_sha256
+                and current.artifact_sha256 == record.artifact_sha256
+                and current.source_sha == record.source_sha
+                and current.structural_status == record.structural_status
+                and current.structural_human_tester_attestation_sha256
+                == record.structural_human_tester_attestation_sha256
+                and current.webview2_runtime_browser_version
+                == record.webview2_runtime_browser_version
+                and current.webview2_runtime_witness_sha256
+                == record.webview2_runtime_witness_sha256
+                and current.windows_version == record.windows_version
+                and current.nvda_version == record.nvda_version
+            )
+        ]
+        if not current_matching or current_matching[-1] != record:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution is no longer the current durable decision"
+            )
+        return resolution
+
+    return verify_manual_nvda_acceptance_resolution
+
+
+verify_manual_nvda_acceptance_resolution = _make_resolution_verifier(
+    _LOOKUP_RESOLUTION_WITNESS
+)
+del _make_resolution_verifier
+del _LOOKUP_RESOLUTION_WITNESS
+
+
+class _ManualNvdaWriterLock(WorkspaceEconomicLock):
+    """Crash-releasing writer fence for one manual-NVDA ledger pathname."""
+
+    def __init__(self, ledger_path: str | Path) -> None:
+        path = Path(ledger_path)
+        super().__init__(path.parent)
+        self.path = path.with_name(path.name + ".writer.lock")
+
+
+class ManualNvdaAcceptanceLedger:
+    """Append-only exact-candidate manual review ledger."""
+
+    def __init__(self, path: str | Path) -> None:
+        self.path = Path(path)
+        self.path.parent.mkdir(parents=True, exist_ok=True)
+        self._anchor_path = self.path.with_name(self.path.name + ".anchor.json")
+        self._pending_path = self.path.with_name(self.path.name + ".pending.json")
+        self._lock_path = self.path.with_name(self.path.name + ".writer.lock")
+
+    def _sync_parent_directory(self) -> None:
+        if os.name == "nt":
+            return
+        flags = os.O_RDONLY | getattr(os, "O_DIRECTORY", 0)
+        directory_fd = os.open(self.path.parent, flags)
+        try:
+            os.fsync(directory_fd)
+        finally:
+            os.close(directory_fd)
+
+    def _anchor(self, *, event_count: int, root: str | None) -> dict[str, Any]:
+        body = {
+            "anchor_schema_version": ANCHOR_SCHEMA_VERSION,
+            "ledger_schema_version": SCHEMA_VERSION,
+            "event_count": event_count,
+            "ledger_root_sha256": root,
+        }
+        return {**body, "anchor_sha256": _digest(body)}
+
+    def _write_anchor(self, *, event_count: int, root: str | None) -> None:
+        anchor = self._anchor(event_count=event_count, root=root)
+        tmp = self._anchor_path.with_name(self._anchor_path.name + ".tmp")
+        encoded = _canonical(anchor) + "\n"
+        try:
+            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(encoded)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._anchor_path)
+            self._sync_parent_directory()
+        except OSError as exc:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor durability barrier failed"
+            ) from exc
+
+    def _read_anchor(self) -> dict[str, Any] | None:
+        if not self._anchor_path.exists():
+            return None
+        try:
+            raw = self._anchor_path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "cannot read manual NVDA ledger anchor"
+            ) from exc
+        if not raw.endswith("\n"):
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor lacks canonical trailing newline"
+            )
+        anchor = _parse_json_object(raw, what="manual NVDA ledger anchor")
+        if raw != _canonical(anchor) + "\n":
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor bytes are not canonical"
+            )
+        if frozenset(anchor) != _ANCHOR_KEYS:
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor schema is invalid"
+            )
+        body = {key: anchor[key] for key in anchor if key != "anchor_sha256"}
+        if (
+            anchor["anchor_schema_version"] != ANCHOR_SCHEMA_VERSION
+            or anchor["ledger_schema_version"] != SCHEMA_VERSION
+            or type(anchor["event_count"]) is not int
+            or anchor["event_count"] < 0
+            or anchor["anchor_sha256"] != _digest(body)
+        ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor is invalid"
+            )
+        root = anchor["ledger_root_sha256"]
+        if root is not None and (
+            type(root) is not str or _SHA256_RE.fullmatch(root) is None
+        ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor root is invalid"
+            )
+        return anchor
+
+    @staticmethod
+    def _anchor_matches(
+        anchor: dict[str, Any] | None,
+        *,
+        event_count: int,
+        root: str | None,
+    ) -> bool:
+        if event_count == 0 and root is None:
+            return anchor is None
+        return (
+            anchor is not None
+            and anchor["event_count"] == event_count
+            and anchor["ledger_root_sha256"] == root
+        )
+
+    def _read_ledger_unanchored(
+        self,
+    ) -> tuple[
+        tuple[ManualNvdaDecisionRecord, ...],
+        tuple[dict[str, Any], ...],
+        str | None,
+    ]:
+        if not self.path.exists():
+            return (), (), None
+        try:
+            raw = self.path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "cannot read manual NVDA ledger"
+            ) from exc
+        if raw and not raw.endswith("\n"):
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger lacks canonical trailing newline"
+            )
+        raw_lines = [] if not raw else raw[:-1].split("\n")
+        if any(not line for line in raw_lines):
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger contains a blank event line"
+            )
+
+        records: list[ManualNvdaDecisionRecord] = []
+        events: list[dict[str, Any]] = []
+        prior_sha: str | None = None
+        for sequence, raw_line in enumerate(raw_lines):
+            event = _parse_json_object(raw_line, what="manual NVDA ledger event")
+            if raw_line != _canonical(event):
+                raise NvdaManualAcceptanceIntegrityError(
+                    "manual NVDA ledger event bytes are not canonical"
+                )
+            if event.get("sequence") != sequence:
+                raise NvdaManualAcceptanceIntegrityError(
+                    "manual NVDA ledger sequence is invalid"
+                )
+            if event.get("previous_sha256") != prior_sha:
+                raise NvdaManualAcceptanceIntegrityError(
+                    "manual NVDA ledger predecessor chain is invalid"
+                )
+            record = _record_from_event(event)
+            events.append(event)
+            records.append(record)
+            prior_sha = record.event_sha256
+        return tuple(records), tuple(events), prior_sha
+
+    def _events_locked(self) -> tuple[ManualNvdaDecisionRecord, ...]:
+        records, _, root = self._read_ledger_unanchored()
+        anchor = self._read_anchor()
+        if not self._anchor_matches(
+            anchor,
+            event_count=len(records),
+            root=root,
+        ):
+            if not records and anchor is not None:
+                raise NvdaManualAcceptanceIntegrityError(
+                    "manual NVDA ledger is missing while anchor exists"
+                )
+            if records and anchor is None:
+                raise NvdaManualAcceptanceIntegrityError(
+                    "manual NVDA ledger anchor is missing"
+                )
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger anchor does not match durable history"
+            )
+        return records
+
+    def _pending_record(
+        self,
+        *,
+        prior_event_count: int,
+        prior_root: str | None,
+        event: dict[str, Any],
+    ) -> dict[str, Any]:
+        body = {
+            "pending_schema_version": _PENDING_SCHEMA_VERSION,
+            "prior_event_count": prior_event_count,
+            "prior_root_sha256": prior_root,
+            "event": event,
+        }
+        return {**body, "pending_sha256": _digest(body)}
+
+    def _write_pending(
+        self,
+        *,
+        prior_event_count: int,
+        prior_root: str | None,
+        event: dict[str, Any],
+    ) -> None:
+        pending = self._pending_record(
+            prior_event_count=prior_event_count,
+            prior_root=prior_root,
+            event=event,
+        )
+        tmp = self._pending_path.with_name(self._pending_path.name + ".tmp")
+        try:
+            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(_canonical(pending) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self._pending_path)
+            self._sync_parent_directory()
+        except OSError as exc:
+            try:
+                tmp.unlink()
+            except FileNotFoundError:
+                pass
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA pending decision durability barrier failed"
+            ) from exc
+
+    def _read_pending(self) -> dict[str, Any] | None:
+        if not self._pending_path.exists():
+            return None
+        try:
+            raw = self._pending_path.read_bytes().decode("utf-8")
+        except (OSError, UnicodeError) as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "cannot read pending manual NVDA decision"
+            ) from exc
+        if not raw.endswith("\n"):
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA decision lacks canonical trailing newline"
+            )
+        pending = _parse_json_object(raw, what="pending manual NVDA decision")
+        if raw != _canonical(pending) + "\n":
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA decision bytes are not canonical"
+            )
+        if frozenset(pending) != _PENDING_KEYS:
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA decision schema is invalid"
+            )
+        body = {
+            key: pending[key]
+            for key in pending
+            if key != "pending_sha256"
+        }
+        if (
+            pending["pending_schema_version"] != _PENDING_SCHEMA_VERSION
+            or type(pending["prior_event_count"]) is not int
+            or pending["prior_event_count"] < 0
+            or pending["pending_sha256"] != _digest(body)
+        ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA decision is invalid"
+            )
+        prior_root = pending["prior_root_sha256"]
+        if prior_root is not None and (
+            type(prior_root) is not str
+            or _SHA256_RE.fullmatch(prior_root) is None
+        ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA predecessor root is invalid"
+            )
+        event = pending["event"]
+        if type(event) is not dict:
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA event is invalid"
+            )
+        _record_from_event(event)
+        if (
+            event["sequence"] != pending["prior_event_count"]
+            or event["previous_sha256"] != prior_root
+        ):
+            raise NvdaManualAcceptanceIntegrityError(
+                "pending manual NVDA event predecessor is invalid"
+            )
+        return pending
+
+    def _remove_pending(self) -> None:
+        try:
+            self._pending_path.unlink(missing_ok=True)
+            self._sync_parent_directory()
+        except OSError as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "cannot retire pending manual NVDA decision"
+            ) from exc
+
+    def _publish_ledger_event(self, event: dict[str, Any]) -> None:
+        try:
+            current = (
+                self.path.read_text(encoding="utf-8")
+                if self.path.exists()
+                else ""
+            )
+            if current and not current.endswith("\n"):
+                raise NvdaManualAcceptanceIntegrityError(
+                    "manual NVDA ledger lacks canonical trailing newline"
+                )
+            tmp = self.path.with_name(self.path.name + ".tmp")
+            with tmp.open("w", encoding="utf-8", newline="\n") as handle:
+                handle.write(current)
+                handle.write(_canonical(event) + "\n")
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(tmp, self.path)
+            self._sync_parent_directory()
+        except NvdaManualAcceptanceIntegrityError:
+            raise
+        except (OSError, UnicodeError) as exc:
+            try:
+                tmp.unlink()
+            except (FileNotFoundError, UnboundLocalError):
+                pass
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger durability barrier failed"
+            ) from exc
+
+    def _recover_pending_locked(self) -> None:
+        pending = self._read_pending()
+        if pending is None:
+            return
+
+        records, events, root = self._read_ledger_unanchored()
+        anchor = self._read_anchor()
+        prior_count = pending["prior_event_count"]
+        prior_root = pending["prior_root_sha256"]
+        event = pending["event"]
+        event_root = event["event_sha256"]
+
+        prior_anchor_matches = self._anchor_matches(
+            anchor,
+            event_count=prior_count,
+            root=prior_root,
+        )
+        if (
+            len(records) == prior_count
+            and root == prior_root
+            and prior_anchor_matches
+        ):
+            self._remove_pending()
+            return
+
+        new_anchor_matches = self._anchor_matches(
+            anchor,
+            event_count=prior_count + 1,
+            root=event_root,
+        )
+        if (
+            len(records) == prior_count + 1
+            and root == event_root
+            and events
+            and events[-1] == event
+            and (prior_anchor_matches or new_anchor_matches)
+        ):
+            if not new_anchor_matches:
+                self._write_anchor(
+                    event_count=prior_count + 1,
+                    root=event_root,
+                )
+            self._remove_pending()
+            return
+
+        raise NvdaManualAcceptanceIntegrityError(
+            "pending manual NVDA decision cannot be safely recovered"
+        )
+
+    def events(self) -> tuple[ManualNvdaDecisionRecord, ...]:
+        writer_lock = writer_lock_type(self.path)
+        try:
+            with writer_lock:
+                self._recover_pending_locked()
+                return self._events_locked()
+        except WorkspaceEconomicLockBusyError as exc:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA ledger writer is active"
+            ) from exc
+        except (WorkspaceEconomicLockError, OSError) as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger writer authority is invalid"
+            ) from exc
+
+    def _record_structural_decision(
+        self,
+        *,
+        structural: object,
+        writer_lock_type: object,
+        reviewer_ref: str,
+        reviewer_attestation: str,
+        reviewed_at: str,
+        decision: ManualNvdaDecision,
+        protocol_version: str = PROTOCOL_VERSION,
+    ) -> ManualNvdaDecisionRecord:
+        payload = _decision_payload(
+            structural=structural,
+            decision=decision,
+            reviewer_ref=reviewer_ref,
+            reviewer_attestation=reviewer_attestation,
+            reviewed_at=reviewed_at,
+            protocol_version=protocol_version,
+        )
+
+        writer_lock = _ManualNvdaWriterLock(self.path)
+        try:
+            with writer_lock:
+                self._recover_pending_locked()
+                records = self._events_locked()
+                for record in records:
+                    if record.decision_id == payload["decision_id"]:
+                        return record
+                if records and payload["reviewed_at"] <= records[-1].reviewed_at:
+                    raise NvdaManualAcceptanceStateError(
+                        "new manual NVDA decision must have a later reviewed_at"
+                    )
+
+                previous_sha = None if not records else records[-1].event_sha256
+                sequence = len(records)
+                body = {
+                    "schema_version": SCHEMA_VERSION,
+                    "event_type": EVENT_TYPE,
+                    "sequence": sequence,
+                    "previous_sha256": previous_sha,
+                    "payload": payload,
+                }
+                event = {**body, "event_sha256": _digest(body)}
+                self._write_pending(
+                    prior_event_count=sequence,
+                    prior_root=previous_sha,
+                    event=event,
+                )
+                self._publish_ledger_event(event)
+                self._write_anchor(
+                    event_count=sequence + 1,
+                    root=event["event_sha256"],
+                )
+                self._remove_pending()
+                return _record_from_event(event)
+        except WorkspaceEconomicLockBusyError as exc:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA ledger writer is active"
+            ) from exc
+        except (WorkspaceEconomicLockError, OSError) as exc:
+            raise NvdaManualAcceptanceIntegrityError(
+                "manual NVDA ledger writer authority is invalid"
+            ) from exc
+
+    def _resolve_structural_current(
+        self,
+        *,
+        structural: object,
+        protocol_version: str = PROTOCOL_VERSION,
+    ) -> ManualNvdaAcceptanceResolution | None:
+        protocol = _require_protocol(protocol_version)
+        matching = [
+            record
+            for record in self.events()
+            if (
+                record.protocol_version == protocol
+                and record.transcript_sha256 == structural.transcript_sha256
+                and record.artifact_sha256 == structural.artifact_sha256
+                and record.source_sha == structural.source_sha
+                and record.structural_status == structural.status
+                and record.structural_human_tester_attestation_sha256
+                == structural.human_tester_attestation_sha256
+                and record.webview2_runtime_browser_version
+                == structural.webview2_runtime_browser_version
+                and record.webview2_runtime_witness_sha256
+                == structural.webview2_runtime_witness_sha256
+                and record.windows_version == structural.windows_version
+                and record.nvda_version == structural.nvda_version
+            )
+        ]
+        if not matching:
+            return None
+        record = matching[-1]
+        resolution = object.__new__(ManualNvdaAcceptanceResolution)
+        object.__setattr__(resolution, "record", record)
+        object.__setattr__(
+            resolution,
+            "accepted_manual_decision",
+            record.decision is ManualNvdaDecision.ACCEPT_PHYSICAL_NVDA,
+        )
+        object.__setattr__(resolution, "reviewer_identity_verified", False)
+        object.__setattr__(resolution, "human_tested", False)
+        object.__setattr__(resolution, "nvda_verified", False)
+        object.__setattr__(resolution, "manual_truth_promotion_required", True)
+        object.__setattr__(resolution, "real_money_execution", False)
+        object.__setattr__(resolution, "whole_product_complete", False)
+        return resolution
+
+
+def _install_record_decision_authority() -> None:
+    ledger_type = ManualNvdaAcceptanceLedger
+    implementation = ledger_type._record_structural_decision
+    implementation_code = implementation.__code__
+    structural_result = _structural_result
+    structural_result_code = structural_result.__code__
+    writer_lock_type = _ManualNvdaWriterLock
+    writer_lock_method_names = (
+        "__init__",
+        "__enter__",
+        "__exit__",
+        "acquire",
+        "release",
+    )
+    writer_lock_method_witnesses = tuple(
+        (
+            name,
+            getattr(writer_lock_type, name),
+            getattr(getattr(writer_lock_type, name), "__code__", None),
+        )
+        for name in writer_lock_method_names
+    )
+
+    def require_writer_lock_authority() -> None:
+        if _ManualNvdaWriterLock is not writer_lock_type:
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA decision writer-lock authority changed"
+            )
+        for name, expected_callable, expected_code in writer_lock_method_witnesses:
+            current_callable = getattr(writer_lock_type, name, None)
+            if (
+                current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None)
+                is not expected_code
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA decision writer-lock authority changed: " + name
+                )
+
+    def record_decision(
+        self,
+        *,
+        transcript: object,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
+        reviewer_ref: str,
+        reviewer_attestation: str,
+        reviewed_at: str,
+        decision: ManualNvdaDecision,
+        protocol_version: str = PROTOCOL_VERSION,
+    ) -> ManualNvdaDecisionRecord:
+        if (
+            type(self) is not ledger_type
+            or ledger_type._record_structural_decision is not implementation
+            or getattr(implementation, "__code__", None) is not implementation_code
+            or _structural_result is not structural_result
+            or getattr(structural_result, "__code__", None)
+            is not structural_result_code
+            or "record_decision" in vars(self)
+            or "_record_structural_decision" in vars(self)
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA decision issuance authority changed"
+            )
+        require_writer_lock_authority()
+        structural = structural_result(
+            transcript,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_source_sha=expected_source_sha,
+            expected_webview2_runtime_witness_sha256=(
+                expected_webview2_runtime_witness_sha256
+            ),
+        )
+        if (
+            _structural_result is not structural_result
+            or getattr(structural_result, "__code__", None)
+            is not structural_result_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA decision issuance authority changed"
+            )
+        require_writer_lock_authority()
+        return implementation(
+            self,
+            structural=structural,
+            writer_lock_type=writer_lock_type,
+            reviewer_ref=reviewer_ref,
+            reviewer_attestation=reviewer_attestation,
+            reviewed_at=reviewed_at,
+            decision=decision,
+            protocol_version=protocol_version,
+        )
+
+    ledger_type.record_decision = record_decision
+
+
+_install_record_decision_authority()
+del _install_record_decision_authority
+
+
+def _seal_resolution_issuance(register_witness) -> None:
+    ledger_type = ManualNvdaAcceptanceLedger
+    implementation = ledger_type._resolve_structural_current
+    implementation_code = implementation.__code__
+    structural_result = _structural_result
+    structural_result_code = structural_result.__code__
+    fingerprint_for = _resolution_fingerprint
+    fingerprint_code = fingerprint_for.__code__
+    reader_method_names = (
+        "events",
+        "_recover_pending_locked",
+        "_events_locked",
+        "_read_pending",
+        "_read_ledger_unanchored",
+        "_read_anchor",
+        "_anchor_matches",
+        "_remove_pending",
+        "_write_anchor",
+        "_sync_parent_directory",
+    )
+    reader_method_witnesses = tuple(
+        (
+            name,
+            ledger_type.__dict__.get(name),
+            getattr(ledger_type, name),
+            getattr(getattr(ledger_type, name), "__code__", None),
+        )
+        for name in reader_method_names
+    )
+    events_reader = ledger_type.events
+    events_reader_code = events_reader.__code__
+    reader_global_names = (
+        "_parse_json_object",
+        "_record_from_event",
+        "_digest",
+        "_canonical",
+        "_require_text",
+        "_require_sha256",
+        "_require_git_commit_sha",
+        "_require_canonical_utc",
+        "_require_protocol",
+        "ManualNvdaDecision",
+        "ManualNvdaDecisionRecord",
+        "SCHEMA_VERSION",
+        "ANCHOR_SCHEMA_VERSION",
+        "_PENDING_SCHEMA_VERSION",
+        "PROTOCOL_VERSION",
+        "EVENT_TYPE",
+        "STATUS_STRUCTURALLY_COMPLETE",
+        "_SHA256_RE",
+        "_EVENT_KEYS",
+        "_PAYLOAD_KEYS",
+        "_ANCHOR_KEYS",
+        "_PENDING_KEYS",
+        "datetime",
+        "timezone",
+        "hashlib",
+        "json",
+        "os",
+    )
+    reader_global_witnesses = tuple(
+        (
+            name,
+            events_reader.__globals__.get(name),
+            getattr(events_reader.__globals__.get(name), "__code__", None),
+        )
+        for name in reader_global_names
+    )
+    writer_lock_type = _ManualNvdaWriterLock
+    writer_lock_method_names = (
+        "__init__",
+        "__enter__",
+        "__exit__",
+        "acquire",
+        "release",
+    )
+    writer_lock_method_witnesses = tuple(
+        (
+            name,
+            getattr(writer_lock_type, name),
+            getattr(getattr(writer_lock_type, name), "__code__", None),
+        )
+        for name in writer_lock_method_names
+    )
+
+    def require_reader_graph(self) -> None:
+        if (
+            type(self) is not ledger_type
+            or events_reader.__globals__.get("_ManualNvdaWriterLock")
+            is not writer_lock_type
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution durable-reader authority changed"
+            )
+        for name, expected_value, expected_code in reader_global_witnesses:
+            current_value = events_reader.__globals__.get(name)
+            if (
+                current_value is not expected_value
+                or (
+                    expected_code is not None
+                    and getattr(current_value, "__code__", None)
+                    is not expected_code
+                )
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution durable-reader dependency changed: "
+                    + name
+                )
+        for (
+            name,
+            expected_descriptor,
+            expected_callable,
+            expected_code,
+        ) in reader_method_witnesses:
+            current_descriptor = ledger_type.__dict__.get(name)
+            current_callable = getattr(ledger_type, name, None)
+            if (
+                current_descriptor is not expected_descriptor
+                or current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+                or name in vars(self)
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution durable-reader authority changed: "
+                    + name
+                )
+        for name, expected_callable, expected_code in writer_lock_method_witnesses:
+            current_callable = getattr(writer_lock_type, name, None)
+            if (
+                current_callable is not expected_callable
+                or getattr(current_callable, "__code__", None) is not expected_code
+            ):
+                raise NvdaManualAcceptanceStateError(
+                    "manual NVDA resolution writer-lock authority changed: " + name
+                )
+
+    def resolve_current(
+        self,
+        *,
+        transcript: object,
+        expected_artifact_sha256: str,
+        expected_source_sha: str,
+        expected_webview2_runtime_witness_sha256: str,
+        protocol_version: str = PROTOCOL_VERSION,
+    ) -> ManualNvdaAcceptanceResolution | None:
+        if (
+            ledger_type.resolve_current is not resolve_current
+            or ledger_type._resolve_structural_current is not implementation
+            or implementation.__code__ is not implementation_code
+            or _structural_result is not structural_result
+            or getattr(structural_result, "__code__", None)
+            is not structural_result_code
+            or _resolution_fingerprint is not fingerprint_for
+            or getattr(fingerprint_for, "__code__", None) is not fingerprint_code
+            or "resolve_current" in vars(self)
+            or "_resolve_structural_current" in vars(self)
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution issuance authority changed"
+            )
+        require_reader_graph(self)
+        structural = structural_result(
+            transcript,
+            expected_artifact_sha256=expected_artifact_sha256,
+            expected_source_sha=expected_source_sha,
+            expected_webview2_runtime_witness_sha256=(
+                expected_webview2_runtime_witness_sha256
+            ),
+        )
+        if (
+            _structural_result is not structural_result
+            or getattr(structural_result, "__code__", None)
+            is not structural_result_code
+        ):
+            raise NvdaManualAcceptanceStateError(
+                "manual NVDA resolution issuance authority changed"
+            )
+        resolution = implementation(
+            self,
+            structural=structural,
+            protocol_version=protocol_version,
+        )
+        require_reader_graph(self)
+        if resolution is None:
+            return None
+        fingerprint = fingerprint_for(resolution)
+        register_witness(
+            resolution=resolution,
+            fingerprint=fingerprint,
+            ledger=self,
+            path=self.path,
+            anchor_path=self._anchor_path,
+            pending_path=self._pending_path,
+            lock_path=self._lock_path,
+            ledger_type=ledger_type,
+            reader_method_witnesses=reader_method_witnesses,
+            writer_lock_type=writer_lock_type,
+            writer_lock_method_witnesses=writer_lock_method_witnesses,
+            reader_global_witnesses=reader_global_witnesses,
+            events_reader=events_reader,
+            events_reader_code=events_reader_code,
+        )
+        return resolution
+
+    ledger_type.resolve_current = resolve_current
+
+
+_seal_resolution_issuance(_REGISTER_RESOLUTION_WITNESS)
+del _seal_resolution_issuance
+del _REGISTER_RESOLUTION_WITNESS
+
+
+__all__ = [
+    "ANCHOR_SCHEMA_VERSION",
+    "EVENT_TYPE",
+    "ManualNvdaAcceptanceLedger",
+    "ManualNvdaAcceptanceResolution",
+    "ManualNvdaDecision",
+    "ManualNvdaDecisionRecord",
+    "NvdaManualAcceptanceError",
+    "NvdaManualAcceptanceIntegrityError",
+    "NvdaManualAcceptanceStateError",
+    "PROTOCOL_VERSION",
+    "SCHEMA_VERSION",
+    "verify_manual_nvda_acceptance_resolution",
+]

@@ -133,6 +133,58 @@ class NestedWindowsReparseReleaseTests(unittest.TestCase):
             self.assertFalse(installed.exists())
             self.assertEqual(private.read_text(encoding="utf-8"), "DO-NOT-TOUCH")
 
+    def test_redirected_receipt_refused_before_inspection_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive, digest, installed, verified = self._package_and_install(Path(tmp))
+            receipt = installed / install._RECEIPT
+            original_read = Path.read_bytes
+
+            def deny_redirected_read(path: Path):
+                if path == receipt:
+                    self.fail("redirected receipt was read before admission")
+                return original_read(path)
+
+            with self._reparse(receipt), patch.object(
+                Path, "read_bytes", deny_redirected_read,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "missing or invalid installed-release receipt",
+                ):
+                    self._inspect(archive, digest, installed, verified)
+            self.assertTrue(receipt.is_file())
+
+    def test_redirected_quarantine_receipt_refused_before_recovery_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive, digest, installed, verified = self._package_and_install(root)
+            quarantine = root / ".autosport-uninstall-abc123" / "verified-product"
+            quarantine.parent.mkdir()
+            installed.rename(quarantine)
+            receipt = quarantine / install._RECEIPT
+            original_read = Path.read_bytes
+
+            def deny_redirected_read(path: Path):
+                if path == receipt:
+                    self.fail("redirected quarantine receipt was read")
+                return original_read(path)
+
+            with self._reparse(receipt), patch.object(
+                Path, "read_bytes", deny_redirected_read,
+            ), patch.object(
+                recovery.release_package, "verify_windows_package",
+                return_value=verified,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "redirected",
+                ):
+                    recovery.recover_interrupted_uninstall(
+                        quarantine, installed, archive=archive,
+                        expected_source_sha=self.SOURCE,
+                        expected_package_sha256=digest,
+                    )
+            self.assertFalse(installed.exists())
+            self.assertTrue(receipt.is_file())
+
     def test_ordinary_verified_install_remains_accepted(self):
         with tempfile.TemporaryDirectory() as tmp:
             archive, digest, installed, verified = self._package_and_install(Path(tmp))

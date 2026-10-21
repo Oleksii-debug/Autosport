@@ -417,8 +417,9 @@ def repackage_stage_neutral_windows_release(
     output_zip: str | Path,
     *,
     expected_source_sha: str,
+    require_source_manifest: bool = False,
 ) -> dict[str, object]:
-    """Convert the canonically verified legacy Windows ZIP to stage-neutral identity."""
+    """Convert a verified Windows ZIP; release mode requires source declarations."""
 
     legacy_package = Path(legacy_package_zip)
     output = Path(output_zip)
@@ -433,10 +434,20 @@ def repackage_stage_neutral_windows_release(
     if legacy_package.resolve() == output.resolve():
         raise ValueError("stage-neutral output must not overwrite the legacy input")
 
-    legacy_verification = canonical_release.verify_windows_package(
-        legacy_package,
-        expected_source_sha=expected_source_sha,
-    )
+    # Historical library fixtures keep the original compatibility boundary.
+    # The canonical production materializer requires exact-source declarations;
+    # older/resealed ZIPs must not be admitted as new release artifacts.
+    if require_source_manifest:
+        legacy_verification = canonical_release.verify_windows_package(
+            legacy_package,
+            expected_source_sha=expected_source_sha,
+            require_source_manifest=True,
+        )
+    else:
+        legacy_verification = canonical_release.verify_windows_package(
+            legacy_package,
+            expected_source_sha=expected_source_sha,
+        )
     if legacy_verification.get("status") != "PASS":
         raise ValueError("legacy release verifier did not return PASS")
     verified_legacy_sha = _require_sha256(
@@ -548,6 +559,11 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--input", required=True, type=Path)
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--source-sha", required=True)
+    parser.add_argument(
+        "--require-source-manifest",
+        action="store_true",
+        help="fail closed when verified input ZIP lacks exact-source declarations",
+    )
     parser.add_argument("--evidence", type=Path)
     args = parser.parse_args(argv)
 
@@ -558,6 +574,7 @@ def main(argv: list[str] | None = None) -> int:
         args.input,
         args.output,
         expected_source_sha=args.source_sha,
+        require_source_manifest=args.require_source_manifest,
     )
     if args.evidence is not None:
         _write_evidence(args.evidence, evidence)

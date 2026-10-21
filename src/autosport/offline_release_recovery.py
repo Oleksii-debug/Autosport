@@ -82,7 +82,9 @@ def recover_interrupted_uninstall(
             raise OfflineInstallError("interrupted release receipt is redirected")
         try:
             receipt_mode = receipt_path.lstat().st_mode
-            if not stat.S_ISREG(receipt_mode) or receipt_path.stat().st_size > 1024 * 1024:
+            if (_is_redirected_install_path(receipt_path)
+                    or not stat.S_ISREG(receipt_mode)
+                    or receipt_path.stat().st_size > 1024 * 1024):
                 raise OfflineInstallError("interrupted release receipt is unsafe")
             actual_receipt = release_package._decode_json_object(
                 receipt_path.read_bytes(), "interrupted installed-release receipt"

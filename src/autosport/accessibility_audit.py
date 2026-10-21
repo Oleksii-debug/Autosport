@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from itertools import chain, islice
 from pathlib import Path
 from types import SimpleNamespace
 from unicodedata import category as unicode_category
@@ -109,6 +110,12 @@ _PUBLIC_ROLES = frozenset(_EXPECTED_ROLES.values()) | frozenset({
 })
 _PUBLIC_GAPS = frozenset(_BLOCKING_GAPS)
 
+# Bounded evidence collection. Exceeding any limit is a reported audit FAILURE,
+# never permission to treat the omitted provider records as a clean UIA tree.
+_MAX_AUDIT_WIDGETS = 512
+_MAX_WIDGET_METADATA = 64
+_MAX_PROVIDER_TROUBLE = 64
+
 
 _PUBLIC_AUDIT_ERROR_TYPES = (
     AssertionError, ConnectionError, FileNotFoundError, KeyError, OSError,
@@ -177,10 +184,14 @@ def _combined_description(*descriptions: Any) -> Any:
     )
     return SimpleNamespace(
         strategy=first.strategy if every_provider_supported else "UNRECOGNIZED",
-        widgets=tuple(widget for description in descriptions for widget in description.widgets),
-        provider_trouble=tuple(
-            item for description in descriptions for item in description.provider_trouble
-        ),
+        widgets=tuple(islice(
+            chain.from_iterable(description.widgets for description in descriptions),
+            _MAX_AUDIT_WIDGETS + 1,
+        )),
+        provider_trouble=tuple(islice(
+            chain.from_iterable(description.provider_trouble for description in descriptions),
+            _MAX_PROVIDER_TROUBLE + 1,
+        )),
         providers_stood_down_because=next(
             (
                 description.providers_stood_down_because
@@ -239,7 +250,10 @@ def summarize_description(
     if strategy != "PROVIDED":
         failures.append("unrecognized accessibility audit provider strategy")
 
-    for widget in description.widgets:
+    for widget_index, widget in enumerate(islice(description.widgets, _MAX_AUDIT_WIDGETS + 1)):
+        if widget_index == _MAX_AUDIT_WIDGETS:
+            failures.append("accessibility audit widget enumeration exceeded safe limit")
+            break
         automation_id = widget.automation_id
         # UIA provider identities are untrusted. Numeric aliases such as
         # 101.0 and int subclasses must not satisfy a critical int ID.
@@ -251,16 +265,25 @@ def summarize_description(
                 f"automation_id={normalized_automation_id}: duplicate critical control identity"
             )
             continue
-        observed_gaps = (_enum_name(gap) for gap in widget.gaps)
+        observed_gaps = tuple(islice(widget.gaps, _MAX_WIDGET_METADATA + 1))
         gap_names = sorted({
             name if name in _PUBLIC_GAPS else "OTHER_GAP"
-            for name in observed_gaps
+            for name in (_enum_name(gap) for gap in observed_gaps)
         })
-        observed_patterns = (_enum_name(pattern) for pattern in widget.patterns)
+        if len(observed_gaps) > _MAX_WIDGET_METADATA:
+            gap_names = sorted(set(gap_names) | {"OTHER_GAP"})
+            failures.append(
+                f"automation_id={normalized_automation_id}: UIA gap enumeration exceeded safe limit"
+            )
+        observed_patterns = tuple(islice(widget.patterns, _MAX_WIDGET_METADATA + 1))
         pattern_names = sorted({
             name if name in _PUBLIC_PATTERNS else "OTHER_PATTERN"
-            for name in observed_patterns if name
+            for name in (_enum_name(pattern) for pattern in observed_patterns) if name
         })
+        if len(observed_patterns) > _MAX_WIDGET_METADATA:
+            failures.append(
+                f"automation_id={normalized_automation_id}: UIA pattern enumeration exceeded safe limit"
+            )
         observed_role = _enum_name(widget.role)
         role_name = observed_role if observed_role in _PUBLIC_ROLES else "UNRECOGNIZED"
         # Invisible Unicode-only or non-text UIA Name is not an accessible label.
@@ -340,9 +363,15 @@ def summarize_description(
             )
 
     # External UIA errors can include credentials, paths and account data.
-    provider_trouble = ["provider details redacted" for _ in description.provider_trouble]
+    observed_trouble = tuple(islice(description.provider_trouble, _MAX_PROVIDER_TROUBLE + 1))
+    provider_trouble = ["provider details redacted"] * min(
+        len(observed_trouble), _MAX_PROVIDER_TROUBLE,
+    )
+    if len(observed_trouble) > _MAX_PROVIDER_TROUBLE:
+        provider_trouble.append("additional provider trouble redacted")
+        failures.append("provider trouble enumeration exceeded safe limit")
     if provider_trouble:
-        failures.extend("provider trouble: details redacted" for _ in provider_trouble)
+        failures.append("provider trouble: details redacted")
 
     return {
         "status": "PASS" if not failures else "FAIL",

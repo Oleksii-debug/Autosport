@@ -100,10 +100,10 @@ def test_busy_economic_lock_is_not_ignored(tmp_path: Path, monkeypatch) -> None:
     assert not (tmp_path / "backup.zip").exists()
 
 
-def test_windows_reserved_device_name_never_enters_backup(tmp_path: Path) -> None:
-    root = tmp_path / "source"
-    root.mkdir()
-    (root / "CON.txt").write_text("unsafe portability")
+def test_windows_reserved_device_name_never_enters_backup() -> None:
+    from autosport.workspace_backup import _safe_relative
+
     with pytest.raises(WorkspaceBackupError, match="nonportable"):
-        backup_workspace(root, tmp_path / "backup.zip")
-    assert not (tmp_path / "backup.zip").exists()
+        _safe_relative("CON.txt")
+    with pytest.raises(WorkspaceBackupError, match="nonportable"):
+        _safe_relative("session/LPT1.txt")

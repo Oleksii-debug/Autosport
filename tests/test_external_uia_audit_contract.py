@@ -1474,3 +1474,24 @@ def test_external_uia_report_has_no_raw_exception_text_on_webview2_lineage() -> 
         assert expected in audit
     assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in audit
     assert "Write-Host ($report | ConvertTo-Json -Depth 8)" in audit
+
+
+def test_external_uia_critical_identity_scan_is_bounded_and_rejects_duplicates() -> None:
+    """The real WebView2 UIA witness may not hide duplicate critical IDs."""
+    audit = _audit()
+    start = audit.index("    $criticalIds = [System.Collections.Generic.HashSet[string]]")
+    end = audit.index("    foreach ($spec in $expected) {", audit.index(
+        "external UIA critical identity scan incomplete", start
+    ))
+    probe = audit[start:end]
+    assert "$descendants = $uiaRoot.FindAll(" in audit[:start]
+    assert "$descendants.Count -gt 4096" in probe
+    assert "$criticalIds.Contains($candidateId)" in probe
+    assert "$criticalCounts.ContainsKey($candidateId)" in probe
+    assert "$criticalCounts[$expectedId] -gt 1" in probe
+    assert "duplicate external UIA control identity" in probe
+    assert "external UIA critical identity scan incomplete" in probe
+    assert "if (-not ($lastFamilyIds -contains [int]$candidate.Current.ProcessId))" in probe
+    assert "$report.failures += 'external UIA critical identity scan exceeded bounded collection limit'" in probe
+    # No second full-desktop tree walk to defeat the WebView2 COM watchdog.
+    assert probe.count("FindAll(") == 0

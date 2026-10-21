@@ -165,30 +165,6 @@ def _remove_pinned_inventory(root: Path, trusted_files: dict[str, str]) -> None:
     root.rmdir()
 
 
-def _remove_known_members_only(root: Path, trusted_files: dict[str, str]) -> None:
-    """Never recursively delete arbitrary files in a directory that may have changed."""
-    # Remove only the exact known, independently ZIP-hashed members. Unexpected
-    # additions cause directory removal to fail, preserving the new data.
-    for name in sorted(trusted_files):
-        member = root.joinpath(*name.split("/"))
-        if (
-            not stat.S_ISREG(member.lstat().st_mode)
-            or member.stat().st_nlink != 1
-            or installation._sha_file(member) != trusted_files[name]
-        ):
-            raise installation.OfflineInstallError("installed release changed during removal")
-        member.unlink()
-    (root / installation._RECEIPT).unlink()
-    known_directories = {
-        "/".join(name.split("/")[:index])
-        for name in trusted_files
-        for index in range(1, len(name.split("/")))
-    }
-    for name in sorted(known_directories, key=lambda item: (-item.count("/"), item)):
-        root.joinpath(*name.split("/")).rmdir()
-    root.rmdir()
-
-
 def uninstall_verified_release(
     archive: str | Path,
     destination: str | Path,
@@ -255,7 +231,6 @@ def uninstall_verified_release(
     staged = quarantine / "payload"
     moved = False
     removed = False
-    removal_started = False
     deletion_started = False
     try:
         installation._publish_directory_no_replace(root, staged)
@@ -283,8 +258,6 @@ def uninstall_verified_release(
                 quarantine.rmdir()
             except OSError:
                 pass
-        # If a concurrent unknown file appeared during removal, the private
-        # quarantine remains for recovery; never erase those bytes recursively.
 
 
 def main(argv: list[str] | None = None) -> int:

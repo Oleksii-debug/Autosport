@@ -27,7 +27,7 @@ def test_webview2_build_preserves_exact_sbom_source_and_clean_env() -> None:
     assert 'load_module("autosport.release_sbom", "src/autosport/release_sbom.py")' in script
     assert script.index('load_module("autosport.release_sbom"') < script.index('load_module("autosport.release_package"')
     assert "& $packagingPython -I -c $script:trustedPackageLauncher" in script
-    assert "src/autosport/release_sbom.py src/autosport/data_tool_package.py" in script
+    assert "src/autosport/release_sbom.py src/autosport/release_dependency_graph.py src/autosport/data_tool_package.py" in script
     assert "$trustedWebAssetsSpec" in script
     assert "--add-data $trustedWebAssetsSpec" in script
 
@@ -43,3 +43,38 @@ def test_package_source_binds_release_metadata_and_safety_policy() -> None:
     assert "capture_direct_installed_dependencies" in cli
     assert "require_dependency_metadata=True" in cli
     assert "capture_direct_installed_dependencies(" in sbom
+
+
+def test_webview2_preserves_accepted_dependency_graph_release_wiring() -> None:
+    """Source regression: Windows shell changes must retain accepted release graph."""
+    script = (ROOT / "scripts/build_windows.ps1").read_text(encoding="utf-8")
+    package = (ROOT / "src/autosport/release_package.py").read_text(encoding="utf-8")
+    builder = (ROOT / "scripts/package_windows.py").read_text(encoding="utf-8")
+    graph = (ROOT / "src/autosport/release_dependency_graph.py").read_text(
+        encoding="utf-8"
+    )
+    trusted_module = (
+        'load_module("autosport.release_dependency_graph", '
+        '"src/autosport/release_dependency_graph.py")'
+    )
+    assert trusted_module in script
+    assert script.index('load_module("autosport.release_sbom"') < script.index(
+        trusted_module
+    ) < script.index('load_module("autosport.release_package"')
+    assert '"src/autosport/release_dependency_graph.py",' in script
+    assert "'src/autosport/release_dependency_graph.py'," in script
+    assert "require_dependency_graph=True" in builder
+    assert "capture_build_host_dependency_graph" in builder
+    assert "validate_build_host_dependency_graph" in package
+    assert "_require_dependency_evidence_coherence(" in package
+    assert "def validate_build_host_dependency_graph(" in graph
+
+
+def test_webview2_preserves_accepted_offline_release_package_smokes() -> None:
+    """WebView2 packaged UI and offline-release data operations must both ship."""
+    script = (ROOT / "scripts/build_windows.ps1").read_text(encoding="utf-8")
+    for command in ("install-release", "verify-installed-release", "uninstall-release"):
+        assert f"& $dataExe {command} --help | Out-Null" in script
+    for command in ("verify-installed-release", "uninstall-release"):
+        assert f"& $extractedDataExe {command} --help | Out-Null" in script
+    assert "--add-data $trustedWebAssetsSpec" in script

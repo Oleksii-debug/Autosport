@@ -70,6 +70,11 @@ from . import _provider_transport_origin as _provider_transport_origin  # noqa: 
 # fields before normalization or monotonic integrity validation.
 from . import _provider_observation_payload_strictness as _provider_observation_payload_strictness  # noqa: F401,E402
 
+# Parlay display labels must never silently become canonical provider identity.
+# Bind provider event witnesses and reject ambiguous event/market/selection tuples
+# before any partial provider snapshot can escape to product evaluation.
+from . import _parlayapi_canonical_identity_guard as _parlayapi_canonical_identity_guard  # noqa: F401,E402
+
 # Install the fail-closed predictive runtime authority bridge before callers import
 # decision modules.  The import is intentionally private; public APIs remain in the
 # owning opportunity/predictive modules.
@@ -151,6 +156,15 @@ from . import _scientific_registry_read_authority as _scientific_registry_read_a
 # and explicit runtime-repair reloads must restore this seal before positive use.
 from . import _point_in_time_class_dispatch_seal as _point_in_time_class_dispatch_seal  # noqa: F401,E402
 
+# Holdout freshness is physical evaluation content, not a protocol/source/licence/
+# family label. Compose the existing ledger with registry-backed factory history while
+# retaining old stored freshness ids as readable migration input only.
+from . import _holdout_physical_content_guard as _holdout_physical_content_guard  # noqa: F401,E402
+# Preserve that composition across explicit reloads of the runtime-repair and factory
+# implementation without bypassing existing compatibility seals.
+from . import _holdout_physical_runtime_reload_guard as _holdout_physical_runtime_reload_guard  # noqa: F401,E402
+from . import _holdout_physical_factory_reload_guard as _holdout_physical_factory_reload_guard  # noqa: F401,E402
+
 # Sequential multiplicity evidence and PromotionEvidence live in separate durable
 # journals. Seal the registry prefix observed at look registration so a later write
 # can never retroactively authorize an already-durable promotion record.
@@ -168,6 +182,20 @@ from . import _policy_evaluation_canonical_reader_authority as _policy_evaluatio
 # Robust portfolio stakes are monetary grid values, not Decimal exponent values.
 # Install the exact arbitrary-quantum floor after the owning proposal implementation.
 from . import _robust_portfolio_quantum_grid as _robust_portfolio_quantum_grid  # noqa: F401,E402
+
+# Family-close evidence is useful only if canonical re-resolution cannot be paired
+# with caller-rebound evidence constructors/digests. Seal its publication surface.
+from . import _research_multiplicity_family_close_dispatch_guard as _research_multiplicity_family_close_dispatch_guard  # noqa: F401,E402
+
+# Reproducibility bundles contain Experiment outcome. Their outward file-export path
+# therefore consumes the canonically resolved confirmation holdout before publication;
+# legacy direct export is fail-closed so callers cannot substitute holdout identity.
+from . import scientific_disclosure_export as _scientific_disclosure_export  # noqa: F401,E402
+from . import _scientific_disclosure_export_reload_guard as _scientific_disclosure_export_reload_guard  # noqa: F401,E402
+
+# Lawful-use composition depends on exact durable owner-approval semantics. Seal
+# internal store dispatch before downstream governance captures its resolver.
+from . import _provider_owner_approval_dispatch_guard as _provider_owner_approval_dispatch_guard  # noqa: F401,E402
 
 # Caller-owned market-filter containers cannot remain authority-bearing after the
 # authenticated Betfair subscription starts. Snapshot once, then let the canonical
@@ -191,3 +219,16 @@ from . import _drift_decimal_resource_guard as _drift_decimal_resource_guard  # 
 # K07 authenticated account identity must acquire account details from a sealed
 # product-origin snapshot, not mutable live-client fields during provider I/O.
 from . import _betfair_account_identity_io_snapshot_guard as _betfair_account_identity_io_snapshot_guard  # noqa: F401,E402
+
+
+# RunRegistry availability and run-state updates are whole-image authority
+# transitions. Serialize the entire read/modify/write cycle, not only final replace.
+from . import _outcome_availability_registry_serialization as _outcome_availability_registry_serialization  # noqa: F401,E402
+
+# Seal the two-phase availability clock against mutable function defaults, module
+# dispatch rebinding and direct mutation of cloned UTC-clock/begin globals.
+from . import _outcome_availability_clock_dispatch_guard as _outcome_availability_clock_dispatch_guard  # noqa: F401,E402
+
+# Positive Historical Data provenance uses the closure-hidden canonical urllib
+# dispatch snapshot; synthetic transports remain explicitly non-authoritative.
+from . import _betfair_historical_entitlement_io_snapshot_guard as _betfair_historical_entitlement_io_snapshot_guard  # noqa: F401,E402

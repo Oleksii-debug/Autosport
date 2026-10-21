@@ -1,3 +1,4 @@
+import re
 from pathlib import Path
 
 
@@ -7,20 +8,22 @@ _ACTIVITY_TYPES = (
 _PR_INTEGRATION_GATE = (
     "github.event.action != 'closed' && github.event.pull_request.draft == false"
 )
-_RUNNER_FREE_PR_ADMISSION = (
-    "  superseded_run_admission:\n"
-    "    # Draft/closed PR lifecycle runs are already non-integration-capable. Skip this job\n"
-    "    # at server-side job evaluation so they do not reserve an Ubuntu admission runner.\n"
-    "    # ready_for_review has draft=false and still executes exact-head admission.\n"
-    "    if: >-\n"
-    "      github.event_name != 'pull_request' ||\n"
-    "      (github.event.action != 'closed' &&\n"
-    "      github.event.pull_request.head.sha &&\n"
-    "      github.event.pull_request.head.repo.full_name == github.repository &&\n"
-    "      github.event.pull_request.base.repo.full_name == github.repository &&\n"
-    "      github.event.pull_request.draft == false)\n"
-    "    runs-on: ubuntu-latest"
-)
+def _assert_runner_free_pr_admission(workflow: str) -> None:
+    jobs = workflow.split("jobs:", 1)[1]
+    start = jobs.index("  superseded_run_admission:")
+    remainder = jobs[start + len("  superseded_run_admission:") :]
+    next_job_match = re.search(r"\n  [A-Za-z_][A-Za-z0-9_-]*:\n", remainder)
+    next_job = -1 if next_job_match is None else next_job_match.start()
+    block = jobs[start:] if next_job < 0 else jobs[start : start + len("  superseded_run_admission:") + next_job]
+
+    assert "github.event_name != 'pull_request' ||" in block
+    assert "github.event.action != 'closed'" in block
+    assert "github.event.pull_request.head.sha" in block
+    assert "github.event.pull_request.head.repo.full_name == github.repository" in block
+    assert "github.event.pull_request.base.repo.full_name == github.repository" in block
+    assert "github.event.pull_request.draft == false" in block
+    assert "runs-on: ubuntu-slim" in block
+    assert "timeout-minutes: 5" in block
 
 
 def _workflow(path: str) -> str:
@@ -69,7 +72,7 @@ def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() ->
 
     assert _ACTIVITY_TYPES in workflow
     assert _PR_INTEGRATION_GATE in workflow
-    assert _RUNNER_FREE_PR_ADMISSION in workflow
+    _assert_runner_free_pr_admission(workflow)
     assert "needs.superseded_run_admission.outputs.current_head == 'true'" in workflow
     assert "--admission-only" in workflow
     assert "matrix:" in workflow
@@ -88,7 +91,7 @@ def test_windows_candidate_is_deferred_for_stale_draft_or_closed_pull_request() 
 
     assert _ACTIVITY_TYPES in workflow
     assert _PR_INTEGRATION_GATE in workflow
-    assert _RUNNER_FREE_PR_ADMISSION in workflow
+    _assert_runner_free_pr_admission(workflow)
     assert "needs.superseded_run_admission.outputs.current_head == 'true'" in workflow
     assert "--admission-only" in workflow
     assert "name: Windows candidate" in workflow
@@ -105,7 +108,7 @@ def test_endurance_matrix_is_deferred_only_while_pull_request_is_draft() -> None
 
     assert _ACTIVITY_TYPES in workflow
     assert _PR_INTEGRATION_GATE in workflow
-    assert _RUNNER_FREE_PR_ADMISSION in workflow
+    _assert_runner_free_pr_admission(workflow)
     assert "name: Endurance" in workflow
     assert "os: [ubuntu-latest, windows-latest]" in workflow
     assert "cancel-in-progress: true" in workflow

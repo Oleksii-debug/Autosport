@@ -5,10 +5,11 @@ from tkinter import messagebox, ttk
 
 import tk_uia
 
-from .gui import AutosportApp
+from .gui import AutosportApp, _safe_worker_error_text
 from .localization import text
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
+from .secret_redaction import _safe_exception_type_label, redact_operator_text
 from .ui_model import evaluation_lines, result_summary, ticket_lines
 
 
@@ -18,10 +19,9 @@ WINDOWS_BANKROLL_AUTOMATION_ID = 205
 def _safe_exception_detail(exc: BaseException) -> str:
     """Render fail-closed GUI diagnostics without trusting exception metadata."""
 
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "BaseException"
+    # Exception subclass names can themselves be attacker-controlled and secret-bearing.
+    # Reuse the canonical built-in exception-category boundary.
+    exception_type = _safe_exception_type_label(exc)
     try:
         detail = str(exc)
     except BaseException:
@@ -29,7 +29,9 @@ def _safe_exception_detail(exc: BaseException) -> str:
             "ui.error.exception.message_unavailable",
             exception_type=exception_type,
         )
-    return f"{exception_type}: {detail}"
+    # Untrusted exception text can contain bookmaker tokens, credentialed URLs,
+    # or private environment secrets. Never copy it raw into dialogs or logs.
+    return f"{exception_type}: {redact_operator_text(detail)}"
 
 
 class WindowsAutosportApp(AutosportApp):
@@ -310,7 +312,7 @@ class WindowsAutosportApp(AutosportApp):
             self._recovery_view = None
             self.bank.set(self._bank_text())
             self._refresh_tickets()
-            detail = text("ui.error.recovery.worker", detail=message.error)
+            detail = text("ui.error.recovery.worker", detail=_safe_worker_error_text(message.error))
             self.status.set(text("ui.status.recovery.blocked"))
             self._append_log(detail)
             messagebox.showerror(text("ui.dialog.title"), detail)
@@ -399,7 +401,7 @@ class WindowsAutosportApp(AutosportApp):
             self.bank.set(self._bank_text())
             self._refresh_tickets()
             if message.error is not None:
-                replay_error = text("ui.error.replay.worker", detail=message.error)
+                replay_error = text("ui.error.replay.worker", detail=_safe_worker_error_text(message.error))
                 self._append_log(replay_error)
                 self._set_evaluation_lines([text("ui.evaluation.replay_failed")])
                 self.status.set(text("ui.status.replay.failed_recovery"))

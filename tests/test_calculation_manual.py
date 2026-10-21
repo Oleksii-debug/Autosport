@@ -198,3 +198,36 @@ def test_manual_service_snapshots_default_boundary_and_rejects_corrupted_default
         service.odds_conversion("1" * 129)
     with pytest.raises(ValueError, match="must not be looser"):
         ManualCalculationService()
+
+def test_manual_service_snapshots_limits_before_validation_use_race(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    boundary = CalculationInputBoundary(
+        CalculationInputLimits(numeric_text_chars=1)
+    )
+    canonical_limits = CalculationInputLimits()
+    original_validate = calculation_manual._validate_input_boundary_limits
+
+    def validate_then_relax(limits: object) -> None:
+        original_validate(limits)
+        boundary.limits = canonical_limits
+
+    monkeypatch.setattr(
+        calculation_manual,
+        "_validate_input_boundary_limits",
+        validate_then_relax,
+    )
+
+    service = ManualCalculationService(input_boundary=boundary)
+
+    assert boundary.limits is canonical_limits
+    with pytest.raises(ValueError, match="text limit"):
+        service.odds_conversion("12")
+
+
+def test_manual_service_rejects_replaced_noncanonical_limits_object() -> None:
+    boundary = CalculationInputBoundary()
+    boundary.limits = object()
+    with pytest.raises(ValueError, match="exact CalculationInputLimits"):
+        ManualCalculationService(input_boundary=boundary)
+

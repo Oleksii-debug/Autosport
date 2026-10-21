@@ -37,17 +37,17 @@ class CausalJsonDomainIntegrityTests(unittest.TestCase):
     def test_top_level_causal_provenance_must_be_json_object(self):
         for value in ([], (), ["feature"]):
             with self.subTest(value=value):
-                with self.assertRaisesRegex(ValueError, "must be a JSON object"):
+                with self.assertRaisesRegex(ValueError, "must be (?:an exact )?JSON object"):
                     self._evidence(value)
-                with self.assertRaisesRegex(ValueError, "must be a JSON object"):
+                with self.assertRaisesRegex(ValueError, "must be (?:an exact )?JSON object"):
                     self._forecast(value)
 
     def test_non_string_object_keys_are_rejected_before_hash_binding(self):
         for value in ({1: "x"}, {"nested": {1: "x"}}):
             with self.subTest(value=value):
-                with self.assertRaisesRegex(ValueError, "keys must be strings"):
+                with self.assertRaisesRegex(ValueError, "keys must be (?:exact )?strings"):
                     self._evidence(value)
-                with self.assertRaisesRegex(ValueError, "keys must be strings"):
+                with self.assertRaisesRegex(ValueError, "keys must be (?:exact )?strings"):
                     self._forecast(value)
 
     def test_non_finite_numbers_are_rejected_before_hash_binding(self):

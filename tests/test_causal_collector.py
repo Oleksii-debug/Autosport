@@ -6,6 +6,8 @@ from dataclasses import replace
 from pathlib import Path
 from unittest.mock import patch
 
+from autosport.causal_collector_legacy import LegacyJsonCollectorDeltaStore as LegacyCollectorDeltaStore
+
 from autosport.causal_collector import (
     AckConflictError,
     CanonicalDesktopApplication,
@@ -142,6 +144,26 @@ class CollectorDeltaTests(unittest.TestCase):
             checkpoint = reopened.stream_checkpoint("source-x", "epoch-1")
             self.assertEqual(checkpoint.last_position, 1)
             self.assertEqual(checkpoint.last_cursor, "1")
+
+    def test_store_reopen_rejects_boolean_schema_version_without_rewrite(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "collector.json"
+            LegacyCollectorDeltaStore(path)
+            raw = json.loads(path.read_text(encoding="utf-8"))
+            raw["schema_version"] = True
+            path.write_text(
+                json.dumps(raw, ensure_ascii=False, sort_keys=True),
+                encoding="utf-8",
+            )
+            forged = path.read_bytes()
+
+            with self.assertRaisesRegex(
+                ValueError,
+                "unsupported causal collector store schema",
+            ):
+                LegacyCollectorDeltaStore(path)
+
+            self.assertEqual(path.read_bytes(), forged)
 
     def test_source_and_normalized_digests_preserve_distinct_evidence(self):
         payload = event_payload()

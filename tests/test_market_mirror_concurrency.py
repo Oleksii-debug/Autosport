@@ -27,6 +27,7 @@ class MarketMirrorConcurrencyTests(unittest.TestCase):
             selection_id=selection_id,
             decimal_odds=Decimal(odds),
             observed_ts=observed_ts,
+            ingest_ts=observed_ts,
             source_id=source,
             sequence=sequence,
             status=status,

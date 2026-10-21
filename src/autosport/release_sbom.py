@@ -236,6 +236,9 @@ def capture_embedded_executable_inventory(
         raise ValueError("unable to inspect executable PyInstaller CArchive") from exc
     if type(toc) is not dict or not 1 <= len(toc) <= 20000:
         raise ValueError("executable has no bounded CArchive member table")
+    # CArchive member offsets are archive-relative; even without trusting the
+    # archive start, a compressed member cannot extend beyond the EXE bytes.
+    executable_size = path.stat().st_size
     components: list[dict[str, Any]] = []
     for name, record in sorted(toc.items()):
         if type(record) not in (tuple, list) or len(record) != 5:
@@ -243,6 +246,10 @@ def capture_embedded_executable_inventory(
         position, packed, unpacked, compressed, typecode = record
         if (
             type(position) is not int or position < 0
+            or type(packed) is not int or packed < 0
+            or type(unpacked) is not int or unpacked < 0
+            or position > executable_size
+            or packed > executable_size - position
             or type(compressed) not in (bool, int) or compressed not in (False, True, 0, 1)
         ):
             raise ValueError("malformed executable CArchive member flags")

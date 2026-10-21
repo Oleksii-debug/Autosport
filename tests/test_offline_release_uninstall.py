@@ -163,5 +163,27 @@ class SafeReleaseUninstallTests(unittest.TestCase):
             self.assertTrue(destination.is_dir())
 
 
+    def test_late_unowned_file_is_preserved_in_quarantine_not_recursively_deleted(self):
+        """Even after preflight, unexpected owner bytes must never enter deletion."""
+        with tempfile.TemporaryDirectory() as home:
+            parent = Path(home)
+            archive, destination, digest = self._prepared(parent)
+            original = uninstall._remove_pinned_inventory
+
+            def inject_extra_after_inspection(stage, trusted_files):
+                (stage / "late-owner-data.json").write_text("PRESERVE", encoding="utf-8")
+                return original(stage, trusted_files)
+
+            with patch.object(uninstall, "_remove_pinned_inventory", side_effect=inject_extra_after_inspection):
+                with self.assertRaises(OSError):
+                    self._uninstall(archive, destination, digest)
+            quarantines = list(parent.glob(".autosport-uninstall-staging-*"))
+            self.assertEqual(len(quarantines), 1)
+            retained = quarantines[0] / "payload" / "late-owner-data.json"
+            self.assertEqual(retained.read_text(encoding="utf-8"), "PRESERVE")
+            self.assertFalse(destination.exists())
+            self.assertTrue(archive.is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

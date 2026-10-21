@@ -31,6 +31,9 @@ Usage:
   Autosport-Data.exe verify-installed-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe uninstall-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe recover-uninstall-release --quarantine <interrupted-quarantine-folder> --archive <original-release.zip> --destination <original-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
+  Autosport-Data.exe upgrade-release --destination <installed-folder> --old-archive <old.zip> --old-source-sha <old-git-sha> --old-package-sha256 <old-zip-sha> --new-archive <new.zip> --new-source-sha <new-git-sha> --new-package-sha256 <new-zip-sha>
+  Autosport-Data.exe rollback-release --destination <installed-folder> --old-archive <old.zip> --old-source-sha <old-git-sha> --old-package-sha256 <old-zip-sha> --new-archive <new.zip> --new-source-sha <new-git-sha> --new-package-sha256 <new-zip-sha>
+  Autosport-Data.exe recover-update-release --destination <installed-folder> --old-archive <old.zip> --old-source-sha <old-git-sha> --old-package-sha256 <old-zip-sha>
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
@@ -52,6 +55,9 @@ Commands:
   verify-installed-release  Compare installed PAPER files and receipt to the independently pinned original release ZIP.
   uninstall-release         Remove only a fully matching inventoried PAPER release, refusing unowned user data or modified files.
   recover-uninstall-release Restore an interrupted uninstall from an independently pinned original PAPER ZIP; preserve unknown private data.
+  upgrade-release           Install a newer same-schema PAPER release; preserve exact old product for rollback.
+  rollback-release          Restore independently verified prior PAPER product; quarantine rejected new release.
+  recover-update-release    Restore old PAPER product after interrupted update left installation folder absent.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
   export-evidence            Export the canonical deterministic metadata-only workspace evidence manifest.
   verify-evidence            Verify an exported evidence manifest against the current canonical workspace evidence.
@@ -127,6 +133,10 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.offline_release_recovery import main as recovery_main
 
         return recovery_main(forwarded)
+    if command in {"upgrade-release", "rollback-release", "recover-update-release"}:
+        from autosport.offline_release_upgrade import main as upgrade_main
+
+        return upgrade_main([command, *forwarded])
     if command == "repair-workspace":
         from autosport.cli import main as cli_main
 

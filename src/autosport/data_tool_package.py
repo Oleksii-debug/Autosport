@@ -16,6 +16,7 @@ from autosport.release_package import (
     _validate_windows_member,
     _write_canonical_zip,
     _ZIP_MAX_WIRE_BYTES,
+    _ZIP_MAX_MEMBER_UNCOMPRESSED,
     verify_windows_package,
 )
 
@@ -157,7 +158,15 @@ def bind_portable_data_tool(
 
     package = Path(package_zip)
     data_path = Path(data_exe)
-    data_bytes = data_path.read_bytes()
+    # Autosport-Data.exe becomes a single release ZIP member. Enforce the
+    # canonical per-member limit *before* capturing its bytes, including when
+    # the file grows after the first stat; never decompress or publish it here.
+    if data_path.stat().st_size > _ZIP_MAX_MEMBER_UNCOMPRESSED:
+        raise ValueError("release ZIP resource limit: unsafe member size")
+    with data_path.open("rb") as source:
+        data_bytes = source.read(_ZIP_MAX_MEMBER_UNCOMPRESSED + 1)
+    if len(data_bytes) > _ZIP_MAX_MEMBER_UNCOMPRESSED:
+        raise ValueError("release ZIP resource limit: unsafe member size")
     if not data_bytes:
         raise ValueError("portable data tool executable is empty")
 

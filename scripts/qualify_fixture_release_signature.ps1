@@ -76,6 +76,30 @@ try {
     $finalDigest = (Get-FileHash -LiteralPath $archive -Algorithm SHA256).Hash.ToLowerInvariant()
     if ($finalDigest -cne $observedSha) { throw 'Release ZIP was modified during signing' }
 
+    # The independently callable update admission verifier must accept only
+    # the exact pinned public certificate and the exact source/package identity.
+    $fixtureRoot = Join-Path ([System.IO.Path]::GetTempPath()) (
+        'autosport-release-signature-fixture-' + [System.Guid]::NewGuid().ToString('N'))
+    [System.IO.Directory]::CreateDirectory($fixtureRoot) | Out-Null
+    try {
+        $publicPath = Join-Path $fixtureRoot 'public-certificate.der'
+        $signaturePath = Join-Path $fixtureRoot 'release-manifest.signature'
+        [System.IO.File]::WriteAllBytes($publicPath, $publicCertificate.RawData)
+        [System.IO.File]::WriteAllBytes($signaturePath, $signature)
+        $digestCalculator = [System.Security.Cryptography.SHA256]::Create()
+        try {
+            $trustedPin = [System.Convert]::ToHexString(
+                $digestCalculator.ComputeHash($publicCertificate.RawData)).ToLowerInvariant()
+        } finally { $digestCalculator.Dispose() }
+        $admission = & (Join-Path $PSScriptRoot 'verify_release_update_signature.ps1') -PackagePath $resolvedPackage -SourceSha $SourceSha -ExpectedPackageSha256 $observedSha -PublicCertificatePath $publicPath -SignaturePath $signaturePath -PinnedPublicCertificateSha256 $trustedPin
+        if ($admission -notlike 'release-update-signature=PASS*') {
+            throw 'Fixture signing failed independent update-signature admission'
+        }
+    }
+    finally {
+        Remove-Item -LiteralPath $fixtureRoot -Recurse -Force -ErrorAction SilentlyContinue
+    }
+
     $hash = [System.Security.Cryptography.SHA256]::Create()
     try {
         $publicCertSha = [System.Convert]::ToHexString(

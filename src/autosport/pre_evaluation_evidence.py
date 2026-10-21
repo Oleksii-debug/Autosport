@@ -13,6 +13,7 @@ from enum import Enum
 from hashlib import sha256
 import json
 import os
+import tempfile
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
@@ -495,13 +496,32 @@ class PreEvaluationEvidenceStore:
             "payload": evidence.to_payload(),
         }
         self._path.parent.mkdir(parents=True, exist_ok=True)
-        temporary = self._path.with_name(f".{self._path.name}.tmp")
         data = _canonical_json(envelope) + b"\n"
-        with temporary.open("wb") as handle:
-            handle.write(data)
-            handle.flush()
-            os.fsync(handle.fileno())
-        os.replace(temporary, self._path)
+        # A fixed .tmp filename lets concurrent processes overwrite each
+        # other's bytes before publication. Each writer owns its own inode.
+        temporary: Path | None = None
+        try:
+            with tempfile.NamedTemporaryFile(
+                mode="wb",
+                dir=self._path.parent,
+                prefix=f".{self._path.name}.",
+                suffix=".tmp",
+                delete=False,
+            ) as handle:
+                temporary = Path(handle.name)
+                handle.write(data)
+                handle.flush()
+                os.fsync(handle.fileno())
+            os.replace(temporary, self._path)
+        except BaseException:
+            # Preserve the original publication error, including STOP signals;
+            # only remove this writer's temporary, never another writer's.
+            if temporary is not None:
+                try:
+                    temporary.unlink()
+                except OSError:
+                    pass
+            raise
 
     def load(self) -> PreEvaluationSessionEvidence:
         try:

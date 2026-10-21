@@ -126,7 +126,14 @@ def backup_workspace(workspace: str | Path, destination: str | Path) -> dict[str
             files: list[tuple[str, bytes]] = []
             seen_windows_names: set[str] = set()
             total = 0
-            for folder, directory_names, file_names in os.walk(root, followlinks=False):
+            def reject_walk_error(exc: OSError) -> None:
+                # os.walk otherwise suppresses scandir errors and can certify a
+                # partial backup as complete. Never publish an incomplete ZIP.
+                raise WorkspaceBackupError("workspace directory enumeration failed") from exc
+
+            for folder, directory_names, file_names in os.walk(
+                root, followlinks=False, onerror=reject_walk_error
+            ):
                 folder_path = Path(folder)
                 for directory in sorted(directory_names):
                     item = folder_path / directory

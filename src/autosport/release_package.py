@@ -459,17 +459,37 @@ def _validate_source_manifest(value: dict[str, Any], source_sha: str) -> None:
     for digest in source_files.values():
         if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
             raise ValueError("SOURCE_MANIFEST source digest is invalid")
+    # Distribution identities follow PEP 503 normalization, not spelling:
+    # tk-uia, tk_uia and TK.UIA all address the same installed distribution.
+    # Recomputable ZIP hashes must not disguise aliases or conflicting pins.
+    pinned_versions: dict[str, str] = {}
     for field in ("declared_runtime_dependencies", "declared_build_dependencies"):
         dependencies = value[field]
         if not isinstance(dependencies, list) or not dependencies:
             raise ValueError("SOURCE_MANIFEST dependency declaration is missing")
         if dependencies != sorted(set(dependencies)):
             raise ValueError("SOURCE_MANIFEST dependency declaration is not unique/sorted")
+        names_in_scope: set[str] = set()
         for requirement in dependencies:
-            if not isinstance(requirement, str) or not re.fullmatch(
-                r"[A-Za-z][A-Za-z0-9_.-]*==[0-9][A-Za-z0-9_.+-]*", requirement
-            ):
+            match = (
+                re.fullmatch(
+                    r"([A-Za-z][A-Za-z0-9_.-]*)==([0-9][A-Za-z0-9_.+-]*)",
+                    requirement,
+                )
+                if isinstance(requirement, str)
+                else None
+            )
+            if match is None:
                 raise ValueError("SOURCE_MANIFEST dependency is not exactly pinned")
+            package_name = re.sub(r"[-_.]+", "-", match.group(1)).lower()
+            version = match.group(2)
+            if package_name in names_in_scope:
+                raise ValueError("SOURCE_MANIFEST contains normalized dependency aliases")
+            names_in_scope.add(package_name)
+            previous_version = pinned_versions.get(package_name)
+            if previous_version is not None and previous_version != version:
+                raise ValueError("SOURCE_MANIFEST contains conflicting dependency versions")
+            pinned_versions[package_name] = version
 
 
 def build_windows_package(

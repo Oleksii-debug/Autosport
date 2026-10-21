@@ -46,6 +46,11 @@ GROUPS = (
         "tests/test_offline_release_lifecycle.py",
         "tests/test_offline_release_recovery.py",
         "tests/test_offline_release_upgrade.py",
+        "tests/test_data_tools_installed_release_entry.py",
+        "tests/test_offline_release_deflate_errors.py",
+        "tests/test_offline_release_install_windows_namespace.py",
+        "tests/test_plan6_6a_data_tool_zip_preflight.py",
+        "tests/test_plan6_6a_uninstall_atomic_quarantine.py",
     )),
 )
 _SHA = re.compile(r"[0-9a-f]{40}\Z")

@@ -12,8 +12,10 @@ from typing import Any, BinaryIO
 from autosport.release_sbom import validate_embedded_executable_inventory
 from autosport.release_package import (
     _decode_json_object,
+    _require_release_zip_resource_bounds,
     _validate_windows_member,
     _write_canonical_zip,
+    _ZIP_MAX_WIRE_BYTES,
     verify_windows_package,
 )
 
@@ -48,7 +50,11 @@ def _read_members(package_zip: str | Path | BinaryIO) -> dict[str, bytes]:
     members: dict[str, bytes] = {}
     windows_keys: dict[str, str] = {}
     with zipfile.ZipFile(package_zip, "r") as archive:
-        for info in archive.infolist():
+        # Bound every central-directory entry before reading any ZIP member.
+        # The canonical release verifier otherwise runs only after extraction.
+        infos = archive.infolist()
+        _require_release_zip_resource_bounds(infos)
+        for info in infos:
             if info.is_dir():
                 raise ValueError(
                     f"release package contains unsupported directory entry: {info.filename}"
@@ -89,7 +95,14 @@ def _verified_base_members(
             label="expected_base_package_sha256",
         )
 
-    base_bytes = package.read_bytes()
+    # Bound the whole input before snapshotting it into memory.  The second
+    # check catches growth between the path-size check and descriptor read.
+    if package.stat().st_size > _ZIP_MAX_WIRE_BYTES:
+        raise ValueError("release ZIP resource limit: excessive wire size")
+    with package.open("rb") as source:
+        base_bytes = source.read(_ZIP_MAX_WIRE_BYTES + 1)
+    if len(base_bytes) > _ZIP_MAX_WIRE_BYTES:
+        raise ValueError("release ZIP resource limit: excessive wire size")
     captured_sha = _sha256_bytes(base_bytes)
     if (
         expected_package_sha256 is not None

@@ -45,7 +45,7 @@ def test_reject_windows_aliases_even_when_raw_toc_names_are_distinct(names):
 @pytest.mark.parametrize("name", [
     "CON.txt", "dir/COM1.dll", "dir/LPT2.txt", "aux",
     "dir/name.", "dir/name ", "bad?.dll", "dir/stream:metadata",
-    "dir/hidden\\tvalue",
+    "dir/hidden\tvalue",
 ])
 def test_reject_unsafe_embedded_windows_member_names(name):
     with pytest.raises(ValueError, match="Windows member name is unsafe"):

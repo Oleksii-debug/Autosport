@@ -243,8 +243,11 @@ try {
 
     $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
     $report.process_id = [int]$uiaRoot.Current.ProcessId
-    $report.root_name = [string]$uiaRoot.Current.Name
-    if ([string]::IsNullOrWhiteSpace($report.root_name)) {
+    # Do not serialize untrusted window titles (which can include user/private text).
+    $rootName = [string]$uiaRoot.Current.Name
+    $report.root_name = '[redacted]'
+    if ([string]::IsNullOrWhiteSpace($rootName)) {
+        $report.root_name = $null
         $report.failures += 'main window has no external UIA Name'
     }
 
@@ -325,7 +328,8 @@ try {
             key = $spec.key
             automation_id = [string]$element.Current.AutomationId
             expected_name = $spec.name
-            name = $currentName
+            # Only the trusted expected label (or a fixed failure marker) is exported.
+            name = $(if ($currentName -eq [string]$spec.name) { [string]$spec.name } else { '[redacted mismatch]' })
             control_type = $controlType
             expected_control_type = $spec.expected_control_type
             keyboard_focusable = $focusable
@@ -341,7 +345,7 @@ try {
         $report.controls += $record
 
         if ($currentName -ne $spec.name) {
-            $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch expected='$($spec.name)' actual='$currentName'"
+            $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch"
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$spec.expected_control_type) -and $controlType -ne [string]$spec.expected_control_type) {
             $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch expected='$($spec.expected_control_type)' actual='$controlType'"

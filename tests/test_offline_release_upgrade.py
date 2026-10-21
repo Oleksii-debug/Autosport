@@ -141,5 +141,43 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
 
 
+    def test_finalize_after_update_discards_only_verified_previous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                prior = upgrade.upgrade_verified_paper_release(dest, **args)
+                outcome = upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual(outcome["status"], "PAPER_UPDATE_FINALIZED")
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertFalse(Path(prior["previous_release_path"]).exists())
+            self.assertFalse(upgrade._transaction_root(dest).exists())
+
+    def test_finalize_after_rollback_retains_restored_old_release(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                upgrade.rollback_verified_paper_release(dest, **args)
+                outcome = upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual(outcome["status"], "PAPER_UPDATE_FINALIZED")
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertFalse(upgrade._transaction_root(dest).exists())
+
+    def test_finalize_refuses_unknown_transaction_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                prior = upgrade.upgrade_verified_paper_release(dest, **args)
+                private = upgrade._transaction_root(dest) / "private-owner.txt"
+                private.write_text("intact")
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual(private.read_text(), "intact")
+            self.assertTrue(Path(prior["previous_release_path"]).is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()

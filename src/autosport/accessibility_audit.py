@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from pathlib import Path
 from types import SimpleNamespace
+from unicodedata import category as unicode_category
 from typing import Any
 
 import tk_uia
@@ -168,8 +169,14 @@ def _combined_description(*descriptions: Any) -> Any:
     if not descriptions:
         raise ValueError("at least one UIA description is required")
     first = descriptions[0]
+    # Three distinct real windows are described independently. A degraded
+    # provider on a later dialog must not inherit the root's PROVIDED proof.
+    every_provider_supported = all(
+        _enum_name(description.strategy) == "PROVIDED"
+        for description in descriptions
+    )
     return SimpleNamespace(
-        strategy=first.strategy,
+        strategy=first.strategy if every_provider_supported else "UNRECOGNIZED",
         widgets=tuple(widget for description in descriptions for widget in description.widgets),
         provider_trouble=tuple(
             item for description in descriptions for item in description.provider_trouble
@@ -203,6 +210,20 @@ def _open_owner_economic_dialog_for_audit(app: WindowsAutosportApp) -> Any:
     return created[0]
 
 
+def _has_visible_accessible_text(value: str) -> bool:
+    """Require readable letters or digits in critical UIA control labels.
+
+    Whitespace, Unicode controls, combining marks, symbols and punctuation
+    alone cannot identify a critical operator action to a screen reader.
+    A localized label with meaningful text and accompanying symbols remains
+    valid. Never export the provider-controlled Name text.
+    """
+    return any(
+        unicode_category(character)[0] in {"L", "N"}
+        for character in value
+    )
+
+
 def summarize_description(
     description: Any,
     *,
@@ -214,6 +235,9 @@ def summarize_description(
     expected_ids = set(_REQUIRED_PATTERNS)
     controls: dict[int, dict[str, Any]] = {}
     failures: list[str] = []
+    strategy = _enum_name(description.strategy)
+    if strategy != "PROVIDED":
+        failures.append("unrecognized accessibility audit provider strategy")
 
     for widget in description.widgets:
         automation_id = widget.automation_id
@@ -230,7 +254,7 @@ def summarize_description(
         observed_gaps = (_enum_name(gap) for gap in widget.gaps)
         gap_names = sorted({
             name if name in _PUBLIC_GAPS else "OTHER_GAP"
-            for name in observed_gaps if name
+            for name in observed_gaps
         })
         observed_patterns = (_enum_name(pattern) for pattern in widget.patterns)
         pattern_names = sorted({
@@ -239,20 +263,22 @@ def summarize_description(
         })
         observed_role = _enum_name(widget.role)
         role_name = observed_role if observed_role in _PUBLIC_ROLES else "UNRECOGNIZED"
-        # A whitespace-only or non-text UIA Name is not an accessible label.
+        # Invisible Unicode-only or non-text UIA Name is not an accessible label.
         # Keep exported evidence JSON-serializable even for malformed providers.
         accessible_name = widget.name if isinstance(widget.name, str) else ""
+        name_present = _has_visible_accessible_text(accessible_name)
+        rows_exposed = widget.answers_rows is True
         controls[normalized_automation_id] = {
             "path": "[redacted]",
             "tk_class": "[redacted]",
             "role": role_name,
-            "name": "[present]" if accessible_name.strip() else "",
+            "name": "[present]" if name_present else "",
             "automation_id": normalized_automation_id,
             "patterns": pattern_names,
-            "answers_rows": bool(widget.answers_rows),
+            "answers_rows": rows_exposed,
             "gaps": gap_names,
         }
-        if not accessible_name.strip():
+        if not name_present:
             failures.append(f"automation_id={normalized_automation_id}: missing accessible name")
         expected_role = _EXPECTED_ROLES[normalized_automation_id]
         if role_name != expected_role:
@@ -273,7 +299,7 @@ def summarize_description(
             failures.append(
                 f"automation_id={normalized_automation_id}: missing UIA patterns={','.join(missing_patterns)}"
             )
-        if normalized_automation_id in _ROW_CONTROLS and not widget.answers_rows:
+        if normalized_automation_id in _ROW_CONTROLS and not rows_exposed:
             failures.append(
                 f"automation_id={normalized_automation_id}: list rows are not exposed through UIA"
             )
@@ -320,9 +346,7 @@ def summarize_description(
 
     return {
         "status": "PASS" if not failures else "FAIL",
-        "strategy": (
-            "PROVIDER" if _enum_name(description.strategy) == "PROVIDER" else "UNRECOGNIZED"
-        ),
+        "strategy": "PROVIDED" if strategy == "PROVIDED" else "UNRECOGNIZED",
         "critical_controls": [controls[key] for key in sorted(controls)],
         "failures": failures,
         "provider_trouble": provider_trouble,

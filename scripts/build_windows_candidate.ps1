@@ -27,6 +27,30 @@ try {
     Write-Host ([System.IO.File]::ReadAllText($restartRecoveryAudit))
     Write-Host '--- end packaged restart/recovery audit evidence ---'
   }
+  # Avoid exporting raw provider text or UIA names to public CI logs.
+  $auditPath = Join-Path (Get-Location).Path 'dist/accessibility-audit.json'
+  if (Test-Path -LiteralPath $auditPath -PathType Leaf) {
+    try {
+      $audit = Get-Content -LiteralPath $auditPath -Raw | ConvertFrom-Json -ErrorAction Stop
+      $safeStatus = if ($audit.status -eq 'PASS') { 'PASS' } else { 'FAIL' }
+      $safeStrategy = if ($audit.strategy -eq 'PROVIDED') { 'PROVIDED' } else { 'UNRECOGNIZED' }
+      $failureCount = @($audit.failures).Count
+      Write-Host "packaged_accessibility_status=$safeStatus strategy=$safeStrategy failures=$failureCount"
+      if (@($audit.failures) -contains 'unrecognized accessibility audit provider strategy') {
+        Write-Host 'packaged_accessibility_category=UNRECOGNIZED_STRATEGY'
+      }
+      $missingControls = @($audit.failures | Where-Object { $_ -match '^automation_id=[0-9]+: critical control not found$' })
+      if ($missingControls.Count -gt 0) {
+        Write-Host 'packaged_accessibility_category=MISSING_CONTROL'
+      }
+      $missingRows = @($audit.failures | Where-Object { $_ -match '^automation_id=[0-9]+: list rows are not exposed through UIA$' })
+      if ($missingRows.Count -gt 0) {
+        Write-Host 'packaged_accessibility_category=MISSING_ROWS'
+      }
+    } catch {
+      Write-Host 'packaged_accessibility_category=UNREADABLE_REPORT'
+    }
+  }
   throw
 }
 

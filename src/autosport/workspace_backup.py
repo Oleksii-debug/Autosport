@@ -22,7 +22,12 @@ MAX_TOTAL_BYTES = 512 * 1024 * 1024
 _MANIFEST = "AUTOSPORT_BACKUP_MANIFEST.json"
 _SKIP = frozenset({WorkspaceEconomicLock.FILE_NAME})
 _TIMESTAMP = (1980, 1, 1, 0, 0, 0)
-_WINDOWS_DEVICE_NAMES = frozenset({"con", "prn", "aux", "nul"} | {f"com{i}" for i in range(1, 10)} | {f"lpt{i}" for i in range(1, 10)})
+_WINDOWS_DEVICE_NAMES = frozenset(
+    {"con", "prn", "aux", "nul"}
+    | {f"com{i}" for i in range(1, 10)}
+    | {f"lpt{i}" for i in range(1, 10)}
+    | {f"{prefix}{digit}" for prefix in ("com", "lpt") for digit in "¹²³"}
+)
 
 
 class WorkspaceBackupError(ValueError):
@@ -43,12 +48,21 @@ def _regular(path: Path, *, label: str) -> os.stat_result:
 def _safe_relative(name: str) -> PurePosixPath:
     if not isinstance(name, str) or not name or "\\" in name or "\x00" in name or name.startswith("/"):
         raise WorkspaceBackupError("invalid backup member path")
+    try:
+        name.encode("utf-8", errors="strict")
+    except UnicodeEncodeError as exc:
+        raise WorkspaceBackupError("nonportable backup member name") from exc
     path = PurePosixPath(name)
     if any(part in {"", ".", ".."} for part in name.split("/")) or path.as_posix() != name:
         raise WorkspaceBackupError("noncanonical backup member path")
-    if any(part.endswith(".") or part.endswith(" ") or ":" in part or part.split(".", 1)[0].casefold() in _WINDOWS_DEVICE_NAMES for part in path.parts):
+    if any(
+        part.endswith((".", " "))
+        or part.split(".", 1)[0].casefold() in _WINDOWS_DEVICE_NAMES
+        or any(ord(char) < 32 or char in '<>:"|?*' for char in part)
+        for part in path.parts
+    ):
         raise WorkspaceBackupError("nonportable backup member name")
-    if name == _MANIFEST or any(part in _SKIP for part in path.parts):
+    if name.casefold() == _MANIFEST.casefold() or any(part.casefold() in {reserved.casefold() for reserved in _SKIP} for part in path.parts):
         raise WorkspaceBackupError("reserved backup member name")
     return path
 
@@ -107,6 +121,7 @@ def backup_workspace(workspace: str | Path, destination: str | Path) -> dict[str
     try:
         with WorkspaceEconomicLock(root):
             files: list[tuple[str, bytes]] = []
+            seen_windows_names: set[str] = set()
             total = 0
             for folder, directory_names, file_names in os.walk(root, followlinks=False):
                 folder_path = Path(folder)
@@ -114,6 +129,12 @@ def backup_workspace(workspace: str | Path, destination: str | Path) -> dict[str
                     item = folder_path / directory
                     if not stat.S_ISDIR(item.lstat().st_mode):
                         raise WorkspaceBackupError("workspace directory alias or special file")
+                    relative_directory = item.relative_to(root).as_posix()
+                    _safe_relative(relative_directory)
+                    folded_directory = relative_directory.casefold()
+                    if folded_directory in seen_windows_names:
+                        raise WorkspaceBackupError("Windows-case-colliding workspace paths")
+                    seen_windows_names.add(folded_directory)
                 directory_names.sort()
                 for filename in sorted(file_names):
                     source = folder_path / filename
@@ -121,6 +142,10 @@ def backup_workspace(workspace: str | Path, destination: str | Path) -> dict[str
                     if name in _SKIP:
                         continue
                     _safe_relative(name)
+                    folded_name = name.casefold()
+                    if folded_name in seen_windows_names:
+                        raise WorkspaceBackupError("Windows-case-colliding workspace paths")
+                    seen_windows_names.add(folded_name)
                     data = _read_regular_stable(source)
                     total += len(data)
                     if len(files) >= MAX_FILES or total > MAX_TOTAL_BYTES:
@@ -156,6 +181,8 @@ def _validated_members(source: Path) -> tuple[list[tuple[str, bytes]], int]:
         names = [item.filename for item in entries]
         if len(set(names)) != len(names) or names.count(_MANIFEST) != 1:
             raise WorkspaceBackupError("duplicate or missing backup manifest")
+        if len({name.casefold() for name in names}) != len(names):
+            raise WorkspaceBackupError("Windows-case-colliding backup members")
         if any(item.is_dir() or item.file_size > MAX_FILE_BYTES or item.flag_bits & 0x1 for item in entries):
             raise WorkspaceBackupError("unsafe backup archive member")
         for name in names:

@@ -179,5 +179,23 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertTrue(Path(prior["previous_release_path"]).is_dir())
 
 
+    def test_bounded_update_build_info_and_no_partial_publication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dest, old, od, new, nd = self._installed(root)
+            # Large source metadata is independently hashable but not an
+            # acceptable in-memory update identity, even if ZIP verifier is stubbed.
+            with zipfile.ZipFile(new, "w") as z:
+                z.writestr("Autosport-V1/Autosport.exe", self.NEW.encode())
+                z.writestr("Autosport-V1/BUILD_INFO.json", " " * 9000)
+                z.writestr("Autosport-V1/examples/demo.txt", "paper-only")
+            nd = hashlib.sha256(new.read_bytes()).hexdigest()
+            with self._trusted():
+                with self.assertRaisesRegex(install.OfflineInstallError, "exceeds size bound"):
+                    upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertFalse(upgrade._transaction_root(dest).exists())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -1,21 +1,54 @@
-"""Plan 6 §6А: concurrent quarantine creation cannot be overwritten on uninstall."""
+"""Plan 6 §6А: competing quarantine cannot be overwritten on uninstall.
+
+A real release/receipt installation is independently pinned. Both a racing
+empty quarantine and a modified foreign-file quarantine are never replaced.
+"""
 from __future__ import annotations
 
 from pathlib import Path
+import hashlib
 import tempfile
+import zipfile
 from unittest.mock import patch
 
 import pytest
 
+from autosport import offline_release_install as install
 from autosport import offline_release_lifecycle as lifecycle
-from test_offline_release_lifecycle import InstalledReleaseLifecycleTests
+
+
+SOURCE_SHA = "a" * 40
+
+
+def _installed(root: Path) -> tuple[Path, str]:
+    archive = root / "original.zip"
+    with zipfile.ZipFile(archive, "w") as package:
+        package.writestr("Autosport-V1/Autosport.exe", b"test-executable")
+        package.writestr("Autosport-V1/BUILD_INFO.json", b"{}")
+        package.writestr("Autosport-V1/examples/demo.json", b"{}")
+    digest = hashlib.sha256(archive.read_bytes()).hexdigest()
+    receipt = {"status": "PASS", "source_sha": SOURCE_SHA, "package_sha256": digest}
+    target = root / "installed"
+    with patch.object(install.release_package, "verify_windows_package", return_value=receipt):
+        install.install_verified_release(
+            archive, target, expected_source_sha=SOURCE_SHA,
+            expected_package_sha256=digest,
+        )
+    return target, digest
+
+
+def _trusted(digest: str):
+    return patch.object(
+        lifecycle.release_package, "verify_windows_package",
+        return_value={"status": "PASS", "source_sha": SOURCE_SHA,
+                      "package_sha256": digest},
+    )
 
 
 def test_uninstall_refuses_competing_quarantine_without_moving_product():
-    harness = InstalledReleaseLifecycleTests()
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
-        destination, digest = harness._installed(root)
+        destination, digest = _installed(root)
         normal_publish = lifecycle._publish_directory_no_replace
         created = []
 
@@ -27,17 +60,28 @@ def test_uninstall_refuses_competing_quarantine_without_moving_product():
                 created.append(owner_file)
             return normal_publish(source, target)
 
-        with patch.object(
-            lifecycle, "_publish_directory_no_replace",
-            side_effect=create_quarantine_race,
-        ):
-            with pytest.raises(lifecycle.OfflineInstallError, match="destination appeared"):
-                harness._uninstall(destination, digest)
+        with _trusted(digest):
+            with patch.object(
+                lifecycle, "_publish_directory_no_replace",
+                side_effect=create_quarantine_race,
+            ):
+                with pytest.raises(install.OfflineInstallError, match="destination appeared"):
+                    lifecycle.uninstall_verified_release(
+                        destination, archive=root / "original.zip",
+                        expected_source_sha=SOURCE_SHA,
+                        expected_package_sha256=digest,
+                    )
 
         assert len(created) == 1
         assert created[0].read_bytes() == b"never replace"
         assert (destination / "Autosport.exe").is_file()
-        assert harness._verify(destination, digest)["status"] == "VERIFIED"
+        with _trusted(digest):
+            proof = lifecycle.inspect_installed_release(
+                destination, archive=root / "original.zip",
+                expected_source_sha=SOURCE_SHA,
+                expected_package_sha256=digest,
+            )
+        assert proof["status"] == "VERIFIED"
 
 
 def test_uninstall_uses_canonical_no_replace_primitive():

@@ -12,6 +12,7 @@ from typing import Any
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
+_PREHUMAN_BUILD_VERSION = "0.1.0-v1-prehuman"
 _WINDOWS_RESERVED_NAMES = {
     "con",
     "prn",
@@ -464,7 +465,7 @@ def build_windows_package(
 
         build_info = {
             "product": "Autosport",
-            "version": "0.1.0-v1-prehuman",
+            "version": _PREHUMAN_BUILD_VERSION,
             "source_sha": source_sha,
             "autosport_exe_sha256": sha256_file(package_dir / "Autosport.exe"),
             "real_money_execution": False,
@@ -565,6 +566,8 @@ def verify_windows_package(
     build_info = _decode_json_object(members["BUILD_INFO.json"], "BUILD_INFO.json")
     if build_info.get("product") != "Autosport":
         raise ValueError("BUILD_INFO product identity mismatch")
+    if type(build_info.get("version")) is not str or build_info.get("version") != _PREHUMAN_BUILD_VERSION:
+        raise ValueError("BUILD_INFO unsupported or ambiguous prehuman version")
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO source_sha does not match exact candidate head")
     _require_false_truth_labels(build_info, "BUILD_INFO.json")

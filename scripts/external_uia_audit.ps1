@@ -245,8 +245,9 @@ try {
     $report.process_id = [int]$uiaRoot.Current.ProcessId
     # Do not serialize untrusted window titles (which can include user/private text).
     $rootName = [string]$uiaRoot.Current.Name
-    $report.root_name = if ([string]::IsNullOrWhiteSpace($rootName)) { $null } else { '[redacted]' }
-    if ($null -eq $report.root_name) {
+    $report.root_name = '[redacted]'
+    if ([string]::IsNullOrWhiteSpace($rootName)) {
+        $report.root_name = $null
         $report.failures += 'main window has no external UIA Name'
     }
 

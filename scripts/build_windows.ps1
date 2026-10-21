@@ -392,6 +392,7 @@ required = {
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
     "src/autosport/release_sbom.py",
+    "src/autosport/release_dependency_graph.py",
     "src/autosport/data_tool_package.py",
 }
 if set(manifest) != required:
@@ -428,6 +429,7 @@ def load_module(name, relative):
     return module
 
 load_module("autosport.release_sbom", "src/autosport/release_sbom.py")
+load_module("autosport.release_dependency_graph", "src/autosport/release_dependency_graph.py")
 load_module("autosport.release_package", "src/autosport/release_package.py")
 load_module("autosport.data_tool_package", "src/autosport/data_tool_package.py")
 script_path, script_data = payloads["scripts/package_windows.py"]
@@ -1059,6 +1061,7 @@ $trustedPackagePathsJson = ConvertTo-Json -Compress -InputObject @(
   'scripts/package_windows.py',
   'src/autosport/release_package.py',
   'src/autosport/release_sbom.py',
+  'src/autosport/release_dependency_graph.py',
   'src/autosport/data_tool_package.py'
 )
 $trustedPackageManifestLines = @(& $pythonExecutable -I -S -c $trustedGitSourceOracleLauncher $gitExecutable $repoRoot $sourceSha $trustedPackagePathsJson)
@@ -1071,7 +1074,7 @@ $trustedPackageManifestJson = [string]$trustedPackageManifestLines[0]
 # imported or executed by the package assembly process.
 $trustedPackageArchive = Join-Path $boundArtifactRoot 'trusted-package-source.zip'
 $trustedPackageRoot = Join-Path $boundArtifactRoot 'trusted-package-source'
-& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/release_sbom.py src/autosport/data_tool_package.py
+& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/release_sbom.py src/autosport/release_dependency_graph.py src/autosport/data_tool_package.py
 if ($LASTEXITCODE -ne 0) { throw "Exact package source archive exited $LASTEXITCODE" }
 if (Test-Path $trustedPackageRoot) { Remove-Item -LiteralPath $trustedPackageRoot -Recurse -Force }
 New-Item -ItemType Directory -Path $trustedPackageRoot | Out-Null

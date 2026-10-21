@@ -25,6 +25,12 @@ from .windows_update_admission import _schema, _version
 def _transaction_root(destination: Path) -> Path:
     if not destination.is_absolute() or destination.parent == destination:
         raise OfflineInstallError("update destination must be a concrete absolute path")
+    # One installed directory must have one transaction namespace. A spelling
+    # such as /install/other/../product otherwise points to the same product
+    # while generating a distinct transaction digest, bypassing the single
+    # pending-update guard during upgrade, rollback and crash recovery.
+    if ".." in destination.parts:
+        raise OfflineInstallError("update destination contains parent traversal")
     name = hashlib.sha256(os.fsencode(str(destination))).hexdigest()[:24]
     return destination.parent / (".autosport-update-" + name)
 

@@ -53,6 +53,14 @@ def test_complete_windows_surface_inventory_is_stable_and_truthful() -> None:
     assert settings.target_widget == "owner_economic_authority_button"
     assert settings.blocked_reason_uk is None
 
+    # Help/About was previously a presentation-only navigation placeholder.
+    # It is now an actionable native Open target, while unavailable external
+    # bookmaker actions remain truthfully disabled.
+    help_surface = SURFACE_BY_KEY["help_about"]
+    assert help_surface.phase == "active"
+    assert help_surface.target_widget == "shell_open_button"
+    assert help_surface.blocked_reason_uk is None
+
 
 def test_shell_detail_lines_expose_phase_and_truth_boundaries() -> None:
     for surface in SURFACES:
@@ -107,4 +115,18 @@ def test_shell_selection_requires_exact_supported_schema_version(tmp_path) -> No
     state_path.write_text(
         json.dumps({"version": 1, "surface_key": "market_mirror"}), encoding="utf-8"
     )
+    assert load_surface_selection(tmp_path) == "market_mirror"
+
+
+def test_shell_selection_does_not_parse_oversized_but_otherwise_valid_state(tmp_path) -> None:
+    path = tmp_path / "windows-shell-state-v1.json"
+    large_valid_state = {
+        "version": 1, "surface_key": "market_mirror", "padding": "x" * 8192,
+    }
+    path.write_text(json.dumps(large_valid_state), encoding="utf-8")
+    # Older code accepted the requested surface after reading the entire
+    # attacker-controlled document. Oversized UI state must fail soft instead.
+    assert load_surface_selection(tmp_path) == DEFAULT_SURFACE_KEY
+
+    assert save_surface_selection(tmp_path, "market_mirror") is True
     assert load_surface_selection(tmp_path) == "market_mirror"

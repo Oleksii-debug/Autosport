@@ -76,12 +76,13 @@ SURFACES: Final[tuple[WindowsSurfaceSpec, ...]] = (
     _localized_surface("settings", "active", "owner_economic_authority_button"),
     _localized_surface("manual_calculation", "active", "manual_calculation_button"),
     _localized_surface("diagnostics_recovery", "active", "repair_button"),
-    _localized_surface("help_about", "presentation-only", None),
+    _localized_surface("help_about", "active", "shell_open_button"),
 )
 
 DEFAULT_SURFACE_KEY: Final[str] = SURFACES[0].key
 SURFACE_BY_KEY: Final[dict[str, WindowsSurfaceSpec]] = {surface.key: surface for surface in SURFACES}
 SHELL_STATE_FILENAME: Final[str] = "windows-shell-state-v1.json"
+_MAX_SHELL_STATE_BYTES: Final[int] = 4096
 
 
 def shell_state_path(workspace: str | Path) -> Path:
@@ -92,7 +93,14 @@ def load_surface_selection(workspace: str | Path) -> str:
     """Read presentation-only shell state; corruption fails soft to Home."""
     path = shell_state_path(workspace)
     try:
-        raw = strict_json_loads(path.read_text(encoding="utf-8"))
+        # This untrusted, persisted UI preference never needs a large document.
+        # Read only a fixed prefix so a corrupted state file cannot exhaust
+        # memory before the JSON parser or schema check is reached.
+        with path.open("rb") as stream:
+            payload = stream.read(_MAX_SHELL_STATE_BYTES + 1)
+        if len(payload) > _MAX_SHELL_STATE_BYTES:
+            return DEFAULT_SURFACE_KEY
+        raw = strict_json_loads(payload.decode("utf-8"))
     except (OSError, UnicodeError, TypeError, ValueError):
         return DEFAULT_SURFACE_KEY
     # The stored schema is versioned. Boolean 1 and future versions must not

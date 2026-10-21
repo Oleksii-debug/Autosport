@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
+import zipfile
 from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,7 @@ from .integrity import atomic_write_json
 from .live_observation import observe_workspace_once
 from .paper import PaperBook
 from .paths import default_workspace
+from .workspace_backup import WorkspaceBackupError, backup_workspace, restore_workspace
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -163,6 +165,12 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--evidence", type=Path, default=None, help="optional machine evidence JSON path")
     snapshot.add_argument("--regions", default="us", help="comma-separated provider regions")
     snapshot.add_argument("--markets", default="h2h,spreads,totals", help="comma-separated historical game-line markets")
+    backup = sub.add_parser("backup-workspace", help="create private SHA-256 inventoried workspace ZIP on trusted local storage")
+    backup.add_argument("--workspace", type=Path, default=None)
+    backup.add_argument("--output", type=Path, required=True)
+    restore = sub.add_parser("restore-workspace", help="verify entire private backup and restore to a NEW empty workspace path")
+    restore.add_argument("--archive", type=Path, required=True)
+    restore.add_argument("--destination", type=Path, required=True)
     repair = sub.add_parser("repair-workspace", help="reconcile only late-crashed runs with durable hash-matched completion evidence")
     repair.add_argument("--workspace", type=Path, default=None)
     endurance = sub.add_parser("endurance", help="run deterministic bounded ingestion/replay/restart/settlement stress checks")
@@ -174,6 +182,48 @@ def build_parser() -> argparse.ArgumentParser:
     endurance.add_argument("--tickets", type=int, default=50)
     endurance.add_argument("--output", type=Path, default=None)
     dataset_calculation_cli.add_parser(sub)
+    install = sub.add_parser(
+        "install-release",
+        help="install an independently SHA-pinned PAPER release to a NEW directory only",
+    )
+    install.add_argument("--archive", required=True, type=Path)
+    install.add_argument("--destination", required=True, type=Path)
+    install.add_argument("--source-sha", required=True)
+    install.add_argument("--package-sha256", required=True)
+    installed_verify = sub.add_parser(
+        "verify-installed-release",
+        help="read back a PAPER installation without changing any files",
+    )
+    installed_uninstall = sub.add_parser(
+        "uninstall-release",
+        help="remove only an exact unchanged pinned PAPER installation",
+    )
+    for command in (installed_verify, installed_uninstall):
+        command.add_argument("--archive", type=Path, required=True)
+        command.add_argument("--destination", type=Path, required=True)
+        command.add_argument("--source-sha", required=True)
+        command.add_argument("--package-sha256", required=True)
+    interrupted_recovery = sub.add_parser(
+        "recover-uninstall-release",
+        help="restore interrupted PAPER uninstallation from the pinned original ZIP",
+    )
+    interrupted_recovery.add_argument("--quarantine", type=Path, required=True)
+    interrupted_recovery.add_argument("--archive", type=Path, required=True)
+    interrupted_recovery.add_argument("--destination", type=Path, required=True)
+    interrupted_recovery.add_argument("--source-sha", required=True)
+    interrupted_recovery.add_argument("--package-sha256", required=True)
+    for name in ("upgrade-release", "rollback-release", "recover-update-release", "finalize-update-release"):
+        update_command = sub.add_parser(
+            name, help="independently pinned PAPER-only release lifecycle transaction",
+        )
+        update_command.add_argument("--destination", type=Path, required=True)
+        update_command.add_argument("--old-archive", type=Path, required=True)
+        update_command.add_argument("--old-source-sha", required=True)
+        update_command.add_argument("--old-package-sha256", required=True)
+        if name != "recover-update-release":
+            update_command.add_argument("--new-archive", type=Path, required=True)
+            update_command.add_argument("--new-source-sha", required=True)
+            update_command.add_argument("--new-package-sha256", required=True)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -558,6 +608,22 @@ def main(argv: list[str] | None = None) -> int:
             regions=args.regions,
             markets=args.markets,
         )
+    if args.command == "backup-workspace":
+        try:
+            report = backup_workspace(args.workspace or default_workspace(), args.output)
+        except (WorkspaceBackupError, OSError, RuntimeError, ValueError, TypeError, EOFError, zipfile.BadZipFile, zipfile.LargeZipFile):
+            print("backup=FAIL_CLOSED reason=unsafe_workspace_or_archive")
+            return 3
+        print(f"backup=OK files={report['file_count']} bytes={report['total_bytes']} sha256={report['archive_sha256']} private_data=true")
+        return 0
+    if args.command == "restore-workspace":
+        try:
+            report = restore_workspace(args.archive, args.destination)
+        except (WorkspaceBackupError, OSError, RuntimeError, ValueError, TypeError, EOFError, zipfile.BadZipFile, zipfile.LargeZipFile):
+            print("restore=FAIL_CLOSED reason=unsafe_workspace_or_archive")
+            return 3
+        print(f"restore=OK files={report['file_count']} bytes={report['total_bytes']} private_data=true real_money_execution=false")
+        return 0
     if args.command == "repair-workspace":
         return run_repair_workspace(args.workspace)
     if args.command == "endurance":
@@ -572,6 +638,60 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "calculate-dataset-quote":
         return dataset_calculation_cli.run(args)
+    if args.command == "install-release":
+        from .offline_release_install import main as offline_install_main
+        return offline_install_main([
+            "--archive", str(args.archive),
+            "--destination", str(args.destination),
+            "--source-sha", args.source_sha,
+            "--package-sha256", args.package_sha256,
+        ])
+    if args.command in {"verify-installed-release", "uninstall-release"}:
+        from .offline_release_install import OfflineInstallError
+        from .offline_release_lifecycle import (
+            inspect_installed_release, uninstall_verified_release,
+        )
+        operation = (
+            inspect_installed_release
+            if args.command == "verify-installed-release"
+            else uninstall_verified_release
+        )
+        try:
+            result = operation(
+                args.destination, archive=args.archive,
+                expected_source_sha=args.source_sha,
+                expected_package_sha256=args.package_sha256,
+            )
+        except (OfflineInstallError, OSError, RuntimeError, TypeError, ValueError):
+            print("release_lifecycle=FAIL_CLOSED reason=unsafe_or_modified_installation")
+            return 3
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
+    if args.command == "recover-uninstall-release":
+        from .offline_release_recovery import main as recovery_main
+        return recovery_main([
+            "--quarantine", str(args.quarantine),
+            "--archive", str(args.archive),
+            "--destination", str(args.destination),
+            "--source-sha", args.source_sha,
+            "--package-sha256", args.package_sha256,
+        ])
+    if args.command in {"upgrade-release", "rollback-release", "recover-update-release", "finalize-update-release"}:
+        from .offline_release_upgrade import main as upgrade_main
+        forwarded = [
+            args.command,
+            "--destination", str(args.destination),
+            "--old-archive", str(args.old_archive),
+            "--old-source-sha", args.old_source_sha,
+            "--old-package-sha256", args.old_package_sha256,
+        ]
+        if args.command != "recover-update-release":
+            forwarded.extend([
+                "--new-archive", str(args.new_archive),
+                "--new-source-sha", args.new_source_sha,
+                "--new-package-sha256", args.new_package_sha256,
+            ])
+        return upgrade_main(forwarded)
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

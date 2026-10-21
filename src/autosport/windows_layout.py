@@ -248,10 +248,53 @@ def refresh_windows_shell_open_availability(app: Any) -> None:
     )
 
 
+def _show_help_about_dialog(app: Any) -> None:
+    """Open real Ukrainian help in the existing native shell, not a fake navigation page.
+
+    Non-modal by design: the main product and its emergency controls remain
+    reachable. The explanatory report is ordinary selectable read-only text.
+    """
+    surface = SURFACE_BY_KEY["help_about"]
+    dialog = tk.Toplevel(app)
+    dialog.title(surface.title_uk)
+    dialog.transient(app)
+    dialog.resizable(True, True)
+    frame = ttk.Frame(dialog, padding=12)
+    frame.pack(fill="both", expand=True)
+    ttk.Label(frame, text=surface.title_uk).pack(anchor="w")
+    details = tk.Text(frame, width=76, height=14, wrap="word", takefocus=True)
+    details.insert("1.0", "\n".join(surface_detail_lines(surface)))
+    details.configure(state="disabled")
+    details.pack(fill="both", expand=True, pady=(8, 8))
+    tk_uia.set_acc_name(details, surface.title_uk)
+    tk_uia.set_acc_description(details, surface.accessibility_uk)
+
+    def close_help() -> None:
+        dialog.destroy()
+        # Preserve predictable keyboard navigation without taking over focus
+        # on a window that the user may already have closed.
+        try:
+            if app.winfo_exists():
+                app.shell_navigation.focus_set()
+        except tk.TclError:
+            pass
+
+    ttk.Button(
+        frame, text=text("ui.windows.owner_authority.button.close"),
+        command=close_help, takefocus=True,
+    ).pack(anchor="e")
+    dialog.bind("<Escape>", lambda _event: close_help())
+    dialog.protocol("WM_DELETE_WINDOW", close_help)
+    details.focus_set()
+
+
 def _focus_surface_target(app: Any, surface_key: str) -> None:
     target = _surface_target_widget(app, surface_key)
     if target is None:
         app.shell_details.focus_set()
+        return
+    if surface_key == "help_about":
+        _show_help_about_dialog(app)
         return
     target.focus_set()
 

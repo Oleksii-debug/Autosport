@@ -197,5 +197,53 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertFalse(upgrade._transaction_root(dest).exists())
 
 
+    def test_upgrade_refuses_concurrent_previous_directory_without_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            previous = upgrade._transaction_root(dest) / "previous"
+            publish = upgrade._publish_directory_no_replace
+
+            def concurrent_previous(source, target):
+                if Path(target) == previous:
+                    previous.mkdir()
+                return publish(source, target)
+
+            with self._trusted():
+                with patch.object(upgrade, "_publish_directory_no_replace", side_effect=concurrent_previous):
+                    with self.assertRaises((install.OfflineInstallError, OSError)):
+                        upgrade.upgrade_verified_paper_release(
+                            dest, **self._args(old, od, new, nd)
+                        )
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertTrue(previous.is_dir())
+            self.assertEqual(list(previous.iterdir()), [])
+
+    def test_rollback_refuses_concurrent_rejected_directory_without_replacement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            rejected = upgrade._transaction_root(dest) / "rejected-current"
+            publish = upgrade._publish_directory_no_replace
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+
+                def concurrent_rejected(source, target):
+                    if Path(target) == rejected:
+                        rejected.mkdir()
+                    return publish(source, target)
+
+                with patch.object(upgrade, "_publish_directory_no_replace", side_effect=concurrent_rejected):
+                    with self.assertRaises((install.OfflineInstallError, OSError)):
+                        upgrade.rollback_verified_paper_release(
+                            dest, **self._args(old, od, new, nd)
+                        )
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertTrue(rejected.is_dir())
+            self.assertEqual(list(rejected.iterdir()), [])
+            self.assertEqual(
+                (upgrade._transaction_root(dest) / "previous" / "Autosport.exe").read_bytes(),
+                self.OLD.encode(),
+            )
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -239,18 +239,24 @@ def capture_historical_acquisition_bundle(
         }
         bundle_path = staging / "bundle.json"
         atomic_write_json(bundle_path, bundle)
-        staging.rename(output)
-        final_bundle = output / "bundle.json"
-        return HistoricalAcquisitionBundle(
+        bundle_sha256 = sha256_file(bundle_path)
+        report = HistoricalAcquisitionBundle(
             root=str(output),
             request_identity=request_identity,
             evidence_identity=evidence_identity,
-            bundle_sha256=sha256_file(final_bundle),
+            bundle_sha256=bundle_sha256,
             snapshot_count=len(snapshot_entries),
             snapshots_with_odds=snapshots_with_odds,
             result_capture_sha256=result_report.capture_sha256,
         )
-    except Exception:
+        # All fallible content verification runs while the tree is still
+        # unpublished. A successful same-parent rename is the commit point;
+        # after it succeeds, returning the already-built report performs no
+        # further filesystem reads that could report failure for a published
+        # bundle.
+        staging.rename(output)
+        return report
+    except BaseException:
         shutil.rmtree(staging, ignore_errors=True)
         raise
 

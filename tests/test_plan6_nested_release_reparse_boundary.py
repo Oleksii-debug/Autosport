@@ -194,5 +194,60 @@ class NestedWindowsReparseReleaseTests(unittest.TestCase):
             )
 
 
+    def test_installed_receipt_reparse_refused_before_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            archive, digest, installed, verified = self._package_and_install(Path(tmp))
+            flagged = installed / ".autosport-installed-release.json"
+            original_read = Path.read_bytes
+
+            def read_no_receipt(path: Path):
+                if path == flagged:
+                    self.fail("reparse receipt was read before admission")
+                return original_read(path)
+
+            with self._reparse(flagged), patch.object(
+                Path, "read_bytes", read_no_receipt,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "missing or invalid installed-release receipt",
+                ):
+                    self._inspect(archive, digest, installed, verified)
+            self.assertTrue(flagged.exists())
+
+    def test_recovery_receipt_reparse_refused_before_read(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            archive, digest, installed, verified = self._package_and_install(root)
+            quarantine = root / ".autosport-uninstall-abc123" / "verified-product"
+            quarantine.parent.mkdir()
+            installed.rename(quarantine)
+            flagged = quarantine / ".autosport-installed-release.json"
+            original_read = Path.read_bytes
+
+            def read_no_receipt(path: Path):
+                if path == flagged:
+                    self.fail("quarantine reparse receipt was read before admission")
+                return original_read(path)
+
+            with self._reparse(flagged), patch.object(
+                Path, "read_bytes", read_no_receipt,
+            ), patch.object(
+                recovery.release_package, "verify_windows_package",
+                return_value=verified,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "receipt is unsafe",
+                ):
+                    recovery.recover_interrupted_uninstall(
+                        quarantine, installed, archive=archive,
+                        expected_source_sha=self.SOURCE,
+                        expected_package_sha256=digest,
+                    )
+            self.assertTrue(quarantine.exists())
+            self.assertFalse(installed.exists())
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

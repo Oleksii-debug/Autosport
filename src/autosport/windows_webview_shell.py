@@ -468,6 +468,7 @@ class AutosportWebController:
         self.workspace = Path(default_workspace() if workspace is None else workspace)
         self._active_workspace = self.workspace
         self.dataset_path: Path | None = None
+        self._dataset_success_generation = 0
         self.research_plan_path: Path | None = None
         self.research_plan: ResearchStrategyPlan | None = None
         self.strategy_id = "baseline-v1"
@@ -1226,6 +1227,7 @@ class AutosportWebController:
             else:
                 dataset = message.result
                 self.dataset_path = pending
+                self._dataset_success_generation += 1
                 self.dataset_summary = text(
                     "ui.status.dataset.summary",
                     name=dataset.name,
@@ -1477,6 +1479,7 @@ class AutosportWebController:
                 "bank": self.bank,
                 "dataset_summary": self.dataset_summary,
                 "dataset_path": "" if self.dataset_path is None else str(self.dataset_path),
+                "dataset_success_generation": self._dataset_success_generation,
                 "research_plan_path": (
                     "" if self.research_plan_path is None else str(self.research_plan_path)
                 ),
@@ -1604,10 +1607,16 @@ class AutosportWebController:
         if not self.dataset_worker.start(task):
             self._pending_dataset_path = None
             return self._fail(text("ui.error.dataset.worker_not_started"))
-        return self._ok(
+        result = self._ok(
             text("ui.status.dataset.validation_running", path=selected),
             focus_id="dataset-path",
         )
+        # The asynchronous validation has been scheduled, not committed.
+        result["dataset_validation_pending"] = {
+            "path": str(selected),
+            "after_generation": self._dataset_success_generation,
+        }
+        return result
 
     def _action_strategy_set(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         if self._busy():

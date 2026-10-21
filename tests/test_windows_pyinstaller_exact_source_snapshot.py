@@ -62,8 +62,8 @@ def test_windows_build_runs_both_pyinstaller_consumers_from_locked_exact_source_
     )
     gui_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --windowed "
-        "--paths $trustedBuildSrc --distpath $pyInstallerDist --workpath $pyInstallerWork "
-        "--specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
+        "--paths $trustedBuildSrc --add-data $trustedWebAssetsSpec --distpath $pyInstallerDist "
+        "--workpath $pyInstallerWork --specpath $pyInstallerSpec --name Autosport $trustedGuiEntry"
     )
     data_build = (
         "& $packagingPython -I -m PyInstaller --noconfirm --clean --onefile --console "

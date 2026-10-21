@@ -38,12 +38,18 @@ class PaperRiskReportingTests(unittest.TestCase):
         return EconomicGoalContract(**values)  # type: ignore[arg-type]
 
     @staticmethod
-    def _leg(index: int, odds: str = "2") -> TicketLeg:
+    def _leg(
+        index: int,
+        odds: str = "2",
+        *,
+        sport: str | None = None,
+    ) -> TicketLeg:
         return TicketLeg(
             event_id=f"event-{index}",
             market_id=f"market-{index}",
             selection_id=f"selection-{index}",
             locked_odds=Decimal(odds),
+            sport=sport,
         )
 
     def test_pristine_report_uses_canonical_risk_replay_and_keeps_ruin_unknown(self) -> None:
@@ -53,6 +59,7 @@ class PaperRiskReportingTests(unittest.TestCase):
         report = build_paper_risk_report(book, goal)
 
         self.assertEqual(report.schema, RISK_REPORT_SCHEMA)
+        self.assertEqual(RISK_REPORT_SCHEMA, "autosport.paper-risk-report.v5")
         self.assertEqual(report.scope, RISK_REPORT_SCOPE_PAPER_ONLY)
         self.assertEqual(
             report.drawdown_metric_class,
@@ -200,6 +207,29 @@ class PaperRiskReportingTests(unittest.TestCase):
         self.assertEqual(report.drawdown_loss_room, Decimal("-10.00"))
         self.assertEqual(report.portfolio_risk_state_sha256, before_sha256)
         self.assertEqual(after_sha256, before_sha256)
+
+    def test_report_portfolio_commitment_binds_ticket_sport_identity(self) -> None:
+        football = PaperBook("100")
+        football.open_ticket(
+            (self._leg(1, sport="football"),),
+            Decimal("1"),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+        tennis = PaperBook("100")
+        tennis.open_ticket(
+            (self._leg(1, sport="tennis"),),
+            Decimal("1"),
+            placed_at="2026-09-21T08:00:00+00:00",
+        )
+
+        football_report = build_paper_risk_report(football, self._goal())
+        tennis_report = build_paper_risk_report(tennis, self._goal())
+
+        self.assertNotEqual(
+            football_report.portfolio_risk_state_sha256,
+            tennis_report.portfolio_risk_state_sha256,
+        )
+
 
     def test_recovery_does_not_erase_historical_max_drawdown_episode(self) -> None:
         book = PaperBook("100")

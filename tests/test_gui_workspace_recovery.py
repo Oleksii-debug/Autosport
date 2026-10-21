@@ -93,8 +93,17 @@ class GuiWorkspaceRecoveryTests(unittest.TestCase):
         return app
 
     def test_packaged_windows_entry_uses_responsive_gui(self) -> None:
-        source = inspect.getsource(windows_entry._run_interactive_gui)
-        self.assertIn("from autosport.windows_gui import main as gui_main", source)
+        # Entry preflight owns storage/lock checks; the owned helper owns
+        # WebView2 renderer and native emergency-STOP fallback.
+        preflight = inspect.getsource(windows_entry._run_interactive_gui)
+        owned_shell = inspect.getsource(windows_entry._run_owned_interactive_gui)
+        self.assertIn("WorkspaceInteractiveLock", preflight)
+        self.assertIn("_run_owned_interactive_gui(workspace, webview_storage)", preflight)
+        self.assertIn("from autosport.windows_webview_shell", owned_shell)
+        self.assertIn("EmergencyStopWebController", owned_shell)
+        self.assertIn("_offer_native_emergency_stop", owned_shell)
+        self.assertNotIn("from autosport.windows_gui import main as gui_main", preflight)
+        self.assertNotIn("from autosport.windows_gui import main as gui_main", owned_shell)
         self.assertEqual(AUTOMATION_IDS["repair_workspace"], 108)
 
     def test_recovery_worker_is_non_daemon_and_runs_off_caller_thread(self) -> None:

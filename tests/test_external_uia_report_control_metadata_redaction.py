@@ -17,7 +17,7 @@ def test_exported_automation_id_is_trusted_spec_identity_not_provider_metadata()
 
 def test_control_type_mismatches_report_fixed_markers_not_provider_values():
     script = _AUDIT.read_text(encoding="utf-8")
-    assert "control_type = $(if ($controlType -eq [string]$spec.expected_control_type) { [string]$spec.expected_control_type } else { '[redacted mismatch]' })" in script
+    assert "control_type = $(if ($controlType -ceq [string]$spec.expected_control_type) { [string]$spec.expected_control_type } else { '[redacted mismatch]' })" in script
     assert 'external UIA ControlType mismatch"' in script
     assert "actual='$controlType'" not in script
     assert "control_type = $controlType" not in script
@@ -26,7 +26,7 @@ def test_control_type_mismatches_report_fixed_markers_not_provider_values():
 def test_control_name_and_failure_exports_are_still_redacted():
     script = _AUDIT.read_text(encoding="utf-8")
     assert "'[redacted mismatch]'" in script
-    assert "name = $(if ($currentName -eq [string]$spec.name)" in script
+    assert "name = $(if ($currentName -ceq [string]$spec.name)" in script
     assert "external UIA Name mismatch" in script
     assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in script
     assert "human_tested = $false" in script

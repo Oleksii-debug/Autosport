@@ -190,6 +190,19 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--destination", required=True, type=Path)
     install.add_argument("--source-sha", required=True)
     install.add_argument("--package-sha256", required=True)
+    installed_verify = sub.add_parser(
+        "verify-installed-release",
+        help="read back a PAPER installation without changing any files",
+    )
+    installed_uninstall = sub.add_parser(
+        "uninstall-release",
+        help="remove only an exact unchanged pinned PAPER installation",
+    )
+    for command in (installed_verify, installed_uninstall):
+        command.add_argument("--archive", type=Path, required=True)
+        command.add_argument("--destination", type=Path, required=True)
+        command.add_argument("--source-sha", required=True)
+        command.add_argument("--package-sha256", required=True)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -612,6 +625,27 @@ def main(argv: list[str] | None = None) -> int:
             "--source-sha", args.source_sha,
             "--package-sha256", args.package_sha256,
         ])
+    if args.command in {"verify-installed-release", "uninstall-release"}:
+        from .offline_release_install import OfflineInstallError
+        from .offline_release_lifecycle import (
+            inspect_installed_release, uninstall_verified_release,
+        )
+        operation = (
+            inspect_installed_release
+            if args.command == "verify-installed-release"
+            else uninstall_verified_release
+        )
+        try:
+            result = operation(
+                args.destination, archive=args.archive,
+                expected_source_sha=args.source_sha,
+                expected_package_sha256=args.package_sha256,
+            )
+        except (OfflineInstallError, OSError, RuntimeError, TypeError, ValueError):
+            print("release_lifecycle=FAIL_CLOSED reason=unsafe_or_modified_installation")
+            return 3
+        print(json.dumps(result, sort_keys=True, separators=(",", ":")))
+        return 0
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

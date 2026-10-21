@@ -76,7 +76,7 @@ SURFACES: Final[tuple[WindowsSurfaceSpec, ...]] = (
     _localized_surface("settings", "active", "owner_economic_authority_button"),
     _localized_surface("manual_calculation", "active", "manual_calculation_button"),
     _localized_surface("diagnostics_recovery", "active", "repair_button"),
-    _localized_surface("help_about", "presentation-only", None),
+    _localized_surface("help_about", "active", "shell_open_button"),
 )
 
 DEFAULT_SURFACE_KEY: Final[str] = SURFACES[0].key

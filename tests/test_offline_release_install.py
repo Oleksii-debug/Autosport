@@ -126,5 +126,95 @@ class OfflineInstallTests(unittest.TestCase):
             self.assertFalse(list(root.glob(".autosport-install-staging-*")))
 
 
+    def test_symlink_in_ancestor_is_rejected_before_release_verification(self) -> None:
+        """A safe-looking parent must not hide an earlier symlink component."""
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            actual = root / "actual" / "nested"
+            actual.mkdir(parents=True)
+            alias = root / "alias"
+            try:
+                alias.symlink_to(root / "actual", target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlinks unavailable on this test host: {type(exc).__name__}")
+            archive, digest = self._package(root)
+            destination = alias / "nested" / "Autosport"
+            with patch.object(installer.release_package, "verify_windows_package") as verifier:
+                with self.assertRaisesRegex(installer.OfflineInstallError, "symlink"):
+                    installer.install_verified_release(
+                        archive, destination, expected_source_sha=self.SOURCE,
+                        expected_package_sha256=digest,
+                    )
+                verifier.assert_not_called()
+            self.assertFalse((root / "actual" / "nested" / "Autosport").exists())
+            self.assertFalse(list(root.glob(".autosport-install-staging-*")))
+
+    def test_regular_nested_parent_remains_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            parent = root / "ordinary" / "nested"
+            parent.mkdir(parents=True)
+            archive, digest = self._package(root)
+            result = self._install(archive, parent / "Autosport", digest)
+            self.assertEqual(result["status"], "INSTALLED")
+            self.assertTrue((parent / "Autosport" / "Autosport.exe").is_file())
+
+    def test_atomic_publication_does_not_replace_competing_empty_directory(self) -> None:
+        # Linux os.rename would destroy an empty owner directory at destination.
+        import os
+        import sys
+
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("atomic no-replace primitive not supported on this platform")
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            payload = root / "stage"
+            destination = root / "owner-created"
+            payload.mkdir()
+            destination.mkdir()
+            (payload / "Autosport.exe").write_bytes(b"fixture")
+            with self.assertRaises((installer.OfflineInstallError, FileExistsError)):
+                installer._publish_directory_no_replace(payload, destination)
+            self.assertTrue(destination.is_dir())
+            self.assertTrue(payload.is_dir())
+            self.assertEqual((payload / "Autosport.exe").read_bytes(), b"fixture")
+
+    def test_atomic_publication_to_new_path_succeeds(self) -> None:
+        import os
+        import sys
+
+        if os.name != "nt" and sys.platform != "linux":
+            self.skipTest("atomic no-replace primitive not supported on this platform")
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            payload = root / "stage"
+            destination = root / "installed"
+            payload.mkdir()
+            (payload / "Autosport.exe").write_bytes(b"fixture")
+            installer._publish_directory_no_replace(payload, destination)
+            self.assertFalse(payload.exists())
+            self.assertEqual((destination / "Autosport.exe").read_bytes(), b"fixture")
+
+    def test_competing_destination_during_install_is_preserved(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            archive, digest = self._package(root)
+            destination = root / "install"
+            original = installer._publish_directory_no_replace
+
+            def competing_publish(payload, target):
+                destination.mkdir()
+                return original(payload, target)
+
+            with patch.object(installer, "_publish_directory_no_replace", side_effect=competing_publish):
+                with self.assertRaises((installer.OfflineInstallError, FileExistsError)):
+                    self._install(archive, destination, digest)
+            self.assertTrue(destination.is_dir())
+            self.assertFalse((destination / "Autosport.exe").exists())
+            self.assertFalse(list(root.glob(".autosport-install-staging-*")))
+
+
+
+
 if __name__ == "__main__":
     unittest.main()

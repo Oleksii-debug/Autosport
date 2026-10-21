@@ -6,12 +6,14 @@ Physical Windows/NVDA and production signing are separate acceptance gates.
 from __future__ import annotations
 
 import argparse
+import errno
 import hashlib
 import json
 import os
 import re
 import shutil
 import stat
+import sys
 import tempfile
 import zipfile
 from pathlib import Path
@@ -52,7 +54,49 @@ def _safe_root(destination: Path) -> Path:
         raise OfflineInstallError("install parent/destination is unsafe")
     if destination.exists():
         raise OfflineInstallError("existing installation must not be overwritten")
+    # A normal-looking immediate parent can still be reached through a
+    # symlink higher in the absolute path. Refuse such paths before staging
+    # any verified owner release outside the requested directory hierarchy.
+    ancestor = parent
+    while True:
+        if ancestor.is_symlink():
+            raise OfflineInstallError("install path traverses a symlink")
+        if ancestor == ancestor.parent:
+            break
+        ancestor = ancestor.parent
     return destination
+
+
+def _publish_directory_no_replace(source: Path, destination: Path) -> None:
+    """Atomically publish without replacing a directory created by another actor.
+
+    The caller's earlier destination.exists() check is advisory only. POSIX
+    os.rename can replace an empty destination directory, unlike Windows.
+    Fail closed when the platform lacks an atomic no-replace primitive.
+    """
+    if os.name == "nt":
+        # Windows os.rename fails if the target path already exists.
+        os.rename(source, destination)
+        return
+    if sys.platform != "linux":
+        raise OfflineInstallError("atomic no-replace installation is unsupported")
+    import ctypes
+
+    library = ctypes.CDLL(None, use_errno=True)
+    renameat2 = getattr(library, "renameat2", None)
+    if renameat2 is None:
+        raise OfflineInstallError("atomic no-replace installation is unavailable")
+    renameat2.argtypes = (
+        ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p,
+        ctypes.c_uint,
+    )
+    renameat2.restype = ctypes.c_int
+    # AT_FDCWD=-100, RENAME_NOREPLACE=1; no fallback to replacing rename.
+    if renameat2(-100, os.fsencode(source), -100, os.fsencode(destination), 1):
+        error = ctypes.get_errno()
+        if error in (errno.EEXIST, errno.ENOTEMPTY):
+            raise OfflineInstallError("installation destination appeared during publication")
+        raise OSError(error, os.strerror(error))
 
 
 def install_verified_release(
@@ -151,7 +195,7 @@ def install_verified_release(
             raise OfflineInstallError("archive changed during staged installation")
         if destination.exists() or destination.is_symlink():
             raise OfflineInstallError("installation appeared during staging")
-        os.rename(payload_root, destination)
+        _publish_directory_no_replace(payload_root, destination)
         return {
             "status": "INSTALLED", "source_sha": expected_source_sha,
             "package_sha256": expected_package_sha256,

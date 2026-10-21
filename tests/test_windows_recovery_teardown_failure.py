@@ -200,10 +200,13 @@ class WindowsRecoveryTeardownFailureTests(unittest.TestCase):
             self.assertEqual(app.bank.value, "hidden")
             self.assertEqual(app._ticket_sessions, [None])
             self.assertIn("не вдалося завершити попередній економічний сеанс", app.status.value)
-            fallback = "_HostileTeardownError: <повідомлення недоступне>"
+            # A hostile metaclass may fabricate or leak its class name. The
+            # redaction contract exposes only the built-in Exception label.
+            fallback = "Exception: <повідомлення недоступне>"
             self.assertTrue(any(fallback in line for line in app._logs), app._logs)
             error.assert_called_once()
             self.assertIn(fallback, error.call_args.args[1])
+            self.assertNotIn("_HostileTeardownError", error.call_args.args[1])
 
 
 if __name__ == "__main__":

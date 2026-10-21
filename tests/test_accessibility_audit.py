@@ -309,6 +309,42 @@ class AccessibilityAuditTests(unittest.TestCase):
             "[present]",
         )
 
+    def test_punctuation_or_symbol_only_critical_name_is_not_accessible(self):
+        # A punctuation mark or icon is visible, but it cannot name the
+        # critical replay action. Preserve report redaction and machine truth.
+        target_id = AUTOMATION_IDS["run_replay"]
+        for name in ("...", "—", "★", "⁉️", "\\u200b!!!"):
+            with self.subTest(name=repr(name)):
+                description = self._passing_description()
+                control = next(
+                    item for item in description.widgets
+                    if item.automation_id == target_id
+                )
+                control.name = name
+                report = self._summarize(description)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={target_id}: missing accessible name",
+                    report["failures"],
+                )
+                entry = next(
+                    item for item in report["critical_controls"]
+                    if item["automation_id"] == target_id
+                )
+                self.assertEqual(entry["name"], "")
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+                self.assertNotIn(name, json.dumps(report, ensure_ascii=False))
+
+        description = self._passing_description()
+        control = next(
+            item for item in description.widgets
+            if item.automation_id == target_id
+        )
+        control.name = "★ Запустити повтор"
+        report = self._summarize(description)
+        self.assertEqual(report["status"], "PASS")
+
     def test_unrecognized_critical_provider_gap_is_blocking_and_redacted(self):
         description = self._passing_description()
         target = next(

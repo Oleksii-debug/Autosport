@@ -258,7 +258,9 @@ def summarize_description(
             failures.append(
                 f"automation_id={normalized_automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
             )
-        blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
+        # Unknown provider gap types cannot be silently treated as a clean
+        # critical control: preserve only a fixed public diagnostic label.
+        blockers = sorted(set(gap_names) & (_BLOCKING_GAPS | {"OTHER_GAP"}))
         if blockers:
             failures.append(
                 f"automation_id={normalized_automation_id}: blocking gaps={','.join(blockers)}"

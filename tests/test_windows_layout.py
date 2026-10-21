@@ -101,12 +101,6 @@ def test_windows_product_shell_has_stable_uia_ids_and_keyboard_navigation():
         "max_day_loss_fraction": 315,
         "max_drawdown_fraction": 316,
         "max_capital_at_risk_fraction": 317,
-        "max_event_concentration_fraction": 330,
-        "max_market_concentration_fraction": 331,
-        "max_provider_concentration_fraction": 332,
-        "max_sport_concentration_fraction": 333,
-        "max_turnover_fraction": 334,
-        "max_execution_slippage_fraction": 335,
         "max_risk_of_ruin": 318,
         "max_quote_age_seconds": 319,
         "minimum_data_quality": 320,
@@ -188,6 +182,51 @@ def test_shell_target_requires_a_real_widget_before_open_is_authorized():
     assert _surface_target_widget(app, "paper_bank") is bank_summary
     refresh_windows_shell_open_availability(app)
     assert app.shell_open_button.state == "normal"
+
+
+def test_shell_open_disables_stale_destroyed_native_targets():
+    class SurfaceKey:
+        def get(self):
+            return "paper_bank"
+
+    class OpenButton:
+        def __init__(self):
+            self.state = None
+
+        def configure(self, **kwargs):
+            self.state = kwargs["state"]
+
+    class App:
+        shell_surface_key = SurfaceKey()
+        shell_open_button = OpenButton()
+
+    class NativeTarget:
+        def __init__(self, alive=True, failure=False):
+            self.alive = alive
+            self.failure = failure
+
+        def winfo_exists(self):
+            if self.failure:
+                raise RuntimeError("stale Tk interpreter")
+            return int(self.alive)
+
+    app = App()
+    widget = NativeTarget(alive=True)
+    app.bank_summary = widget
+    assert _surface_target_widget(app, "paper_bank") is widget
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "normal"
+
+    # The native window can disappear without the app attribute being cleared.
+    widget.alive = False
+    assert _surface_target_widget(app, "paper_bank") is None
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "disabled"
+
+    app.bank_summary = NativeTarget(failure=True)
+    assert _surface_target_widget(app, "paper_bank") is None
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "disabled"
 
 
 def test_owner_economic_creation_is_closed_for_strategies_without_goal_aware_sizing():

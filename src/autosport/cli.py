@@ -182,6 +182,14 @@ def build_parser() -> argparse.ArgumentParser:
     endurance.add_argument("--tickets", type=int, default=50)
     endurance.add_argument("--output", type=Path, default=None)
     dataset_calculation_cli.add_parser(sub)
+    install = sub.add_parser(
+        "install-release",
+        help="install an independently SHA-pinned PAPER release to a NEW directory only",
+    )
+    install.add_argument("--archive", required=True, type=Path)
+    install.add_argument("--destination", required=True, type=Path)
+    install.add_argument("--source-sha", required=True)
+    install.add_argument("--package-sha256", required=True)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -596,6 +604,14 @@ def main(argv: list[str] | None = None) -> int:
         )
     if args.command == "calculate-dataset-quote":
         return dataset_calculation_cli.run(args)
+    if args.command == "install-release":
+        from .offline_release_install import main as offline_install_main
+        return offline_install_main([
+            "--archive", str(args.archive),
+            "--destination", str(args.destination),
+            "--source-sha", args.source_sha,
+            "--package-sha256", args.package_sha256,
+        ])
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

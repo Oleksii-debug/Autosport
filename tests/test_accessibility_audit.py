@@ -160,6 +160,47 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_unknown_provider_strategy_cannot_pass_even_with_complete_controls(self):
+        description = self._passing_description()
+        marker = "SYNTHETIC_PRIVATE_UIA_STRATEGY_20261021"
+        description.strategy = _Named(marker)
+        report = self._summarize(description)
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["strategy"], "UNRECOGNIZED")
+        self.assertIn(
+            "unrecognized accessibility audit provider strategy",
+            report["failures"],
+        )
+        self.assertNotIn(marker, json.dumps(report, ensure_ascii=False))
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+
+    def test_list_rows_reject_truthy_nonboolean_provider_state(self):
+        for malformed_rows in ("false", 1, ["false"]):
+            with self.subTest(value_type=type(malformed_rows).__name__):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == AUTOMATION_IDS["tickets"]
+                )
+                target.answers_rows = malformed_rows
+                report = self._summarize(description)
+
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={AUTOMATION_IDS['tickets']}: list rows are not exposed through UIA",
+                    report["failures"],
+                )
+                row = next(
+                    item for item in report["critical_controls"]
+                    if item["automation_id"] == AUTOMATION_IDS["tickets"]
+                )
+                self.assertIs(row["answers_rows"], False)
+                json.dumps(report, ensure_ascii=False)
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+
     def test_whitespace_and_malformed_critical_accessible_names_fail_closed(self):
         for bad_name in (" \t\u00a0", object()):
             with self.subTest(name_type=type(bad_name).__name__):

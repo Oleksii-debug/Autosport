@@ -5,10 +5,13 @@ storage; this interface never transmits them and grants no bookmaker capability.
 """
 from __future__ import annotations
 
+import ctypes
+import errno
 import hashlib
 import json
 import os
 import stat
+import sys
 import tempfile
 import zipfile
 from pathlib import Path, PurePosixPath
@@ -226,6 +229,40 @@ def _validated_members(source: Path) -> tuple[list[tuple[str, bytes]], int]:
         return files, total
 
 
+def _publish_new_workspace(stage: Path, root: Path) -> None:
+    """Atomically install a verified tree without replacing a concurrent directory.
+
+    Plain POSIX os.rename may replace an existing EMPTY directory even when
+    existence was checked immediately beforehand. Linux RENAME_NOREPLACE and
+    Windows' no-overwrite directory rename close that collision window.
+    Unsupported platforms fail closed rather than risking owner data.
+    """
+    if os.name == "nt":
+        try:
+            os.rename(stage, root)
+        except FileExistsError as exc:
+            raise WorkspaceBackupError("restore target already exists; refuse overwrite") from exc
+        return
+    if sys.platform.startswith("linux"):
+        try:
+            renameat2 = ctypes.CDLL(None, use_errno=True).renameat2
+        except (AttributeError, OSError) as exc:
+            raise WorkspaceBackupError("atomic no-replace restore unavailable") from exc
+        renameat2.argtypes = (ctypes.c_int, ctypes.c_char_p, ctypes.c_int, ctypes.c_char_p, ctypes.c_uint)
+        renameat2.restype = ctypes.c_int
+        # AT_FDCWD=-100; RENAME_NOREPLACE=1. Neither path is a user command.
+        result = renameat2(-100, os.fsencode(stage), -100, os.fsencode(root), 1)
+        if result == 0:
+            return
+        code = ctypes.get_errno()
+        if code in (errno.EEXIST, errno.ENOTEMPTY):
+            raise WorkspaceBackupError("restore target already exists; refuse overwrite")
+        if code in (errno.ENOSYS, errno.EINVAL, errno.EOPNOTSUPP):
+            raise WorkspaceBackupError("atomic no-replace restore unavailable")
+        raise OSError(code, os.strerror(code))
+    raise WorkspaceBackupError("atomic no-replace restore unavailable")
+
+
 def restore_workspace(source: str | Path, destination: str | Path) -> dict[str, object]:
     """Verify the entire archive before creating a fresh destination workspace.
 
@@ -249,5 +286,5 @@ def restore_workspace(source: str | Path, destination: str | Path) -> dict[str, 
             os.chmod(path, 0o600)
         if root.exists() or root.is_symlink():
             raise WorkspaceBackupError("restore destination appeared during validation")
-        os.rename(stage, root)
+        _publish_new_workspace(stage, root)
     return {"file_count": len(files), "total_bytes": total, "private_data": True, "real_money_execution": False}

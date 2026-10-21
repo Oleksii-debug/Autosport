@@ -7,9 +7,10 @@ schema-changing updates are refused instead of silently migrated.
 from __future__ import annotations
 
 import hashlib
+import ntpath
 import os
 import zipfile
-from pathlib import Path
+from pathlib import Path, PureWindowsPath
 
 from . import release_package
 from .offline_release_install import (
@@ -31,7 +32,14 @@ def _transaction_root(destination: Path) -> Path:
     # pending-update guard during upgrade, rollback and crash recovery.
     if ".." in destination.parts:
         raise OfflineInstallError("update destination contains parent traversal")
-    name = hashlib.sha256(os.fsencode(str(destination))).hexdigest()[:24]
+    # Windows product paths are case-insensitive. Without a canonical key,
+    # C:\\Apps\\Autosport and c:\\apps\\AUTOSPORT address the same install
+    # but receive different transaction directories, bypassing the pending-
+    # update fence. Preserve POSIX case sensitivity.
+    spelling = os.fspath(destination)
+    if isinstance(destination, PureWindowsPath):
+        spelling = ntpath.normcase(spelling)
+    name = hashlib.sha256(os.fsencode(spelling)).hexdigest()[:24]
     return destination.parent / (".autosport-update-" + name)
 
 

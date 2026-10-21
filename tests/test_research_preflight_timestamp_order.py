@@ -78,8 +78,8 @@ class ResearchPreflightTimestampOrderTests(unittest.TestCase):
         group = ScenarioGroup(
             "placeholder",
             (
-                ScenarioOutcome("outcome-a", Decimal("0.5")),
-                ScenarioOutcome("outcome-b", Decimal("0.5")),
+                ScenarioOutcome("abstract-a|placeholder|yes", Decimal("0.5")),
+                ScenarioOutcome("abstract-b|placeholder|yes", Decimal("0.5")),
             ),
         )
         instruction = ResearchReplayInstruction(

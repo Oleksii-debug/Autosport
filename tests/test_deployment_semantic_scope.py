@@ -645,14 +645,34 @@ def test_scientific_evidence_available_only_after_decision_is_rejected(
 
 
 def test_dataset_cutoff_cannot_be_after_decision() -> None:
-    dataset = _dataset(
+    # Reject a forged early availability timestamp at the registry ingress.
+    # The source cannot physically exist before its own causal cutoff.
+    malformed = _dataset(
         cutoff="2100-09-03T00:00:00Z",
         available_at="2100-09-02T00:00:00Z",
     )
     environment = _environment(cutoff="2100-09-03T00:00:00Z")
-    with pytest.raises(DeploymentSemanticScopeError, match="causal cutoff is later than decision time"):
+    with pytest.raises(
+        ValueError, match="DatasetSnapshot available_at must not precede causal_cutoff"
+    ):
         _resolve(
-            dataset=dataset,
+            dataset=malformed,
+            environment=environment,
+            decision_ts="2100-09-02T00:00:00Z",
+        )
+
+    # A physically consistent future snapshot is still unavailable to the
+    # earlier decision. Do not backdate its provenance to reach the resolver.
+    future = _dataset(
+        cutoff="2100-09-03T00:00:00Z",
+        available_at="2100-09-03T00:00:00Z",
+    )
+    with pytest.raises(
+        DeploymentSemanticScopeError,
+        match="DatasetSnapshot:dataset-001 was not available at decision time",
+    ):
+        _resolve(
+            dataset=future,
             environment=environment,
             decision_ts="2100-09-02T00:00:00Z",
         )

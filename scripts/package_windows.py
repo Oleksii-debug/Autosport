@@ -7,9 +7,12 @@ import os
 import stat
 import subprocess
 import tempfile
+import tomllib
 from pathlib import Path, PurePosixPath
 
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
+from autosport.release_sbom import capture_direct_installed_dependencies
+from autosport.release_dependency_graph import capture_build_host_dependency_graph
 from autosport.release_package import (
     _require_git_commit_sha,
     build_windows_package,
@@ -51,6 +54,34 @@ _PRIVATE_KEY_BASENAMES = frozenset({"id_dsa", "id_ecdsa", "id_ed25519", "id_rsa"
 _PRIVATE_KEY_CONTAINER_SUFFIXES = (".key", ".ppk", ".pfx", ".p12")
 
 
+_TEST_STATE_DIRECTORY_NAMES = frozenset({
+    ".pytest_cache", ".mypy_cache", ".ruff_cache", ".tox", "__pycache__",
+    # Recorded property-based examples, nox environments and HTML coverage
+    # reports are test-run byproducts, not operator demonstration data.
+    ".hypothesis", ".nox", "htmlcov",
+})
+_TEST_STATE_BASENAMES = frozenset({
+    ".coverage", "coverage.xml", ".testmondata", "pytestdebug.log",
+})
+
+
+def _test_state_source_path_reason(path: PurePosixPath) -> str | None:
+    """Reject tracked test/build byproducts before release materialization."""
+    if not isinstance(path, PurePosixPath) or not path.parts:
+        raise ValueError("release static payload path must be a concrete PurePosixPath")
+    normalized = tuple(part.casefold() for part in path.parts)
+    if any(part in _TEST_STATE_DIRECTORY_NAMES for part in normalized[:-1]):
+        return "test/build state directory"
+    basename = normalized[-1]
+    if (
+        basename in _TEST_STATE_BASENAMES
+        or basename.startswith(".coverage.")
+        or basename.endswith((".pyc", ".pyo"))
+    ):
+        return "test/build state file"
+    return None
+
+
 def _secret_source_path_reason(path: PurePosixPath) -> str | None:
     """Classify high-confidence local credential/session paths by name only.
 
@@ -89,6 +120,8 @@ def _secret_source_path_reason(path: PurePosixPath) -> str | None:
 def _require_safe_static_release_paths(paths: tuple[PurePosixPath, ...]) -> None:
     for path in paths:
         reason = _secret_source_path_reason(path)
+        if reason is None:
+            reason = _test_state_source_path_reason(path)
         if reason is not None:
             raise ValueError(
                 "release static payload contains forbidden "
@@ -649,6 +682,60 @@ def _capture_verified_evidence(
     )
 
 
+_RELEASE_SOURCE_INPUTS = (
+    "pyproject.toml",
+    "scripts/package_windows.py",
+    "src/autosport/release_package.py",
+    "src/autosport/release_sbom.py",
+    # Bind the shipped operator configuration and durable on-disk schema
+    # authorities to the same immutable exact-Git release source declaration.
+    "src/autosport/windows_entry.py",
+    "src/autosport/windows_layout.py",
+    "src/autosport/paths.py",
+    "src/autosport/storage.py",
+    "src/autosport/workspace_lock.py",
+    "src/autosport/monotonic_workspace_authority.py",
+    "src/autosport/release_dependency_graph.py",
+    "scripts/build_windows.ps1",
+    "scripts/build_windows_candidate.ps1",
+    ".github/workflows/windows-build.yml",
+)
+
+
+def _source_declaration_manifest(repo_root: Path, source_sha: str) -> dict[str, object]:
+    """Record only exact Git source declarations, never unverified installed packages.
+
+    These hashes bind the tracked release recipes to the source commit. A future
+    separate qualification must attest installed distributions and licenses.
+    """
+    _require_git_commit_sha(source_sha, field="source_sha")
+    source_blobs = {
+        path: _exact_git_bytes(repo_root, "show", f"{source_sha}:{path}")
+        for path in _RELEASE_SOURCE_INPUTS
+    }
+    try:
+        metadata = tomllib.loads(source_blobs["pyproject.toml"].decode("utf-8"))
+        runtime = metadata["project"]["dependencies"]
+        build = metadata["project"]["optional-dependencies"]["build"]
+    except (KeyError, TypeError, UnicodeError, ValueError, tomllib.TOMLDecodeError) as exc:
+        raise ValueError("exact source has no valid dependency declarations") from exc
+    from autosport.release_package import _validate_source_manifest
+
+    manifest: dict[str, object] = {
+        "schema_version": 1,
+        "source_sha": source_sha,
+        "evidence_class": "SOURCE_DECLARATIONS_ONLY",
+        "source_files_sha256": {
+            path: hashlib.sha256(payload).hexdigest()
+            for path, payload in sorted(source_blobs.items())
+        },
+        "declared_runtime_dependencies": sorted(runtime),
+        "declared_build_dependencies": sorted(build),
+    }
+    _validate_source_manifest(manifest, source_sha)
+    return manifest
+
+
 def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("--exe", type=Path, required=True)
@@ -673,6 +760,9 @@ def main() -> int:
     repo_root = Path.cwd()
     _bind_source_sha_to_checkout(args.source_sha, repo_root=repo_root)
     _require_checkout_matches_exact_source(repo_root, args.source_sha)
+    source_manifest = _source_declaration_manifest(repo_root, args.source_sha)
+    dependency_metadata = capture_direct_installed_dependencies(source_manifest)
+    dependency_graph = capture_build_host_dependency_graph(source_manifest)
 
     with tempfile.TemporaryDirectory(prefix="autosport-package-inputs-") as snapshot_root:
         snapshot_dir = Path(snapshot_root)
@@ -730,6 +820,9 @@ def main() -> int:
             trusted_restart_recovery,
             args.output,
             args.source_sha,
+            source_manifest=source_manifest,
+            dependency_metadata=dependency_metadata,
+            dependency_graph=dependency_graph,
         )
         binding = bind_portable_data_tool(
             output,
@@ -740,6 +833,9 @@ def main() -> int:
     release_verification = verify_windows_package(
         output,
         expected_source_sha=args.source_sha,
+        require_source_manifest=True,
+        require_dependency_metadata=True,
+        require_dependency_graph=True,
     )
     package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(output)

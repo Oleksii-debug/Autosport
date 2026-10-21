@@ -15,6 +15,7 @@ from autosport.event_lifecycle import (
     ContinuousEventLifecycle,
     EventLifecycleRecord,
     EventPhase,
+    canonical_event_identity_aliases,
 )
 from autosport.domain import MarketEvent
 from autosport.opponent_intelligence import OpponentIntelligenceStore
@@ -257,6 +258,21 @@ def _binding(
     )
 
 
+def _canonical_lifecycle_identity(
+    materializer: SportMemoryResultMaterializer,
+    binding: SportMemoryResultBinding,
+) -> str:
+    matches = tuple(
+        record.identity
+        for record in materializer.runtime.lifecycle.records()
+        if record.source_id == binding.source_id
+        and record.sport == binding.sport_id
+        and binding.event_identity in canonical_event_identity_aliases(record.identity)
+    )
+    assert len(matches) == 1
+    return matches[0]
+
+
 def _settlement(
     materializer: SportMemoryResultMaterializer,
     binding: SportMemoryResultBinding,
@@ -264,14 +280,19 @@ def _settlement(
     *,
     available_at: str = T2,
     evidence_sha256: str = SHA_B,
-    event_identity: str = EVENT_ID,
+    event_identity: str | None = None,
     evidence_id: str = "result-1",
     settlement_ref: str = "settlement-1",
 ) -> SettlementResolution:
     opponent_outcome = "void" if outcome == "void" else ("loss" if outcome == "win" else "win")
     assert binding.opponent_quote_key is not None
+    resolved_event_identity = (
+        _canonical_lifecycle_identity(materializer, binding)
+        if event_identity is None
+        else event_identity
+    )
     canonical = SettlementResolution(
-        event_identity=event_identity,
+        event_identity=resolved_event_identity,
         settlement_ref=settlement_ref,
         quote_outcomes={
             binding.subject_quote_key: outcome,
@@ -974,7 +995,7 @@ def test_event_and_subject_quote_must_match_frozen_binding(tmp_path):
     settlement = _authoritative_assertion(
         materializer,
         SettlementResolution(
-            event_identity=EVENT_ID,
+            event_identity=_canonical_lifecycle_identity(materializer, binding),
             settlement_ref="settlement-1",
             quote_outcomes={"other-quote": "win"},
             evidence_id="result-1",

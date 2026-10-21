@@ -4,7 +4,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from unittest.mock import patch
 
-from autosport.gui import AutosportApp
+from autosport.gui import AutosportApp, strategy_id_from_display
 from autosport.localization import text
 
 
@@ -69,3 +69,20 @@ def test_base_replay_configuration_broken_str_stays_fail_closed() -> None:
         text("ui.dialog.title"),
         _expected_error("ui.error.replay.configuration"),
     )
+
+
+class _HostileStrategyDisplay(str):
+    def __hash__(self):
+        raise AssertionError("hostile strategy display hash must not run")
+
+    def __repr__(self):
+        raise AssertionError("hostile strategy display repr must not run")
+
+
+def test_strategy_display_identity_rejects_string_subclass_before_hash_or_repr() -> None:
+    try:
+        strategy_id_from_display(_HostileStrategyDisplay("baseline"))
+    except ValueError:
+        pass
+    else:
+        raise AssertionError("string subclass must fail closed")

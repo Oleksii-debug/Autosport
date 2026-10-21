@@ -894,7 +894,20 @@ class BetfairReadOnlyClient:
         request_id = self._next_request_id()
         body = json.dumps({"jsonrpc": "2.0", "method": method, "params": dict(params), "id": request_id}, ensure_ascii=True, sort_keys=True, separators=(",", ":")).encode("utf-8")
         headers = {"Accept": "application/json", "Content-Type": "application/json", "X-Application": self._credentials.application_key, "X-Authentication": self._credentials.session_token}
-        payload = self._transport.post(endpoint, headers=headers, body=body, timeout_seconds=self._timeout_seconds)
+        try:
+            payload = self._transport.post(
+                endpoint, headers=headers, body=body, timeout_seconds=self._timeout_seconds
+            )
+        except Exception:
+            # A suppressed exception chain still retains __context__, including
+            # credential-bearing transport messages. Exit the handler before
+            # raising the sanitized error so no secret-bearing exception is kept.
+            transport_failed = True
+            payload = None
+        else:
+            transport_failed = False
+        if transport_failed:
+            raise BetfairReadOnlyError("Betfair read-only transport failed")
         if not isinstance(payload, bytes):
             raise BetfairReadOnlyError("Betfair transport must return bytes")
         evidence = BetfairEvidence(self._observed_at(), sha256(payload).hexdigest())

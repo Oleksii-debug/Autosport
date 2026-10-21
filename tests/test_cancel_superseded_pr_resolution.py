@@ -67,7 +67,10 @@ def test_missing_workflow_run_pr_number_fails_closed_without_exact_head() -> Non
 
 class FakeQualificationApi(GitHubApi):
     def __init__(self, payload: dict[str, object]) -> None:
-        self._repository = "Oleksii-debug/Autosport"
+        super().__init__(
+            repository="Oleksii-debug/Autosport",
+            token="test-token",
+        )
         self._payload = payload
 
     def _pull_request(self, pr_number: int) -> dict[str, object]:
@@ -98,10 +101,7 @@ def _qualification_pr(
 def test_live_qualification_accepts_open_nondraft_same_repository_head() -> None:
     api = FakeQualificationApi(_qualification_pr())
 
-    assert api.live_pr_qualification(2022) == PullRequestQualification(
-        head_sha=HEAD_A,
-        integration_capable=True,
-    )
+    assert api.live_pr_qualification(2022) == (HEAD_A, True)
 
 
 def test_live_qualification_fails_closed_for_fork_head() -> None:
@@ -109,10 +109,7 @@ def test_live_qualification_fails_closed_for_fork_head() -> None:
         _qualification_pr(head_repo="external-contributor/Autosport")
     )
 
-    assert api.live_pr_qualification(2022) == PullRequestQualification(
-        head_sha=HEAD_A,
-        integration_capable=False,
-    )
+    assert api.live_pr_qualification(2022) == (HEAD_A, False)
 
 
 def test_live_qualification_rejects_foreign_base_repository() -> None:

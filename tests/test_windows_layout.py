@@ -184,6 +184,51 @@ def test_shell_target_requires_a_real_widget_before_open_is_authorized():
     assert app.shell_open_button.state == "normal"
 
 
+def test_shell_open_disables_stale_destroyed_native_targets():
+    class SurfaceKey:
+        def get(self):
+            return "paper_bank"
+
+    class OpenButton:
+        def __init__(self):
+            self.state = None
+
+        def configure(self, **kwargs):
+            self.state = kwargs["state"]
+
+    class App:
+        shell_surface_key = SurfaceKey()
+        shell_open_button = OpenButton()
+
+    class NativeTarget:
+        def __init__(self, alive=True, failure=False):
+            self.alive = alive
+            self.failure = failure
+
+        def winfo_exists(self):
+            if self.failure:
+                raise RuntimeError("stale Tk interpreter")
+            return int(self.alive)
+
+    app = App()
+    widget = NativeTarget(alive=True)
+    app.bank_summary = widget
+    assert _surface_target_widget(app, "paper_bank") is widget
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "normal"
+
+    # The native window can disappear without the app attribute being cleared.
+    widget.alive = False
+    assert _surface_target_widget(app, "paper_bank") is None
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "disabled"
+
+    app.bank_summary = NativeTarget(failure=True)
+    assert _surface_target_widget(app, "paper_bank") is None
+    refresh_windows_shell_open_availability(app)
+    assert app.shell_open_button.state == "disabled"
+
+
 def test_owner_economic_creation_is_closed_for_strategies_without_goal_aware_sizing():
     class App:
         workspace = "."
@@ -556,3 +601,54 @@ def test_manual_calculation_source_has_no_automatic_event_market_or_outcome_sele
     assert "MarketEvent" not in source
     assert "event_id" not in source
     assert "_selection_odds(widget)" in source
+
+
+def test_help_about_open_routes_to_real_native_dialog(monkeypatch):
+    """The product Open button must execute Help, not just focus a placeholder."""
+    class App:
+        shell_open_button = object()
+        shell_details = object()
+
+    app = App()
+    opened = []
+    monkeypatch.setattr(windows_layout, "_show_help_about_dialog", lambda owner: opened.append(owner))
+    windows_layout._focus_surface_target(app, "help_about")
+    assert opened == [app]
+
+
+def test_help_about_missing_or_stale_open_target_fails_closed(monkeypatch):
+    class Focus:
+        def __init__(self):
+            self.calls = 0
+
+        def focus_set(self):
+            self.calls += 1
+
+    class Stale:
+        def winfo_exists(self):
+            return 0
+
+    class App:
+        shell_open_button = Stale()
+        shell_details = Focus()
+
+    app = App()
+    opened = []
+    monkeypatch.setattr(windows_layout, "_show_help_about_dialog", lambda owner: opened.append(owner))
+    windows_layout._focus_surface_target(app, "help_about")
+    assert opened == []
+    assert app.shell_details.calls == 1
+
+
+def test_help_about_dialog_is_selectable_nonmodal_and_restores_focus():
+    source = inspect.getsource(windows_layout._show_help_about_dialog)
+    assert "tk.Toplevel(app)" in source
+    assert "surface_detail_lines(surface)" in source
+    assert 'tk.Text(frame, width=76, height=14, wrap="word", takefocus=True)' in source
+    assert 'details.configure(state="disabled")' in source
+    assert "tk_uia.set_acc_name(details, surface.title_uk)" in source
+    assert "tk_uia.set_acc_description(details, surface.accessibility_uk)" in source
+    assert "app.shell_navigation.focus_set()" in source
+    assert 'dialog.bind("<Escape>"' in source
+    assert 'dialog.protocol("WM_DELETE_WINDOW"' in source
+    assert ".grab_set(" not in source

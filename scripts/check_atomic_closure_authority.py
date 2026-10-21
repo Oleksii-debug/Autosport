@@ -1117,9 +1117,23 @@ def _is_terminal_done(value: str) -> bool:
     # otherwise misses the failed process. Quoted JSON diagnostic keys have
     # the same problem. These are rejection-only oracles, not PASS evidence.
     structured_exit_key = re.compile(
-        r"[\"'](?P<key>exit[ _-]?code|return[ _-]?code|returncode|"
-        r"errorlevel|last[ _-]?exit[ _-]?code|rc|signal)[\"']\s*:\s*"
+        r"[\"'](?P<key>exit[ _-]?(?:code|status)|return[ _-]?(?:code|value)|"
+        r"errorlevel|last[ _-]?exit[ _-]?code|process[.]?exit[ _-]?(?:code|status)|"
+        r"rc|signal)[\"']\s*:\s*"
         r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^,;\s}\])]+)",
+        re.IGNORECASE,
+    )
+    # PowerShell and JavaScript expose process status as standalone variables,
+    # not necessarily as a check-name + detail pair. A semicolon-delimited
+    # "$LASTEXITCODE=1" or "process.exitCode=1" after CI: PASS is independent
+    # negative evidence. Restrict this to the *beginning* of a clause so a
+    # historical prose mention does not become a current process outcome.
+    standalone_machine_exit = re.compile(
+        r"^(?:(?:PowerShell|pwsh)\s+)?"
+        r"(?:\$(?:global:)?last[_-]?exit[_-]?code|"
+        r"(?:process[.]?|process[_-]?)?exit[_-]?(?:code|status)|"
+        r"return[_-]?(?:code|value)|errorlevel|rc)\s*[:=]\s*"
+        r"(?P<code>[^,;\s}\])]+)\s*$",
         re.IGNORECASE,
     )
     def bad_process_value(value: str, *, signal: bool = False) -> bool:
@@ -1139,6 +1153,10 @@ def _is_terminal_done(value: str) -> bool:
         # narrative about a repaired failure.
         standalone = process_exit.match(clause)
         if standalone and bad_process_value(standalone.group("code")):
+            independent_process_failure = True
+            break
+        variable = standalone_machine_exit.match(clause)
+        if variable and bad_process_value(variable.group("code")):
             independent_process_failure = True
             break
         for diagnostic in structured_exit_key.finditer(clause):

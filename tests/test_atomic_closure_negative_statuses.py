@@ -1531,3 +1531,48 @@ def test_r123_structured_failure_blocks_aggregate_parent_done(tmp_path):
         .replace('| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
                  '| 2В | Native STOP | DONE — merged |'))
     rejected(tmp_path, registry=registry, atomic=atomic)
+
+
+# r127: A PowerShell/Node process can report its exit result in a separate
+# variable assignment after a successful CI banner. The check-name parser
+# does not see these assignments, so a nonzero result must independently
+# prevent terminal closure, including when encoded as a JSON diagnostic.
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: PASS; $LASTEXITCODE=1",
+    "Windows Candidate: PASS; $LASTEXITCODE = 1",
+    "Windows Candidate: PASS; $global:LASTEXITCODE=1",
+    "Windows Candidate: PASS; PowerShell $LASTEXITCODE=1",
+    "Windows Candidate: PASS; process.exitCode=1",
+    "Windows Candidate: PASS; processExitCode=1",
+    "Windows Candidate: PASS; exitStatus=1",
+    'Windows Candidate: PASS; {"exitStatus": 1}',
+    'Windows Candidate: PASS; {"process.exitCode": "0xC0000005"}',
+    "Windows Candidate: PASS; $LASTEXITCODE=garbled",
+])
+def test_r127_standalone_variable_or_structured_exit_blocks_done(summary):
+    assert not module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: PASS; $LASTEXITCODE=0",
+    "Windows Candidate: PASS; $global:LASTEXITCODE=0",
+    "Windows Candidate: PASS; PowerShell $LASTEXITCODE=0",
+    "Windows Candidate: PASS; process.exitCode=0",
+    "Windows Candidate: PASS; exitStatus=0",
+    'Windows Candidate: PASS; {"exitStatus": 0}',
+    "previous Windows Candidate: PASS; $LASTEXITCODE=1 fixed",
+])
+def test_r127_zero_or_historical_process_variable_is_not_failure(summary):
+    assert module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+def test_r127_variable_failure_blocks_aggregate_parent_done(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = (ATOMIC
+        .replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |",
+                 "| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: PASS; $LASTEXITCODE=1 |")
+        .replace("| 2Б | Navigation | IN_PROGRESS / NOT DONE |",
+                 "| 2Б | Navigation | DONE — merged |")
+        .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
+                 "| 2В | Native STOP | DONE — merged |"))
+    rejected(tmp_path, registry=registry, atomic=atomic)

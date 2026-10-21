@@ -5,6 +5,7 @@ import json
 import os
 import sqlite3
 import uuid
+import zipfile
 from dataclasses import asdict
 from decimal import Decimal
 from pathlib import Path
@@ -22,6 +23,7 @@ from .integrity import atomic_write_json
 from .live_observation import observe_workspace_once
 from .paper import PaperBook
 from .paths import default_workspace
+from .workspace_backup import WorkspaceBackupError, backup_workspace, restore_workspace
 from .parlayapi_provider import (
     ParlayApiTableTennisProvider,
     ProviderPayloadError,
@@ -163,6 +165,12 @@ def build_parser() -> argparse.ArgumentParser:
     snapshot.add_argument("--evidence", type=Path, default=None, help="optional machine evidence JSON path")
     snapshot.add_argument("--regions", default="us", help="comma-separated provider regions")
     snapshot.add_argument("--markets", default="h2h,spreads,totals", help="comma-separated historical game-line markets")
+    backup = sub.add_parser("backup-workspace", help="create private SHA-256 inventoried workspace ZIP on trusted local storage")
+    backup.add_argument("--workspace", type=Path, default=None)
+    backup.add_argument("--output", type=Path, required=True)
+    restore = sub.add_parser("restore-workspace", help="verify entire private backup and restore to a NEW empty workspace path")
+    restore.add_argument("--archive", type=Path, required=True)
+    restore.add_argument("--destination", type=Path, required=True)
     repair = sub.add_parser("repair-workspace", help="reconcile only late-crashed runs with durable hash-matched completion evidence")
     repair.add_argument("--workspace", type=Path, default=None)
     endurance = sub.add_parser("endurance", help="run deterministic bounded ingestion/replay/restart/settlement stress checks")
@@ -558,6 +566,22 @@ def main(argv: list[str] | None = None) -> int:
             regions=args.regions,
             markets=args.markets,
         )
+    if args.command == "backup-workspace":
+        try:
+            report = backup_workspace(args.workspace or default_workspace(), args.output)
+        except (WorkspaceBackupError, OSError, RuntimeError, ValueError, TypeError, EOFError, zipfile.BadZipFile, zipfile.LargeZipFile):
+            print("backup=FAIL_CLOSED reason=unsafe_workspace_or_archive")
+            return 3
+        print(f"backup=OK files={report['file_count']} bytes={report['total_bytes']} sha256={report['archive_sha256']} private_data=true")
+        return 0
+    if args.command == "restore-workspace":
+        try:
+            report = restore_workspace(args.archive, args.destination)
+        except (WorkspaceBackupError, OSError, RuntimeError, ValueError, TypeError, EOFError, zipfile.BadZipFile, zipfile.LargeZipFile):
+            print("restore=FAIL_CLOSED reason=unsafe_workspace_or_archive")
+            return 3
+        print(f"restore=OK files={report['file_count']} bytes={report['total_bytes']} private_data=true real_money_execution=false")
+        return 0
     if args.command == "repair-workspace":
         return run_repair_workspace(args.workspace)
     if args.command == "endurance":

@@ -27,6 +27,7 @@ Usage:
   Autosport-Data.exe observe-continuous [autosport-observe-continuous arguments]
   Autosport-Data.exe run-product [autosport-product arguments]
   Autosport-Data.exe install-release --archive <release.zip> --destination <new-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
+  Autosport-Data.exe uninstall-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
@@ -107,6 +108,10 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.offline_release_install import main as installer_main
 
         return installer_main(forwarded)
+    if command == "uninstall-release":
+        from autosport.offline_release_uninstall import main as uninstall_main
+
+        return uninstall_main(forwarded)
     if command == "repair-workspace":
         from autosport.cli import main as cli_main
 

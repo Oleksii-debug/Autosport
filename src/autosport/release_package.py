@@ -44,6 +44,13 @@ _GIT_COMMIT_SHA_LENGTH = 40
 _GIT_COMMIT_SHA_CHARS = frozenset("0123456789abcdef")
 _SHA256_LENGTH = 64
 _PACKAGE_SNAPSHOT_MEMORY_LIMIT = 8 * 1024 * 1024
+# Fail closed on hostile ZIP resource declarations BEFORE payload decompression.
+# A legitimate one-file Windows executable fits this bounded release envelope.
+_ZIP_MAX_MEMBER_UNCOMPRESSED = 512 * 1024 * 1024
+_ZIP_MAX_TOTAL_UNCOMPRESSED = 1024 * 1024 * 1024
+_ZIP_MAX_TOTAL_COMPRESSED = 1024 * 1024 * 1024
+_ZIP_MAX_MEMBERS = 4096
+_ZIP_MAX_COMPRESSION_RATIO = 4096
 _ZIP_CREATE_SYSTEM = 3
 _ZIP_CREATE_VERSION = 20
 _ZIP_EXTRACT_VERSION = 20
@@ -235,6 +242,30 @@ def _write_canonical_zip(package_zip: Path, members: dict[str, bytes]) -> str:
         finally:
             if publication.exists():
                 publication.unlink()
+
+
+def _require_release_zip_resource_bounds(infos: list[zipfile.ZipInfo]) -> None:
+    """Screen all central-directory sizes before reading even one member.
+
+    Trust no advertised size as a license for unbounded decompression. The
+    independent content hashes/local-header checks still validate identities.
+    """
+    if len(infos) > _ZIP_MAX_MEMBERS:
+        raise ValueError("release ZIP resource limit: excessive member count")
+    total_uncompressed = 0
+    total_compressed = 0
+    for info in infos:
+        expanded = info.file_size
+        packed = info.compress_size
+        if expanded < 0 or packed < 0 or expanded > _ZIP_MAX_MEMBER_UNCOMPRESSED:
+            raise ValueError("release ZIP resource limit: unsafe member size")
+        if expanded and (packed == 0 or expanded > packed * _ZIP_MAX_COMPRESSION_RATIO):
+            raise ValueError("release ZIP resource limit: excessive compression ratio")
+        total_uncompressed += expanded
+        total_compressed += packed
+        if (total_uncompressed > _ZIP_MAX_TOTAL_UNCOMPRESSED or
+                total_compressed > _ZIP_MAX_TOTAL_COMPRESSED):
+            raise ValueError("release ZIP resource limit: excessive archive size")
 
 
 def _require_canonical_zip_metadata(
@@ -866,6 +897,7 @@ def verify_windows_package(
         snapshot.seek(0)
         with zipfile.ZipFile(snapshot, "r") as archive:
             infos = archive.infolist()
+            _require_release_zip_resource_bounds(infos)
             archive_comment = archive.comment
             directory_names = [item.filename for item in infos if item.is_dir()]
             if directory_names:

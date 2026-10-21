@@ -37,8 +37,11 @@ def _identity(archive: Path, source_sha: str, digest: str) -> tuple[tuple[int, i
     if "BUILD_INFO.json" not in trusted:
         raise OfflineInstallError("update archive has no verified build identity")
     with zipfile.ZipFile(archive) as stream:
-        payload = stream.read("Autosport-V1/BUILD_INFO.json")
-    if len(payload) > 8192 or hashlib.sha256(payload).hexdigest() != trusted["BUILD_INFO.json"]:
+        info = stream.getinfo("Autosport-V1/BUILD_INFO.json")
+        if info.file_size > 8192:
+            raise OfflineInstallError("update BUILD_INFO exceeds size bound")
+        payload = stream.read(info)
+    if hashlib.sha256(payload).hexdigest() != trusted["BUILD_INFO.json"]:
         raise OfflineInstallError("update build identity changed during inspection")
     try:
         info = release_package._decode_json_object(payload, "update BUILD_INFO")
@@ -85,20 +88,29 @@ def upgrade_verified_paper_release(
     txn.mkdir(mode=0o700)
     candidate = txn / "candidate"
     previous = txn / "previous"
-    install_verified_release(
-        new_archive, candidate, expected_source_sha=new_source_sha,
-        expected_package_sha256=new_package_sha256,
-    )
-    inspect_installed_release(
-        candidate, archive=new_archive,
-        expected_source_sha=new_source_sha,
-        expected_package_sha256=new_package_sha256,
-    )
-    inspect_installed_release(
-        root, archive=old_archive,
-        expected_source_sha=old_source_sha,
-        expected_package_sha256=old_package_sha256,
-    )
+    try:
+        install_verified_release(
+            new_archive, candidate, expected_source_sha=new_source_sha,
+            expected_package_sha256=new_package_sha256,
+        )
+        inspect_installed_release(
+            candidate, archive=new_archive,
+            expected_source_sha=new_source_sha,
+            expected_package_sha256=new_package_sha256,
+        )
+        inspect_installed_release(
+            root, archive=old_archive,
+            expected_source_sha=old_source_sha,
+            expected_package_sha256=old_package_sha256,
+        )
+    except Exception:
+        # Only an entirely empty transaction may be silently cleaned.
+        # Incomplete candidate material stays quarantined for diagnosis.
+        try:
+            txn.rmdir()
+        except OSError:
+            pass
+        raise
     original = root.stat()
     root.rename(previous)
     if (previous.stat().st_dev, previous.stat().st_ino) != (

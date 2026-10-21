@@ -11,6 +11,7 @@ import re
 import stat
 import tempfile
 import zipfile
+import zlib
 from pathlib import Path
 
 from . import release_package
@@ -104,7 +105,7 @@ def _trusted_archive_inventory(
         if _hash_file(original) != expected_package_sha256:
             raise OfflineInstallError("original release changed during inspection")
         return trusted
-    except (OSError, ValueError, EOFError, zipfile.BadZipFile) as exc:
+    except (OSError, ValueError, EOFError, zipfile.BadZipFile, zlib.error) as exc:
         raise OfflineInstallError("original archive could not be verified") from exc
 
 

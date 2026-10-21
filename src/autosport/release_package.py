@@ -680,6 +680,40 @@ def verify_windows_package(
     }
 
 
+_RELEASE_PRIVATE_OR_TEST_DIRECTORIES = frozenset({
+    ".aws", ".ssh", ".pytest_cache", ".mypy_cache", ".ruff_cache",
+    ".tox", "__pycache__", "user data",
+})
+_RELEASE_PRIVATE_OR_TEST_FILES = frozenset({
+    ".env", ".envrc", ".pypirc", "token.json", "logins.json",
+    "secrets.json", "secrets.toml", "credentials", "cookies",
+    "login data", ".coverage", "coverage.xml", ".testmondata",
+    "pytestdebug.log", "id_ed25519", "id_rsa",
+})
+
+
+def _require_release_member_without_private_or_test_state(
+    relative_path: PurePosixPath,
+) -> None:
+    """Reject forbidden package bytes even if a ZIP's hashes were recomputed.
+
+    Build-time Git-tree screening is not sufficient: the verifier is also used
+    on externally supplied and repacked archives. Never trust a self-consistent
+    manifest to authorize cached tests or local credential material.
+    """
+    components = tuple(part.casefold() for part in relative_path.parts)
+    if any(part in _RELEASE_PRIVATE_OR_TEST_DIRECTORIES for part in components[:-1]):
+        raise ValueError("release package contains forbidden private/test state directory")
+    leaf = components[-1]
+    if (
+        leaf in _RELEASE_PRIVATE_OR_TEST_FILES
+        or leaf.startswith(".coverage.")
+        or leaf.endswith((".pyc", ".pyo", ".pfx", ".p12", ".ppk", ".key"))
+        or leaf.endswith((".session", ".session-journal"))
+    ):
+        raise ValueError("release package contains forbidden private/test state file")
+
+
 def _validate_windows_member(name: str) -> tuple[str, str]:
     """Return canonical relative/member key or reject a path unsafe for Windows extraction."""
 
@@ -713,6 +747,7 @@ def _validate_windows_member(name: str) -> tuple[str, str]:
         if device_stem in _WINDOWS_RESERVED_NAMES:
             raise ValueError(f"release package contains reserved Windows device name: {name}")
         normalized_parts.append(component.casefold())
+    _require_release_member_without_private_or_test_state(relative_path)
     return relative, "/".join(normalized_parts)
 
 

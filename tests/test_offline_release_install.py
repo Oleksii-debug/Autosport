@@ -126,5 +126,39 @@ class OfflineInstallTests(unittest.TestCase):
             self.assertFalse(list(root.glob(".autosport-install-staging-*")))
 
 
+    def test_symlink_in_ancestor_is_rejected_before_release_verification(self) -> None:
+        """A safe-looking parent must not hide an earlier symlink component."""
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            actual = root / "actual" / "nested"
+            actual.mkdir(parents=True)
+            alias = root / "alias"
+            try:
+                alias.symlink_to(root / "actual", target_is_directory=True)
+            except (OSError, NotImplementedError) as exc:
+                self.skipTest(f"symlinks unavailable on this test host: {type(exc).__name__}")
+            archive, digest = self._package(root)
+            destination = alias / "nested" / "Autosport"
+            with patch.object(installer.release_package, "verify_windows_package") as verifier:
+                with self.assertRaisesRegex(installer.OfflineInstallError, "symlink"):
+                    installer.install_verified_release(
+                        archive, destination, expected_source_sha=self.SOURCE,
+                        expected_package_sha256=digest,
+                    )
+                verifier.assert_not_called()
+            self.assertFalse((root / "actual" / "nested" / "Autosport").exists())
+            self.assertFalse(list(root.glob(".autosport-install-staging-*")))
+
+    def test_regular_nested_parent_remains_valid(self) -> None:
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            parent = root / "ordinary" / "nested"
+            parent.mkdir(parents=True)
+            archive, digest = self._package(root)
+            result = self._install(archive, parent / "Autosport", digest)
+            self.assertEqual(result["status"], "INSTALLED")
+            self.assertTrue((parent / "Autosport" / "Autosport.exe").is_file())
+
+
 if __name__ == "__main__":
     unittest.main()

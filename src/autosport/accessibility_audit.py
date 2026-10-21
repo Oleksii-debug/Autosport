@@ -211,15 +211,15 @@ def _open_owner_economic_dialog_for_audit(app: WindowsAutosportApp) -> Any:
 
 
 def _has_visible_accessible_text(value: str) -> bool:
-    """Reject UIA labels made only of invisible formatting/combining characters.
+    """Require readable letters or digits in critical UIA control labels.
 
-    Unicode format controls and combining marks are not independently readable
-    names, even if str.strip() leaves them intact. Real localized text with
-    such characters remains valid. Never export provider-controlled Name text.
+    Whitespace, Unicode controls, combining marks, symbols and punctuation
+    alone cannot identify a critical operator action to a screen reader.
+    A localized label with meaningful text and accompanying symbols remains
+    valid. Never export the provider-controlled Name text.
     """
     return any(
-        not character.isspace()
-        and unicode_category(character)[0] not in {"C", "M", "Z"}
+        unicode_category(character)[0] in {"L", "N"}
         for character in value
     )
 

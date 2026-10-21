@@ -44,7 +44,12 @@
       <p id="dataset-summary">Набір даних не вибрано.</p>
 
       <label for="106">Стратегія повтору</label>
-      <select id="106" aria-label="Стратегія повтору"></select>
+      <select id="106" aria-label="Стратегія повтору" aria-describedby="strategy-agent-help"></select>
+      <p id="strategy-agent-help">Фактичні агенти визначаються канонічною стратегією. Це перевірюваний склад, а не незалежний перемикач зовнішньої ШІ-моделі.</p>
+      <label for="strategy-agent-names">Агенти поточної стратегії</label>
+      <input id="strategy-agent-names" type="text" readonly aria-label="Агенти поточної стратегії">
+      <label for="strategy-agent-composition-sha">SHA-256 складу агентів</label>
+      <input id="strategy-agent-composition-sha" type="text" readonly aria-label="SHA-256 складу агентів">
 
       <label for="research-plan-path">Шлях до JSON-плану дослідження</label>
       <input id="research-plan-path" type="text" autocomplete="off" aria-describedby="research-plan-summary">

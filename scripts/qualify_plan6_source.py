@@ -69,8 +69,8 @@ def _identity(root: Path) -> str:
     sha = _git(root, "rev-parse", "--verify", "HEAD")
     if not _SHA.fullmatch(sha):
         raise ValueError("not a canonical full Git commit")
-    if _git(root, "status", "--porcelain", "--untracked-files=no"):
-        raise ValueError("tracked source changed")
+    if _git(root, "status", "--porcelain", "--untracked-files=all"):
+        raise ValueError("source tree changed or contains untracked files")
     return sha
 
 def _test_group(root: Path, name: str, paths: tuple[str, ...], *, timeout: int) -> dict:

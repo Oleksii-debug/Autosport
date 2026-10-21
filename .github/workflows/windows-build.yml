@@ -102,6 +102,9 @@ jobs:
         run: python scripts/verify_source_checkout.py --source-sha $env:AUTOSPORT_SOURCE_SHA
       - shell: pwsh
         run: ./scripts/build_windows_candidate.ps1
+      - name: Qualify release CMS signing with ephemeral fixture
+        shell: pwsh
+        run: ./scripts/fixture_cms_signing.ps1 -PackagePath ./dist/Autosport-V1-windows-x64.zip
       - name: Materialize verified independent package extraction
         shell: pwsh
         run: |

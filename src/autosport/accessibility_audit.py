@@ -217,9 +217,11 @@ def summarize_description(
 
     for widget in description.widgets:
         automation_id = widget.automation_id
-        if automation_id not in expected_ids:
+        # UIA provider identities are untrusted. Numeric aliases such as
+        # 101.0 and int subclasses must not satisfy a critical int ID.
+        if type(automation_id) is not int or automation_id not in expected_ids:
             continue
-        normalized_automation_id = int(automation_id)
+        normalized_automation_id = automation_id
         if normalized_automation_id in controls:
             failures.append(
                 f"automation_id={normalized_automation_id}: duplicate critical control identity"

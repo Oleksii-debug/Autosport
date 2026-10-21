@@ -705,6 +705,7 @@ _RELEASE_SOURCE_INPUTS = (
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
     "src/autosport/release_sbom.py",
+    "src/autosport/data_tool_package.py",
     # Bind the shipped operator configuration and durable on-disk schema
     # authorities to the same immutable exact-Git release source declaration.
     "src/autosport/windows_entry.py",

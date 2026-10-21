@@ -683,6 +683,7 @@ _RELEASE_SOURCE_INPUTS = (
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
     "src/autosport/release_sbom.py",
+    "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
 )

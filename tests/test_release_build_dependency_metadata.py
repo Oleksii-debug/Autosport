@@ -86,7 +86,7 @@ def test_rejects_duplicate_names_and_conflicting_pins():
         capture_direct_installed_dependencies(bad)
 
 
-def _packaging_fixture(root, source_manifest, dependency_metadata):
+def _packaging_fixture(root, source_manifest, dependency_metadata, *, embedded_inventory=None):
     import json
     from autosport.release_package import build_windows_package
     exe = root / "Autosport.exe"
@@ -121,6 +121,7 @@ def _packaging_fixture(root, source_manifest, dependency_metadata):
     package, _ = build_windows_package(
         exe, guide, sample, *paths, root / "release.zip", SHA,
         source_manifest=source_manifest, dependency_metadata=dependency_metadata,
+        embedded_executable_inventory=embedded_inventory,
     )
     return package
 
@@ -160,3 +161,43 @@ def test_release_requires_real_build_host_metadata_in_cli_mode(tmp_path):
             package, expected_source_sha=SHA,
             require_source_manifest=True, require_dependency_metadata=True,
         )
+
+
+def test_binary_bound_inventory_roundtrip_and_missing_required_gate(tmp_path):
+    """The additional manifest is bound to the exact packaged EXE, not host wheel names."""
+    from autosport.release_package import _SOURCE_MANIFEST_INPUTS, verify_windows_package
+    from autosport.release_sbom import capture_embedded_executable_inventory
+    from types import SimpleNamespace
+
+    manifest = {
+        **SOURCE, "schema_version": 1,
+        "evidence_class": "SOURCE_DECLARATIONS_ONLY",
+        "source_files_sha256": {path: "0" * 64 for path in _SOURCE_MANIFEST_INPUTS},
+    }
+    exe = tmp_path / "Autosport.exe"
+    exe.write_bytes(b"fake-windows-executable")
+    census = capture_embedded_executable_inventory(
+        exe, SHA,
+        reader_factory=lambda _: SimpleNamespace(
+            toc={"PYZ.pyz": (0, 10, 20, 0, "z")}
+        ),
+    )
+    package = _packaging_fixture(
+        tmp_path, manifest, None, embedded_inventory=census,
+    )
+    assert verify_windows_package(
+        package, expected_source_sha=SHA, require_source_manifest=True,
+        require_embedded_executable_inventory=True,
+    )["status"] == "PASS"
+
+    package_without_inventory = _packaging_fixture(tmp_path, manifest, None)
+    with pytest.raises(ValueError, match="missing embedded executable inventory"):
+        verify_windows_package(
+            package_without_inventory, expected_source_sha=SHA,
+            require_embedded_executable_inventory=True,
+        )
+
+    forged = deepcopy(census)
+    forged["executable_sha256"] = "0" * 64
+    with pytest.raises(ValueError, match="inventory identity/schema"):
+        _packaging_fixture(tmp_path, manifest, None, embedded_inventory=forged)

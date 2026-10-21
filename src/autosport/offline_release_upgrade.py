@@ -112,7 +112,7 @@ def upgrade_verified_paper_release(
             pass
         raise
     original = root.stat()
-    root.rename(previous)
+    _publish_directory_no_replace(root, previous)
     if (previous.stat().st_dev, previous.stat().st_ino) != (
         original.st_dev, original.st_ino
     ):
@@ -171,7 +171,7 @@ def rollback_verified_paper_release(
         expected_package_sha256=new_package_sha256,
     )
     original = root.stat()
-    root.rename(rejected)
+    _publish_directory_no_replace(root, rejected)
     if (rejected.stat().st_dev, rejected.stat().st_ino) != (
         original.st_dev, original.st_ino
     ):

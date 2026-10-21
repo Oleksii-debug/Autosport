@@ -25,6 +25,7 @@ from .replay_worker import (
 )
 from .research_strategy import ResearchStrategyPlan
 from .session import AutosportSession
+from .secret_redaction import safe_exception_text as _operator_safe_exception_text
 from .strategies import (
     available_strategies,
     strategy_spec,
@@ -99,17 +100,13 @@ def strategy_id_from_display(display: str) -> str:
 
 
 def _safe_exception_text(exc: BaseException) -> str:
-    """Describe a caught failure without allowing hostile metadata/stringification to escape."""
+    """Use the canonical secret-redacting exception boundary for GUI errors.
 
-    try:
-        name = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        name = "BaseException"
-    try:
-        detail = str(exc)
-    except BaseException:
-        return text("ui.error.exception.message_unavailable", exception_type=name)
-    return f"{name}: {detail}" if detail else name
+    Launch/recovery/provider exceptions can include credentials in messages or
+    malicious subclass names. Product UI, status and exportable logs must not
+    render those values directly.
+    """
+    return _operator_safe_exception_text(exc)
 
 
 class AutosportApp(tk.Tk):

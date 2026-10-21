@@ -83,6 +83,19 @@ class Plan6QualifierTests(unittest.TestCase):
                 result = qualifier._test_group(root, name, paths, timeout=3)
             self.assertEqual(result["status"], "FAIL")
 
+    def test_all_current_plan6_5b_sources_are_covered(self):
+        """Future 5B releases cannot gain a source test outside exact-head qualification."""
+        root = SCRIPT.parents[1]
+        groups = dict(qualifier.GROUPS)
+        included = set(groups["release_integrity"])
+        expected = {
+            path.relative_to(root).as_posix()
+            for path in (root / "tests").glob("test_plan6_5b_*.py")
+        }
+        self.assertTrue(expected, "Plan 6 5B tests must exist")
+        self.assertFalse(expected - included, sorted(expected - included))
+        self.assertIn("tests/test_plan6_source_qualifier.py", included)
+
     def test_atomic_report_contains_actual_negative_truth(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "result.json"

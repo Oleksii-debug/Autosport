@@ -138,6 +138,7 @@ def install_verified_release(
         payload_root = temp_root / "payload"
         payload_root.mkdir(mode=0o700)
         file_hashes: dict[str, str] = {}
+        windows_keys: set[str] = {_RECEIPT.casefold()}
         total = 0
         with zipfile.ZipFile(archive) as source:
             infos = source.infolist()
@@ -156,6 +157,15 @@ def install_verified_release(
                     raise OfflineInstallError("unsafe release path")
                 if relative == _RECEIPT or relative in file_hashes:
                     raise OfflineInstallError("reserved or duplicated release path")
+                # Independently enforce the Windows namespace during extraction,
+                # even if an upstream package verifier is accidentally bypassed.
+                try:
+                    canonical, windows_key = release_package._validate_windows_member(name)
+                except ValueError as exc:
+                    raise OfflineInstallError("unsafe Windows release path") from exc
+                if canonical != relative or windows_key in windows_keys:
+                    raise OfflineInstallError("ambiguous Windows release path")
+                windows_keys.add(windows_key)
                 if info.file_size < 0 or total + info.file_size > _MAX_TOTAL_BYTES:
                     raise OfflineInstallError("release exceeds bounded installed size")
                 total += info.file_size

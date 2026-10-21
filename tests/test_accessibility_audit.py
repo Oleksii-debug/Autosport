@@ -36,7 +36,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         shell = WINDOWS_SHELL_AUTOMATION_IDS
         owner_dialog = OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS
         return SimpleNamespace(
-            strategy=_Named("PROVIDER"),
+            strategy=_Named("PROVIDED"),
             widgets=(
                 self._widget(AUTOMATION_IDS["strategy"], "Стратегія replay", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["research_plan"], "Вибрати research plan", patterns=("INVOKE",)),
@@ -159,6 +159,15 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertTrue(shell_state["read_only"])
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
+
+    def test_old_provider_label_is_not_a_real_tk_uia_strategy(self):
+        # tk-uia 0.8.0's enum is PROVIDED, not PROVIDER; a typo must fail.
+        description = self._passing_description()
+        description.strategy = _Named("PROVIDER")
+        report = self._summarize(description)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["strategy"], "UNRECOGNIZED")
+        self.assertIn("unrecognized accessibility audit provider strategy", report["failures"])
 
     def test_unknown_provider_strategy_cannot_pass_even_with_complete_controls(self):
         description = self._passing_description()

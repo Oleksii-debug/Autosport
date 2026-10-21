@@ -480,10 +480,10 @@ def inspect_semantic_shell() -> dict[str, Any]:
     failures: list[str] = []
     try:
         html = index.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError):
         return {
             "status": "FAIL",
-            "failures": [f"semantic shell HTML unreadable: {type(exc).__name__}: {exc}"],
+            "failures": ["semantic shell HTML unreadable"],
             **_base_truth(),
         }
 
@@ -495,8 +495,8 @@ def inspect_semantic_shell() -> dict[str, Any]:
         _reject_broken_html_id_references(parser, failures)
         _reject_missing_accessible_names(parser, failures)
         _reject_inaccessible_emergency_stop(parser, failures)
-    except Exception as exc:
-        failures.append(f"semantic shell HTML parse failed: {type(exc).__name__}: {exc}")
+    except Exception:
+        failures.append("semantic shell HTML parse failed")
 
     if parser.landmarks != _REQUIRED_LANDMARKS:
         failures.append(
@@ -585,10 +585,8 @@ def inspect_semantic_shell() -> dict[str, Any]:
 
     try:
         javascript = script.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        failures.append(
-            f"semantic shell JavaScript unreadable: {type(exc).__name__}: {exc}"
-        )
+    except (OSError, UnicodeError):
+        failures.append("semantic shell JavaScript unreadable")
         javascript = ""
 
     for marker in _REQUIRED_BRIDGE_MARKERS:
@@ -636,19 +634,16 @@ def inspect_keyboard_contract() -> dict[str, Any]:
     try:
         html = index.read_text(encoding="utf-8")
         javascript = script.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
+    except (OSError, UnicodeError):
         return {
             "status": "FAIL",
-            "failures": [f"semantic keyboard assets unreadable: {type(exc).__name__}: {exc}"],
+            "failures": ["semantic keyboard assets unreadable"],
             **_base_truth(),
         }
     try:
         emergency_javascript = emergency_script.read_text(encoding="utf-8")
-    except (OSError, UnicodeError) as exc:
-        failures.append(
-            "emergency STOP keyboard asset unreadable: "
-            f"{type(exc).__name__}: {exc}"
-        )
+    except (OSError, UnicodeError):
+        failures.append("emergency STOP keyboard asset unreadable")
         emergency_javascript = ""
 
     parser = _SemanticShellParser()

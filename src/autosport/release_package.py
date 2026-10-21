@@ -150,7 +150,6 @@ def _require_safe_release_inputs(
         _require_regular_release_input(path, label)
     _require_safe_release_example_tree(example_dir)
 
-
 def _sorted_package_files(package_dir: Path) -> list[Path]:
     return sorted(
         (item for item in package_dir.rglob("*") if item.is_file()),

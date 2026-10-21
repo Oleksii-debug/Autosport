@@ -73,6 +73,18 @@
       <label for="evidence-path">Файл експорту доказів поза активною робочою областю</label>
       <input id="evidence-path" type="text" autocomplete="off">
       <button id="109" type="button">Експортувати докази</button>
+      <section id="update-diagnostic" aria-labelledby="update-diagnostic-heading">
+        <h3 id="update-diagnostic-heading">Перевірка оновлення (без встановлення)</h3>
+        <p>Використовується наявна перевірка підпису та цілісності.
+          Результат не підтверджує незалежний корінь довіри й ніколи не дозволяє встановлення.</p>
+        <label for="update-request-path">Абсолютний шлях до локального JSON-запиту на діагностику оновлення</label>
+        <input id="update-request-path" type="text" autocomplete="off"
+               aria-describedby="update-diagnostic-status">
+        <button id="update-diagnostic-button" type="button"
+                aria-describedby="update-diagnostic-status">Перевірити оновлення без встановлення</button>
+        <p id="update-diagnostic-status" role="status" aria-live="polite" aria-atomic="true">
+          Підписане оновлення ще не перевірялось.</p>
+      </section>
     </section>
 
     <section id="paper-runtime" aria-labelledby="paper-runtime-heading">

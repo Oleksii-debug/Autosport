@@ -15,6 +15,7 @@ from .causal_collector import GapState, SyncState
 from .dataset import ReplayDataset, load_dataset
 from .dataset_worker import OneShotDatasetValidationWorker
 from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
+from .gui_update_diagnostic import OneShotUpdateDiagnosticWorker
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
 from .operator_source_config import OperatorSourceSelection, OperatorSourceSelectionState
@@ -476,6 +477,8 @@ class AutosportWebController:
         self.live_worker = OneShotObservationWorker()
         self.recovery_worker = OneShotRecoveryWorker()
         self.evidence_export_worker = OneShotEvidenceExportWorker()
+        self.update_diagnostic_worker = OneShotUpdateDiagnosticWorker()
+        self.update_diagnostic_status = "Підписане оновлення ще не перевірялось."
         self.product_worker = ProductGuiWorker()
         self.product_runtime_status = "Тривалий імітаційний режим не запущено."
         self._product_runtime_identity: tuple[Path, str, str] | None = None
@@ -1306,6 +1309,10 @@ class AutosportWebController:
             else:
                 self._ok(text("ui.status.evidence_export.complete"))
 
+        update_message = self.update_diagnostic_worker.poll()
+        if update_message is not None:
+            self.update_diagnostic_status = update_message.status
+
         # Drain the current product queue before deriving actionability in state().
         # ProductGuiWorker publishes the terminal message immediately before clearing
         # busy; consuming only one message could therefore re-enable START while a
@@ -1516,6 +1523,10 @@ class AutosportWebController:
                     "recovery": self.recovery_worker.busy,
                     "evidence_export": self.evidence_export_worker.busy,
                     "product_runtime": self.product_worker.busy,
+                },
+                "update_diagnostic": {
+                    "status": self.update_diagnostic_status,
+                    "busy": self.update_diagnostic_worker.busy,
                 },
                 "product_source": source_projection,
                 "product_runtime": {
@@ -1813,6 +1824,21 @@ class AutosportWebController:
         return self._ok(
             text("ui.status.evidence_export.running"),
             focus_id="202",
+        )
+
+    def _action_update_diagnostic(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        """Invoke only canonical read-only, fail-closed signed-update diagnostic."""
+        raw = payload.get("request_path")
+        if not self.update_diagnostic_worker.start(raw):
+            return self._fail(
+                "Укажіть абсолютний шлях до локального JSON-запиту "
+                "або завершіть попередню діагностику."
+            )
+        self.update_diagnostic_status = (
+            "Підпис та стан релізу перевіряються без встановлення."
+        )
+        return self._ok(
+            self.update_diagnostic_status, focus_id="update-diagnostic-status"
         )
 
     def _action_product_source_configure(
@@ -2167,6 +2193,7 @@ class AutosportWebController:
             "live.refresh": self._action_live_refresh,
             "recovery.run": self._action_recovery_run,
             "evidence.export": self._action_evidence_export,
+            "update.diagnose": self._action_update_diagnostic,
             "product_source.configure": self._action_product_source_configure,
             "product_runtime.start": self._action_product_runtime_start,
             "product_runtime.stop": self._action_product_runtime_stop,
@@ -2287,6 +2314,7 @@ class AutosportWebController:
                 self.live_worker,
                 self.recovery_worker,
                 self.evidence_export_worker,
+                self.update_diagnostic_worker,
             ):
                 self._wait_for_terminal_worker(worker)
 

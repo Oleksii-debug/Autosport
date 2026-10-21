@@ -349,6 +349,12 @@
           || value.agent_overview.length !== 5
           || value.agent_overview.some((item) =>
             typeof item !== "string" || item.length > 600))) invalid();
+    if (value.update_diagnostic !== undefined && (
+      !record(value.update_diagnostic)
+      || typeof value.update_diagnostic.status !== "string"
+      || value.update_diagnostic.status.length > 600
+      || typeof value.update_diagnostic.busy !== "boolean"
+    )) invalid();
     if (value.product_source !== undefined && !record(value.product_source)) invalid();
     if (value.product_source && value.product_source.choices !== undefined
       && !Array.isArray(value.product_source.choices)) invalid();
@@ -377,7 +383,8 @@
     latestState = null;
     for (const id of [101, 102, 103, 104, 105, 106, 107, 108, 109,
       328, "owner-confirm", "product-source-select", "product-source-save",
-      "product-runtime-start", "product-runtime-stop"]) {
+      "product-runtime-start", "product-runtime-stop",
+      "update-diagnostic-button"]) {
       setDisabledWithFocusFallback(byId(id), true);
     }
     document.querySelectorAll("[data-owner-field], #327").forEach((node) => {
@@ -481,6 +488,15 @@
     setSelectOptions(strategy, state.strategy_choices || []);
     setValueUnlessFocused(strategy, state.strategy_id || previousStrategy);
     renderList(byId("agent-overview-list"), state.agent_overview || []);
+    const updateInfo = state.update_diagnostic || {};
+    setTextIfChanged(
+      byId("update-diagnostic-status"),
+      updateInfo.status || "Діагностика недоступна.",
+    );
+    setDisabledWithFocusFallback(
+      byId("update-diagnostic-button"),
+      updateInfo.busy === true,
+    );
 
     setValueUnlessFocused(byId(103), String(state.replay_speed));
     setValueUnlessFocused(byId(104), state.live_mode);
@@ -689,6 +705,11 @@
   byId(108).addEventListener("click", () => dispatch("recovery.run"));
   byId(109).addEventListener("click", () => {
     dispatch("evidence.export", { path: byId("evidence-path").value });
+  });
+  byId("update-diagnostic-button").addEventListener("click", () => {
+    dispatch("update.diagnose", {
+      request_path: byId("update-request-path").value,
+    });
   });
   byId("product-source-save").addEventListener("click", () => {
     dispatch("product_source.configure", {

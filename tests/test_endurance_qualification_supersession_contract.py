@@ -50,3 +50,4 @@ def test_trusted_supersession_controller_covers_endurance_without_cross_workflow
     assert "github.event.workflow_run.head_sha" not in concurrency_block
     assert "github.event.workflow_run.name" in text
     assert "github.event.workflow_run.workflow_id" in concurrency_block
+    assert "github.event.workflow_run.pull_requests" not in concurrency_block

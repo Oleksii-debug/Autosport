@@ -43,6 +43,19 @@ class GovernancePermissionState(str, Enum):
 _LOCAL_WRITE_LOCK = RLock()
 
 
+def _fdopen_owned_text(fd: int):
+    """Transfer a temporary file descriptor to a text handle without leaking it."""
+
+    try:
+        return os.fdopen(fd, "w", encoding="utf-8", newline="\n")
+    except BaseException:
+        try:
+            os.close(fd)
+        except OSError:
+            pass
+        raise
+
+
 @contextmanager
 def _registry_write_lock(registry_path: Path) -> Iterator[None]:
     """Serialize the complete registry read-modify-publish transaction.
@@ -89,10 +102,21 @@ def _registry_write_lock(registry_path: Path) -> Iterator[None]:
 
 
 def _text(value: str, field: str) -> str:
-    if not isinstance(value, str) or not value or value != value.strip():
+    if (
+        type(value) is not str
+        or not value
+        or value != value.strip()
+        or any(ord(character) < 32 or ord(character) == 127 for character in value)
+    ):
         raise BookmakerCapabilityRegistryError(
-            f"{field} must be a non-empty trimmed string"
+            f"{field} must be a non-empty canonical string"
         )
+    try:
+        value.encode("utf-8", "strict")
+    except UnicodeEncodeError as exc:
+        raise BookmakerCapabilityRegistryError(
+            f"{field} must be valid UTF-8"
+        ) from exc
     return value
 
 
@@ -118,6 +142,14 @@ def _digest(value: str, field: str) -> str:
             f"{field} must be a lowercase 64-character SHA-256 hex digest"
         )
     return value
+
+
+def _require_exact_fields(value: object, fields: frozenset[str], label: str) -> None:
+    """Reject unknown versioned evidence fields before they can be silently dropped."""
+    if type(value) is not dict or value.keys() != fields:
+        raise BookmakerCapabilityRegistryError(
+            f"{label} has missing or unknown schema fields"
+        )
 
 
 @dataclass(frozen=True, slots=True)
@@ -157,6 +189,11 @@ class BookmakerGovernanceEvidence:
         return sha256(encoded).hexdigest()
 
     def to_canonical_dict(self) -> dict[str, object]:
+        if type(self) is not BookmakerGovernanceEvidence:
+            raise BookmakerCapabilityRegistryError(
+                "evidence must be an exact BookmakerGovernanceEvidence"
+            )
+        BookmakerGovernanceEvidence.__post_init__(self)
         return {
             "account_id": self.account_id,
             "automation_permission": self.automation_permission.value,
@@ -178,9 +215,9 @@ class BookmakerCapabilityRegistry:
         self.path = Path(path)
 
     def register_profile(self, profile: BookmakerCapabilityProfile) -> bool:
-        if not isinstance(profile, BookmakerCapabilityProfile):
+        if type(profile) is not BookmakerCapabilityProfile:
             raise BookmakerCapabilityRegistryError(
-                "profile must be a BookmakerCapabilityProfile"
+                "profile must be an exact BookmakerCapabilityProfile"
             )
         with _registry_write_lock(self.path):
             document = self._load_document()
@@ -247,9 +284,9 @@ class BookmakerCapabilityRegistry:
         self,
         evidence: BookmakerGovernanceEvidence,
     ) -> bool:
-        if not isinstance(evidence, BookmakerGovernanceEvidence):
+        if type(evidence) is not BookmakerGovernanceEvidence:
             raise BookmakerCapabilityRegistryError(
-                "evidence must be BookmakerGovernanceEvidence"
+                "evidence must be exact BookmakerGovernanceEvidence"
             )
         with _registry_write_lock(self.path):
             document = self._load_document()
@@ -335,11 +372,14 @@ class BookmakerCapabilityRegistry:
             raise BookmakerCapabilityRegistryError(
                 "capability registry is unreadable or corrupt"
             ) from exc
-        if not isinstance(document, dict):
-            raise BookmakerCapabilityRegistryError(
-                "capability registry root must be an object"
-            )
-        if document.get("schema_version") != self.SCHEMA_VERSION:
+        _require_exact_fields(
+            document, frozenset({"schema_version", "profiles", "governance"}),
+            "capability registry root",
+        )
+        if (
+            type(document["schema_version"]) is not int
+            or document["schema_version"] != self.SCHEMA_VERSION
+        ):
             raise BookmakerCapabilityRegistryError(
                 "unsupported capability registry schema_version"
             )
@@ -362,11 +402,10 @@ class BookmakerCapabilityRegistry:
         ids: set[str] = set()
         keys: dict[tuple[str, str, str, int], str] = {}
         for entry in raw_entries:
-            if not isinstance(entry, dict):
-                raise BookmakerCapabilityRegistryError(
-                    "profile registry entry must be an object"
-                )
-            profile = self._decode_profile(entry.get("profile"))
+            _require_exact_fields(
+                entry, frozenset({"profile", "profile_id"}), "profile registry entry"
+            )
+            profile = self._decode_profile(entry["profile"])
             stored_id = entry.get("profile_id")
             if not isinstance(stored_id, str) or stored_id != profile.profile_id:
                 raise BookmakerCapabilityRegistryError(
@@ -398,11 +437,11 @@ class BookmakerCapabilityRegistry:
         ids: set[str] = set()
         keys: dict[tuple[str, str, str, str, str], str] = {}
         for entry in raw_entries:
-            if not isinstance(entry, dict):
-                raise BookmakerCapabilityRegistryError(
-                    "governance registry entry must be an object"
-                )
-            evidence = self._decode_governance(entry.get("evidence"))
+            _require_exact_fields(
+                entry, frozenset({"evidence", "evidence_id"}),
+                "governance registry entry",
+            )
+            evidence = self._decode_governance(entry["evidence"])
             stored_id = entry.get("evidence_id")
             if not isinstance(stored_id, str) or stored_id != evidence.evidence_id:
                 raise BookmakerCapabilityRegistryError(
@@ -425,14 +464,23 @@ class BookmakerCapabilityRegistry:
 
     @staticmethod
     def _decode_profile(raw: object) -> BookmakerCapabilityProfile:
-        if not isinstance(raw, dict):
-            raise BookmakerCapabilityRegistryError(
-                "profile payload must be an object"
-            )
+        _require_exact_fields(
+            raw,
+            frozenset({
+                "venue_id", "account_id", "adapter_id", "adapter_version",
+                "profile_version", "facts", "observed_at", "source_ref",
+                "source_payload_sha256",
+            }),
+            "capability profile",
+        )
         try:
             raw_facts = raw["facts"]
             if not isinstance(raw_facts, list):
                 raise TypeError("facts")
+            for item in raw_facts:
+                _require_exact_fields(
+                    item, frozenset({"capability", "state"}), "capability fact"
+                )
             facts = tuple(
                 BookmakerCapabilityFact(
                     capability=BookmakerCapability(item["capability"]),
@@ -461,10 +509,15 @@ class BookmakerCapabilityRegistry:
 
     @staticmethod
     def _decode_governance(raw: object) -> BookmakerGovernanceEvidence:
-        if not isinstance(raw, dict):
-            raise BookmakerCapabilityRegistryError(
-                "governance payload must be an object"
-            )
+        _require_exact_fields(
+            raw,
+            frozenset({
+                "venue_id", "account_id", "jurisdiction", "terms_version",
+                "automation_permission", "observed_at", "source_ref",
+                "source_payload_sha256",
+            }),
+            "governance evidence",
+        )
         try:
             return BookmakerGovernanceEvidence(
                 venue_id=raw["venue_id"],
@@ -530,7 +583,7 @@ class BookmakerCapabilityRegistry:
         )
         temp_path = Path(temp_name)
         try:
-            with os.fdopen(fd, "w", encoding="utf-8", newline="\n") as handle:
+            with _fdopen_owned_text(fd) as handle:
                 json.dump(
                     document,
                     handle,

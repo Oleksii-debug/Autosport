@@ -1,0 +1,31 @@
+# Plan 1 — Section 5: Collector / transactional synchronization — terminal reuse qualification
+
+**Disposition:** REUSE → QUALIFY → INTEGRATE → READBACK. No source rewrite or competing PR. **Evidence date:** 2026-10-11.  
+**Conflict key:** `data-causality`. **Scope:** Plan 1 §5 only; Sections 1–4 were terminal DONE.
+
+## Acceptance and production authority
+- `HeadlessCollectorService` (`src/autosport/collector_service.py`, blob `e01bb758e531e456cba5d0200c2be6ad2c56695d`) owns bounded read-only provider acquisition, startup/restart recovery, stop/resume, catalog discovery, persistent source/epoch identity, retries and redacted failure state.
+- `CollectorDeltaStore` (`src/autosport/collector_sqlite_store.py`, `d43f5309d7aea9b8b3d9260570acdcccfb087e13`) owns persisted delta/commit order, exact-once replay, durable checkpoints, legacy migration, tamper rejection and transactional SQLite state. `collector_sqlite_active_store.py` (`be3f4d836eedbd785c32195592e865dd494a2f94`) and `collector_sqlite_bounded_storage.py` (`456fbd099b3dc1260a5fcc205c743daee905e785`) reuse the bounded storage and epoch authority.
+- `collector_retention.py` (`bf3dbb97d691b395278a46af6d4db6d246938c31`) owns preview/compaction with decision/replay/desktop ACK pins, no deletion without supported proof, stale-preview/restart safeguards. `_collector_retention_desktop_ack_authority.py` (`1f7dede03c8b6e47c5f8478c9e808624c41e4d69`) supplies independent ACK authority.
+- `scheduled_source_universe.py` (`df8344cb30216e1ca33de43d9554bc691acc7d4d`), `source_universe_commitment.py` (`1898fb425366da4f7e3fd48c71677153a54cd577`), `ingestion_health.py` (`ca4bf40e05e28c3cb41439227fc5a10a567dd9fa`) preserve scheduled-slot/coverage/freshness/source-health observations with causal cutoff and explicit missing-provider evidence. `historical_acquisition.py` (`4413e82046a40081f9640557412be789644089af`) preserves acquisition provenance. `event_lifecycle.py` (`c57dbc754124c6b6aac0a1bf055f932828efab99`) handles catalog cursor/lifecycle.
+- Read-only `ReadOnlyCollectorDeltaFeed` and commit/checkpoint evidence form the transactional desktop handoff; ACK must come from durable desktop checkpoint truth.
+
+## Executed negative, recovery, and provenance test inventory
+- `tests/test_collector_service.py`: duplicate/restart; crash epoch/delta atomicity; persisted STOP/resume; bounded provider failures; source/epoch spoof/rebind; undiscovered event/late correction; no unauthorized success.
+- `tests/test_collector_process_death_recovery.py`: true subprocess death before commit rolls back; after commit deduplicates on replay.
+- `tests/test_collector_delta_sqlite_store.py`: durable exactly-once, late correction commit order, tamper, checkpoint rollback prevention, concurrent writers, migration/reopen.
+- `tests/test_collector_prospective_schedule.py`, `tests/test_collector_schedule_clock_discontinuity.py`, `tests/test_scheduled_source_universe.py`: frozen due/evaluation windows, missed slots, restart monotonicity, no fabricated coverage or late outcome publication, provider failures not silently declared complete.
+- `tests/test_collector_retention_compaction.py`, `tests/test_collector_retention_desktop_ack_authority.py`, `tests/test_collector_retention_desktop_ack_class_authority.py`: pins/ACK, crash recovery, stale preview, no premature deletion, compaction tombstone.
+- `tests/test_collector_sqlite_storage_budget.py`, `tests/test_collector_sqlite_storage_budget_race.py`, `tests/test_collector_service_native_storage_budget.py`, `tests/test_collector_endurance_composition.py`: budget and restart/retention composition.
+- Additional unchanged qualifying test sources include `test_collector_stream_checkpoint_integrity.py`, `test_collector_schedule_config_scope_binding.py`, `test_scheduled_source_universe_dispatch_seal.py`, `test_source_universe_commitment.py`, `test_source_universe_same_path_store_replacement.py`, `test_source_universe_descriptor_read_seams.py`, `test_source_universe_class_read_seam.py`, `test_scheduled_source_universe_read_seams.py`.
+
+## Exact-SHA executed qualification and integration
+1. Full frozen PR #2261 source candidate `d93d203e867c71aad880f1b2e3d144549e166030` — [CI #38148320018](https://github.com/Oleksii-debug/Autosport/actions/runs/38148320018): **completed/success**, Ubuntu/Windows × Python 3.11/3.12, all four test jobs SUCCESS; [Windows Candidate #38148320047](https://github.com/Oleksii-debug/Autosport/actions/runs/38148320047): **completed/success**, build job SUCCESS. Independently queried GitHub Actions readback on 2026-10-11.
+2. Prior exact head `4bf8da693c119a9fe41d7e792b5e6ba39f6a414a`: [Endurance #37988899097](https://github.com/Oleksii-debug/Autosport/actions/runs/37988899097) completed/success. This is historical endurance evidence, **not** falsely represented as a fresh exact-PR-2261 endurance execution.
+3. Candidate PR #2261 was integrated into `main` via merge `bf25e29329ae7cfbe1e705fb00073dedc414b785`. At pre-closure `main@6d62d5c55f73654b1dbc315a4d5aa2f1cf7c3e58`, GitHub recursive tree readbacks compared ALL `src/`, `tests/`, CI configuration and all other tree paths against qualified `d93d203e...`: **zero changed source, test or configuration blobs**. Differences were solely `MULTI_PLAN_CLOSURE_STATE.md` and existing Section-4 evidence document. Thus every existing §5 production/test blob remains byte-identical to the successful exact-head matrix. Readback of key production/test blobs confirmed SHA identity.
+4. As no missing repo-controllable acceptance gap or executed failure was found, Section-5 requires no source mutation. This evidence document and the canonical registry status are the integration-only closure updates. Changes here do not confer legal provider entitlement.
+
+## Evidence-class and final-product boundaries
+Public/fixture/recorded source collection supports engineering DONE; no real bookmaker credentials or source entitlement are asserted. No physical owner/NVDA validation. `REAL_MONEY_EXECUTION=false`, `HUMAN_TESTED=false`, `NVDA_VERIFIED=false`. Any concrete later regression requires explicit REOPENED evidence per AGENTS.md, never routine rework.
+
+**Section 5 = terminal DONE** once the registry row and Drive plan are updated and independently read back. Next first ACTIONABLE: Section 6.

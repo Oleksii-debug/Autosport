@@ -40,6 +40,7 @@ from .market_mirror_runtime import (
 )
 from .paper import PaperBook
 from .resolver_semantics import ResolverSemanticIdentityError, function_semantic_sha256
+from .secret_redaction import _safe_exception_type_label
 from .storage import SQLiteMarketStore
 from .workspace_lock import (
     WorkspaceEconomicLock,
@@ -618,7 +619,7 @@ class AutonomousProductRuntime:
         try:
             primary_error.add_note(
                 f"{action} also failed: "
-                f"{type(secondary_error).__name__}: {secondary_error}"
+                f"{_safe_exception_type_label(secondary_error)}"
             )
         except BaseException:
             pass
@@ -816,7 +817,7 @@ class AutonomousProductRuntime:
                 try:
                     primary_error.add_note(
                         "product runtime lease release also failed while closing "
-                        f"market storage: {type(release_error).__name__}: {release_error}"
+                        f"market storage: {_safe_exception_type_label(release_error)}"
                     )
                 except BaseException:
                     pass

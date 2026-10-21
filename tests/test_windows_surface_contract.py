@@ -79,3 +79,46 @@ def test_shell_selection_persistence_is_atomic_bounded_and_fail_soft(tmp_path) -
 
     (tmp_path / "windows-shell-state-v1.json").write_text("{broken", encoding="utf-8")
     assert load_surface_selection(tmp_path) == DEFAULT_SURFACE_KEY
+
+def test_shell_selection_rejects_invalid_untrusted_input_without_writing(tmp_path) -> None:
+    state_path = tmp_path / "windows-shell-state-v1.json"
+    # JSON bridge callers can pass an array or object even when annotated str.
+    for invalid in ([], {}, ["market_mirror"], {"key": "market_mirror"}, None, 1, True):
+        assert save_surface_selection(tmp_path, invalid) is False
+        assert not state_path.exists()
+
+    assert save_surface_selection(tmp_path, "market_mirror") is True
+    expected = state_path.read_bytes()
+    for invalid in ([], {}, ["home_dashboard"], 0, False):
+        assert save_surface_selection(tmp_path, invalid) is False
+        assert state_path.read_bytes() == expected
+
+
+def test_shell_selection_requires_exact_supported_schema_version(tmp_path) -> None:
+    state_path = tmp_path / "windows-shell-state-v1.json"
+    for bad in (None, False, True, 0, 2, "1", 1.0, [], {}):
+        state_path.write_text(
+            json.dumps({"version": bad, "surface_key": "market_mirror"}),
+            encoding="utf-8",
+        )
+        assert load_surface_selection(tmp_path) == DEFAULT_SURFACE_KEY
+    state_path.write_text(json.dumps({"surface_key": "market_mirror"}), encoding="utf-8")
+    assert load_surface_selection(tmp_path) == DEFAULT_SURFACE_KEY
+    state_path.write_text(
+        json.dumps({"version": 1, "surface_key": "market_mirror"}), encoding="utf-8"
+    )
+    assert load_surface_selection(tmp_path) == "market_mirror"
+
+
+def test_shell_selection_does_not_parse_oversized_but_otherwise_valid_state(tmp_path) -> None:
+    path = tmp_path / "windows-shell-state-v1.json"
+    large_valid_state = {
+        "version": 1, "surface_key": "market_mirror", "padding": "x" * 8192,
+    }
+    path.write_text(json.dumps(large_valid_state), encoding="utf-8")
+    # Older code accepted the requested surface after reading the entire
+    # attacker-controlled document. Oversized UI state must fail soft instead.
+    assert load_surface_selection(tmp_path) == DEFAULT_SURFACE_KEY
+
+    assert save_surface_selection(tmp_path, "market_mirror") is True
+    assert load_surface_selection(tmp_path) == "market_mirror"

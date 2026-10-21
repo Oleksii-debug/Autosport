@@ -30,6 +30,8 @@ def _write_snapshot(root: Path) -> dict[str, str]:
             "def verify_windows_package(*args, **kwargs):\n"
             "    return {}\n"
         ),
+        "src/autosport/release_sbom.py": "SENTINEL = 'trusted-sbom-module'\n",
+        "src/autosport/release_dependency_graph.py": "SENTINEL = 'trusted-graph-module'\n",
         "src/autosport/data_tool_package.py": (
             "from autosport.release_package import verify_windows_package\n"
             "SENTINEL = 'trusted-data-module'\n"
@@ -121,7 +123,9 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     final_gate = "python $sourceVerifier --source-sha $sourceSha --late-build-boundary --allow-release-outputs"
     archive = (
         "& $gitExecutable archive --format=zip \"--output=$trustedPackageArchive\" $sourceSha -- "
-        "scripts/package_windows.py src/autosport/release_package.py src/autosport/data_tool_package.py"
+        "scripts/package_windows.py src/autosport/release_package.py "
+        "src/autosport/release_sbom.py src/autosport/release_dependency_graph.py "
+        "src/autosport/data_tool_package.py"
     )
     package_command = "python scripts/package_windows.py `"
     isolated_runner = (
@@ -138,5 +142,25 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     assert isolated_runner in script
     assert "$trustedPackageLauncher = @'" in script
     assert "sys.path.insert" not in launcher
+    assert 'load_module("autosport.release_sbom", "src/autosport/release_sbom.py")' in launcher
+    assert 'load_module("autosport.release_dependency_graph", "src/autosport/release_dependency_graph.py")' in launcher
     assert 'load_module("autosport.release_package", "src/autosport/release_package.py")' in launcher
     assert 'load_module("autosport.data_tool_package", "src/autosport/data_tool_package.py")' in launcher
+
+
+def test_trusted_launcher_refuses_mutated_graph_module_before_execution(tmp_path: Path) -> None:
+    launcher = _trusted_package_launcher_source()
+    root = tmp_path / "snapshot"
+    manifest = _write_snapshot(root)
+    graph_module = root / "src/autosport/release_dependency_graph.py"
+    graph_module.write_text("raise AssertionError('untrusted graph executed')\n", encoding="utf-8")
+    marker = tmp_path / "marker.txt"
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", launcher, str(root),
+         json.dumps(manifest, sort_keys=True, separators=(",", ":")), str(marker)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "trusted package source SHA-256 mismatch" in result.stderr
+    assert "untrusted graph executed" not in result.stderr
+    assert not marker.exists()

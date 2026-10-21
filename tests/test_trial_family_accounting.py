@@ -109,7 +109,7 @@ def _foundation(tmp_path):
     hypothesis = _hypothesis()
     binding = _binding(question, hypothesis)
     protocol = ResearchProtocol(binding, SHA_C, SHA_D, SHA_A, T0)
-    dataset = DatasetSnapshot("dataset-1", SHA_A, "lawful-provider:fixture", "license-evidence:v1", T1, T0, outcome_reveal_after=T1)
+    dataset = DatasetSnapshot("dataset-1", SHA_A, "lawful-provider:fixture", "license-evidence:v1", T1, T1, outcome_reveal_after=T1)
     features = FeatureSet("features-1", "v1", SHA_B, SHA_C, T0)
     model = ModelVersion("model-1", "fixture-model", SHA_A, SHA_C, SHA_D, "dataset-1", "features-1", "protocol-1", 7, SHA_B, T1)
     strategy = StrategyVersion("strategy-1", "canonical-strategy", SHA_C, SHA_D, SHA_B, T1, model_version_id="model-1")

@@ -579,3 +579,83 @@ def test_instance_level_transport_method_replacement_revokes_issued_identity(
     client._transport.post = lambda *args, **kwargs: b"{}"
 
     assert not is_authoritative_betfair_account_identity(value, client=client)
+
+
+class _HostileIdentityStr(str):
+    def _dispatch(self, *_args, **_kwargs):
+        raise AssertionError("hostile identity string dispatched before exact-type rejection")
+
+    __eq__ = _dispatch
+    __ne__ = _dispatch
+    __len__ = _dispatch
+    __iter__ = _dispatch
+    startswith = _dispatch
+    removeprefix = _dispatch
+    strip = _dispatch
+    isascii = _dispatch
+    isalpha = _dispatch
+    upper = _dispatch
+    encode = _dispatch
+
+
+@pytest.mark.parametrize(
+    ("field", "value"),
+    [
+        ("venue_id", "betfair"),
+        ("identity_scope", IDENTITY_SCOPE),
+        ("session_context_id", "betfair-session-context:" + "1" * 64),
+        ("currency_code", "EUR"),
+        ("account_details_sha256", "1" * 64),
+        ("observed_at", "2026-10-07T10:00:00+00:00"),
+    ],
+)
+def test_identity_scalar_subclasses_fail_before_virtual_dispatch(
+    field: str,
+    value: str,
+) -> None:
+    kwargs = {
+        "venue_id": "betfair",
+        "mode": BetfairAccountIdentityMode.PERSONAL_DEVELOPER,
+        "identity_scope": IDENTITY_SCOPE,
+        "session_context_id": "betfair-session-context:" + "1" * 64,
+        "currency_code": "EUR",
+        "account_details_sha256": "1" * 64,
+        "observed_at": "2026-10-07T10:00:00+00:00",
+    }
+    kwargs[field] = _HostileIdentityStr(value)
+
+    with pytest.raises(BetfairAccountIdentityError):
+        BetfairAuthenticatedAccountIdentity(**kwargs)
+
+
+def test_identity_digest_revalidates_post_init_scalar_tamper() -> None:
+    value = BetfairAuthenticatedAccountIdentity(
+        venue_id="betfair",
+        mode=BetfairAccountIdentityMode.PERSONAL_DEVELOPER,
+        identity_scope=IDENTITY_SCOPE,
+        session_context_id="betfair-session-context:" + "1" * 64,
+        currency_code="EUR",
+        account_details_sha256="1" * 64,
+        observed_at="2026-10-07T10:00:00+00:00",
+    )
+    object.__setattr__(value, "currency_code", _HostileIdentityStr("EUR"))
+
+    with pytest.raises(BetfairAccountIdentityError):
+        _ = value.identity_id
+
+
+def test_authority_check_rejects_post_init_scalar_subclass_without_dispatch(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_details_transport(monkeypatch)
+    client = _client()
+    value = resolve_betfair_authenticated_account_identity(client)
+    assert is_authoritative_betfair_account_identity(value, client=client)
+
+    object.__setattr__(
+        value,
+        "session_context_id",
+        _HostileIdentityStr(value.session_context_id),
+    )
+
+    assert not is_authoritative_betfair_account_identity(value, client=client)

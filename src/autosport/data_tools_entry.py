@@ -26,6 +26,9 @@ Usage:
   Autosport-Data.exe compare-strategies <run-summary> <run-summary> [...] [strategy-comparison arguments]
   Autosport-Data.exe observe-continuous [autosport-observe-continuous arguments]
   Autosport-Data.exe run-product [autosport-product arguments]
+  Autosport-Data.exe install-release --archive <release.zip> --destination <new-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
+  Autosport-Data.exe verify-installed-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
+  Autosport-Data.exe uninstall-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
@@ -42,6 +45,9 @@ Commands:
   compare-strategies         Compare compatible completed paper strategy runs on the same sealed replay identity.
   observe-continuous         Run the existing canonical bounded read-only observation service; network opt-in, environment credentials, durable status and stop semantics remain owned by autosport.continuous_observation.
   run-product                Run the existing canonical autonomous product runtime through autosport.product_entrypoint; arguments and exit status are delegated unchanged.
+  install-release           Install verified canonical PAPER release to a NEW folder using independent SHA anchors, without replacing existing files.
+  verify-installed-release  Compare installed PAPER files and receipt to the independently pinned original release ZIP.
+  uninstall-release         Remove only a fully matching inventoried PAPER release, refusing unowned user data or modified files.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
   export-evidence            Export the canonical deterministic metadata-only workspace evidence manifest.
   verify-evidence            Verify an exported evidence manifest against the current canonical workspace evidence.
@@ -101,6 +107,14 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.product_entrypoint import main as product_main
 
         return product_main(forwarded)
+    if command == "install-release":
+        from autosport.offline_release_install import main as installer_main
+
+        return installer_main(forwarded)
+    if command in {"verify-installed-release", "uninstall-release"}:
+        from autosport.cli import main as cli_main
+
+        return cli_main([command, *forwarded])
     if command == "repair-workspace":
         from autosport.cli import main as cli_main
 

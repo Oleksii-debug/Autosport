@@ -150,6 +150,23 @@ def _candidate(
     )
 
 
+def _exact_unbound_run(
+    run_id: int,
+    *,
+    head_sha: str = HEAD,
+    workflow_name: str = "CI",
+) -> dict[str, object]:
+    payload = _run(
+        run_id,
+        head_sha=head_sha,
+        workflow_name=workflow_name,
+        pull_requests=[],
+    )
+    payload["workflow_id"] = 356678400
+    payload["event"] = "pull_request"
+    return payload
+
+
 def _associated_pr(number: int, *, head_sha: str = HEAD) -> dict[str, object]:
     return {"number": number, "head": {"sha": head_sha}}
 
@@ -330,6 +347,7 @@ def test_recovered_candidate_identity_is_revalidated_at_cancel_boundary(monkeypa
         356678400,
         [
             [_associated_pr(2022)],
+            _exact_unbound_run(99),
             [_associated_pr(2022), _associated_pr(3030)],
         ],
     )
@@ -350,6 +368,7 @@ def test_recovered_candidate_identity_is_revalidated_at_cancel_boundary(monkeypa
 
     assert api.paths == [
         f"/commits/{HEAD}/pulls?per_page=100&page=1",
+        "/actions/runs/99",
         f"/commits/{HEAD}/pulls?per_page=100&page=1",
     ]
 
@@ -359,6 +378,7 @@ def test_recovered_candidate_rejects_historical_cross_pr_reuse_at_cancel_boundar
         356678400,
         [
             [_associated_pr(2022)],
+            _exact_unbound_run(99),
             [_associated_pr(2022), _associated_pr(3030, head_sha=STALE_HEAD)],
         ],
     )
@@ -392,6 +412,7 @@ def test_recovered_same_head_candidate_rejects_ready_transition_before_post(monk
         356678400,
         [
             [_associated_pr(2022)],
+            _exact_unbound_run(99),
             [_associated_pr(2022)],
             live_payload,
         ],
@@ -413,6 +434,7 @@ def test_recovered_same_head_candidate_rejects_ready_transition_before_post(monk
 
     assert api.paths == [
         f"/commits/{HEAD}/pulls?per_page=100&page=1",
+        "/actions/runs/99",
         f"/commits/{HEAD}/pulls?per_page=100&page=1",
         "/pulls/2022",
     ]
@@ -483,8 +505,11 @@ def _live_pr_payload(
     }
 
 
-def test_historical_stale_empty_reference_recovers_unique_target_pr() -> None:
-    api = FakeScopedApi(
+def test_historical_stale_empty_reference_recovers_unique_target_pr(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    api = _sealed_api(
+        monkeypatch,
         356678400,
         [[_associated_pr(2022, head_sha=HEAD)]],
     )
@@ -553,6 +578,7 @@ def test_historical_stale_candidate_can_cancel_after_fresh_target_rechecks(
         356678400,
         [
             [_associated_pr(2022, head_sha=HEAD)],
+            _exact_unbound_run(99, head_sha=STALE_HEAD),
             [_associated_pr(2022, head_sha=HEAD)],
             _live_pr_payload(HEAD),
         ],
@@ -572,6 +598,7 @@ def test_historical_stale_candidate_can_cancel_after_fresh_target_rechecks(
     assert api.cancelled == [99]
     assert api.paths == [
         f"/commits/{STALE_HEAD}/pulls?per_page=100&page=1",
+        "/actions/runs/99",
         f"/commits/{STALE_HEAD}/pulls?per_page=100&page=1",
         "/pulls/2022",
     ]
@@ -584,6 +611,7 @@ def test_historical_stale_candidate_rollback_to_ready_head_revokes_cancel(
         356678400,
         [
             [_associated_pr(2022, head_sha=HEAD)],
+            _exact_unbound_run(99, head_sha=STALE_HEAD),
             [_associated_pr(2022, head_sha=STALE_HEAD)],
             _live_pr_payload(STALE_HEAD),
         ],
@@ -611,6 +639,7 @@ def test_historical_stale_candidate_ambiguity_before_post_fails_closed(
         356678400,
         [
             [_associated_pr(2022, head_sha=HEAD)],
+            _exact_unbound_run(99, head_sha=STALE_HEAD),
             [
                 _associated_pr(2022, head_sha=HEAD),
                 _associated_pr(3030, head_sha=HEAD),

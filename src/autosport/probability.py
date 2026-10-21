@@ -25,7 +25,15 @@ class PaperValueEstimate:
 
 
 def _finite_decimal(value: Decimal | str, *, field: str) -> Decimal:
-    numeric = Decimal(str(value))
+    # Only exact decimal transport is financial authority. Converting a binary64
+    # float via str() conceals its rounded origin; hostile subclasses can also
+    # execute caller-owned code during conversion.
+    if type(value) is Decimal:
+        numeric = value
+    elif type(value) is str:
+        numeric = Decimal(value)
+    else:
+        raise ValueError(f"{field} must be a Decimal or decimal string")
     if not numeric.is_finite():
         raise ValueError(f"{field} must be finite")
     return numeric

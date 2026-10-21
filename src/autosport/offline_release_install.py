@@ -52,6 +52,16 @@ def _safe_root(destination: Path) -> Path:
         raise OfflineInstallError("install parent/destination is unsafe")
     if destination.exists():
         raise OfflineInstallError("existing installation must not be overwritten")
+    # A normal-looking immediate parent can still be reached through a
+    # symlink higher in the absolute path. Refuse such paths before staging
+    # any verified owner release outside the requested directory hierarchy.
+    ancestor = parent
+    while True:
+        if ancestor.is_symlink():
+            raise OfflineInstallError("install path traverses a symlink")
+        if ancestor == ancestor.parent:
+            break
+        ancestor = ancestor.parent
     return destination
 
 

@@ -60,18 +60,20 @@ _FOCUSABLE_CONTROLS = (
 )
 
 
-def _safe_exception_detail(exc: Exception) -> str:
-    """Render audit failure evidence without trusting exception formatting."""
+_PUBLIC_AUDIT_ERROR_TYPES = (
+    AssertionError, ConnectionError, FileNotFoundError, KeyError, OSError,
+    PermissionError, RuntimeError, TimeoutError, TypeError, ValueError,
+)
 
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = "exception details unavailable"
-    return f"{exception_type}: {rendered}"
+
+def _safe_exception_detail(exc: Exception) -> str:
+    """Emit only fixed error categories in exportable keyboard audit evidence."""
+    error_type = type(exc)
+    category = next(
+        (builtin.__name__ for builtin in _PUBLIC_AUDIT_ERROR_TYPES if error_type is builtin),
+        "Exception",
+    )
+    return f"{category}: details redacted"
 
 
 def summarize_keyboard_contract(

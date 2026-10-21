@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -87,6 +88,37 @@ class AccessibilityAuditTests(unittest.TestCase):
             shell_state_readonly=shell_state_readonly,
             owner_economic_state_readonly=owner_economic_state_readonly,
             workbench_result_readonly=workbench_result_readonly,
+        )
+
+    def test_exported_failure_does_not_leak_private_exception_text(self):
+        marker = "PLAN6_SYNTHETIC_PRIVATE_VALUE_20261021"
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "accessibility.json"
+            with patch.object(
+                accessibility_audit,
+                "WindowsAutosportApp",
+                side_effect=RuntimeError("provider_token=" + marker),
+            ):
+                self.assertEqual(accessibility_audit.run_accessibility_audit(destination), 1)
+            raw = destination.read_text(encoding="utf-8")
+            report = json.loads(raw)
+        self.assertNotIn(marker, raw)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["failures"], ["RuntimeError: details redacted"])
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+        self.assertFalse(report["real_money_execution"])
+
+    def test_untrusted_exception_class_and_stringification_are_private(self):
+        marker = "PLAN6_SYNTHETIC_CLASS_MARKER_20261021"
+        secret_exception = type(marker, (Exception,), {})
+        self.assertEqual(
+            accessibility_audit._safe_exception_detail(secret_exception("hidden=" + marker)),
+            "Exception: details redacted",
+        )
+        self.assertEqual(
+            accessibility_audit._safe_exception_detail(ValueError("hidden=" + marker)),
+            "ValueError: details redacted",
         )
 
     def test_v1_replay_speed_contract_includes_event_jump_and_1000x(self):

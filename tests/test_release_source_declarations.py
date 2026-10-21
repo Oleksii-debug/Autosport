@@ -147,3 +147,41 @@ def test_release_manifest_rejects_unpinned_or_forged_data_before_zip() -> None:
         with tempfile.TemporaryDirectory() as directory:
             with pytest.raises(ValueError):
                 _fixture(Path(directory), manifest)
+
+
+@pytest.mark.parametrize(
+    "alias",
+    ["tk_uia==0.8.0", "TK.UIA==0.8.0", "Tk_uia==0.8.0"],
+)
+def test_source_manifest_rejects_same_distribution_under_pep503_alias(alias: str) -> None:
+    manifest = _source_manifest()
+    dependencies = list(manifest["declared_runtime_dependencies"])
+    dependencies.append(alias)
+    manifest["declared_runtime_dependencies"] = sorted(dependencies)
+    with tempfile.TemporaryDirectory() as directory:
+        with pytest.raises(ValueError, match="normalized dependency aliases"):
+            _fixture(Path(directory), manifest)
+        assert not (Path(directory) / "release.zip").exists()
+
+
+def test_source_manifest_rejects_cross_scope_conflicting_versions() -> None:
+    manifest = _source_manifest()
+    manifest["declared_build_dependencies"] = sorted(
+        [*manifest["declared_build_dependencies"], "tk_uia==0.9.0"]
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        with pytest.raises(ValueError, match="conflicting dependency versions"):
+            _fixture(Path(directory), manifest)
+        assert not (Path(directory) / "release.zip").exists()
+
+
+def test_source_manifest_allows_same_version_cross_scope_declaration() -> None:
+    manifest = _source_manifest()
+    manifest["declared_build_dependencies"] = sorted(
+        [*manifest["declared_build_dependencies"], "tk_uia==0.8.0"]
+    )
+    with tempfile.TemporaryDirectory() as directory:
+        archive = _fixture(Path(directory), manifest)
+        assert verify_windows_package(
+            archive, expected_source_sha=SHA, require_source_manifest=True
+        )["status"] == "PASS"

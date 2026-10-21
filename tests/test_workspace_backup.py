@@ -98,3 +98,12 @@ def test_busy_economic_lock_is_not_ignored(tmp_path: Path, monkeypatch) -> None:
     with pytest.raises(RuntimeError, match="economic writer busy"):
         backup_workspace(root, tmp_path / "backup.zip")
     assert not (tmp_path / "backup.zip").exists()
+
+
+def test_windows_reserved_device_name_never_enters_backup(tmp_path: Path) -> None:
+    root = tmp_path / "source"
+    root.mkdir()
+    (root / "CON.txt").write_text("unsafe portability")
+    with pytest.raises(WorkspaceBackupError, match="nonportable"):
+        backup_workspace(root, tmp_path / "backup.zip")
+    assert not (tmp_path / "backup.zip").exists()

@@ -9,7 +9,7 @@ from .gui import AutosportApp
 from .localization import text
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
-from .secret_redaction import redact_operator_text
+from .secret_redaction import _safe_exception_type_label, redact_operator_text
 from .ui_model import evaluation_lines, result_summary, ticket_lines
 
 
@@ -19,10 +19,9 @@ WINDOWS_BANKROLL_AUTOMATION_ID = 205
 def _safe_exception_detail(exc: BaseException) -> str:
     """Render fail-closed GUI diagnostics without trusting exception metadata."""
 
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "BaseException"
+    # Exception subclass names can themselves be attacker-controlled and secret-bearing.
+    # Reuse the canonical built-in exception-category boundary.
+    exception_type = _safe_exception_type_label(exc)
     try:
         detail = str(exc)
     except BaseException:

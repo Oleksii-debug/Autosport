@@ -44,3 +44,27 @@ def test_operator_recovery_exception_keeps_benign_diagnostic() -> None:
     assert _safe_exception_detail(RuntimeError("teardown exploded")) == (
         "RuntimeError: teardown exploded"
     )
+
+
+def test_operator_recovery_exception_never_uses_untrusted_subclass_name() -> None:
+    # Exception classes created by provider plugins can encode secret material
+    # in __name__. The UI should reveal only an actual built-in MRO category.
+    hostile_type = type("AuthorizationBearerHiddenSecret987", (RuntimeError,), {})
+    presentation = _safe_exception_detail(hostile_type("restart unavailable"))
+    assert presentation == "RuntimeError: restart unavailable"
+    assert "HiddenSecret987" not in presentation
+
+
+def test_operator_recovery_exception_str_failure_keeps_type_private() -> None:
+    def broken_str(self: BaseException) -> str:
+        raise RuntimeError("provider token must stay private")
+
+    hostile_type = type(
+        "api_key_BadCredential987",
+        (RuntimeError,),
+        {"__str__": broken_str},
+    )
+    presentation = _safe_exception_detail(hostile_type())
+    assert "BadCredential987" not in presentation
+    assert "provider token must stay private" not in presentation
+    assert "RuntimeError" in presentation

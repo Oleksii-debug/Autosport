@@ -27,20 +27,20 @@ try {
     Write-Host ([System.IO.File]::ReadAllText($restartRecoveryAudit))
     Write-Host '--- end packaged restart/recovery audit evidence ---'
   }
-  # Print only fixed audit categories on failure. The raw report may contain
-  # operator/private UIA metadata and must not be copied into CI logs.
-  $accessibilityAudit = Join-Path (Get-Location).Path 'dist/accessibility-audit.json'
-  if (Test-Path -LiteralPath $accessibilityAudit -PathType Leaf) {
+  # On failure, report fixed machine-audit categories only. Never echo raw
+  # UIA names, paths, provider messages or the complete exported JSON.
+  $auditPath = Join-Path (Get-Location).Path 'dist/accessibility-audit.json'
+  if (Test-Path -LiteralPath $auditPath -PathType Leaf) {
     try {
-      $audit = Get-Content -LiteralPath $accessibilityAudit -Raw | ConvertFrom-Json
-      $safeStrategy = if ($audit.strategy -eq 'PROVIDER') { 'PROVIDER' } else { 'UNRECOGNIZED' }
-      $safeStatus = if ($audit.status -eq 'PASS') { 'PASS' } else { 'FAIL' }
-      $safeFailureCount = @($audit.failures).Count
-      Write-Host "packaged_accessibility_status=$safeStatus strategy=$safeStrategy failures=$safeFailureCount"
-      if (@($audit.failures) -contains 'unrecognized accessibility audit provider strategy') {
+      $audit = Get-Content -LiteralPath $auditPath -Raw | ConvertFrom-Json -ErrorAction Stop
+      $statusCategory = if ($audit.status -eq 'PASS') { 'PASS' } else { 'FAIL' }
+      $strategyCategory = if ($audit.strategy -eq 'PROVIDED') { 'PROVIDED' } else { 'UNRECOGNIZED' }
+      $failures = @($audit.failures | Where-Object { $_ -is [string] })
+      Write-Host "packaged_accessibility_status=$statusCategory strategy=$strategyCategory failure_count=$($failures.Count)"
+      if ($failures -contains 'unrecognized accessibility audit provider strategy') {
         Write-Host 'packaged_accessibility_category=UNRECOGNIZED_STRATEGY'
       }
-      if (@($audit.failures) | Where-Object { $_ -match '^automation_id=[0-9]+: critical control not found runs only from source_sha Git objects. Do not execute
+      if ($failures | Where-Object { $_ -match '^automation_id=[0-9]+: critical control not found runs only from source_sha Git objects. Do not execute
 # the live materializer path after the canonical build has finished: late checkout
 # drift must not be able to redefine the release transformation authority.
 $repoRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))
@@ -158,7 +158,7 @@ $materializerScript = [scriptblock]::Create($materializerText)
  }) {
         Write-Host 'packaged_accessibility_category=MISSING_CONTROL'
       }
-      if (@($audit.failures) | Where-Object { $_ -match '^automation_id=[0-9]+: list rows are not exposed through UIA runs only from source_sha Git objects. Do not execute
+      if ($failures | Where-Object { $_ -match '^automation_id=[0-9]+: list rows are not exposed through UIA runs only from source_sha Git objects. Do not execute
 # the live materializer path after the canonical build has finished: late checkout
 # drift must not be able to redefine the release transformation authority.
 $repoRoot = [System.IO.Path]::GetFullPath((Split-Path -Parent $PSScriptRoot))

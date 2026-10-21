@@ -163,17 +163,23 @@ def validate_embedded_executable_inventory(
         or _re.fullmatch(r"[0-9a-f]{64}", executable_sha256) is None
     ):
         raise ValueError("invalid embedded inventory source/executable identity")
+    # V1 captures only the outer CArchive. V2 also inventories the nested
+    # PYZ table, without claiming distribution attribution or license clearance.
+    schema_version = payload.get("schema_version") if type(payload) is dict else None
+    base_fields = {
+        "schema_version", "source_sha", "executable_sha256",
+        "evidence_class", "components",
+    }
     if (
-        type(payload) is not dict
-        or set(payload) != {
-            "schema_version", "source_sha", "executable_sha256",
-            "evidence_class", "components",
-        }
-        or type(payload["schema_version"]) is not int
-        or payload["schema_version"] != 1
+        type(schema_version) is not int
+        or schema_version not in (1, 2)
+        or set(payload) != (base_fields | ({"pyz_modules"} if schema_version == 2 else set()))
         or payload["source_sha"] != source_sha
         or payload["executable_sha256"] != executable_sha256
-        or payload["evidence_class"] != "EMBEDDED_PYINSTALLER_CARCHIVE_TOC_ONLY"
+        or payload["evidence_class"] != (
+            "EMBEDDED_PYINSTALLER_CARCHIVE_AND_PYZ_TOC_ONLY" if schema_version == 2
+            else "EMBEDDED_PYINSTALLER_CARCHIVE_TOC_ONLY"
+        )
     ):
         raise ValueError("embedded executable inventory identity/schema mismatch")
     components = payload["components"]
@@ -263,10 +269,51 @@ def validate_embedded_executable_inventory(
             size = item[key]
             if type(size) is not int or size < 0 or size > (1 << 35):
                 raise ValueError("embedded executable component size is invalid")
+    if schema_version == 2:
+        # One PYZ is the canonical embedded Python module archive for these
+        # one-file executables; no outer-only census may masquerade as V2.
+        pyz_parents = [entry for entry in components if entry["typecode"] == "z"]
+        if len(pyz_parents) != 1 or pyz_parents[0]["unpacked_bytes"] <= 0:
+            raise ValueError("nested PYZ inventory requires exactly one bounded archive")
+        archive_size = pyz_parents[0]["unpacked_bytes"]
+        modules = payload["pyz_modules"]
+        if type(modules) is not list or not (1 <= len(modules) <= 20000):
+            raise ValueError("nested PYZ module inventory is empty or unbounded")
+        last_module = None
+        windows_modules: set[str] = set()
+        for module in modules:
+            if type(module) is not dict or set(module) != {
+                "name", "typecode", "position", "packed_bytes",
+            }:
+                raise ValueError("nested PYZ module schema is invalid")
+            name = module["name"]
+            if (
+                type(name) is not str or not (1 <= len(name) <= 512)
+                or any(not part.isidentifier() for part in name.split("."))
+                or name != unicodedata.normalize("NFC", name)
+                or (last_module is not None and name <= last_module)
+            ):
+                raise ValueError("nested PYZ module names must be safe and sorted")
+            last_module = name
+            windows_name = name.casefold()
+            if windows_name in windows_modules:
+                raise ValueError("nested PYZ module names collide on Windows")
+            windows_modules.add(windows_name)
+            typecode = module["typecode"]
+            position = module["position"]
+            length = module["packed_bytes"]
+            if (
+                type(typecode) is not int or typecode not in (0, 1, 2, 3)
+                or type(position) is not int or position < 0
+                or type(length) is not int or length < 0
+                or position > archive_size or length > archive_size - position
+            ):
+                raise ValueError("nested PYZ module offset/type is invalid")
 
 
 def capture_embedded_executable_inventory(
     exe_path: "str | Path", source_sha: str, *, reader_factory: Any = None,
+    include_nested_pyz: bool = False,
 ) -> dict[str, Any]:
     """Census names/typecodes/sizes inside the *shipped EXE*, not host wheels.
 
@@ -334,6 +381,33 @@ def capture_embedded_executable_inventory(
                 "name": name, "typecode": typecode,
                 "packed_bytes": packed, "unpacked_bytes": unpacked,
             })
+        pyz_modules = None
+        if include_nested_pyz:
+            # Inspect the in-place PyInstaller PYZ TOC through the sealed
+            # snapshot; never unmarshal/execute individual Python code objects.
+            pyz_names = [
+                item["name"] for item in components if item["typecode"] == "z"
+            ]
+            if len(pyz_names) != 1:
+                raise ValueError("exactly one embedded PYZ archive is required")
+            try:
+                pyz = reader.open_embedded_archive(pyz_names[0])
+                pyz_toc = pyz.toc
+            except Exception as exc:
+                raise ValueError("unable to inspect sealed embedded PYZ archive") from exc
+            if type(pyz_toc) is not dict or not 1 <= len(pyz_toc) <= 20000:
+                raise ValueError("embedded PYZ module table is missing or unbounded")
+            pyz_modules = []
+            for module_name, record in sorted(pyz_toc.items()):
+                if type(record) not in (tuple, list) or len(record) != 3:
+                    raise ValueError("malformed embedded PYZ module record")
+                kind, position, packed = record
+                pyz_modules.append({
+                    "name": module_name,
+                    "typecode": kind,
+                    "position": position,
+                    "packed_bytes": packed,
+                })
         # Verify TOC and bounded offsets belong to the same sealed snapshot.
         snapshot_final = hashlib.sha256()
         with snapshot_path.open("rb") as stream:
@@ -348,12 +422,17 @@ def capture_embedded_executable_inventory(
         if digest.digest() != digest_before.digest():
             raise ValueError("executable changed during CArchive inventory capture")
         result = {
-            "schema_version": 1,
+            "schema_version": 2 if include_nested_pyz else 1,
             "source_sha": source_sha,
             "executable_sha256": digest.hexdigest(),
-            "evidence_class": "EMBEDDED_PYINSTALLER_CARCHIVE_TOC_ONLY",
+            "evidence_class": (
+                "EMBEDDED_PYINSTALLER_CARCHIVE_AND_PYZ_TOC_ONLY"
+                if include_nested_pyz else "EMBEDDED_PYINSTALLER_CARCHIVE_TOC_ONLY"
+            ),
             "components": components,
         }
+        if pyz_modules is not None:
+            result["pyz_modules"] = pyz_modules
         validate_embedded_executable_inventory(
             result, source_sha=source_sha, executable_sha256=digest.hexdigest(),
         )

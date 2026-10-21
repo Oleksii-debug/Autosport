@@ -9,6 +9,7 @@ import zipfile
 from pathlib import Path
 from typing import Any, BinaryIO
 
+from autosport.release_sbom import validate_embedded_executable_inventory
 from autosport.release_package import (
     _decode_json_object,
     _validate_windows_member,
@@ -19,6 +20,7 @@ from autosport.release_package import (
 
 _PREFIX = "Autosport-V1/"
 _DATA_TOOL = "Autosport-Data.exe"
+_DATA_INVENTORY = "DATA_EXECUTABLE_INVENTORY.json"
 _BUILD_INFO = "BUILD_INFO.json"
 _MANIFEST = "PACKAGE_MANIFEST.json"
 _SUMS = "SHA256SUMS.txt"
@@ -136,6 +138,7 @@ def bind_portable_data_tool(
     data_exe: str | Path,
     *,
     expected_base_package_sha256: str | None = None,
+    data_executable_inventory: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Add the data tool only after the exact expected base package verifies cleanly."""
 
@@ -154,6 +157,15 @@ def bind_portable_data_tool(
     data_sha = _sha256_bytes(data_bytes)
     build_info["autosport_data_exe_sha256"] = data_sha
     build_info["portable_historical_data_tools"] = True
+    if data_executable_inventory is not None:
+        # A second PE is shipped: provenance of the main executable alone is
+        # insufficient to describe the exact final release archive.
+        validate_embedded_executable_inventory(
+            data_executable_inventory,
+            source_sha=build_info["source_sha"],
+            executable_sha256=data_sha,
+        )
+        members[_DATA_INVENTORY] = _json_bytes(data_executable_inventory)
     members[_BUILD_INFO] = _json_bytes(build_info)
 
     manifest_files = {
@@ -173,7 +185,9 @@ def bind_portable_data_tool(
     return {"autosport_data_exe_sha256": data_sha, "package_sha256": writer_sha}
 
 
-def verify_portable_data_tool(package_zip: str | Path) -> dict[str, Any]:
+def verify_portable_data_tool(
+    package_zip: str | Path, *, require_data_executable_inventory: bool = False,
+) -> dict[str, Any]:
     members, build_info, verification = _verified_base_members(Path(package_zip))
     if _DATA_TOOL not in members:
         raise ValueError("release package is missing Autosport-Data.exe")
@@ -182,6 +196,17 @@ def verify_portable_data_tool(package_zip: str | Path) -> dict[str, Any]:
     actual = _sha256_bytes(members[_DATA_TOOL])
     if build_info.get("autosport_data_exe_sha256") != actual:
         raise ValueError("BUILD_INFO Autosport-Data.exe hash mismatch")
+    if require_data_executable_inventory and _DATA_INVENTORY not in members:
+        raise ValueError("release package is missing Data executable inventory")
+    if _DATA_INVENTORY in members:
+        inventory = _decode_json_object(
+            members[_DATA_INVENTORY], _DATA_INVENTORY,
+        )
+        validate_embedded_executable_inventory(
+            inventory, source_sha=build_info["source_sha"], executable_sha256=actual,
+        )
+        if members[_DATA_INVENTORY] != _json_bytes(inventory):
+            raise ValueError("Data executable inventory is not canonical JSON")
     return {
         **verification,
         "status": "PASS",

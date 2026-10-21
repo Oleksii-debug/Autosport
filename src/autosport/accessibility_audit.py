@@ -214,12 +214,17 @@ def summarize_description(
     expected_ids = set(_REQUIRED_PATTERNS)
     controls: dict[int, dict[str, Any]] = {}
     failures: list[str] = []
+    strategy = _enum_name(description.strategy)
+    if strategy != "PROVIDED":
+        failures.append("unrecognized accessibility audit provider strategy")
 
     for widget in description.widgets:
         automation_id = widget.automation_id
-        if automation_id not in expected_ids:
+        # UIA provider identities are untrusted. Numeric aliases such as
+        # 101.0 and int subclasses must not satisfy a critical int ID.
+        if type(automation_id) is not int or automation_id not in expected_ids:
             continue
-        normalized_automation_id = int(automation_id)
+        normalized_automation_id = automation_id
         if normalized_automation_id in controls:
             failures.append(
                 f"automation_id={normalized_automation_id}: duplicate critical control identity"
@@ -240,6 +245,7 @@ def summarize_description(
         # A whitespace-only or non-text UIA Name is not an accessible label.
         # Keep exported evidence JSON-serializable even for malformed providers.
         accessible_name = widget.name if isinstance(widget.name, str) else ""
+        rows_exposed = widget.answers_rows is True
         controls[normalized_automation_id] = {
             "path": "[redacted]",
             "tk_class": "[redacted]",
@@ -247,7 +253,7 @@ def summarize_description(
             "name": "[present]" if accessible_name.strip() else "",
             "automation_id": normalized_automation_id,
             "patterns": pattern_names,
-            "answers_rows": bool(widget.answers_rows),
+            "answers_rows": rows_exposed,
             "gaps": gap_names,
         }
         if not accessible_name.strip():
@@ -258,7 +264,9 @@ def summarize_description(
             failures.append(
                 f"automation_id={normalized_automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
             )
-        blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
+        # Unknown provider gap types cannot be silently treated as a clean
+        # critical control: preserve only a fixed public diagnostic label.
+        blockers = sorted(set(gap_names) & (_BLOCKING_GAPS | {"OTHER_GAP"}))
         if blockers:
             failures.append(
                 f"automation_id={normalized_automation_id}: blocking gaps={','.join(blockers)}"
@@ -269,7 +277,7 @@ def summarize_description(
             failures.append(
                 f"automation_id={normalized_automation_id}: missing UIA patterns={','.join(missing_patterns)}"
             )
-        if normalized_automation_id in _ROW_CONTROLS and not widget.answers_rows:
+        if normalized_automation_id in _ROW_CONTROLS and not rows_exposed:
             failures.append(
                 f"automation_id={normalized_automation_id}: list rows are not exposed through UIA"
             )
@@ -316,9 +324,7 @@ def summarize_description(
 
     return {
         "status": "PASS" if not failures else "FAIL",
-        "strategy": (
-            "PROVIDER" if _enum_name(description.strategy) == "PROVIDER" else "UNRECOGNIZED"
-        ),
+        "strategy": "PROVIDED" if strategy == "PROVIDED" else "UNRECOGNIZED",
         "critical_controls": [controls[key] for key in sorted(controls)],
         "failures": failures,
         "provider_trouble": provider_trouble,

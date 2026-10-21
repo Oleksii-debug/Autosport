@@ -28,7 +28,7 @@ def _widget(automation_id: int, *, path: str | None = None) -> SimpleNamespace:
 
 def _description(*widgets: SimpleNamespace) -> SimpleNamespace:
     return SimpleNamespace(
-        strategy=_Named("PROVIDER"),
+        strategy=_Named("PROVIDED"),
         widgets=widgets,
         provider_trouble=(),
         providers_stood_down_because=None,
@@ -59,16 +59,20 @@ def test_duplicate_critical_automation_id_fails_closed_without_overwrite():
 
     assert report["status"] == "FAIL"
     assert len(report["critical_controls"]) == len(accessibility_audit._REQUIRED_PATTERNS)
-    assert f"automation_id={duplicate_id}: duplicate critical control identity" in report["failures"]
-    # The report must identify the collision without exposing provider paths.
-    assert ".!duplicate-dataset-control" not in str(report)
-    assert f".!control{duplicate_id}" not in str(report)
+    assert any(
+        failure
+        == f"automation_id={duplicate_id}: duplicate critical control identity"
+        for failure in report["failures"]
+    )
     canonical = next(
         item
         for item in report["critical_controls"]
         if item["automation_id"] == duplicate_id
     )
     assert canonical["path"] == "[redacted]"
+    serialized = str(report)
+    assert ".!control" not in serialized
+    assert ".!duplicate-dataset-control" not in serialized
     assert report["human_tested"] is False
     assert report["nvda_verified"] is False
     assert report["real_money_execution"] is False

@@ -36,7 +36,7 @@ class AccessibilityAuditTests(unittest.TestCase):
         shell = WINDOWS_SHELL_AUTOMATION_IDS
         owner_dialog = OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS
         return SimpleNamespace(
-            strategy=_Named("PROVIDER"),
+            strategy=_Named("PROVIDED"),
             widgets=(
                 self._widget(AUTOMATION_IDS["strategy"], "Стратегія replay", role="COMBO_BOX", patterns=("VALUE",)),
                 self._widget(AUTOMATION_IDS["research_plan"], "Вибрати research plan", patterns=("INVOKE",)),
@@ -160,6 +160,56 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_old_provider_label_is_not_a_real_tk_uia_strategy(self):
+        # tk-uia 0.8.0's enum is PROVIDED, not PROVIDER; a typo must fail.
+        description = self._passing_description()
+        description.strategy = _Named("PROVIDER")
+        report = self._summarize(description)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["strategy"], "UNRECOGNIZED")
+        self.assertIn("unrecognized accessibility audit provider strategy", report["failures"])
+
+    def test_unknown_provider_strategy_cannot_pass_even_with_complete_controls(self):
+        description = self._passing_description()
+        marker = "SYNTHETIC_PRIVATE_UIA_STRATEGY_20261021"
+        description.strategy = _Named(marker)
+        report = self._summarize(description)
+
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["strategy"], "UNRECOGNIZED")
+        self.assertIn(
+            "unrecognized accessibility audit provider strategy",
+            report["failures"],
+        )
+        self.assertNotIn(marker, json.dumps(report, ensure_ascii=False))
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+
+    def test_list_rows_reject_truthy_nonboolean_provider_state(self):
+        for malformed_rows in ("false", 1, ["false"]):
+            with self.subTest(value_type=type(malformed_rows).__name__):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == AUTOMATION_IDS["tickets"]
+                )
+                target.answers_rows = malformed_rows
+                report = self._summarize(description)
+
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={AUTOMATION_IDS['tickets']}: list rows are not exposed through UIA",
+                    report["failures"],
+                )
+                row = next(
+                    item for item in report["critical_controls"]
+                    if item["automation_id"] == AUTOMATION_IDS["tickets"]
+                )
+                self.assertIs(row["answers_rows"], False)
+                json.dumps(report, ensure_ascii=False)
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+
     def test_whitespace_and_malformed_critical_accessible_names_fail_closed(self):
         for bad_name in (" \t\u00a0", object()):
             with self.subTest(name_type=type(bad_name).__name__):
@@ -184,6 +234,51 @@ class AccessibilityAuditTests(unittest.TestCase):
                     if control["automation_id"] == AUTOMATION_IDS["run_replay"]
                 )
                 self.assertIsInstance(found["name"], str)
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+
+    def test_unrecognized_critical_provider_gap_is_blocking_and_redacted(self):
+        description = self._passing_description()
+        target = next(
+            widget for widget in description.widgets
+            if widget.automation_id == AUTOMATION_IDS["run_replay"]
+        )
+        secret = "UNTRUSTED_UIA_PROVIDER_GAP_SECRET_20261021"
+        target.gaps = (_Named(secret),)
+        report = self._summarize(description)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertIn(
+            f"automation_id={AUTOMATION_IDS['run_replay']}: blocking gaps=OTHER_GAP",
+            report["failures"],
+        )
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(secret, serialized)
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+
+    def test_critical_automation_id_rejects_numeric_aliases(self):
+        class IntAlias(int):
+            pass
+
+        expected_id = AUTOMATION_IDS["run_replay"]
+        for malformed_id in (float(expected_id), IntAlias(expected_id)):
+            with self.subTest(type=type(malformed_id).__name__):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == expected_id
+                )
+                target.automation_id = malformed_id
+                report = self._summarize(description)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={expected_id}: critical control not found",
+                    report["failures"],
+                )
+                self.assertNotIn(
+                    expected_id,
+                    [item["automation_id"] for item in report["critical_controls"]],
+                )
                 self.assertFalse(report["human_tested"])
                 self.assertFalse(report["nvda_verified"])
 

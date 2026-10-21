@@ -59,21 +59,16 @@ def test_duplicate_critical_automation_id_fails_closed_without_overwrite():
 
     assert report["status"] == "FAIL"
     assert len(report["critical_controls"]) == len(accessibility_audit._REQUIRED_PATTERNS)
-    assert any(
-        failure
-        == (
-            f"automation_id={duplicate_id}: duplicate critical control identity "
-            f"first_path=.!control{duplicate_id} "
-            "duplicate_path=.!duplicate-dataset-control"
-        )
-        for failure in report["failures"]
-    )
+    assert f"automation_id={duplicate_id}: duplicate critical control identity" in report["failures"]
+    # The report must identify the collision without exposing provider paths.
+    assert ".!duplicate-dataset-control" not in str(report)
+    assert f".!control{duplicate_id}" not in str(report)
     canonical = next(
         item
         for item in report["critical_controls"]
         if item["automation_id"] == duplicate_id
     )
-    assert canonical["path"] == f".!control{duplicate_id}"
+    assert canonical["path"] == "[redacted]"
     assert report["human_tested"] is False
     assert report["nvda_verified"] is False
     assert report["real_money_execution"] is False

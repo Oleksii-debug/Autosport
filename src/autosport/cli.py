@@ -212,7 +212,7 @@ def build_parser() -> argparse.ArgumentParser:
     interrupted_recovery.add_argument("--destination", type=Path, required=True)
     interrupted_recovery.add_argument("--source-sha", required=True)
     interrupted_recovery.add_argument("--package-sha256", required=True)
-    for name in ("upgrade-release", "rollback-release", "recover-update-release"):
+    for name in ("upgrade-release", "rollback-release", "recover-update-release", "finalize-update-release"):
         update_command = sub.add_parser(
             name, help="independently pinned PAPER-only release lifecycle transaction",
         )
@@ -676,7 +676,7 @@ def main(argv: list[str] | None = None) -> int:
             "--source-sha", args.source_sha,
             "--package-sha256", args.package_sha256,
         ])
-    if args.command in {"upgrade-release", "rollback-release", "recover-update-release"}:
+    if args.command in {"upgrade-release", "rollback-release", "recover-update-release", "finalize-update-release"}:
         from .offline_release_upgrade import main as upgrade_main
         forwarded = [
             args.command,

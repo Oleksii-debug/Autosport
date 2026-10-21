@@ -96,6 +96,19 @@ class Plan6QualifierTests(unittest.TestCase):
         self.assertFalse(expected - included, sorted(expected - included))
         self.assertIn("tests/test_plan6_source_qualifier.py", included)
 
+    def test_current_install_update_recovery_sources_are_covered(self):
+        """An added 6A or offline release negative test must enter the source gate."""
+        root = SCRIPT.parents[1]
+        covered = set(dict(qualifier.GROUPS)["paper_install_update_recovery"])
+        present = {
+            path.relative_to(root).as_posix()
+            for pattern in ("test_offline_release_*.py", "test_plan6_6a_*.py")
+            for path in (root / "tests").glob(pattern)
+        }
+        present.add("tests/test_data_tools_installed_release_entry.py")
+        self.assertTrue(present)
+        self.assertFalse(present - covered, sorted(present - covered))
+
     def test_atomic_report_contains_actual_negative_truth(self):
         with tempfile.TemporaryDirectory() as d:
             path = Path(d) / "result.json"

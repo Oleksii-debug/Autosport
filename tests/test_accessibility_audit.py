@@ -256,6 +256,26 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["human_tested"])
         self.assertFalse(report["nvda_verified"])
 
+    def test_empty_or_none_provider_gap_is_not_silently_ignored(self):
+        for malformed_gap in (None, ""):
+            with self.subTest(gap=repr(malformed_gap)):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == AUTOMATION_IDS["run_replay"]
+                )
+                target.gaps = (malformed_gap,)
+                report = self._summarize(description)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={AUTOMATION_IDS['run_replay']}: blocking gaps=OTHER_GAP",
+                    report["failures"],
+                )
+                json.dumps(report, ensure_ascii=False)
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+                self.assertFalse(report["real_money_execution"])
+
     def test_critical_automation_id_rejects_numeric_aliases(self):
         class IntAlias(int):
             pass

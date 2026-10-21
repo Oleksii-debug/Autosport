@@ -136,7 +136,8 @@ def inspect_installed_release(
     if not re.fullmatch(r"[0-9a-f]{64}", expected_package_sha256 or ""):
         raise OfflineInstallError("invalid independent package anchor")
     receipt_path = root / _RECEIPT
-    if not _regular_file(receipt_path) or receipt_path.stat().st_size > _MAX_RECEIPT_BYTES:
+    if (_is_redirected_install_path(receipt_path) or not _regular_file(receipt_path)
+            or receipt_path.stat().st_size > _MAX_RECEIPT_BYTES):
         raise OfflineInstallError("missing or invalid installed-release receipt")
     try:
         receipt = release_package._decode_json_object(

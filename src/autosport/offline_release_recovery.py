@@ -78,6 +78,8 @@ def recover_interrupted_uninstall(
     }
     receipt_path = quarantine / _RECEIPT
     if receipt_path.exists() or receipt_path.is_symlink():
+        if _is_redirected_install_path(receipt_path):
+            raise OfflineInstallError("interrupted release receipt is redirected")
         try:
             receipt_mode = receipt_path.lstat().st_mode
             if not stat.S_ISREG(receipt_mode) or receipt_path.stat().st_size > 1024 * 1024:

@@ -5,7 +5,7 @@ from tkinter import messagebox, ttk
 
 import tk_uia
 
-from .gui import AutosportApp
+from .gui import AutosportApp, _safe_worker_error_text
 from .localization import text
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
@@ -312,7 +312,7 @@ class WindowsAutosportApp(AutosportApp):
             self._recovery_view = None
             self.bank.set(self._bank_text())
             self._refresh_tickets()
-            detail = text("ui.error.recovery.worker", detail=message.error)
+            detail = text("ui.error.recovery.worker", detail=_safe_worker_error_text(message.error))
             self.status.set(text("ui.status.recovery.blocked"))
             self._append_log(detail)
             messagebox.showerror(text("ui.dialog.title"), detail)
@@ -401,7 +401,7 @@ class WindowsAutosportApp(AutosportApp):
             self.bank.set(self._bank_text())
             self._refresh_tickets()
             if message.error is not None:
-                replay_error = text("ui.error.replay.worker", detail=message.error)
+                replay_error = text("ui.error.replay.worker", detail=_safe_worker_error_text(message.error))
                 self._append_log(replay_error)
                 self._set_evaluation_lines([text("ui.evaluation.replay_failed")])
                 self.status.set(text("ui.status.replay.failed_recovery"))

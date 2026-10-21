@@ -9,6 +9,7 @@ from copy import deepcopy
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 import hashlib
+import os
 
 import pytest
 
@@ -109,3 +110,40 @@ def test_bundled_evidence_is_on_real_windows_package_path():
     assert "DEPENDENCY_LICENSE_EVIDENCE.json" in package
     assert "require_dependency_license_evidence=True" in official
     assert "dependency_license_members=dependency_license_members" in official
+
+
+def test_swapped_license_inode_after_path_preflight_is_rejected(
+    tmp_path: Path, monkeypatch,
+):
+    """The captured bytes must come from the inode whose lstat was checked."""
+    dist = _distribution(tmp_path / "wheel")
+    path = tmp_path / "wheel/example_dist-1.2.3.dist-info/licenses/LICENSE.txt"
+    replacement = tmp_path / "other-license.txt"
+    replacement.write_bytes(b"Replacement text with a different inode and ownership\n")
+    original_lstat = Path.lstat
+    replaced = False
+
+    def replace_after_lstat(self, *args, **kwargs):
+        nonlocal replaced
+        observation = original_lstat(self, *args, **kwargs)
+        if self == path and not replaced:
+            replaced = True
+            os.replace(replacement, path)
+        return observation
+
+    monkeypatch.setattr(subject.metadata, "distribution", lambda name: dist)
+    monkeypatch.setattr(Path, "lstat", replace_after_lstat)
+    with pytest.raises(ValueError, match="changed before read"):
+        subject.capture_dependency_license_evidence(_graph())
+    assert replaced
+
+
+def test_license_capture_rejects_oversized_sources_without_reading(
+    tmp_path: Path, monkeypatch,
+):
+    dist = _distribution(tmp_path)
+    path = tmp_path / "example_dist-1.2.3.dist-info/licenses/LICENSE.txt"
+    path.write_bytes(b"A" * 262145)
+    monkeypatch.setattr(subject.metadata, "distribution", lambda name: dist)
+    with pytest.raises(ValueError, match="bounded regular file"):
+        subject.capture_dependency_license_evidence(_graph())

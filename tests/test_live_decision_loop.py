@@ -21,6 +21,7 @@ from autosport.event_lifecycle import (
     CatalogPage,
     ContinuousEventLifecycle,
     EventPhase,
+    canonical_event_identity,
 )
 from autosport.live_decision_loop import (
     LiveCycleStatus,
@@ -50,6 +51,7 @@ from autosport.providers import ProviderUnavailableError
 from autosport.scientific_registry import ScientificRegistry, StrategyVersion
 from autosport.risk import PaperRiskPolicy, ProposedTicketRiskContext
 from autosport.storage import SQLiteMarketStore
+from autosport import storage as storage_module
 
 
 class _ManualClock:
@@ -174,6 +176,22 @@ class _PositiveIntentFactory:
 
 class PersistentLiveDecisionLoopTests(unittest.TestCase):
     START = datetime(2026, 9, 18, 18, 0, 0, tzinfo=timezone.utc)
+
+    def setUp(self) -> None:
+        # Only the synthetic fixture's product clock is virtual. Production keeps
+        # the physical append-availability and cutoff admission guards unchanged.
+        # An as-of decision must not predate its durable product receipt.
+        self._fixture_product_clock = _ManualClock(self.START)
+        product_clock_patch = patch.object(
+            storage_module,
+            "_market_product_utc_now",
+            side_effect=lambda: self._fixture_product_clock().isoformat(
+                timespec="microseconds"
+            ),
+        )
+        product_clock_patch.start()
+        self.addCleanup(product_clock_patch.stop)
+
     INTENT_SOURCE_SHA256 = hashlib.sha256(
         b"tests.test_live_decision_loop:_EmptyIntentFactory:v1"
     ).hexdigest()
@@ -274,13 +292,25 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
         catalog_required_history: timedelta = timedelta(0),
         paper_execution: PaperExecutionAdoptionRuntime | None = None,
     ) -> PersistentLiveDecisionLoop:
+        # Both append availability and replay issuance use the cycle's single
+        # deterministic virtual clock, including crash/restart and later polls.
+        self._fixture_product_clock = clock
         selected_strategy = strategy_version or self._strategy_version()
         registry = self._scientific_registry(workspace, selected_strategy)
+        if book is None:
+            canonical_book_path = workspace / "paper_book.json"
+            selected_book = (
+                PaperBook.load(canonical_book_path)
+                if canonical_book_path.exists()
+                else PaperBook("1000")
+            )
+        else:
+            selected_book = book
         return PersistentLiveDecisionLoop(
             workspace,
             loop_id="live-test-loop",
             mode=LiveDecisionMode.PAPER,
-            book=PaperBook("1000") if book is None else book,
+            book=selected_book,
             authority=self._authority() if authority is None else authority,
             intent_factory=factory,
             scientific_registry=registry,
@@ -471,6 +501,154 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
             market_ids="market-1",
             selection_ids="selection-b",
         )
+
+    def test_clock_failure_after_decision_does_not_change_economic_effect(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace, [(self._event(selection="selection-a"),)]
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            self._register_two(loop)
+            with patch(
+                "autosport.live_decision_loop.perf_counter_ns",
+                side_effect=[100, 120, 140, 160, 180, 170],
+            ):
+                decision = loop.run_cycle()
+            self.assertEqual(decision.status, LiveCycleStatus.DECIDED)
+            self.assertEqual(loop.last_cycle_stage_latencies_ns, ())
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            self.assertEqual(loop.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            loop.close()
+
+    def test_real_pipeline_stage_timings_are_observer_only(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace, [(self._event(selection="selection-a"),)]
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            self._register_two(loop)
+            self.assertEqual(loop.last_cycle_stage_latencies_ns, ())
+            decision = loop.run_cycle()
+            self.assertEqual(decision.status, LiveCycleStatus.DECIDED)
+            observations = loop.last_cycle_stage_latencies_ns
+            self.assertEqual(
+                tuple(stage for stage, _elapsed in observations),
+                ("ingest", "mirror", "opportunity", "portfolio", "decision"),
+            )
+            self.assertTrue(all(type(ns) is int and ns >= 0 for _, ns in observations))
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            unchanged = loop.run_cycle()
+            self.assertEqual(unchanged.status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(loop.last_cycle_stage_latencies_ns, ())
+            self.assertEqual(
+                len(JsonlDecisionLedger(workspace / "decisions.jsonl").verified_records()),
+                1,
+            )
+            loop.close()
+
+    def test_repeated_real_pipeline_capacity_observations_remain_source_bound_after_restart(self) -> None:
+        """Run real durable loop cycles, then summarize only detached, source-bound timing."""
+        from autosport.hot_path_capacity import summarize_hot_path_windows
+        from autosport.hot_path_latency import HotPathError, HotPathReport, STAGES
+
+        with tempfile.TemporaryDirectory() as directory:
+            workspace = Path(directory)
+            clock = _ManualClock(self.START + timedelta(seconds=1))
+            observer = _DurableObserver(
+                workspace,
+                [
+                    (
+                        self._event(
+                            sequence=sequence,
+                            observed=self.START + timedelta(seconds=sequence),
+                        ),
+                    )
+                    for sequence in range(1, 13)
+                ],
+            )
+            loop = self._loop(
+                workspace,
+                observer=observer,
+                factory=_EmptyIntentFactory(),
+                clock=clock,
+            )
+            self._register_two(loop)
+            fixture_revision = "a" * 40
+            observations = []
+            for sequence in range(1, 13):
+                clock.value = self.START + timedelta(seconds=sequence)
+                result = loop.run_cycle()
+                self.assertEqual(result.status, LiveCycleStatus.DECIDED)
+                samples = loop.last_cycle_stage_latencies_ns
+                self.assertEqual(tuple(name for name, _ in samples), STAGES)
+                observations.append(
+                    HotPathReport(
+                        source_sha=fixture_revision,
+                        disposition="OK",
+                        reason="WITHIN_BUDGET",
+                        stage_latencies_ns=samples,
+                        total_elapsed_ns=sum(duration for _, duration in samples),
+                        backlog=0,
+                    )
+                )
+
+            ledger = JsonlDecisionLedger(workspace / "decisions.jsonl")
+            self.assertEqual(len(ledger.verified_records()), 12)
+            bound = summarize_hot_path_windows(
+                tuple(observations), expected_source_sha=fixture_revision
+            )
+            self.assertEqual(bound.window_count, 12)
+            self.assertEqual(bound.complete_count, 12)
+            self.assertEqual(bound.wait_count, 0)
+            self.assertEqual(tuple(name for name, _ in bound.stage_p95_ns), STAGES)
+            self.assertEqual(
+                bound,
+                summarize_hot_path_windows(
+                    tuple(observations), expected_source_sha=fixture_revision
+                ),
+            )
+            self.assertFalse(bound.execution_authority)
+            self.assertFalse(bound.target_machine_acceptance)
+            with self.assertRaises(HotPathError):
+                summarize_hot_path_windows(
+                    tuple(observations), expected_source_sha="b" * 40
+                )
+            loop.close()
+
+            resumed = self._loop(
+                workspace,
+                observer=_DurableObserver(workspace, [()]),
+                factory=_EmptyIntentFactory(),
+                clock=_ManualClock(self.START + timedelta(seconds=13)),
+            )
+            self.assertEqual(resumed.run_cycle().status, LiveCycleStatus.NO_CHANGE)
+            self.assertEqual(resumed.last_cycle_stage_latencies_ns, ())
+            self.assertEqual(len(ledger.verified_records()), 12)
+            resumed.close()
 
     def test_first_cycle_rebuilds_all_then_only_affected_input_recomputes(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -1483,7 +1661,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 catalog_fetch_page=fetch_page,
                 catalog_source_id="provider-a",
             )
-            input_id = "catalog:provider-a:event-1"
+            input_id = (
+                "catalog:"
+                + canonical_event_identity(source_id="provider-a", sport="table_tennis", event_id="event-1")
+            )
 
             gap = loop.run_cycle()
             self.assertEqual(gap.status, LiveCycleStatus.PROVIDER_GAP)
@@ -1908,7 +2089,10 @@ class PersistentLiveDecisionLoopTests(unittest.TestCase):
                 catalog_fetch_page=fetch_page,
                 catalog_source_id="provider-a",
             )
-            input_id = "catalog:provider-a:event-1"
+            input_id = (
+                "catalog:"
+                + canonical_event_identity(source_id="provider-a", sport="table_tennis", event_id="event-1")
+            )
 
             first = loop.run_cycle()
             self.assertEqual(first.status, LiveCycleStatus.NO_CHANGE)

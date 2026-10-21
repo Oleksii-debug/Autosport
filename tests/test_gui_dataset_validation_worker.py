@@ -185,6 +185,49 @@ def test_worker_start_process_control_failure_clears_pending_selection(
     assert app._busy_states == []
 
 
+
+def test_terminal_dataset_result_rejects_subclass_before_identity_dispatch(tmp_path: Path) -> None:
+    class HostileReplayDataset(ReplayDataset):
+        __slots__ = ("_armed",)
+
+        def __getattribute__(self, name: str):
+            if name in {"_armed", "__class__", "__dict__"}:
+                return object.__getattribute__(self, name)
+            try:
+                armed = object.__getattribute__(self, "_armed")
+            except AttributeError:
+                armed = False
+            if armed:
+                raise AssertionError(
+                    f"ReplayDataset subclass identity dispatch must not execute: {name}"
+                )
+            return object.__getattribute__(self, name)
+
+    previous = tmp_path / "previous"
+    selected = (tmp_path / "selected").absolute()
+    hostile = HostileReplayDataset(
+        root=selected,
+        name="hostile corpus",
+        sport="table_tennis",
+        market_path=selected / "markets.jsonl",
+        results_path=selected / "results.json",
+        market_sha256="a" * 64,
+        results_sha256="b" * 64,
+    )
+    object.__setattr__(hostile, "_armed", True)
+    worker = _TerminalWorker(DatasetValidationMessage(result=hostile))
+    app = _bare_app(dataset_worker=worker, previous_dataset=previous)
+    app._pending_dataset_path = selected
+
+    with patch("autosport.gui.messagebox.showerror") as showerror:
+        AutosportApp._poll_dataset_worker(app)
+
+    assert app.dataset_path == previous
+    assert app.dataset_text.value == "previous dataset summary"
+    assert "невідповідність ідентичності" in app.status.value
+    showerror.assert_called_once()
+
+
 def test_terminal_result_for_different_folder_fails_closed(tmp_path: Path) -> None:
     previous = tmp_path / "previous"
     selected = (tmp_path / "selected").absolute()

@@ -242,7 +242,7 @@ def test_predictive_edge_cannot_disable_probability_edge_semantics() -> None:
 def test_structural_strategy_cannot_claim_probability_edge() -> None:
     with pytest.raises(
         OpportunityContractError,
-        match="supported only for PREDICTIVE_EDGE or HYBRID",
+        match="supported only for PREDICTIVE_EDGE, PARLAY or HYBRID",
     ):
         Opportunity(
             strategy_class=StrategyClass.ARBITRAGE,

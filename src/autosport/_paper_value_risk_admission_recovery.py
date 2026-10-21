@@ -140,13 +140,37 @@ def _ensure_pre_action(
                 "paper-value risk admission pre-action PaperBook is unreadable"
             ) from exc
     else:
-        current_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(context.paper_book)
+        current_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(
+            context.paper_book
+        )
         if current_sha256 != expected_sha256:
             raise PaperExecutionAdoptionError(
                 "paper-value risk admission PREPARE no longer matches current PaperBook"
             )
-        context.paper_book.save(pre_action_path)
+
+        # The pre-action artifact is an independent recovery snapshot, not a
+        # second publication path for the live PaperBook object.  Reuse the
+        # canonical risk shadow capability: it creates a detached exact semantic
+        # clone with the existing product-issued opening/causal authorities but
+        # no generation/path binding.  Its first save can therefore establish a
+        # dedicated witnessed snapshot lineage without widening or rebinding the
+        # live book's canonical persistence authority.
+        snapshot = agent.risk_policy._shadow_book_for_allocation(context.paper_book)
+        if (
+            type(snapshot) is not PaperBook
+            or snapshot is context.paper_book
+            or not runtime._same_book_state(context.paper_book, snapshot)
+        ):
+            raise PaperExecutionAdoptionError(
+                "paper-value risk admission cannot detach exact pre-action PaperBook"
+            )
+        snapshot_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(snapshot)
+        if snapshot_sha256 != expected_sha256:
+            raise PaperExecutionAdoptionError(
+                "paper-value risk admission detached pre-action PaperBook changed"
+            )
         try:
+            snapshot.save(pre_action_path)
             persisted = PaperBook.load(pre_action_path)
         except (OSError, TypeError, ValueError) as exc:
             raise PaperExecutionAdoptionError(
@@ -154,8 +178,12 @@ def _ensure_pre_action(
             ) from exc
 
     persisted_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(persisted)
+    current_sha256 = agent.risk_policy.risk_of_ruin_portfolio_sha256(
+        context.paper_book
+    )
     if (
         persisted_sha256 != expected_sha256
+        or current_sha256 != expected_sha256
         or not runtime._same_book_state(context.paper_book, persisted)
     ):
         raise PaperExecutionAdoptionError(

@@ -15,20 +15,73 @@ on:
       - 'scripts/**'
       - '.gitattributes'
       - '.github/workflows/windows-build.yml'
+      - '.github/workflows/pr-qualification-supersession.yml'
 
 permissions:
   contents: read
+  pull-requests: read
 
+# Coalesce only scheduler-safe PR classes before runner allocation. Fresh qualification
+# events share one lane only for the same exact PR head, so a delayed stale-head event
+# can never evict current-head qualification. Draft/closed events use a separate
+# LIFECYCLE lane and cannot evict useful qualification. The top-level event number
+# keeps lifecycle identity stable even when a merged PR's pull_request object is empty.
+# Re-runs are isolated by exact event head SHA. Non-PR push/dispatch runs are run-unique
+# so same-ref activity cannot pre-cancel before execution. Live-head admission remains
+# authoritative before the expensive build.
 concurrency:
-  group: windows-candidate-${{ github.event.pull_request.number || github.ref }}-${{ github.run_attempt == 1 && 'fresh' || format('rerun-{0}', github.event.pull_request.head.sha || github.sha) }}
+  group: windows-candidate-${{ github.event_name == 'pull_request' && github.event.pull_request.head.sha && format('pr-{0}-{1}', github.event.number, (github.event.action == 'converted_to_draft' || github.event.action == 'closed' || github.event.pull_request.draft == true) && 'lifecycle' || (github.run_attempt != 1 && format('rerun-{0}', github.event.pull_request.head.sha) || format('qualify-{0}', github.event.pull_request.head.sha))) || format('run-{0}', github.run_id) }}
   cancel-in-progress: true
 
 jobs:
+  superseded_run_admission:
+    # Draft/closed PR lifecycle runs are already non-integration-capable. Skip this job
+    # at server-side job evaluation so they do not reserve an Ubuntu admission runner.
+    # ready_for_review has draft=false and still executes exact-head admission.
+    if: >-
+      github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' &&
+      github.event.pull_request.head.sha &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.base.repo.full_name == github.repository &&
+      github.event.pull_request.draft == false)
+    runs-on: ubuntu-slim
+    timeout-minutes: 5
+    outputs:
+      current_head: ${{ steps.lifecycle.outputs.current_head || steps.admission.outputs.current_head }}
+    steps:
+      - name: Admit non-PR events without PR checkout
+        if: github.event_name != 'pull_request'
+        id: lifecycle
+        run: echo "current_head=true" >> "$GITHUB_OUTPUT"
+      - name: Checkout exact PR head for read-only admission helper
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reject stale PR rerun before Windows runner allocation
+        if: github.event_name == 'pull_request' && github.event.action != 'closed'
+        id: admission
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/cancel_superseded_pr_workflow_runs.py
+          --pr-number "${{ github.event.pull_request.number }}"
+          --event-head-sha "${{ github.event.pull_request.head.sha }}"
+          --workflow-name "${{ github.workflow }}"
+          --current-run-id "${{ github.run_id }}"
+          --admission-only
+
   build:
-    # Build the expensive Windows candidate only for an integration-capable PR.
-    # ready_for_review starts the full gate; converted_to_draft/closed lets concurrency
-    # displace obsolete work; closed itself never qualifies the candidate.
-    if: github.event_name != 'pull_request' || (github.event.action != 'closed' && github.event.pull_request.draft == false)
+    needs: superseded_run_admission
+    # Build the expensive Windows candidate only for an integration-capable current-head PR.
+    # ready_for_review starts the full gate; closed itself never qualifies the candidate.
+    if: >-
+      needs.superseded_run_admission.outputs.current_head == 'true' &&
+      (github.event_name != 'pull_request' ||
+      (github.event.action != 'closed' && github.event.pull_request.draft == false))
     runs-on: windows-latest
     timeout-minutes: 60
     env:
@@ -93,6 +146,15 @@ jobs:
           "AUTOSPORT_PACKAGED_EXE=$packagedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_PACKAGED_DATA_EXE=$packagedDataExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_QUALIFIED_PACKAGE_SHA256=$packageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Qualify fixture-only certificate-backed release/update signature
+        shell: pwsh
+        run: ./scripts/qualify_fixture_release_signature.ps1 -PackagePath (Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip') -SourceSha $env:AUTOSPORT_SOURCE_SHA -ExpectedPackageSha256 $env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256 -EvidencePath (Join-Path $PWD 'dist/fixture-release-signature-evidence.json')
+      - name: Upload fixture-only release signature evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-fixture-release-signature
+          path: dist/fixture-release-signature-evidence.json
+          if-no-files-found: error
       - name: Execute packaged NVDA evidence contract
         shell: pwsh
         run: ./scripts/nvda_evidence_package_smoke.ps1
@@ -241,6 +303,95 @@ jobs:
           name: Autosport-external-uia-failure-evidence
           path: dist/fresh-extraction-external-uia-audit.json
           if-no-files-found: ignore
+      # The candidate builder emits two archives. Qualify the stage-neutral one
+      # independently instead of publishing only the legacy transitional ZIP.
+      - name: Verify independent stage-neutral release extraction
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $stageArchive = Join-Path $PWD 'dist/Autosport-windows-x64.zip'
+          $stageReportPath = Join-Path $PWD 'dist/stage-neutral-release-verification.json'
+          foreach ($required in @($stageArchive, $stageReportPath)) {
+            if (-not (Test-Path -LiteralPath $required -PathType Leaf)) {
+              throw "Stage-neutral release output is missing: $required"
+            }
+          }
+          $stageReport = Get-Content -LiteralPath $stageReportPath -Raw | ConvertFrom-Json
+          if ($stageReport.status -ne 'PASS') { throw 'Stage-neutral verifier did not PASS' }
+          if ([string]$stageReport.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) {
+            throw 'Stage-neutral source SHA does not match exact workflow head'
+          }
+          if ([string]$stageReport.archive_name -ne 'Autosport-windows-x64.zip') {
+            throw 'Stage-neutral archive identity is incorrect'
+          }
+          if ([string]$stageReport.package_prefix -ne 'Autosport/') {
+            throw 'Stage-neutral extraction prefix is incorrect'
+          }
+          foreach ($field in @('real_money_execution', 'human_tested', 'nvda_verified', 'whole_product_complete')) {
+            if ($stageReport.$field -ne $false) { throw "Stage-neutral evidence $field is not false" }
+          }
+          $stageHash = (Get-FileHash -LiteralPath $stageArchive -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ([string]$stageReport.package_sha256 -ne $stageHash) {
+            throw 'Stage-neutral ZIP changed since exact-source verification'
+          }
+          $stageExtractRoot = Join-Path $PWD '.build-stage-neutral-Перевірка шляху з пробілами'
+          if (Test-Path -LiteralPath $stageExtractRoot) {
+            Remove-Item -LiteralPath $stageExtractRoot -Recurse -Force
+          }
+          Expand-Archive -LiteralPath $stageArchive -DestinationPath $stageExtractRoot
+          $stagePackageRoot = Join-Path $stageExtractRoot 'Autosport'
+          $stageExe = Join-Path $stagePackageRoot 'Autosport.exe'
+          $stageInfoPath = Join-Path $stagePackageRoot 'BUILD_INFO.json'
+          if (-not (Test-Path -LiteralPath $stageExe -PathType Leaf) -or -not (Test-Path -LiteralPath $stageInfoPath -PathType Leaf)) {
+            throw 'Fresh stage-neutral extraction is missing canonical executable or BUILD_INFO'
+          }
+          $stageInfo = Get-Content -LiteralPath $stageInfoPath -Raw | ConvertFrom-Json
+          if ([string]$stageInfo.source_sha -ne [string]$env:AUTOSPORT_SOURCE_SHA) {
+            throw 'Fresh stage-neutral BUILD_INFO source drift'
+          }
+          if ([string]$stageInfo.autosport_exe_sha256 -ne (Get-FileHash -LiteralPath $stageExe -Algorithm SHA256).Hash.ToLowerInvariant()) {
+            throw 'Fresh stage-neutral EXE digest mismatch'
+          }
+          foreach ($field in @('real_money_execution', 'human_tested', 'nvda_verified', 'whole_product_complete')) {
+            if ($stageInfo.$field -ne $false) { throw "Fresh stage-neutral BUILD_INFO $field is not false" }
+          }
+          # Run the final stage-neutral user's EXEs after Unicode-path extraction.
+          # Earlier legacy ZIP tests cannot substitute for the shipped ZIP.
+          $stageDataExe = Join-Path $stagePackageRoot 'Autosport-Data.exe'
+          $stageDemo = Join-Path $stagePackageRoot 'examples/tt_demo'
+          if (-not (Test-Path -LiteralPath $stageDataExe -PathType Leaf)) {
+            throw 'Final stage-neutral ZIP is missing Autosport-Data.exe'
+          }
+          $demoManifest = Join-Path $stageDemo 'manifest.json'
+          if (-not (Test-Path -LiteralPath $demoManifest -PathType Leaf)) {
+            throw 'Final stage-neutral ZIP is missing demo dataset'
+          }
+          $stageDataDigest = (Get-FileHash -LiteralPath $stageDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ([string]$stageInfo.autosport_data_exe_sha256 -ne $stageDataDigest) {
+            throw 'Final stage-neutral Data EXE digest mismatch'
+          }
+          & $stageDataExe verify-dataset $stageDemo
+          if ($LASTEXITCODE -ne 0) { throw "Final stage-neutral Data EXE dataset verification exited $LASTEXITCODE" }
+          $stageDatasetAuditPath = Join-Path $PWD 'dist/stage-neutral-dataset-smoke.json'
+          [ordered]@{
+            status = 'PASS'
+            evidence_class = 'AUTOMATED_WINDOWS_SHIPPING_ZIP_SMOKE'
+            source_sha = $env:AUTOSPORT_SOURCE_SHA
+            zip_sha256 = $stageHash
+            data_exe_sha256 = $stageDataDigest
+            demo_manifest_sha256 = (Get-FileHash -LiteralPath $demoManifest -Algorithm SHA256).Hash.ToLowerInvariant()
+            real_money_execution = $false
+            human_tested = $false
+            nvda_verified = $false
+            whole_product_complete = $false
+          } | ConvertTo-Json -Depth 3 | Set-Content -LiteralPath $stageDatasetAuditPath -Encoding utf8
+          $stageUiaAuditPath = Join-Path $PWD 'dist/stage-neutral-external-uia-audit.json'
+          ./scripts/external_uia_audit.ps1 -Exe $stageExe -Output $stageUiaAuditPath
+          $stageUiaAudit = Get-Content -LiteralPath $stageUiaAuditPath -Raw | ConvertFrom-Json
+          if ($stageUiaAudit.status -ne 'PASS') { throw 'Final stage-neutral EXE external UIA check did not PASS' }
+          foreach ($field in @('real_money_execution', 'human_tested', 'nvda_verified')) {
+            if ($stageUiaAudit.$field -ne $false) { throw "Final stage-neutral UIA evidence $field is not false" }
+          }
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
         with:
           name: Autosport-V1-Windows-prehuman
@@ -271,4 +422,13 @@ jobs:
             dist/nvda-evidence-package-smoke.json
             dist/nvda-evidence-packaged-template.json
             dist/nvda-evidence-fresh-extracted-template.json
+          if-no-files-found: error
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-Windows-stage-neutral-prehuman
+          path: |
+            dist/Autosport-windows-x64.zip
+            dist/stage-neutral-release-verification.json
+            dist/stage-neutral-dataset-smoke.json
+            dist/stage-neutral-external-uia-audit.json
           if-no-files-found: error

@@ -57,9 +57,9 @@ class DecisionLedgerSnapshotBindingTests(unittest.TestCase):
             original_snapshot = RunTransaction._read_canonical_file_snapshot
             swapped = False
 
-            def snapshot_then_swap(path: Path, label: str):
+            def snapshot_then_swap(path: Path, label: str, **kwargs):
                 nonlocal swapped
-                snapshot = original_snapshot(path, label)
+                snapshot = original_snapshot(path, label, **kwargs)
                 if path == canonical.path and not swapped:
                     # Both A and B are individually valid ledgers. The attack is
                     # identity substitution after the canonical pathname has been

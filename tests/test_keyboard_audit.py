@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -218,6 +219,30 @@ class KeyboardAuditTests(unittest.TestCase):
         report = self._summarize(bindings, focus, reachable, reverse_reachable)
         self.assertEqual(report["status"], "FAIL")
         self.assertTrue(any("bankroll" in item for item in report["failures"]))
+
+    def test_keyboard_audit_export_redacts_exception_message_and_type(self):
+        secret = "SYNTHETIC_KEYBOARD_SECRET_20261021"
+        with tempfile.TemporaryDirectory() as directory:
+            output = Path(directory) / "keyboard-audit.json"
+            with patch.object(
+                keyboard_audit, "WindowsAutosportApp",
+                side_effect=RuntimeError("access_token=" + secret),
+            ):
+                self.assertEqual(keyboard_audit.run_keyboard_audit(output), 1)
+            raw = output.read_text(encoding="utf-8")
+            report = json.loads(raw)
+        self.assertNotIn(secret, raw)
+        self.assertEqual(report["failures"], ["RuntimeError: details redacted"])
+        self.assertEqual(report["status"], "FAIL")
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+        self.assertFalse(report["real_money_execution"])
+
+        untrusted_error = type(secret, (Exception,), {})
+        self.assertEqual(
+            keyboard_audit._safe_exception_detail(untrusted_error(secret)),
+            "Exception: details redacted",
+        )
 
     def test_machine_evidence_publication_failure_preserves_existing_file(self):
         class _AuditApp:

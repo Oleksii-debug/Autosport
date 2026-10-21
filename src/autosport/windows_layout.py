@@ -214,11 +214,24 @@ def compact_surface_heights(app: Any) -> None:
 
 
 def _surface_target_widget(app: Any, surface_key: str) -> Any | None:
-    """Return only a target that the current product shell actually exposes."""
+    """Return only a live target exposed by the current native product shell."""
     target_name = SURFACE_BY_KEY[surface_key].target_widget
     if target_name is None:
         return None
-    return getattr(app, target_name, None)
+    widget = getattr(app, target_name, None)
+    if widget is None:
+        return None
+    # A widget retained as an attribute may already have been destroyed during
+    # workspace recovery or a shell rebuild. Never promise an Open action that
+    # would focus a dead native control. Headless contract fakes without a Tk
+    # lifetime API are handled by their existing presence-only contract.
+    try:
+        winfo_exists = getattr(widget, "winfo_exists", None)
+        if callable(winfo_exists) and not bool(winfo_exists()):
+            return None
+    except Exception:
+        return None
+    return widget
 
 
 def refresh_windows_shell_open_availability(app: Any) -> None:

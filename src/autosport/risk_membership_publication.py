@@ -37,6 +37,10 @@ from .risk_sampling_membership import (
 _SCHEMA: Final = "autosport.risk.fixed-n-membership-publication"
 _SCHEMA_VERSION: Final = 1
 _AUTHORITY_DOMAIN: Final = "autosport.risk.fixed-n-membership-publication.v1"
+# The publication state is a bounded authority receipt, not an arbitrary corpus.
+# Keep the ceiling intentionally generous so it is an availability fence rather
+# than a scientific fixed-N limit; canonical membership semantics remain unchanged.
+_MAX_STATE_BYTES: Final = 64 * 1024 * 1024
 
 
 class RiskMembershipPublicationError(RuntimeError):
@@ -210,6 +214,10 @@ def _read_stable_state_bytes(path: Path) -> bytes:
             raise RiskMembershipPublicationError(
                 "fixed-N membership publication state must be one regular file"
             )
+        if before.st_size < 0 or before.st_size > _MAX_STATE_BYTES:
+            raise RiskMembershipPublicationError(
+                "fixed-N membership publication state exceeds bounded size"
+            )
         with path.open("rb") as handle:
             opened = os.fstat(handle.fileno())
             if (
@@ -221,7 +229,15 @@ def _read_stable_state_bytes(path: Path) -> bytes:
                 raise RiskMembershipPublicationError(
                     "fixed-N membership publication state changed during open"
                 )
-            payload = handle.read()
+            if opened.st_size < 0 or opened.st_size > _MAX_STATE_BYTES:
+                raise RiskMembershipPublicationError(
+                    "fixed-N membership publication state exceeds bounded size"
+                )
+            payload = handle.read(_MAX_STATE_BYTES + 1)
+            if len(payload) > _MAX_STATE_BYTES:
+                raise RiskMembershipPublicationError(
+                    "fixed-N membership publication state exceeds bounded size"
+                )
             after_open = os.fstat(handle.fileno())
         after = os.stat(path, follow_symlinks=False)
     except OSError as exc:
@@ -444,6 +460,7 @@ def publish_fixed_n_membership_structure(
         raise RiskMembershipPublicationError(
             "fixed-N membership publication failed closed"
         ) from exc
+
 
 def resolve_fixed_n_membership_publication(
     registry_path: str | Path,

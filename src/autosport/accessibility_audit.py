@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from itertools import chain, islice
 from pathlib import Path
 from types import SimpleNamespace
+from unicodedata import category as unicode_category
 from typing import Any
 
 import tk_uia
@@ -97,20 +99,42 @@ _BLOCKING_GAPS = {
     "CANNOT_BE_PRESSED",
     "LEFT_TO_THE_PROXY",
 }
+# UIA provider metadata is untrusted; exported machine evidence must not include
+# arbitrary widget paths, private accessible names or provider error messages.
+_PUBLIC_PATTERNS = frozenset({
+    "INVOKE", "VALUE", "SELECTION", "SELECTION_ITEM", "TEXT",
+    "TOGGLE", "RANGE_VALUE", "SCROLL", "EXPAND_COLLAPSE",
+})
+_PUBLIC_ROLES = frozenset(_EXPECTED_ROLES.values()) | frozenset({
+    "BUTTON", "COMBOBOX", "EDIT",
+})
+_PUBLIC_GAPS = frozenset(_BLOCKING_GAPS)
+
+# Bounded evidence collection. Exceeding any limit is a reported audit FAILURE,
+# never permission to treat the omitted provider records as a clean UIA tree.
+_MAX_AUDIT_WIDGETS = 512
+_MAX_WIDGET_METADATA = 64
+_MAX_PROVIDER_TROUBLE = 64
+
+
+_PUBLIC_AUDIT_ERROR_TYPES = (
+    AssertionError, ConnectionError, FileNotFoundError, KeyError, OSError,
+    PermissionError, RuntimeError, TimeoutError, TypeError, ValueError,
+)
 
 
 def _safe_exception_detail(exc: Exception) -> str:
-    """Render audit failure evidence without trusting exception formatting."""
+    """Return a fixed diagnostic category without exporting arbitrary private text.
 
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = "exception details unavailable"
-    return f"{exception_type}: {rendered}"
+    UI/provider exceptions can contain access tokens, filesystem paths, account
+    identifiers or untrusted type metadata. Accessibility reports are exportable.
+    """
+    error_type = type(exc)
+    category = next(
+        (builtin.__name__ for builtin in _PUBLIC_AUDIT_ERROR_TYPES if error_type is builtin),
+        "Exception",
+    )
+    return f"{category}: details redacted"
 
 
 def _enum_name(value: Any) -> str | None:
@@ -152,12 +176,22 @@ def _combined_description(*descriptions: Any) -> Any:
     if not descriptions:
         raise ValueError("at least one UIA description is required")
     first = descriptions[0]
+    # Three distinct real windows are described independently. A degraded
+    # provider on a later dialog must not inherit the root's PROVIDED proof.
+    every_provider_supported = all(
+        _enum_name(description.strategy) == "PROVIDED"
+        for description in descriptions
+    )
     return SimpleNamespace(
-        strategy=first.strategy,
-        widgets=tuple(widget for description in descriptions for widget in description.widgets),
-        provider_trouble=tuple(
-            item for description in descriptions for item in description.provider_trouble
-        ),
+        strategy=first.strategy if every_provider_supported else "UNRECOGNIZED",
+        widgets=tuple(islice(
+            chain.from_iterable(description.widgets for description in descriptions),
+            _MAX_AUDIT_WIDGETS + 1,
+        )),
+        provider_trouble=tuple(islice(
+            chain.from_iterable(description.provider_trouble for description in descriptions),
+            _MAX_PROVIDER_TROUBLE + 1,
+        )),
         providers_stood_down_because=next(
             (
                 description.providers_stood_down_because
@@ -187,6 +221,20 @@ def _open_owner_economic_dialog_for_audit(app: WindowsAutosportApp) -> Any:
     return created[0]
 
 
+def _has_visible_accessible_text(value: str) -> bool:
+    """Require readable letters or digits in critical UIA control labels.
+
+    Whitespace, Unicode controls, combining marks, symbols and punctuation
+    alone cannot identify a critical operator action to a screen reader.
+    A localized label with meaningful text and accompanying symbols remains
+    valid. Never export the provider-controlled Name text.
+    """
+    return any(
+        unicode_category(character)[0] in {"L", "N"}
+        for character in value
+    )
+
+
 def summarize_description(
     description: Any,
     *,
@@ -198,33 +246,62 @@ def summarize_description(
     expected_ids = set(_REQUIRED_PATTERNS)
     controls: dict[int, dict[str, Any]] = {}
     failures: list[str] = []
+    strategy = _enum_name(description.strategy)
+    if strategy != "PROVIDED":
+        failures.append("unrecognized accessibility audit provider strategy")
 
-    for widget in description.widgets:
+    for widget_index, widget in enumerate(islice(description.widgets, _MAX_AUDIT_WIDGETS + 1)):
+        if widget_index == _MAX_AUDIT_WIDGETS:
+            failures.append("accessibility audit widget enumeration exceeded safe limit")
+            break
         automation_id = widget.automation_id
-        if automation_id not in expected_ids:
+        # UIA provider identities are untrusted. Numeric aliases such as
+        # 101.0 and int subclasses must not satisfy a critical int ID.
+        if type(automation_id) is not int or automation_id not in expected_ids:
             continue
-        normalized_automation_id = int(automation_id)
+        normalized_automation_id = automation_id
         if normalized_automation_id in controls:
             failures.append(
-                f"automation_id={normalized_automation_id}: duplicate critical control identity "
-                f"first_path={controls[normalized_automation_id]['path']} "
-                f"duplicate_path={widget.path}"
+                f"automation_id={normalized_automation_id}: duplicate critical control identity"
             )
             continue
-        gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
-        pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
-        role_name = _enum_name(widget.role)
+        observed_gaps = tuple(islice(widget.gaps, _MAX_WIDGET_METADATA + 1))
+        gap_names = sorted({
+            name if name in _PUBLIC_GAPS else "OTHER_GAP"
+            for name in (_enum_name(gap) for gap in observed_gaps)
+        })
+        if len(observed_gaps) > _MAX_WIDGET_METADATA:
+            gap_names = sorted(set(gap_names) | {"OTHER_GAP"})
+            failures.append(
+                f"automation_id={normalized_automation_id}: UIA gap enumeration exceeded safe limit"
+            )
+        observed_patterns = tuple(islice(widget.patterns, _MAX_WIDGET_METADATA + 1))
+        pattern_names = sorted({
+            name if name in _PUBLIC_PATTERNS else "OTHER_PATTERN"
+            for name in (_enum_name(pattern) for pattern in observed_patterns) if name
+        })
+        if len(observed_patterns) > _MAX_WIDGET_METADATA:
+            failures.append(
+                f"automation_id={normalized_automation_id}: UIA pattern enumeration exceeded safe limit"
+            )
+        observed_role = _enum_name(widget.role)
+        role_name = observed_role if observed_role in _PUBLIC_ROLES else "UNRECOGNIZED"
+        # Invisible Unicode-only or non-text UIA Name is not an accessible label.
+        # Keep exported evidence JSON-serializable even for malformed providers.
+        accessible_name = widget.name if isinstance(widget.name, str) else ""
+        name_present = _has_visible_accessible_text(accessible_name)
+        rows_exposed = widget.answers_rows is True
         controls[normalized_automation_id] = {
-            "path": widget.path,
-            "tk_class": widget.tk_class,
+            "path": "[redacted]",
+            "tk_class": "[redacted]",
             "role": role_name,
-            "name": widget.name,
+            "name": "[present]" if name_present else "",
             "automation_id": normalized_automation_id,
             "patterns": pattern_names,
-            "answers_rows": bool(widget.answers_rows),
+            "answers_rows": rows_exposed,
             "gaps": gap_names,
         }
-        if not widget.name:
+        if not name_present:
             failures.append(f"automation_id={normalized_automation_id}: missing accessible name")
         expected_role = _EXPECTED_ROLES[normalized_automation_id]
         if role_name != expected_role:
@@ -232,7 +309,9 @@ def summarize_description(
             failures.append(
                 f"automation_id={normalized_automation_id}: unexpected accessible role={actual_role} expected={expected_role}"
             )
-        blockers = sorted(set(gap_names) & _BLOCKING_GAPS)
+        # Unknown provider gap types cannot be silently treated as a clean
+        # critical control: preserve only a fixed public diagnostic label.
+        blockers = sorted(set(gap_names) & (_BLOCKING_GAPS | {"OTHER_GAP"}))
         if blockers:
             failures.append(
                 f"automation_id={normalized_automation_id}: blocking gaps={','.join(blockers)}"
@@ -243,7 +322,7 @@ def summarize_description(
             failures.append(
                 f"automation_id={normalized_automation_id}: missing UIA patterns={','.join(missing_patterns)}"
             )
-        if normalized_automation_id in _ROW_CONTROLS and not widget.answers_rows:
+        if normalized_automation_id in _ROW_CONTROLS and not rows_exposed:
             failures.append(
                 f"automation_id={normalized_automation_id}: list rows are not exposed through UIA"
             )
@@ -283,17 +362,32 @@ def summarize_description(
                 f"automation_id={workbench_result_id}: manual calculation result is not runtime readonly"
             )
 
-    provider_trouble = [str(item) for item in description.provider_trouble]
+    # External UIA errors can include credentials, paths and account data.
+    observed_trouble = tuple(islice(description.provider_trouble, _MAX_PROVIDER_TROUBLE + 1))
+    provider_trouble = ["provider details redacted"] * min(
+        len(observed_trouble), _MAX_PROVIDER_TROUBLE,
+    )
+    if len(observed_trouble) > _MAX_PROVIDER_TROUBLE:
+        provider_trouble.append("additional provider trouble redacted")
+        failures.append("provider trouble enumeration exceeded safe limit")
     if provider_trouble:
-        failures.extend(f"provider trouble: {item}" for item in provider_trouble)
+        failures.append("provider trouble: details redacted")
+    # A stood-down provider makes audit coverage incomplete even when every
+    # expected widget was found by another provider. Never report machine PASS.
+    if description.providers_stood_down_because is not None:
+        failures.append("UIA provider stood down: details redacted")
 
     return {
         "status": "PASS" if not failures else "FAIL",
-        "strategy": _enum_name(description.strategy),
+        "strategy": "PROVIDED" if strategy == "PROVIDED" else "UNRECOGNIZED",
         "critical_controls": [controls[key] for key in sorted(controls)],
         "failures": failures,
         "provider_trouble": provider_trouble,
-        "providers_stood_down_because": description.providers_stood_down_because,
+        "providers_stood_down_because": (
+            "provider details redacted"
+            if description.providers_stood_down_because is not None
+            else None
+        ),
         "evidence_scope": (
             "in-process tk-uia annotation/provider audit plus runtime Tk readonly-state audit "
             "of the packaged Windows GUI and canonical product-shell controls, including the "

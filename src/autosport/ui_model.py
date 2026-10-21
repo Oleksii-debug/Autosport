@@ -134,6 +134,9 @@ def evaluation_lines(result: SessionResult) -> list[str]:
 
 
 def ticket_lines(session) -> list[str]:
+    # UI is an identity use-boundary. Revalidate the product-issued PaperBook
+    # opening/causal authority before rendering caller-visible ticket identities.
+    _ = session.book.committed_stake
     lines: list[str] = []
     for ticket in session.book.tickets.values():
         legs = ", ".join(

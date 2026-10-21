@@ -42,6 +42,9 @@ class RestartRecoveryAuditTests(unittest.TestCase):
         return {
             "status": "PASS",
             "disposition": "aborted_uncommitted",
+            "corrupt_manifest_rejected": True,
+            "corrupt_manifest_base_unchanged": True,
+            "corrupt_manifest_registry_unresolved": True,
         }
 
     @staticmethod
@@ -94,6 +97,9 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertEqual(payload["session_restart_status"], "PASS")
             self.assertEqual(payload["transaction_recovery_status"], "PASS")
             self.assertEqual(payload["recovery_disposition"], "aborted_uncommitted")
+            self.assertTrue(payload["transaction_corrupt_manifest_rejected"])
+            self.assertTrue(payload["transaction_corrupt_manifest_base_unchanged"])
+            self.assertTrue(payload["transaction_corrupt_manifest_registry_unresolved"])
             self.assertGreater(payload["ticket_count"], 0)
             self.assertEqual(len(payload["paper_book_sha256"]), 64)
             self.assertEqual(len(payload["decision_ledger_sha256"]), 64)
@@ -138,9 +144,10 @@ class RestartRecoveryAuditTests(unittest.TestCase):
 
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["phase"], "session_restart")
             self.assertEqual(
                 payload["error"],
-                "_BrokenStringError: exception details unavailable",
+                "Exception: details redacted",
             )
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
@@ -162,8 +169,82 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             self.assertEqual(payload["status"], "FAIL")
             self.assertEqual(
                 payload["error"],
-                "_BrokenMetadataError: exception details unavailable",
+                "Exception: details redacted",
             )
+            self.assertFalse(payload["real_money_execution"])
+            self.assertFalse(payload["human_tested"])
+            self.assertFalse(payload["nvda_verified"])
+
+    def test_safe_exception_trace_is_bounded_and_path_free(self):
+        def nested_failure():
+            raise ValueError("trace-canary")
+
+        try:
+            nested_failure()
+        except ValueError as exc:
+            trace = restart_audit._safe_exception_trace(exc, limit=1)
+
+        self.assertEqual(len(trace), 1)
+        self.assertEqual(trace[0], "external")
+        self.assertNotIn("/", trace[0])
+        self.assertNotIn("\\\\", trace[0])
+
+    def test_safe_exception_trace_nonpositive_limit_returns_no_frames(self):
+        try:
+            raise ValueError("trace-canary")
+        except ValueError as exc:
+            self.assertEqual(restart_audit._safe_exception_trace(exc, limit=0), [])
+            self.assertEqual(restart_audit._safe_exception_trace(exc, limit=-1), [])
+
+    def test_safe_exception_trace_rejects_boolean_limit(self):
+        try:
+            raise ValueError("trace-canary")
+        except ValueError as exc:
+            self.assertEqual(restart_audit._safe_exception_trace(exc, limit=True), [])
+
+    def test_safe_exception_site_reports_only_module_function_and_line(self):
+        try:
+            raise ValueError("site-canary")
+        except ValueError as exc:
+            site = restart_audit._safe_exception_site(exc)
+
+        self.assertEqual(site, "external")
+        self.assertNotIn("/", site)
+        self.assertNotIn("\\\\", site)
+
+    def test_phase_call_preserves_original_exception_and_records_subphase(self):
+        def fail():
+            raise ValueError("phase-canary")
+
+        with self.assertRaisesRegex(ValueError, "phase-canary") as captured:
+            restart_audit._phase_call("session_restart:first_run", fail)
+
+        self.assertEqual(
+            captured.exception.__dict__.get("_autosport_restart_phase"),
+            "session_restart:first_run",
+        )
+
+    def test_transaction_recovery_failure_is_attributed_to_recovery_phase(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            output = Path(tmp) / "restart-recovery-audit.json"
+            with (
+                patch.object(
+                    restart_audit,
+                    "_audit_session_restart",
+                    return_value=self._restart_stub(),
+                ),
+                patch.object(
+                    restart_audit,
+                    "_audit_uncommitted_recovery",
+                    side_effect=ValueError("recovery-canary"),
+                ),
+            ):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(output), 1)
+
+            payload = json.loads(output.read_text(encoding="utf-8"))
+            self.assertEqual(payload["status"], "FAIL")
+            self.assertEqual(payload["phase"], "transaction_recovery")
+            self.assertEqual(payload["error"], "ValueError: details redacted")
             self.assertFalse(payload["real_money_execution"])
             self.assertFalse(payload["human_tested"])
             self.assertFalse(payload["nvda_verified"])
@@ -191,6 +272,9 @@ class RestartRecoveryAuditTests(unittest.TestCase):
             payload = json.loads(output.read_text(encoding="utf-8"))
             self.assertEqual(payload["status"], "PASS")
             self.assertEqual(payload["recovery_disposition"], "aborted_uncommitted")
+            self.assertTrue(payload["transaction_corrupt_manifest_rejected"])
+            self.assertTrue(payload["transaction_corrupt_manifest_base_unchanged"])
+            self.assertTrue(payload["transaction_corrupt_manifest_registry_unresolved"])
 
     def test_replace_failure_preserves_previous_evidence_and_cleans_temp_file(self):
         with tempfile.TemporaryDirectory() as tmp:
@@ -213,6 +297,66 @@ class RestartRecoveryAuditTests(unittest.TestCase):
                 {item.name for item in root.iterdir()},
                 {output.name, f".{output.name}.lock"},
             )
+
+    def test_private_exception_and_attached_phase_do_not_leak_into_report(self):
+        marker = "AS11_SYNTHETIC_SECRET_MARKER_71"
+        error = RuntimeError("synthetic_message=" + marker)
+        error._autosport_restart_phase = "session_restart:" + marker
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "recovery.json"
+            with patch.object(restart_audit, "_audit_session_restart", side_effect=error):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(path), 1)
+            raw = path.read_text(encoding="utf-8")
+            report = json.loads(raw)
+        self.assertNotIn(marker, raw)
+        self.assertEqual(report["phase"], "session_restart")
+        self.assertEqual(report["error"], "RuntimeError: details redacted")
+        self.assertFalse(report["real_money_execution"])
+        self.assertFalse(report["nvda_verified"])
+
+    def test_untrusted_exception_class_and_dynamic_python_names_are_private(self):
+        marker = "AS11_SYNTHETIC_DYNAMIC_METADATA_MARKER_72"
+        custom_error = type(marker, (Exception,), {})
+        ns = {"__name__": marker, "Custom": custom_error}
+        exec("def " + marker + "():\n    raise Custom('synthetic')\n", ns)
+        try:
+            ns[marker]()
+        except custom_error as exc:
+            self.assertEqual(restart_audit._safe_exception_detail(exc), "Exception: details redacted")
+            site = restart_audit._safe_exception_site(exc)
+            trace = restart_audit._safe_exception_trace(exc)
+        self.assertNotIn(marker, site)
+        self.assertNotIn(marker, str(trace))
+        self.assertTrue(all(value == "external" or value.startswith("audit:") for value in trace))
+
+    def test_forged_module_and_trusted_function_name_do_not_spoof_audit_trace(self):
+        namespace = {"__name__": "autosport.restart_recovery_audit"}
+        exec("def _phase_call():\n    raise ValueError('external-synthetic')\n", namespace)
+        try:
+            namespace["_phase_call"]()
+        except ValueError as exc:
+            trace = exc.__traceback__
+            while trace.tb_next is not None:
+                trace = trace.tb_next
+            self.assertEqual(restart_audit._safe_trace_frame(trace), "external")
+            self.assertEqual(restart_audit._safe_exception_site(exc), "external")
+            self.assertTrue(all(item == "external" for item in restart_audit._safe_exception_trace(exc)))
+        else:
+            self.fail("synthetic external probe did not raise")
+
+    def test_nonstring_exception_phase_is_rejected(self):
+        marker = "AS11_SYNTHETIC_UNHASHABLE_PHASE_73"
+        error = ValueError(marker)
+        error._autosport_restart_phase = ["session_restart", marker]
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "recovery.json"
+            with patch.object(restart_audit, "_audit_session_restart", side_effect=error):
+                self.assertEqual(restart_audit.run_restart_recovery_audit(path), 1)
+            raw = path.read_text(encoding="utf-8")
+            report = json.loads(raw)
+        self.assertEqual(report["phase"], "session_restart")
+        self.assertEqual(report["error"], "ValueError: details redacted")
+        self.assertNotIn(marker, raw)
 
 
 if __name__ == "__main__":

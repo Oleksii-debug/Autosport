@@ -1,0 +1,73 @@
+name: PR qualification supersession controller
+
+on:
+  workflow_run:
+    workflows: [CI, Windows candidate, Endurance]
+    types: [requested]
+
+# This workflow is deliberately trusted/default-branch-owned. PR-head workflows keep
+# read-only permissions; only this controller may cancel obsolete qualification runs.
+permissions:
+  actions: write
+  contents: read
+  pull-requests: read
+
+# Bound trusted controller work by exact source workflow, not by PR or source head.
+# Each surviving controller already scans the complete active-run collection for that
+# exact source workflow. The controller now sweeps every explicit singleton PR group
+# from that one snapshot, with a fresh live PR qualification reread before each
+# irreversible cancellation. This makes controller backlog O(source workflows) instead
+# of O(PRs × source workflows) during mass draft/ready/head lifecycle churn.
+#
+# PR metadata is deliberately not scheduler authority. Empty/multi-reference source
+# events share the same workflow lane and cannot grant PR cancellation authority. Their
+# event-level identity classes remain distinct: empty may later recover one exact
+# same-run/same-head singleton snapshot, while multi-reference remains permanently
+# ambiguous for cancellation of that triggering source run. Historical recovery remains
+# fail-closed and re-resolves identity before any effect. Different source workflows
+# remain isolated by workflow_id. A delayed stale-head
+# event may be the surviving trigger; that controller still reconciles its source workflow
+# against fresh live PR qualification rather than trusting the trigger head.
+#
+# The scoped controller carries one shared 24-request transport budget. The canonical
+# transport timeout remains 20 seconds, so worst-case network wait is bounded to 480
+# seconds inside this job's ten-minute timeout, leaving two minutes for checkout/Python
+# overhead. This envelope can finish a 1200-run/three-status snapshot and still perform
+# revalidated cancellation effects; exhaustion still defers remaining cleanup.
+#
+# cancel-in-progress stays false so a newer requested PR event cannot kill a controller
+# that is already making trusted decisions. Pull-request source events share one lane per
+# exact source workflow, so at most one running and one pending trusted sweep are needed.
+# CI/Windows also emit push or workflow_dispatch runs and Endurance emits manual runs.
+# Those non-PR events share a fixed non-PR lane per exact source workflow and execute
+# the same workflow-wide PR snapshot sweep. They enter with empty event PR identity;
+# the Python reader enumerates only event=pull_request runs, so the triggering non-PR
+# source run can neither enter the cancellation candidate set nor gain trigger-run
+# cancellation authority. This gives a newly merged controller a deterministic backlog
+# bootstrap from main/push activity without treating scheduler state as PR authority.
+concurrency:
+  group: pr-qualification-supersession-${{ github.event.workflow_run.workflow_id }}-${{ github.event.workflow_run.event == 'pull_request' && 'pr' || 'non-pr' }}
+  cancel-in-progress: false
+
+jobs:
+  cancel_superseded_head_runs:
+    runs-on: ubuntu-slim
+    timeout-minutes: 10
+    steps:
+      - name: Checkout trusted default-branch controller code
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Reconcile obsolete runs across this source workflow
+        env:
+          GITHUB_TOKEN: ${{ github.token }}
+        run: >-
+          python scripts/cancel_superseded_pr_workflow_runs_scoped.py
+          --pr-number "${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[0].number && !github.event.workflow_run.pull_requests[1].number && github.event.workflow_run.pull_requests[0].number || 0 }}"
+          --event-pr-reference-mode "${{ github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[1].number && 'ambiguous' || (github.event.workflow_run.event == 'pull_request' && github.event.workflow_run.pull_requests[0].number && 'singleton' || 'empty') }}"
+          --event-head-sha "${{ github.event.workflow_run.head_sha }}"
+          --workflow-name "${{ github.event.workflow_run.name }}"
+          --workflow-id "${{ github.event.workflow_run.workflow_id }}"
+          --current-run-id "${{ github.event.workflow_run.id }}"

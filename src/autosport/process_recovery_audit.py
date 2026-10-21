@@ -7,13 +7,15 @@ import subprocess
 import sys
 import tempfile
 import time
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
 from .decision_ledger import DecisionRecord, JsonlDecisionLedger
+from .domain import TicketLeg
 from .integrity import atomic_write_json, ensure_durable_file, sha256_file
 from .paper import PaperBook
-from .restart_recovery_audit import run_restart_recovery_audit
+from .restart_recovery_audit import _safe_exception_detail, run_restart_recovery_audit
 from .run_registry import RunRegistry
 from .run_transaction import RunTransaction
 
@@ -56,6 +58,16 @@ def _entry_command(*args: str) -> list[str]:
     if getattr(sys, "frozen", False):
         return [sys.executable, *args]
     return [sys.executable, "-m", "autosport.windows_entry", *args]
+
+
+def _entry_environment() -> dict[str, str] | None:
+    """Return a child-only environment for an independent frozen instance."""
+
+    if not getattr(sys, "frozen", False):
+        return None
+    environment = os.environ.copy()
+    environment["PYINSTALLER_RESET_ENVIRONMENT"] = "1"
+    return environment
 
 
 def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | Path) -> int:
@@ -106,9 +118,27 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
             )
         )
         # Cross the durable PRECOMMIT boundary before the parent kills this process.
-        # A distinct bankroll value is an audit canary proving recovery promotes NEW
-        # rather than merely observing unchanged BASE state.
-        transaction.stage_outputs(PaperBook("101"), ledger_path)
+        # The staged PaperBook must come from the exact canonical witnessed BASE;
+        # caller-authored/unbound economic state is intentionally rejected by
+        # RunTransaction. Add one deterministic BACK paper ticket so recovery still
+        # has to promote a genuinely distinct NEW PaperBook generation.
+        staged_book = PaperBook.load(paper_path)
+        staged_book.open_ticket(
+            [
+                TicketLeg(
+                    event_id="process-recovery-audit:event",
+                    market_id="process-recovery-audit:winner",
+                    selection_id="process-recovery-audit:home",
+                    locked_odds=Decimal("2"),
+                    sport="motorsport",
+                    exchange_side="back",
+                )
+            ],
+            Decimal("1"),
+            reason="process-recovery-audit-canary",
+            placed_at="2000-01-01T00:00:00+00:00",
+        )
+        transaction.stage_outputs(staged_book, ledger_path)
         summary = transaction.precommit(
             {
                 "schema_version": 2,
@@ -155,7 +185,7 @@ def run_process_kill_stage_child(workspace_path: str | Path, ready_path: str | P
                 {
                     "status": "FAIL",
                     "pid": os.getpid(),
-                    "error": f"{type(exc).__name__}: {exc}",
+                    "error": _safe_exception_detail(exc),
                     "real_money_execution": False,
                 },
             )
@@ -261,7 +291,7 @@ def run_process_kill_recovery_child(
             {
                 "status": "FAIL",
                 "pid": os.getpid(),
-                "error": f"{type(exc).__name__}: {exc}",
+                "error": _safe_exception_detail(exc),
                 "real_money_execution": False,
             },
         )
@@ -281,6 +311,7 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         ),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=_entry_environment(),
     )
     try:
         deadline = time.monotonic() + _CHILD_START_TIMEOUT_SECONDS
@@ -340,6 +371,7 @@ def audit_process_kill_relaunch(root: Path) -> dict[str, Any]:
         ),
         stdout=subprocess.DEVNULL,
         stderr=subprocess.DEVNULL,
+        env=_entry_environment(),
         timeout=_CHILD_RECOVERY_TIMEOUT_SECONDS,
         check=False,
     )
@@ -445,6 +477,8 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
     if run_restart_recovery_audit(destination) != 0:
         return 1
 
+    phase = "process_kill_relaunch"
+    exit_code = 0
     try:
         existing = _decode_strict_json(
             destination,
@@ -484,17 +518,20 @@ def run_packaged_restart_recovery_audit(output_path: str | Path) -> int:
             or existing.get("nvda_verified") is not False
         ):
             raise RuntimeError("packaged restart/recovery truth labels are invalid")
-        atomic_write_json(destination, existing)
-        return 0
+        payload = existing
     except BaseException as exc:
-        atomic_write_json(
-            destination,
-            {
-                "status": "FAIL",
-                "error": f"{type(exc).__name__}: {exc}",
-                "real_money_execution": False,
-                "human_tested": False,
-                "nvda_verified": False,
-            },
-        )
-        return 1
+        payload = {
+            "status": "FAIL",
+            "phase": phase,
+            "error": _safe_exception_detail(exc),
+            "real_money_execution": False,
+            "human_tested": False,
+            "nvda_verified": False,
+        }
+        exit_code = 1
+
+    # Publication is a separate durable boundary. A failed final replace must
+    # propagate without being reclassified as a semantic process/recovery FAIL
+    # or triggering a second write that could destroy last-known evidence.
+    atomic_write_json(destination, payload)
+    return exit_code

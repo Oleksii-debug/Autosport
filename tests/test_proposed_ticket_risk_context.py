@@ -142,7 +142,7 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "duplicate leg identity"):
             ProposedTicketRiskContext(legs=(duplicate, duplicate))
 
-        with self.assertRaisesRegex(ValueError, "invalid leg"):
+        with self.assertRaisesRegex(ValueError, "event_id.*non-empty"):
             ProposedTicketRiskContext(
                 legs=(TicketLeg(" event-1", "market-1", "selection-1", Decimal("2")),)
             )
@@ -447,36 +447,36 @@ class ProposedTicketRiskContextTests(unittest.TestCase):
             book.save(path)
             restarted = PaperBook.load(path)
 
-        proposed_leg = self._leg(
-            "event-provider-2",
-            "market-provider-2",
-            "selection-provider-2",
-        )
-        provider_2 = ProposedTicketRiskContext(
-            legs=(proposed_leg,),
-            quotes=(self._quote(proposed_leg, source_id="provider-2"),),
-            provider_accounts=(("provider-2", "account-B"),),
-            bankroll_id=goal.bankroll_id,
-            currency=goal.currency,
-            proposal_ts="2026-09-16T15:00:02+00:00",
-        )
-        at_boundary = policy.evaluate(restarted, Decimal("1"), context=provider_2)
-        self.assertTrue(at_boundary.allowed)
+            proposed_leg = self._leg(
+                "event-provider-2",
+                "market-provider-2",
+                "selection-provider-2",
+            )
+            provider_2 = ProposedTicketRiskContext(
+                legs=(proposed_leg,),
+                quotes=(self._quote(proposed_leg, source_id="provider-2"),),
+                provider_accounts=(("provider-2", "account-B"),),
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                proposal_ts="2026-09-16T15:00:02+00:00",
+            )
+            at_boundary = policy.evaluate(restarted, Decimal("1"), context=provider_2)
+            self.assertTrue(at_boundary.allowed)
 
-        provider_1 = ProposedTicketRiskContext(
-            legs=(proposed_leg,),
-            quotes=(self._quote(proposed_leg, source_id="provider-1"),),
-            provider_accounts=(("provider-1", "account-A"),),
-            bankroll_id=goal.bankroll_id,
-            currency=goal.currency,
-            proposal_ts="2026-09-16T15:00:02+00:00",
-        )
-        exceeded = policy.evaluate(restarted, Decimal("1"), context=provider_1)
-        self.assertFalse(exceeded.allowed)
-        self.assertEqual(
-            exceeded.reason,
-            "owner provider concentration limit exceeded",
-        )
+            provider_1 = ProposedTicketRiskContext(
+                legs=(proposed_leg,),
+                quotes=(self._quote(proposed_leg, source_id="provider-1"),),
+                provider_accounts=(("provider-1", "account-A"),),
+                bankroll_id=goal.bankroll_id,
+                currency=goal.currency,
+                proposal_ts="2026-09-16T15:00:02+00:00",
+            )
+            exceeded = policy.evaluate(restarted, Decimal("1"), context=provider_1)
+            self.assertFalse(exceeded.allowed)
+            self.assertEqual(
+                exceeded.reason,
+                "owner provider concentration limit exceeded",
+            )
 
     def test_provider_concentration_fails_closed_on_missing_historical_provenance(self) -> None:
         goal = self._goal(max_provider_concentration_fraction=Decimal("0.99"))

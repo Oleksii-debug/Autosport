@@ -348,7 +348,7 @@
       && typeof value.agent_learning_busy !== "boolean") invalid();
     if (value.agent_learning_evidence !== undefined && (
       !Array.isArray(value.agent_learning_evidence)
-      || value.agent_learning_evidence.length > 8
+      || value.agent_learning_evidence.length > 10
       || value.agent_learning_evidence.some((item) =>
         typeof item !== "string" || item.length > 600)
     )) invalid();

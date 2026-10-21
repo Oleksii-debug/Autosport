@@ -202,6 +202,10 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--destination", type=Path, required=True)
         command.add_argument("--source-sha", required=True)
         command.add_argument("--package-sha256", required=True)
+    installed_uninstall.add_argument(
+        "--archive", type=Path, required=True,
+        help="independently pinned original canonical release ZIP (deletion authority)",
+    )
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -635,10 +639,13 @@ def main(argv: list[str] | None = None) -> int:
             else uninstall_verified_release
         )
         try:
-            result = operation(
-                args.destination, expected_source_sha=args.source_sha,
-                expected_package_sha256=args.package_sha256,
-            )
+            anchors = {
+                "expected_source_sha": args.source_sha,
+                "expected_package_sha256": args.package_sha256,
+            }
+            if args.command == "uninstall-release":
+                anchors["original_archive"] = args.archive
+            result = operation(args.destination, **anchors)
         except (OfflineInstallError, OSError, RuntimeError, TypeError, ValueError):
             print("release_lifecycle=FAIL_CLOSED reason=unsafe_or_modified_installation")
             return 3

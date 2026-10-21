@@ -75,13 +75,37 @@ class OneShotLearningStatusWorker:
             runs = research.get("count", 0)
             if any(type(v) is not int or v < 0 or v > 20000 for v in (total, runs)):
                 raise ValueError("invalid counts")
+            model_count = 0
+            evaluation_count = 0
+            promotion_count = 0
+            if science["state"] == "CANONICAL_REGISTRY_VERIFIED":
+                types = science.get("types")
+                if not isinstance(types, list):
+                    raise ValueError("missing canonical science count groups")
+                counts = {}
+                for group in types:
+                    if not isinstance(group, dict):
+                        raise ValueError("invalid science group")
+                    kind, count = group.get("type"), group.get("count")
+                    if (
+                        type(kind) is not str or kind in counts
+                        or type(count) is not int or count < 0 or count > 20000
+                    ):
+                        raise ValueError("invalid canonical group counter")
+                    counts[kind] = count
+                model_count = counts.get("ModelVersion", 0)
+                evaluation_count = counts.get("EvaluationBundle", 0)
+                promotion_count = counts.get("PromotionDecision", 0)
             lines = (
                 "Канонічний реєстр науки: " + science["state"],
                 "Підтверджених наукових записів: " + str(total),
+                "Зареєстрованих версій моделей: " + str(model_count),
+                "Записів оцінювання: " + str(evaluation_count),
+                "Рішень про просування моделей: " + str(promotion_count),
                 "Перевірених дослідницьких запусків: " + str(runs),
                 "Стан AgentLoop: " + loop["state"],
-                "Доказу реального навчання моделей тут немає.",
-                "Доказу економічного покращення або права на ставки тут немає.",
+                "Записи самі по собі не доводять навчання або економічного покращення.",
+                "Права на реальні ставки цей звіт не надає.",
             )
         except Exception:
             lines = (

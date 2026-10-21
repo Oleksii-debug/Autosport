@@ -3,6 +3,7 @@ from __future__ import annotations
 import hashlib
 import json
 import os
+import re
 import shutil
 import struct
 import tempfile
@@ -428,6 +429,49 @@ def _require_process_recovery_evidence(payload: dict[str, Any], label: str) -> N
         raise ValueError(f"{label} does not prove promoted Decision Ledger state")
 
 
+# This records immutable source declarations only. It is not an installed-wheel
+# SBOM, signing proof or claim that third-party licenses were accepted.
+_SOURCE_MANIFEST_INPUTS = frozenset({
+    "pyproject.toml",
+    "scripts/package_windows.py",
+    "src/autosport/release_package.py",
+    "scripts/build_windows_candidate.ps1",
+    ".github/workflows/windows-build.yml",
+})
+
+
+def _validate_source_manifest(value: dict[str, Any], source_sha: str) -> None:
+    if not isinstance(value, dict) or set(value) != {
+        "schema_version", "source_sha", "evidence_class",
+        "source_files_sha256", "declared_runtime_dependencies",
+        "declared_build_dependencies",
+    }:
+        raise ValueError("SOURCE_MANIFEST schema is invalid")
+    if type(value["schema_version"]) is not int or value["schema_version"] != 1:
+        raise ValueError("SOURCE_MANIFEST schema is invalid")
+    if value["source_sha"] != source_sha:
+        raise ValueError("SOURCE_MANIFEST source SHA does not match BUILD_INFO")
+    if value["evidence_class"] != "SOURCE_DECLARATIONS_ONLY":
+        raise ValueError("SOURCE_MANIFEST evidence scope is invalid")
+    source_files = value["source_files_sha256"]
+    if not isinstance(source_files, dict) or set(source_files) != _SOURCE_MANIFEST_INPUTS:
+        raise ValueError("SOURCE_MANIFEST source input set is invalid")
+    for digest in source_files.values():
+        if not isinstance(digest, str) or not re.fullmatch(r"[0-9a-f]{64}", digest):
+            raise ValueError("SOURCE_MANIFEST source digest is invalid")
+    for field in ("declared_runtime_dependencies", "declared_build_dependencies"):
+        dependencies = value[field]
+        if not isinstance(dependencies, list) or not dependencies:
+            raise ValueError("SOURCE_MANIFEST dependency declaration is missing")
+        if dependencies != sorted(set(dependencies)):
+            raise ValueError("SOURCE_MANIFEST dependency declaration is not unique/sorted")
+        for requirement in dependencies:
+            if not isinstance(requirement, str) or not re.fullmatch(
+                r"[A-Za-z][A-Za-z0-9_.-]*==[0-9][A-Za-z0-9_.+-]*", requirement
+            ):
+                raise ValueError("SOURCE_MANIFEST dependency is not exactly pinned")
+
+
 def build_windows_package(
     exe_path: str | Path,
     start_file: str | Path,
@@ -438,8 +482,12 @@ def build_windows_package(
     restart_recovery_path: str | Path,
     output_zip: str | Path,
     source_sha: str,
+    *,
+    source_manifest: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
     _require_git_commit_sha(source_sha, field="source_sha")
+    if source_manifest is not None:
+        _validate_source_manifest(source_manifest, source_sha)
     exe_path = Path(exe_path)
     start_file = Path(start_file)
     example_dir = Path(example_dir)
@@ -473,6 +521,8 @@ def build_windows_package(
             "nvda_verified": False,
         }
         _write_json(package_dir / "BUILD_INFO.json", build_info)
+        if source_manifest is not None:
+            _write_json(package_dir / "SOURCE_MANIFEST.json", source_manifest)
 
         payload_hashes = {}
         for path in _sorted_package_files(package_dir):
@@ -507,6 +557,7 @@ def verify_windows_package(
     package_zip: str | Path,
     *,
     expected_source_sha: str,
+    require_source_manifest: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -571,6 +622,13 @@ def verify_windows_package(
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO source_sha does not match exact candidate head")
     _require_false_truth_labels(build_info, "BUILD_INFO.json")
+    if require_source_manifest and "SOURCE_MANIFEST.json" not in members:
+        raise ValueError("release package is missing SOURCE_MANIFEST.json")
+    if "SOURCE_MANIFEST.json" in members:
+        source_manifest = _decode_json_object(members["SOURCE_MANIFEST.json"], "SOURCE_MANIFEST.json")
+        _validate_source_manifest(source_manifest, expected_source_sha)
+        if members["SOURCE_MANIFEST.json"] != _canonical_json_bytes(source_manifest):
+            raise ValueError("SOURCE_MANIFEST is not in canonical JSON representation")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")

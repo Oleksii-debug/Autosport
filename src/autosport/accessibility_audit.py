@@ -372,6 +372,10 @@ def summarize_description(
         failures.append("provider trouble enumeration exceeded safe limit")
     if provider_trouble:
         failures.append("provider trouble: details redacted")
+    # A stood-down provider makes audit coverage incomplete even when every
+    # expected widget was found by another provider. Never report machine PASS.
+    if description.providers_stood_down_because is not None:
+        failures.append("UIA provider stood down: details redacted")
 
     return {
         "status": "PASS" if not failures else "FAIL",

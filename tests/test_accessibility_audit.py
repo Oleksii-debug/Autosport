@@ -237,6 +237,49 @@ class AccessibilityAuditTests(unittest.TestCase):
                 self.assertFalse(report["human_tested"])
                 self.assertFalse(report["nvda_verified"])
 
+    def test_unicode_invisible_only_accessible_names_fail_closed(self):
+        # Python str.strip() leaves these Unicode format controls/marks intact,
+        # but none independently labels a screen-reader control.
+        for bad_name in (
+            "\u200b", "\u200d\u2060", "\ufeff",
+            "\u0301", "\x00", " \u200b\\t",
+        ):
+            with self.subTest(name=repr(bad_name)):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == AUTOMATION_IDS["run_replay"]
+                )
+                target.name = bad_name
+                report = self._summarize(description)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={AUTOMATION_IDS['run_replay']}: missing accessible name",
+                    report["failures"],
+                )
+                record = next(
+                    item for item in report["critical_controls"]
+                    if item["automation_id"] == AUTOMATION_IDS["run_replay"]
+                )
+                self.assertEqual(record["name"], "")
+                self.assertNotIn(bad_name, json.dumps(report, ensure_ascii=False))
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+
+        description = self._passing_description()
+        target = next(
+            widget for widget in description.widgets
+            if widget.automation_id == AUTOMATION_IDS["run_replay"]
+        )
+        target.name = "\u200bЗапустити повтор"
+        report = self._summarize(description)
+        self.assertEqual(report["status"], "PASS")
+        self.assertEqual(
+            next(item["name"] for item in report["critical_controls"]
+                 if item["automation_id"] == AUTOMATION_IDS["run_replay"]),
+            "[present]",
+        )
+
     def test_unrecognized_critical_provider_gap_is_blocking_and_redacted(self):
         description = self._passing_description()
         target = next(

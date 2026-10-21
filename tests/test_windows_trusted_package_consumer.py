@@ -193,3 +193,47 @@ def test_trusted_launcher_refuses_mutated_pe_oracle_before_script_runs(tmp_path:
     assert "trusted package source SHA-256 mismatch" in result.stderr
     assert "untrusted PE oracle executed" not in result.stderr
     assert not marker.exists()
+
+
+def test_trusted_launcher_imports_real_release_modules_in_isolation(tmp_path: Path) -> None:
+    """Catch a missing preload: production package has no ambient sys.path fallback."""
+    launcher = _trusted_package_launcher_source()
+    repository = Path(__file__).resolve().parents[1]
+    root = tmp_path / "snapshot"
+    names = (
+        "release_sbom",
+        "release_dependency_graph",
+        "windows_pe_integrity",
+        "windows_update_admission",
+        "windows_update_release_metadata",
+        "release_package",
+        "data_tool_package",
+    )
+    payloads = {
+        f"src/autosport/{name}.py": (
+            repository / "src" / "autosport" / f"{name}.py"
+        ).read_bytes()
+        for name in names
+    }
+    payloads["scripts/package_windows.py"] = (
+        "from autosport.release_package import verify_windows_package\n"
+        "from autosport.windows_pe_integrity import validate_pe32plus_amd64\n"
+        "from autosport.windows_update_release_metadata import validate_embedded_update_identity\n"
+        "from pathlib import Path\n"
+        "import sys\n"
+        "Path(sys.argv[1]).write_text('trusted-imports-ready', encoding='utf-8')\n"
+    ).encode("utf-8")
+    manifest = {}
+    for relative, payload in payloads.items():
+        destination = root.joinpath(*relative.split("/"))
+        destination.parent.mkdir(parents=True, exist_ok=True)
+        destination.write_bytes(payload)
+        manifest[relative] = hashlib.sha256(payload).hexdigest()
+    marker = tmp_path / "trusted-imports.txt"
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", launcher, str(root),
+         json.dumps(manifest, sort_keys=True, separators=(",", ":")), str(marker)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert marker.read_text(encoding="utf-8") == "trusted-imports-ready"

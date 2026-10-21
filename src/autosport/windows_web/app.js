@@ -483,6 +483,9 @@
   // the separate native emergency STOP and navigation remain available.
   function freezeUnverifiedOperatorControls() {
     latestState = null;
+    // An unverified bridge cannot preserve approval of a previous owner preview.
+    // Also fence an in-flight preview response from revalidating stale values.
+    invalidateOwnerReview();
     for (const id of [101, 102, 103, 104, 105, 106, 107, 108, 109,
       328, 333, 335, "owner-confirm", "product-source-select", "product-source-save",
       "product-runtime-start", "product-runtime-stop",

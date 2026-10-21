@@ -199,6 +199,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="remove only an exact unchanged pinned PAPER installation",
     )
     for command in (installed_verify, installed_uninstall):
+        command.add_argument("--archive", type=Path, required=True)
         command.add_argument("--destination", type=Path, required=True)
         command.add_argument("--source-sha", required=True)
         command.add_argument("--package-sha256", required=True)
@@ -636,7 +637,8 @@ def main(argv: list[str] | None = None) -> int:
         )
         try:
             result = operation(
-                args.destination, expected_source_sha=args.source_sha,
+                args.destination, archive=args.archive,
+                expected_source_sha=args.source_sha,
                 expected_package_sha256=args.package_sha256,
             )
         except (OfflineInstallError, OSError, RuntimeError, TypeError, ValueError):

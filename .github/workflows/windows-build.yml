@@ -146,6 +146,15 @@ jobs:
           "AUTOSPORT_PACKAGED_EXE=$packagedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_PACKAGED_DATA_EXE=$packagedDataExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_QUALIFIED_PACKAGE_SHA256=$packageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Qualify fixture-only certificate-backed release/update signature
+        shell: pwsh
+        run: ./scripts/qualify_fixture_release_signature.ps1 -PackagePath (Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip') -SourceSha $env:AUTOSPORT_SOURCE_SHA -ExpectedPackageSha256 $env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256 -EvidencePath (Join-Path $PWD 'dist/fixture-release-signature-evidence.json')
+      - name: Upload fixture-only release signature evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-fixture-release-signature
+          path: dist/fixture-release-signature-evidence.json
+          if-no-files-found: error
       - name: Execute packaged NVDA evidence contract
         shell: pwsh
         run: ./scripts/nvda_evidence_package_smoke.ps1

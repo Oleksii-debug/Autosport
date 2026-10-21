@@ -39,6 +39,12 @@ class WebViewPathDraftTruthTest(unittest.TestCase):
         self.assertIn('await dispatch("research_plan.select", { path });', source)
         self.assertIn('result.status === "completed"', _helper())
         self.assertIn('pathDraftEdits.get(id) === editEpoch', _helper())
+        self.assertIn('dataset_validation_pending', _helper())
+        self.assertIn('dataset_success_generation <= pending.afterGeneration', _helper())
+        backend = (APP.parent.parent / 'windows_webview_shell.py').read_text(encoding='utf-8')
+        self.assertIn('self._dataset_success_generation += 1', backend)
+        self.assertIn('result["dataset_validation_pending"]', backend)
+        self.assertIn('"dataset_success_generation": self._dataset_success_generation', backend)
 
     def test_source_exact_javascript_preserves_dirty_and_racing_input(self) -> None:
         node = shutil.which("node")
@@ -63,7 +69,7 @@ function harness() {
   const api = new Function(
     "byId", "setValueUnlessFocused",
     helperSource + "\nreturn {pathDraftEdits, unsavedPathDrafts, "
-      + "renderCanonicalPathUnlessDraft, finalizeConfirmedPathSelection};"
+      + "renderCanonicalPathUnlessDraft, finalizeConfirmedPathSelection, confirmValidatedDatasetSelection};"
   )(id => elements[id], renderValue);
   return {elements, ...api};
 }
@@ -90,9 +96,31 @@ for (const id of ["dataset-path", "research-plan-path"]) {
   t.finalizeConfirmedPathSelection(id, epoch, {status:"completed"});
   t.renderCanonicalPathUnlessDraft(id, "PERSISTED");
   assert.equal(input.value, "NEWER DRAFT", "late success must keep later edit"); count++;
-  t.finalizeConfirmedPathSelection(id, t.pathDraftEdits.get(id), {status:"completed"});
-  t.renderCanonicalPathUnlessDraft(id, "CANONICAL");
-  assert.equal(input.value, "CANONICAL", "confirmed current save restores readback"); count++;
+  if (id === "dataset-path") {
+    const currentEpoch = t.pathDraftEdits.get(id);
+    t.finalizeConfirmedPathSelection(id, currentEpoch, {status:"completed"});
+    t.renderCanonicalPathUnlessDraft(id, "OLD");
+    assert.equal(input.value, "NEWER DRAFT", "queued action cannot clear draft"); count++;
+    t.finalizeConfirmedPathSelection(id, currentEpoch, {
+      status:"completed",
+      dataset_validation_pending:{path:"CANONICAL", after_generation:6}
+    });
+    t.renderCanonicalPathUnlessDraft(id, "OLD");
+    assert.equal(input.value, "NEWER DRAFT", "pending worker cannot clear draft"); count++;
+    t.confirmValidatedDatasetSelection({dataset_path:"CANONICAL", dataset_success_generation:6});
+    t.renderCanonicalPathUnlessDraft(id, "OLD");
+    assert.equal(input.value, "NEWER DRAFT", "same generation cannot clear draft"); count++;
+    t.confirmValidatedDatasetSelection({dataset_path:"WRONG", dataset_success_generation:7});
+    t.renderCanonicalPathUnlessDraft(id, "OLD");
+    assert.equal(input.value, "NEWER DRAFT", "wrong path cannot clear draft"); count++;
+    t.confirmValidatedDatasetSelection({dataset_path:"CANONICAL", dataset_success_generation:7});
+    t.renderCanonicalPathUnlessDraft(id, "CANONICAL");
+    assert.equal(input.value, "CANONICAL", "successful exact worker clears draft"); count++;
+  } else {
+    t.finalizeConfirmedPathSelection(id, t.pathDraftEdits.get(id), {status:"completed"});
+    t.renderCanonicalPathUnlessDraft(id, "CANONICAL");
+    assert.equal(input.value, "CANONICAL", "synchronous research plan restores readback"); count++;
+  }
 }
 const separate = harness();
 separate.elements["dataset-path"].edit("DATA DRAFT");
@@ -108,7 +136,7 @@ console.log(count + "/" + count + " source-exact path draft cases PASS");
             check=False, timeout=20,
         )
         self.assertEqual(result.returncode, 0, result.stderr)
-        self.assertIn("15/15 source-exact", result.stdout)
+        self.assertIn("19/19 source-exact", result.stdout)
 
 
 if __name__ == "__main__":

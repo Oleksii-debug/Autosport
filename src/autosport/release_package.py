@@ -17,6 +17,7 @@ from .release_sbom import (
     validate_dependency_license_evidence,
 )
 from .release_dependency_graph import validate_build_host_dependency_graph
+from .release_binary_attribution import validate_binary_module_attribution
 
 from .windows_update_release_metadata import (
     attach_update_identity,
@@ -548,6 +549,7 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
     "src/autosport/release_sbom.py",
+    "src/autosport/release_binary_attribution.py",
     "src/autosport/data_tool_package.py",
     # Bind the shipped operator configuration and durable on-disk schema
     # authorities to the same immutable exact-Git release source declaration.
@@ -787,6 +789,7 @@ def build_windows_package(
     dependency_license_manifest: dict[str, Any] | None = None,
     dependency_license_members: dict[str, bytes] | None = None,
     embedded_executable_inventory: dict[str, Any] | None = None,
+    binary_module_attribution: dict[str, Any] | None = None,
     update_version: str | None = None,
     update_schema: int | None = None,
 ) -> tuple[Path, str]:
@@ -873,6 +876,16 @@ def build_windows_package(
                 package_dir / "EMBEDDED_EXECUTABLE_INVENTORY.json",
                 embedded_executable_inventory,
             )
+        if binary_module_attribution is not None:
+            if dependency_graph is None or embedded_executable_inventory is None:
+                raise ValueError("binary module attribution requires sealed inventory and host graph")
+            validate_binary_module_attribution(
+                binary_module_attribution, dependency_graph, embedded_executable_inventory,
+            )
+            _write_json(
+                package_dir / "BINARY_MODULE_ATTRIBUTION.json",
+                binary_module_attribution,
+            )
         if source_manifest is not None:
             _write_json(package_dir / "SOURCE_MANIFEST.json", source_manifest)
         if dependency_metadata is not None:
@@ -925,6 +938,7 @@ def verify_windows_package(
     require_dependency_graph: bool = False,
     require_dependency_license_evidence: bool = False,
     require_embedded_executable_inventory: bool = False,
+    require_binary_module_attribution: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -1062,6 +1076,22 @@ def verify_windows_package(
         )
         if members["EMBEDDED_EXECUTABLE_INVENTORY.json"] != _canonical_json_bytes(inventory):
             raise ValueError("embedded executable inventory is not canonical JSON")
+
+    if require_binary_module_attribution and "BINARY_MODULE_ATTRIBUTION.json" not in members:
+        raise ValueError("release package lacks sealed binary module attribution")
+    if "BINARY_MODULE_ATTRIBUTION.json" in members:
+        if (
+            "DEPENDENCY_GRAPH_METADATA.json" not in members
+            or "EMBEDDED_EXECUTABLE_INVENTORY.json" not in members
+        ):
+            raise ValueError("binary attribution lacks its evidence authorities")
+        attribution = _decode_json_object(
+            members["BINARY_MODULE_ATTRIBUTION.json"],
+            "BINARY_MODULE_ATTRIBUTION.json",
+        )
+        validate_binary_module_attribution(attribution, graph, inventory)
+        if members["BINARY_MODULE_ATTRIBUTION.json"] != _canonical_json_bytes(attribution):
+            raise ValueError("binary attribution is not canonical JSON")
 
     manifest = _decode_json_object(
         members["PACKAGE_MANIFEST.json"],

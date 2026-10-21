@@ -26,7 +26,8 @@ _MAX_ENTRIES = 4096
 
 def _regular_file(path: Path) -> bool:
     try:
-        return stat.S_ISREG(path.lstat().st_mode)
+        return (not _is_redirected_install_path(path)
+                and stat.S_ISREG(path.lstat().st_mode))
     except OSError:
         return False
 

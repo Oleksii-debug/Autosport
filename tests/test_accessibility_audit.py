@@ -215,8 +215,6 @@ class AccessibilityAuditTests(unittest.TestCase):
             any(
                 "duplicate critical control identity" in failure
                 and f"automation_id={original.automation_id}" in failure
-                and f"first_path={original.path}" in failure
-                and f"duplicate_path={duplicate.path}" in failure
                 for failure in report["failures"]
             )
         )
@@ -226,7 +224,40 @@ class AccessibilityAuditTests(unittest.TestCase):
             if item["automation_id"] == original.automation_id
         ]
         self.assertEqual(len(matching_controls), 1)
-        self.assertEqual(matching_controls[0]["path"], original.path)
+        self.assertEqual(matching_controls[0]["path"], "[redacted]")
+
+    def test_machine_uia_export_redacts_untrusted_provider_metadata(self):
+        marker = "SYNTHETIC_PRIVATE_UIA_PROVIDER_CREDENTIAL_20261021"
+        description = self._passing_description()
+        target = next(
+            widget for widget in description.widgets
+            if widget.automation_id == AUTOMATION_IDS["run_replay"]
+        )
+        target.path = "/home/operator/.secret/" + marker
+        target.tk_class = marker
+        target.name = "credential=" + marker
+        target.role = _Named(marker)
+        target.patterns = (_Named(marker),)
+        target.gaps = (_Named(marker),)
+        description.provider_trouble = (RuntimeError("token=" + marker),)
+        description.providers_stood_down_because = "account=" + marker
+
+        report = self._summarize(description)
+        exported = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(marker, exported)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(any("unexpected accessible role" in f for f in report["failures"]))
+        self.assertTrue(any("missing UIA patterns" in f for f in report["failures"]))
+        self.assertTrue(any("provider trouble" in f for f in report["failures"]))
+        self.assertEqual(report["providers_stood_down_because"], "provider details redacted")
+        critical = next(
+            item for item in report["critical_controls"]
+            if item["automation_id"] == AUTOMATION_IDS["run_replay"]
+        )
+        self.assertEqual(critical["path"], "[redacted]")
+        self.assertEqual(critical["name"], "[present]")
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
 
     def test_missing_export_evidence_control_fails_closed(self):
         description = self._passing_description()

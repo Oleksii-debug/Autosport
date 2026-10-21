@@ -156,3 +156,16 @@ def test_external_uia_export_never_includes_untrusted_exception_messages() -> No
     assert "external UIA audit failed: unexpected automation error" in audit
     assert "if ($report.status -ne 'PASS')" in audit
     assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in audit
+
+def test_external_uia_export_redacts_untrusted_element_and_window_names() -> None:
+    """UIA provider names can contain private text; report and console stay bounded."""
+    audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+    assert "$report.root_name = [string]$uiaRoot.Current.Name" not in audit
+    assert "$report.root_name = if ([string]::IsNullOrWhiteSpace($rootName)) { $null } else { '[redacted]' }" in audit
+    assert "name = $currentName" not in audit
+    assert "name = $(if ($currentName -eq [string]$spec.name)" in audit
+    assert "'[redacted mismatch]'" in audit
+    assert "external UIA Name mismatch" in audit
+    assert "actual='$currentName'" not in audit
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in audit
+    assert "Write-Host ($report | ConvertTo-Json -Depth 8)" in audit

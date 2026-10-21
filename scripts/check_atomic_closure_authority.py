@@ -1111,6 +1111,45 @@ def _is_terminal_done(value: str) -> bool:
         for pattern in (exit_clause, bare_exit_clause)
         for match in pattern.finditer(matrix_status_projection)
     )
+    # A wrapper can emit a standalone semicolon-delimited outcome after a
+    # positive check banner ("Windows Candidate: PASS; exit code: 1"). The
+    # ordinary check-clause parser treats "exit code" as a *label*, so it
+    # otherwise misses the failed process. Quoted JSON diagnostic keys have
+    # the same problem. These are rejection-only oracles, not PASS evidence.
+    structured_exit_key = re.compile(
+        r"[\"'](?P<key>exit[ _-]?code|return[ _-]?code|returncode|"
+        r"errorlevel|last[ _-]?exit[ _-]?code|rc|signal)[\"']\s*:\s*"
+        r"(?P<value>\"[^\"\r\n]*\"|'[^'\r\n]*'|[^,;\s}\])]+)",
+        re.IGNORECASE,
+    )
+    def bad_process_value(value: str, *, signal: bool = False) -> bool:
+        value = value.strip().strip("\"'")
+        if signal and re.fullmatch(r"SIG[A-Z0-9]+", value, re.IGNORECASE):
+            return True
+        if not re.fullmatch(r"[+-]?(?:0[xX][0-9a-fA-F]+|[0-9]+)", value):
+            return True
+        return int(value, 16 if "0x" in value.lower() else 10) != 0
+
+    independent_process_failure = False
+    for clause in matrix_status_projection.split(";"):
+        clause = clause.strip()
+        if historical_label.match(clause):
+            continue
+        # Standalone outcomes must begin their clause, not appear inside
+        # narrative about a repaired failure.
+        standalone = process_exit.match(clause)
+        if standalone and bad_process_value(standalone.group("code")):
+            independent_process_failure = True
+            break
+        for diagnostic in structured_exit_key.finditer(clause):
+            if bad_process_value(
+                diagnostic.group("value"),
+                signal=diagnostic.group("key").lower() == "signal",
+            ):
+                independent_process_failure = True
+                break
+        if independent_process_failure:
+            break
     # A semicolon may separate an exit-code clause from its crash signal,
     # including inside a parenthesized Windows/CI diagnostic.  Do not lose
     # the second failure merely because the bounded check-detail parser
@@ -1140,6 +1179,7 @@ def _is_terminal_done(value: str) -> bool:
             and not unknown_failed_gate
             and result_first_failed_gate is None
             and not failed_process_exit
+            and not independent_process_failure
             and not bare_signal_failure
             and not spoofed_failed_gate
             and contradictory_state is None

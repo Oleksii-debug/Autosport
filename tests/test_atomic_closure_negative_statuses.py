@@ -1488,3 +1488,46 @@ def test_r122_powershell_failure_blocks_parent_done(tmp_path):
         .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
                  "| 2В | Native STOP | DONE — merged |"))
     rejected(tmp_path, registry=registry, atomic=atomic)
+
+# r123: A check can print a positive banner and then emit its real process
+# result as a separate semicolon clause or a structured diagnostic object.
+# The previous check-clause parser missed these and certified false DONE.
+@pytest.mark.parametrize("summary", [
+    'Windows Candidate: PASS; exit code: 1',
+    'Windows Candidate: PASS; exit code: 0xC0000005',
+    'Windows Candidate: PASS; returncode: 1',
+    'Windows Candidate: PASS; rc=1',
+    'Windows Candidate: PASS; {"exit_code": 1}',
+    'Windows Candidate: PASS; {"exit_code": "0xC0000005"}',
+    'Windows Candidate: PASS; {"returncode": 1}',
+    'Windows Candidate: PASS; {"signal": 11}',
+    'Windows Candidate: PASS; {"signal": "SIGSEGV"}',
+    'Windows Candidate: PASS; {"exit_code": "garbled"}',
+])
+def test_r123_structured_or_separated_process_failure_blocks_done(summary):
+    assert not module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+
+@pytest.mark.parametrize("summary", [
+    'Windows Candidate: PASS; exit code: 0',
+    'Windows Candidate: PASS; returncode: 0',
+    'Windows Candidate: PASS; rc=0',
+    'Windows Candidate: PASS; {"exit_code": 0}',
+    'Windows Candidate: PASS; {"returncode": "0x0"}',
+    'Windows Candidate: PASS; {"signal": 0}',
+    'previous Windows Candidate: {"exit_code": 1} fixed',
+])
+def test_r123_zero_or_historical_diagnostic_remains_nonblocking(summary):
+    assert module._is_terminal_done('DONE — merged; CI: SUCCESS; ' + summary)
+
+
+def test_r123_structured_failure_blocks_aggregate_parent_done(tmp_path):
+    registry = REGISTRY.replace('|2|IN_PROGRESS_NOT_DONE|', '|2|DONE|')
+    atomic = (ATOMIC
+        .replace('| 2А | WebView2 | IN_PROGRESS / NOT DONE |',
+                 '| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: PASS; {"exit_code": 1} |')
+        .replace('| 2Б | Navigation | IN_PROGRESS / NOT DONE |',
+                 '| 2Б | Navigation | DONE — merged |')
+        .replace('| 2В | Native STOP | IN_PROGRESS / NOT DONE |',
+                 '| 2В | Native STOP | DONE — merged |'))
+    rejected(tmp_path, registry=registry, atomic=atomic)

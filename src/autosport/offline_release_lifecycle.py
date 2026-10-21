@@ -255,7 +255,10 @@ def uninstall_verified_release(
     try:
         if root.stat().st_ino != identity.st_ino or root.stat().st_dev != identity.st_dev:
             raise OfflineInstallError("release directory changed before removal")
-        os.rename(root, moved)
+        # A competing same-user worker may create the quarantine entry after
+        # mkdtemp.  POSIX rename() would replace an empty directory there.
+        # Preserve the same atomic no-clobber invariant as install/upgrade.
+        _publish_directory_no_replace(root, moved)
         if moved.stat().st_ino != identity.st_ino or moved.stat().st_dev != identity.st_dev:
             raise OfflineInstallError("release directory identity changed")
         inspect_installed_release(

@@ -1520,6 +1520,45 @@ try {
     )
     $report.descendant_count = $descendants.Count
 
+    # Reuse the *already acquired* semantic tree. Do not initiate an
+    # additional unbounded desktop-wide UIA FindAll: known WebView2 providers
+    # can block the external watchdog. Count critical AutomationIds in the
+    # real observed process-family subtree and deny duplicates/partial reads.
+    $criticalIds = [System.Collections.Generic.HashSet[string]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    foreach ($spec in $expected) {
+        $null = $criticalIds.Add([string]$spec.automation_id)
+    }
+    $criticalCounts = [System.Collections.Generic.Dictionary[string,int]]::new(
+        [System.StringComparer]::Ordinal
+    )
+    if ($descendants.Count -gt 4096) {
+        $report.failures += 'external UIA critical identity scan exceeded bounded collection limit'
+    } else {
+        try {
+            foreach ($candidate in $descendants) {
+                if (-not ($lastFamilyIds -contains [int]$candidate.Current.ProcessId)) { continue }
+                $candidateId = [string]$candidate.Current.AutomationId
+                if (-not $criticalIds.Contains($candidateId)) { continue }
+                if ($criticalCounts.ContainsKey($candidateId)) {
+                    $criticalCounts[$candidateId] = $criticalCounts[$candidateId] + 1
+                } else {
+                    $criticalCounts.Add($candidateId, 1)
+                }
+            }
+            foreach ($spec in $expected) {
+                $expectedId = [string]$spec.automation_id
+                if ($criticalCounts.ContainsKey($expectedId) -and
+                    $criticalCounts[$expectedId] -gt 1) {
+                    $report.failures += "automation_id=$($expectedId): duplicate external UIA control identity"
+                }
+            }
+        } catch {
+            $report.failures += 'external UIA critical identity scan incomplete'
+        }
+    }
+
     foreach ($spec in $expected) {
         $element = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId ([string]$spec.automation_id)
         if ($null -eq $element) {

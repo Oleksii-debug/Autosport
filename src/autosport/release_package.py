@@ -14,6 +14,7 @@ from typing import Any
 
 from .release_sbom import validate_direct_dependency_metadata
 from .release_dependency_graph import validate_build_host_dependency_graph
+from .release_embedded_inventory import verify_pyinstaller_member_catalog
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
@@ -508,6 +509,7 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "src/autosport/workspace_lock.py",
     "src/autosport/monotonic_workspace_authority.py",
     "src/autosport/release_dependency_graph.py",
+    "src/autosport/release_embedded_inventory.py",
     "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
@@ -580,6 +582,7 @@ def build_windows_package(
     source_manifest: dict[str, Any] | None = None,
     dependency_metadata: dict[str, Any] | None = None,
     dependency_graph: dict[str, Any] | None = None,
+    embedded_inventory: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
     _require_git_commit_sha(source_sha, field="source_sha")
     if source_manifest is not None:
@@ -604,6 +607,8 @@ def build_windows_package(
         exe_path, start_file, example_dir, diagnostic_path,
         accessibility_path, keyboard_path, restart_recovery_path,
     )
+    if embedded_inventory is not None:
+        verify_pyinstaller_member_catalog(exe_path, embedded_inventory, source_sha)
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
         prefix=".autosport-release-stage-",
@@ -635,6 +640,8 @@ def build_windows_package(
             _write_json(package_dir / "DIRECT_DEPENDENCY_METADATA.json", dependency_metadata)
         if dependency_graph is not None:
             _write_json(package_dir / "DEPENDENCY_GRAPH_METADATA.json", dependency_graph)
+        if embedded_inventory is not None:
+            _write_json(package_dir / "EMBEDDED_ARCHIVE_INVENTORY.json", embedded_inventory)
 
         payload_hashes = {}
         for path in _sorted_package_files(package_dir):
@@ -672,6 +679,7 @@ def verify_windows_package(
     require_source_manifest: bool = False,
     require_dependency_metadata: bool = False,
     require_dependency_graph: bool = False,
+    require_embedded_inventory: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -765,6 +773,15 @@ def verify_windows_package(
         validate_build_host_dependency_graph(graph, source_manifest)
         if members["DEPENDENCY_GRAPH_METADATA.json"] != _canonical_json_bytes(graph):
             raise ValueError("build-host dependency graph is not canonical JSON")
+    if require_embedded_inventory and "EMBEDDED_ARCHIVE_INVENTORY.json" not in members:
+        raise ValueError("release package is missing embedded executable inventory")
+    if "EMBEDDED_ARCHIVE_INVENTORY.json" in members:
+        embedded = _decode_json_object(
+            members["EMBEDDED_ARCHIVE_INVENTORY.json"], "EMBEDDED_ARCHIVE_INVENTORY.json"
+        )
+        verify_pyinstaller_member_catalog(members["Autosport.exe"], embedded, expected_source_sha)
+        if members["EMBEDDED_ARCHIVE_INVENTORY.json"] != _canonical_json_bytes(embedded):
+            raise ValueError("embedded executable inventory is not canonical JSON")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")

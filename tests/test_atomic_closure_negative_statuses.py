@@ -1451,3 +1451,40 @@ def test_r119_colonless_windows_exit_blocks_parent_done(tmp_path):
         "| 2В | Native STOP | DONE — merged |",
     )
     rejected(tmp_path, registry=registry, atomic=atomic)
+
+
+# r122: A Windows/PowerShell native-process failure may be reported by
+# $LASTEXITCODE or a symbolic termination signal even when the wrapper's
+# preceding summary says PASS.  These are negative exact-gate evidence.
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: PASS ($LASTEXITCODE=1)",
+    "Windows Candidate: PASS (PowerShell $LASTEXITCODE 1)",
+    "Windows Candidate: PASS (return value 1)",
+    "Windows Candidate: PASS (terminated by SIGSEGV)",
+    "Windows Candidate: PASS (killed by SIGKILL)",
+    "Windows Candidate: PASS (ExitCode=0; signal SIGSEGV)",
+])
+def test_r122_powershell_exit_or_signal_cannot_certify_done(summary):
+    assert not module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+@pytest.mark.parametrize("summary", [
+    "Windows Candidate: PASS ($LASTEXITCODE=0)",
+    "Windows Candidate: PASS (return value 0)",
+    "Windows Candidate: PASS (ExitCode=0; signal 0)",
+    "previous Windows Candidate: PASS ($LASTEXITCODE=1), repaired",
+])
+def test_r122_zero_or_historical_powershell_exit_stays_accepted(summary):
+    assert module._is_terminal_done("DONE — merged; CI: SUCCESS; " + summary)
+
+
+def test_r122_powershell_failure_blocks_parent_done(tmp_path):
+    registry = REGISTRY.replace("|2|IN_PROGRESS_NOT_DONE|", "|2|DONE|")
+    atomic = (ATOMIC
+        .replace("| 2А | WebView2 | IN_PROGRESS / NOT DONE |",
+                 "| 2А | WebView2 | DONE — merged; CI: SUCCESS; Windows Candidate: PASS ($LASTEXITCODE=1) |")
+        .replace("| 2Б | Navigation | IN_PROGRESS / NOT DONE |",
+                 "| 2Б | Navigation | DONE — merged |")
+        .replace("| 2В | Native STOP | IN_PROGRESS / NOT DONE |",
+                 "| 2В | Native STOP | DONE — merged |"))
+    rejected(tmp_path, registry=registry, atomic=atomic)

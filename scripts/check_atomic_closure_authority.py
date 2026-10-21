@@ -1044,6 +1044,10 @@ def _is_terminal_done(value: str) -> bool:
         r"exit\s+(?:code|status)\s*[:=]?\s*|"
         r"exit[_-]?code\s*[:=]?\s*|return\s+code\s*[:=]?\s*|"
         r"return[_-]?code\s*[:=]?\s*|"
+        # PowerShell reports process status in $LASTEXITCODE; a failing
+        # native child must not be certified by an unrelated PASS banner.
+        r"last[_-]?exit[_-]?code\s*[:=]?\s*|"
+        r"return\s+value\s*[:=]?\s*|"
         r"process\s+returned\s+|returned\s+|"
         r"errorlevel\s*[:=]?\s*|rc\s*[:=]\s*)"
         r"\(?\s*(?P<code>[^\s,;()\[\]{}.!?]+)\s*\)?",
@@ -1085,7 +1089,8 @@ def _is_terminal_done(value: str) -> bool:
         # even when a wrapper misleadingly prints exit code 0. POSIX signal
         # numbers and symbolic SIG* names are negative evidence only.
         for signal in re.finditer(
-            r"\b(?:terminated\s+by\s+)?signal\s*[:=]?\s*(?P<signal>[0-9]+|SIG[A-Z0-9]+)\b",
+            r"\b(?:(?:terminated|killed)\s+by\s+(?:signal\s*)?|"
+            r"signal\s*[:=]?\s*)(?P<signal>[0-9]+|SIG[A-Z0-9]+)\b",
             detail, re.IGNORECASE,
         ):
             token = signal.group("signal")
@@ -1106,6 +1111,16 @@ def _is_terminal_done(value: str) -> bool:
         for pattern in (exit_clause, bare_exit_clause)
         for match in pattern.finditer(matrix_status_projection)
     )
+    # A semicolon may separate an exit-code clause from its crash signal,
+    # including inside a parenthesized Windows/CI diagnostic.  Do not lose
+    # the second failure merely because the bounded check-detail parser
+    # deliberately stops at semicolons.
+    bare_signal_failure = re.search(
+        r"(?:^|;)\s*(?:signal\s*[:=]?\s*|"
+        r"(?:terminated|killed)\s+by\s+(?:signal\s*)?)"
+        r"(?:SIG[A-Z0-9]+|[1-9][0-9]*)\b",
+        matrix_status_projection, re.IGNORECASE,
+    ) is not None
     spoofed_failed_gate = _has_spoofed_failed_gate(status_projection)
     unknown_failed_gate = (
         any(current_failure(match) for match in generic_failed_clause.finditer(matrix_status_projection))
@@ -1125,6 +1140,7 @@ def _is_terminal_done(value: str) -> bool:
             and not unknown_failed_gate
             and result_first_failed_gate is None
             and not failed_process_exit
+            and not bare_signal_failure
             and not spoofed_failed_gate
             and contradictory_state is None
             and not secondary_nonterminal

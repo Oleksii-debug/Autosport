@@ -203,6 +203,15 @@ def build_parser() -> argparse.ArgumentParser:
         command.add_argument("--destination", type=Path, required=True)
         command.add_argument("--source-sha", required=True)
         command.add_argument("--package-sha256", required=True)
+    interrupted_recovery = sub.add_parser(
+        "recover-uninstall-release",
+        help="restore interrupted PAPER uninstallation from the pinned original ZIP",
+    )
+    interrupted_recovery.add_argument("--quarantine", type=Path, required=True)
+    interrupted_recovery.add_argument("--archive", type=Path, required=True)
+    interrupted_recovery.add_argument("--destination", type=Path, required=True)
+    interrupted_recovery.add_argument("--source-sha", required=True)
+    interrupted_recovery.add_argument("--package-sha256", required=True)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -646,6 +655,15 @@ def main(argv: list[str] | None = None) -> int:
             return 3
         print(json.dumps(result, sort_keys=True, separators=(",", ":")))
         return 0
+    if args.command == "recover-uninstall-release":
+        from .offline_release_recovery import main as recovery_main
+        return recovery_main([
+            "--quarantine", str(args.quarantine),
+            "--archive", str(args.archive),
+            "--destination", str(args.destination),
+            "--source-sha", args.source_sha,
+            "--package-sha256", args.package_sha256,
+        ])
     if args.command == "gui":
         from .gui import main as gui_main
         return gui_main()

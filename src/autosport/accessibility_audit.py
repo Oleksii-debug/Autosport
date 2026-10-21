@@ -97,6 +97,14 @@ _BLOCKING_GAPS = {
     "CANNOT_BE_PRESSED",
     "LEFT_TO_THE_PROXY",
 }
+# UIA provider metadata is untrusted; exported machine evidence must not include
+# arbitrary widget paths, private accessible names or provider error messages.
+_PUBLIC_PATTERNS = frozenset({
+    "INVOKE", "VALUE", "SELECTION", "SELECTION_ITEM", "TEXT",
+    "TOGGLE", "RANGE_VALUE", "SCROLL", "EXPAND_COLLAPSE",
+})
+_PUBLIC_ROLES = frozenset(_EXPECTED_ROLES.values())
+_PUBLIC_GAPS = frozenset(_BLOCKING_GAPS)
 
 
 _PUBLIC_AUDIT_ERROR_TYPES = (
@@ -212,22 +220,29 @@ def summarize_description(
         normalized_automation_id = int(automation_id)
         if normalized_automation_id in controls:
             failures.append(
-                f"automation_id={normalized_automation_id}: duplicate critical control identity "
-                f"first_path={controls[normalized_automation_id]['path']} "
-                f"duplicate_path={widget.path}"
+                f"automation_id={normalized_automation_id}: duplicate critical control identity"
             )
             continue
-        gap_names = sorted(_enum_name(gap) for gap in widget.gaps if _enum_name(gap))
-        pattern_names = sorted(_enum_name(pattern) for pattern in widget.patterns if _enum_name(pattern))
-        role_name = _enum_name(widget.role)
+        observed_gaps = (_enum_name(gap) for gap in widget.gaps)
+        gap_names = sorted({
+            name if name in _PUBLIC_GAPS else "OTHER_GAP"
+            for name in observed_gaps if name
+        })
+        observed_patterns = (_enum_name(pattern) for pattern in widget.patterns)
+        pattern_names = sorted({
+            name if name in _PUBLIC_PATTERNS else "OTHER_PATTERN"
+            for name in observed_patterns if name
+        })
+        observed_role = _enum_name(widget.role)
+        role_name = observed_role if observed_role in _PUBLIC_ROLES else "UNRECOGNIZED"
         # A whitespace-only or non-text UIA Name is not an accessible label.
         # Keep exported evidence JSON-serializable even for malformed providers.
         accessible_name = widget.name if isinstance(widget.name, str) else ""
         controls[normalized_automation_id] = {
-            "path": widget.path,
-            "tk_class": widget.tk_class,
+            "path": "[redacted]",
+            "tk_class": "[redacted]",
             "role": role_name,
-            "name": accessible_name,
+            "name": "[present]" if accessible_name.strip() else "",
             "automation_id": normalized_automation_id,
             "patterns": pattern_names,
             "answers_rows": bool(widget.answers_rows),
@@ -292,17 +307,24 @@ def summarize_description(
                 f"automation_id={workbench_result_id}: manual calculation result is not runtime readonly"
             )
 
-    provider_trouble = [str(item) for item in description.provider_trouble]
+    # External UIA errors can include credentials, paths and account data.
+    provider_trouble = ["provider details redacted" for _ in description.provider_trouble]
     if provider_trouble:
-        failures.extend(f"provider trouble: {item}" for item in provider_trouble)
+        failures.extend("provider trouble: details redacted" for _ in provider_trouble)
 
     return {
         "status": "PASS" if not failures else "FAIL",
-        "strategy": _enum_name(description.strategy),
+        "strategy": (
+            "PROVIDER" if _enum_name(description.strategy) == "PROVIDER" else "UNRECOGNIZED"
+        ),
         "critical_controls": [controls[key] for key in sorted(controls)],
         "failures": failures,
         "provider_trouble": provider_trouble,
-        "providers_stood_down_because": description.providers_stood_down_because,
+        "providers_stood_down_because": (
+            "provider details redacted"
+            if description.providers_stood_down_because is not None
+            else None
+        ),
         "evidence_scope": (
             "in-process tk-uia annotation/provider audit plus runtime Tk readonly-state audit "
             "of the packaged Windows GUI and canonical product-shell controls, including the "

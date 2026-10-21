@@ -109,3 +109,40 @@ def test_bundled_evidence_is_on_real_windows_package_path():
     assert "DEPENDENCY_LICENSE_EVIDENCE.json" in package
     assert "require_dependency_license_evidence=True" in official
     assert "dependency_license_members=dependency_license_members" in official
+
+
+@pytest.mark.parametrize("foreign", [
+    "another_dist-1.2.3.dist-info/licenses/LICENSE.txt",
+    "example_dist-9.9.9.dist-info/licenses/LICENSE.txt",
+    "nested/example_dist-1.2.3.dist-info/licenses/LICENSE.txt",
+])
+def test_foreign_license_record_cannot_be_credited_to_distribution(
+    tmp_path: Path, monkeypatch, foreign: str,
+):
+    path = PurePosixPath(foreign)
+    (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / path).write_bytes(b"Foreign distribution copyright notice\n")
+    dist = _distribution(tmp_path, with_license=False)
+    dist.files = [path]
+    monkeypatch.setattr(subject.metadata, "distribution", lambda _: dist)
+    with pytest.raises(ValueError, match="RECORD origin mismatches"):
+        subject.capture_dependency_license_evidence(_graph())
+
+
+@pytest.mark.parametrize("origin", [
+    "another_dist-1.2.3.dist-info/licenses/LICENSE.txt",
+    "example_dist-9.9.9.dist-info/licenses/LICENSE.txt",
+    "example_dist-1.2.3.dist-info/licenses/secrets.txt",
+    "nested/example_dist-1.2.3.dist-info/licenses/LICENSE.txt",
+    "example_dist-1.2.3.dist-info/licenses/NOTICE.txt/../LICENSE.txt",
+])
+def test_resealed_license_evidence_rejects_foreign_or_non_license_origin(
+    tmp_path: Path, monkeypatch, origin: str,
+):
+    monkeypatch.setattr(subject.metadata, "distribution",
+                        lambda _: _distribution(tmp_path))
+    manifest, members = subject.capture_dependency_license_evidence(_graph())
+    forged = deepcopy(manifest)
+    forged["distributions"][0]["files"][0]["record_path"] = origin
+    with pytest.raises(ValueError, match="origin path is unsafe"):
+        subject.validate_dependency_license_evidence(forged, _graph(), members)

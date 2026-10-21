@@ -197,6 +197,24 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertFalse(upgrade._transaction_root(dest).exists())
 
 
+    def test_rejects_alias_to_same_installation_transaction_namespace(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            (root / "alias-parent").mkdir()
+            canonical = root / "Autosport Product"
+            aliased = root / "alias-parent" / ".." / "Autosport Product"
+            # Before this guard these identical real destinations obtained
+            # different transaction hashes and could bypass the pending lock.
+            self.assertEqual(canonical.resolve(), aliased.resolve())
+            self.assertNotEqual(str(canonical), str(aliased))
+            with self.assertRaisesRegex(
+                install.OfflineInstallError, "parent traversal"
+            ):
+                upgrade._transaction_root(aliased)
+            self.assertEqual(
+                upgrade._transaction_root(canonical).parent, root
+            )
+
     def test_upgrade_refuses_concurrent_previous_directory_without_replacement(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

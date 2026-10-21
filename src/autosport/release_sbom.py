@@ -292,6 +292,9 @@ def validate_embedded_executable_inventory(
             raise ValueError("nested PYZ module inventory is empty or unbounded")
         last_module = None
         windows_modules: set[str] = set()
+        # Each PYZ module is a separate compressed byte range. Independently
+        # in-bounds entries must not alias the same sealed executable bytes.
+        spans: list[tuple[int, int]] = []
         for module in modules:
             if type(module) is not dict or set(module) != {
                 "name", "typecode", "position", "packed_bytes",
@@ -320,6 +323,12 @@ def validate_embedded_executable_inventory(
                 or position > archive_size or length > archive_size - position
             ):
                 raise ValueError("nested PYZ module offset/type is invalid")
+            if length:
+                spans.append((position, position + length))
+        spans.sort()
+        for previous, following in zip(spans, spans[1:]):
+            if previous[1] > following[0]:
+                raise ValueError("nested PYZ module ranges overlap")
 
 
 def capture_embedded_executable_inventory(

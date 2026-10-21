@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 import hashlib
 import json
+import mmap
 import os
 import stat
 import subprocess
@@ -13,6 +14,7 @@ from pathlib import Path, PurePosixPath
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 from autosport.release_sbom import capture_direct_installed_dependencies
 from autosport.release_dependency_graph import capture_build_host_dependency_graph
+from autosport.windows_pe_integrity import validate_pe32plus_amd64
 from autosport.release_package import (
     _require_git_commit_sha,
     build_windows_package,
@@ -666,6 +668,22 @@ def _capture_verified_executable(
     )
 
 
+def _require_executable_pe32plus(path: Path) -> None:
+    """Inspect the exact already SHA-pinned snapshot, never the mutable input path.
+
+    mmap avoids a second full-sized executable allocation during Windows packaging.
+    The oracle checks PE32+ AMD64 structural identity, not signature authenticity.
+    """
+    try:
+        with path.open("rb") as handle:
+            with mmap.mmap(handle.fileno(), 0, access=mmap.ACCESS_READ) as binary:
+                validate_pe32plus_amd64(binary)
+    except (OSError, ValueError) as exc:
+        raise ValueError(
+            "verified Windows executable fails AMD64 PE32+ semantic preflight"
+        ) from exc
+
+
 def _capture_verified_evidence(
     source: Path,
     expected_sha256: str,
@@ -696,6 +714,7 @@ _RELEASE_SOURCE_INPUTS = (
     "src/autosport/workspace_lock.py",
     "src/autosport/monotonic_workspace_authority.py",
     "src/autosport/release_dependency_graph.py",
+    "src/autosport/windows_pe_integrity.py",
     "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
@@ -785,6 +804,10 @@ def main() -> int:
             snapshot_dir=snapshot_dir,
             snapshot_name="Autosport-Data.exe",
         )
+        # Both binaries are sealed snapshots before semantic inspection. Neither an
+        # arbitrary MZ stub nor a wrong-architecture DLL may reach the final ZIP.
+        _require_executable_pe32plus(trusted_exe)
+        _require_executable_pe32plus(trusted_data_exe)
         trusted_diagnostic = _capture_verified_evidence(
             args.diagnostic,
             args.diagnostic_sha256,

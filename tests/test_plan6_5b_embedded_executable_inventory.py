@@ -44,6 +44,23 @@ def test_actual_executable_digest_and_bounded_archive_members(tmp_path: Path) ->
     assert updated["executable_sha256"] != result["executable_sha256"]
 
 
+def test_executable_mutation_during_toc_capture_fails_closed(tmp_path: Path) -> None:
+    exe = tmp_path / "Autosport.exe"
+    exe.write_bytes(b"candidate")
+
+    class SwappingReader(Reader):
+        def __init__(self, path: str) -> None:
+            super().__init__(path)
+            # Same-length mutation after initial SHA read and while the archive
+            # reader is enumerating records: TOC and final digest cannot mix.
+            Path(path).write_bytes(b"candidaXe")
+
+    with pytest.raises(ValueError, match="changed during CArchive inventory"):
+        capture_embedded_executable_inventory(
+            exe, SOURCE, reader_factory=SwappingReader,
+        )
+
+
 @pytest.mark.parametrize("change", [
     lambda x: x.update(evidence_class="COMPLETE_SBOM_LICENSE_CLEARED"),
     lambda x: x.update(source_sha="b" * 40),

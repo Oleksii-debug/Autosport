@@ -75,7 +75,8 @@ def test_packaged_audit_attributes_process_kill_failure(tmp_path, monkeypatch) -
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["status"] == "FAIL"
     assert payload["phase"] == "process_kill_relaunch"
-    assert payload["error"] == "ValueError: process-kill-canary"
+    assert payload["error"] == "ValueError: details redacted"
+    assert "process-kill-canary" not in output.read_text(encoding="utf-8")
     assert payload["real_money_execution"] is False
     assert payload["human_tested"] is False
     assert payload["nvda_verified"] is False
@@ -93,7 +94,7 @@ def test_stage_child_broken_exception_string_still_publishes_fail_evidence(tmp_p
     assert process_audit.run_process_kill_stage_child(tmp_path / "workspace", ready) == 1
     payload = json.loads(ready.read_text(encoding="utf-8"))
     assert payload["status"] == "FAIL"
-    assert payload["error"] == "_BrokenStringError: exception details unavailable"
+    assert payload["error"] == "Exception: details redacted"
     assert payload["real_money_execution"] is False
 
 
@@ -108,7 +109,7 @@ def test_recovery_child_broken_exception_string_still_publishes_fail_evidence(tm
     assert process_audit.run_process_kill_recovery_child(tmp_path / "workspace", output) == 1
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["status"] == "FAIL"
-    assert payload["error"] == "_BrokenStringError: exception details unavailable"
+    assert payload["error"] == "Exception: details redacted"
     assert payload["real_money_execution"] is False
 
 
@@ -139,7 +140,7 @@ def test_packaged_audit_broken_exception_string_still_publishes_fail_evidence(tm
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["status"] == "FAIL"
     assert payload["phase"] == "process_kill_relaunch"
-    assert payload["error"] == "_BrokenStringError: exception details unavailable"
+    assert payload["error"] == "Exception: details redacted"
     assert payload["real_money_execution"] is False
     assert payload["human_tested"] is False
     assert payload["nvda_verified"] is False
@@ -159,7 +160,7 @@ def test_stage_child_hostile_exception_type_metadata_still_publishes_fail_eviden
     assert process_audit.run_process_kill_stage_child(tmp_path / "workspace", ready) == 1
     payload = json.loads(ready.read_text(encoding="utf-8"))
     assert payload["status"] == "FAIL"
-    assert payload["error"] == "_BrokenMetadataError: exception details unavailable"
+    assert payload["error"] == "Exception: details redacted"
     assert payload["real_money_execution"] is False
 
 
@@ -177,7 +178,7 @@ def test_recovery_child_hostile_exception_type_metadata_still_publishes_fail_evi
     assert process_audit.run_process_kill_recovery_child(tmp_path / "workspace", output) == 1
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["status"] == "FAIL"
-    assert payload["error"] == "_BrokenMetadataError: exception details unavailable"
+    assert payload["error"] == "Exception: details redacted"
     assert payload["real_money_execution"] is False
 
 
@@ -211,7 +212,7 @@ def test_packaged_audit_hostile_exception_type_metadata_still_publishes_fail_evi
     payload = json.loads(output.read_text(encoding="utf-8"))
     assert payload["status"] == "FAIL"
     assert payload["phase"] == "process_kill_relaunch"
-    assert payload["error"] == "_BrokenMetadataError: exception details unavailable"
+    assert payload["error"] == "Exception: details redacted"
     assert payload["real_money_execution"] is False
     assert payload["human_tested"] is False
     assert payload["nvda_verified"] is False

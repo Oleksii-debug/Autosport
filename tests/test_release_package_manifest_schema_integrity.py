@@ -7,7 +7,7 @@ import unittest
 import zipfile
 from pathlib import Path
 
-from autosport.release_package import build_windows_package, verify_windows_package
+from autosport.release_package import _write_canonical_zip, build_windows_package, verify_windows_package
 
 
 class ReleasePackageManifestSchemaIntegrityTests(unittest.TestCase):
@@ -131,6 +131,56 @@ class ReleasePackageManifestSchemaIntegrityTests(unittest.TestCase):
                         verify_windows_package(
                             package,
                             expected_source_sha=self.SOURCE_SHA,
+                        )
+
+    @staticmethod
+    def _reseal_with_version(package: Path, version: object) -> None:
+        """Prove forged but internally hash-consistent release versions are refused."""
+        with zipfile.ZipFile(package, "r") as archive:
+            members = {
+                item.filename: archive.read(item.filename)
+                for item in archive.infolist()
+            }
+        prefix = "Autosport-V1/"
+        info_name = prefix + "BUILD_INFO.json"
+        manifest_name = prefix + "PACKAGE_MANIFEST.json"
+        sums_name = prefix + "SHA256SUMS.txt"
+        info = json.loads(members[info_name])
+        info["version"] = version
+        info_payload = (
+            json.dumps(info, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        members[info_name] = info_payload
+        manifest = json.loads(members[manifest_name])
+        manifest["files"]["BUILD_INFO.json"] = hashlib.sha256(info_payload).hexdigest()
+        members[manifest_name] = (
+            json.dumps(manifest, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
+        ).encode("utf-8")
+        members[sums_name] = "".join(
+            f"{hashlib.sha256(members[name]).hexdigest()}  {name[len(prefix):]}\n"
+            for name in sorted(members)
+            if name != sums_name
+        ).encode("utf-8")
+        _write_canonical_zip(package, members)
+
+    def test_verifier_rejects_resealed_unapproved_build_version(self) -> None:
+        for version in (
+            "0.1.0-v1-real",
+            "0.1.0-v1-prehuman ",
+            "0.1.0-v1-prehuman\x00",
+            1,
+            True,
+            None,
+        ):
+            with self.subTest(version=repr(version)):
+                with tempfile.TemporaryDirectory() as temporary:
+                    package = self._build_valid_package(Path(temporary))
+                    self._reseal_with_version(package, version)
+                    with self.assertRaisesRegex(
+                        ValueError, "unsupported or ambiguous prehuman version"
+                    ):
+                        verify_windows_package(
+                            package, expected_source_sha=self.SOURCE_SHA
                         )
 
 

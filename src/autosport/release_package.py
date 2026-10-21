@@ -12,6 +12,7 @@ from typing import Any
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
+_PREHUMAN_BUILD_VERSION = "0.1.0-v1-prehuman"
 _WINDOWS_RESERVED_NAMES = {
     "con",
     "prn",
@@ -447,56 +448,59 @@ def build_windows_package(
     keyboard_path = Path(keyboard_path)
     restart_recovery_path = Path(restart_recovery_path)
     output_zip = Path(output_zip)
-    package_dir = output_zip.parent / "Autosport-V1"
-    if package_dir.exists():
-        shutil.rmtree(package_dir)
-    package_dir.mkdir(parents=True)
-    shutil.copy2(exe_path, package_dir / "Autosport.exe")
-    shutil.copy2(start_file, package_dir / "WINDOWS_START_HERE.txt")
-    shutil.copy2(diagnostic_path, package_dir / "packaged-diagnostic.json")
-    shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
-    shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
-    shutil.copy2(restart_recovery_path, package_dir / "restart-recovery-audit.json")
-    shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
+    output_zip.parent.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(
+        prefix=".autosport-release-stage-",
+        dir=output_zip.parent,
+    ) as staging_root:
+        package_dir = Path(staging_root) / "Autosport-V1"
+        package_dir.mkdir()
+        shutil.copy2(exe_path, package_dir / "Autosport.exe")
+        shutil.copy2(start_file, package_dir / "WINDOWS_START_HERE.txt")
+        shutil.copy2(diagnostic_path, package_dir / "packaged-diagnostic.json")
+        shutil.copy2(accessibility_path, package_dir / "accessibility-audit.json")
+        shutil.copy2(keyboard_path, package_dir / "keyboard-audit.json")
+        shutil.copy2(restart_recovery_path, package_dir / "restart-recovery-audit.json")
+        shutil.copytree(example_dir, package_dir / "examples" / example_dir.name)
 
-    build_info = {
-        "product": "Autosport",
-        "version": "0.1.0-v1-prehuman",
-        "source_sha": source_sha,
-        "autosport_exe_sha256": sha256_file(package_dir / "Autosport.exe"),
-        "real_money_execution": False,
-        "human_tested": False,
-        "nvda_verified": False,
-    }
-    _write_json(package_dir / "BUILD_INFO.json", build_info)
+        build_info = {
+            "product": "Autosport",
+            "version": _PREHUMAN_BUILD_VERSION,
+            "source_sha": source_sha,
+            "autosport_exe_sha256": sha256_file(package_dir / "Autosport.exe"),
+            "real_money_execution": False,
+            "human_tested": False,
+            "nvda_verified": False,
+        }
+        _write_json(package_dir / "BUILD_INFO.json", build_info)
 
-    payload_hashes = {}
-    for path in _sorted_package_files(package_dir):
-        relative = path.relative_to(package_dir).as_posix()
-        if relative == "SHA256SUMS.txt":
-            continue
-        payload_hashes[relative] = sha256_file(path)
-    _write_json(
-        package_dir / "PACKAGE_MANIFEST.json",
-        {"schema_version": 1, "files": payload_hashes},
-    )
+        payload_hashes = {}
+        for path in _sorted_package_files(package_dir):
+            relative = path.relative_to(package_dir).as_posix()
+            if relative == "SHA256SUMS.txt":
+                continue
+            payload_hashes[relative] = sha256_file(path)
+        _write_json(
+            package_dir / "PACKAGE_MANIFEST.json",
+            {"schema_version": 1, "files": payload_hashes},
+        )
 
-    lines = []
-    for path in _sorted_package_files(package_dir):
-        relative = path.relative_to(package_dir).as_posix()
-        if relative == "SHA256SUMS.txt":
-            continue
-        lines.append(f"{sha256_file(path)}  {relative}")
-    (package_dir / "SHA256SUMS.txt").write_bytes(
-        ("\n".join(lines) + "\n").encode("utf-8")
-    )
+        lines = []
+        for path in _sorted_package_files(package_dir):
+            relative = path.relative_to(package_dir).as_posix()
+            if relative == "SHA256SUMS.txt":
+                continue
+            lines.append(f"{sha256_file(path)}  {relative}")
+        (package_dir / "SHA256SUMS.txt").write_bytes(
+            ("\n".join(lines) + "\n").encode("utf-8")
+        )
 
-    archive_members = {
-        (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix(): path.read_bytes()
-        for path in _sorted_package_files(package_dir)
-    }
-    writer_sha = _write_canonical_zip(output_zip, archive_members)
-    return output_zip, writer_sha
+        archive_members = {
+            (Path("Autosport-V1") / path.relative_to(package_dir)).as_posix(): path.read_bytes()
+            for path in _sorted_package_files(package_dir)
+        }
+        writer_sha = _write_canonical_zip(output_zip, archive_members)
+        return output_zip, writer_sha
 
 
 def verify_windows_package(
@@ -562,6 +566,8 @@ def verify_windows_package(
     build_info = _decode_json_object(members["BUILD_INFO.json"], "BUILD_INFO.json")
     if build_info.get("product") != "Autosport":
         raise ValueError("BUILD_INFO product identity mismatch")
+    if type(build_info.get("version")) is not str or build_info.get("version") != _PREHUMAN_BUILD_VERSION:
+        raise ValueError("BUILD_INFO unsupported or ambiguous prehuman version")
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("BUILD_INFO source_sha does not match exact candidate head")
     _require_false_truth_labels(build_info, "BUILD_INFO.json")
@@ -677,6 +683,55 @@ def verify_windows_package(
     }
 
 
+_RELEASE_PRIVATE_OR_TEST_DIRECTORIES = frozenset({
+    ".aws", ".azure", ".mozilla", ".ssh", ".pytest_cache",
+    ".mypy_cache", ".ruff_cache", ".tox", "__pycache__", "user data",
+})
+_RELEASE_PRIVATE_OR_TEST_FILES = frozenset({
+    ".env", ".envrc", ".pypirc", "application_default_credentials.json",
+    "cookies", "cookies.json", "cookies.sqlite", "credentials",
+    "credentials.json", "key3.db", "key4.db", "local state",
+    "login data", "logins.json", "oauth_credentials.json",
+    "secrets.json", "secrets.toml", "token.json", "web data",
+    ".coverage", "coverage.xml", ".testmondata", "pytestdebug.log",
+    "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+})
+_RELEASE_SAFE_ENV_TEMPLATES = frozenset({
+    ".env.example", ".env.sample", ".env.template", ".env.dist",
+})
+_RELEASE_PRIVATE_KEY_STEMS = frozenset({
+    "id_dsa", "id_ecdsa", "id_ed25519", "id_rsa",
+})
+
+
+def _require_release_member_without_private_or_test_state(
+    relative_path: PurePosixPath,
+) -> None:
+    """Reject forbidden package bytes even if a ZIP's hashes were recomputed.
+
+    Build-time Git-tree screening is not sufficient: the verifier is also used
+    on externally supplied and repacked archives. Never trust a self-consistent
+    manifest to authorize cached tests or local credential material.
+    """
+    components = tuple(part.casefold() for part in relative_path.parts)
+    if any(part in _RELEASE_PRIVATE_OR_TEST_DIRECTORIES for part in components[:-1]):
+        raise ValueError("release package contains forbidden private/test state directory")
+    leaf = components[-1]
+    if (
+        leaf in _RELEASE_PRIVATE_OR_TEST_FILES
+        or (leaf.startswith(".env.") and leaf not in _RELEASE_SAFE_ENV_TEMPLATES)
+        or (leaf.startswith("client_secret") and leaf.endswith(".json"))
+        or leaf.startswith(".coverage.")
+        or leaf.endswith((".pyc", ".pyo", ".pfx", ".p12", ".ppk", ".key"))
+        or leaf.endswith((".session", ".session-journal"))
+        or (
+            leaf.endswith(".pem")
+            and ("private" in leaf or leaf[:-4] in _RELEASE_PRIVATE_KEY_STEMS)
+        )
+    ):
+        raise ValueError("release package contains forbidden private/test state file")
+
+
 def _validate_windows_member(name: str) -> tuple[str, str]:
     """Return canonical relative/member key or reject a path unsafe for Windows extraction."""
 
@@ -710,6 +765,7 @@ def _validate_windows_member(name: str) -> tuple[str, str]:
         if device_stem in _WINDOWS_RESERVED_NAMES:
             raise ValueError(f"release package contains reserved Windows device name: {name}")
         normalized_parts.append(component.casefold())
+    _require_release_member_without_private_or_test_state(relative_path)
     return relative, "/".join(normalized_parts)
 
 

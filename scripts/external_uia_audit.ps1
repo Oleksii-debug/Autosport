@@ -135,16 +135,20 @@ function Find-UiaRootForProcessFamily {
     return $null
 }
 
-function Find-UiaElementForProcessFamily {
+function Find-UiaElementsForProcessFamily {
     param(
         [int[]]$ProcessIds,
         [string]$AutomationId
     )
 
+    # Return every matching element, not FindFirst: duplicated AutomationIds
+    # must fail the external packaged UIA gate rather than silently pass.
     $condition = New-Object System.Windows.Automation.PropertyCondition(
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
         $AutomationId
     )
+    $foundMatches = @()
+    $scanFailed = $false
     try {
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         $windows = $desktop.FindAll(
@@ -152,18 +156,49 @@ function Find-UiaElementForProcessFamily {
             [System.Windows.Automation.Condition]::TrueCondition
         )
         foreach ($window in $windows) {
-            if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }
-            if ([string]$window.Current.AutomationId -eq $AutomationId) { return $window }
-            $element = $window.FindFirst(
-                [System.Windows.Automation.TreeScope]::Descendants,
-                $condition
-            )
-            if ($null -ne $element) { return $element }
+            try {
+                if (-not ($ProcessIds -contains [int]$window.Current.ProcessId)) { continue }
+                if ([string]$window.Current.AutomationId -eq $AutomationId) {
+                    $foundMatches += $window
+                }
+                $found = $window.FindAll(
+                    [System.Windows.Automation.TreeScope]::Descendants,
+                    $condition
+                )
+                foreach ($item in $found) {
+                    try {
+                        if ($ProcessIds -contains [int]$item.Current.ProcessId) {
+                            $foundMatches += $item
+                        }
+                    } catch {
+                        # Partial enumeration could hide a duplicate critical ID.
+                        $scanFailed = $true
+                    }
+                }
+            } catch {
+                # A disappearing window invalidates completeness of this scan.
+                $scanFailed = $true
+            }
         }
     } catch {
-        # The UIA tree may change while a dialog opens; bounded callers retry.
+        # Never return one apparent match from an incomplete UIA scan.
+        $scanFailed = $true
     }
-    return $null
+    if ($scanFailed) { return @() }
+    return $foundMatches
+}
+
+function Find-UiaElementForProcessFamily {
+    param(
+        [int[]]$ProcessIds,
+        [string]$AutomationId
+    )
+    # The manual workbench opener and dialog (330/331) use the singular
+    # lookup. Reject missing OR duplicate controls rather than selecting
+    # an arbitrary UIA match after the shared duplicate-detection change.
+    $matches = @(Find-UiaElementsForProcessFamily -ProcessIds $ProcessIds -AutomationId $AutomationId)
+    if ($matches.Count -ne 1) { return $null }
+    return $matches[0]
 }
 
 $report = [ordered]@{
@@ -208,8 +243,11 @@ try {
 
     $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
     $report.process_id = [int]$uiaRoot.Current.ProcessId
-    $report.root_name = [string]$uiaRoot.Current.Name
-    if ([string]::IsNullOrWhiteSpace($report.root_name)) {
+    # Do not serialize untrusted window titles (which can include user/private text).
+    $rootName = [string]$uiaRoot.Current.Name
+    $report.root_name = '[redacted]'
+    if ([string]::IsNullOrWhiteSpace($rootName)) {
+        $report.root_name = $null
         $report.failures += 'main window has no external UIA Name'
     }
 
@@ -244,16 +282,21 @@ try {
                 $report.failures += 'automation_id=331: manual calculation dialog did not become externally inspectable'
             }
         } catch {
-            $report.failures += "manual calculation dialog open failed: $($_.Exception.Message)"
+            $report.failures += "automation_id=330: manual calculation dialog activation failed"
         }
     }
 
     foreach ($spec in $expected) {
-        $element = Find-UiaElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId ([string]$spec.automation_id)
-        if ($null -eq $element) {
+        $matchedElements = @(Find-UiaElementsForProcessFamily -ProcessIds $lastFamilyIds -AutomationId ([string]$spec.automation_id))
+        if ($matchedElements.Count -eq 0) {
             $report.failures += "automation_id=$($spec.automation_id): not found by external UIA client"
             continue
         }
+        if ($matchedElements.Count -gt 1) {
+            $report.failures += "automation_id=$($spec.automation_id): duplicate external UIA control identity"
+            continue
+        }
+        $element = $matchedElements[0]
 
         $currentName = [string]$element.Current.Name
         $controlType = [string]$element.Current.ControlType.ProgrammaticName
@@ -283,10 +326,11 @@ try {
         }
         $record = [ordered]@{
             key = $spec.key
-            automation_id = [string]$element.Current.AutomationId
+            automation_id = [string]$spec.automation_id
             expected_name = $spec.name
-            name = $currentName
-            control_type = $controlType
+            # Only the trusted expected label (or a fixed failure marker) is exported.
+            name = $(if ($currentName -eq [string]$spec.name) { [string]$spec.name } else { '[redacted mismatch]' })
+            control_type = $(if ($controlType -eq [string]$spec.expected_control_type) { [string]$spec.expected_control_type } else { '[redacted mismatch]' })
             expected_control_type = $spec.expected_control_type
             keyboard_focusable = $focusable
             keyboard_focus_required_by_external_gate = [bool]$spec.require_external_focus
@@ -301,10 +345,10 @@ try {
         $report.controls += $record
 
         if ($currentName -ne $spec.name) {
-            $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch expected='$($spec.name)' actual='$currentName'"
+            $report.failures += "automation_id=$($spec.automation_id): external UIA Name mismatch"
         }
         if (-not [string]::IsNullOrWhiteSpace([string]$spec.expected_control_type) -and $controlType -ne [string]$spec.expected_control_type) {
-            $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch expected='$($spec.expected_control_type)' actual='$controlType'"
+            $report.failures += "automation_id=$($spec.automation_id): external UIA ControlType mismatch"
         }
         if ([bool]$spec.require_external_focus -and -not $focusable) {
             $report.failures += "automation_id=$($spec.automation_id): not externally keyboard-focusable"
@@ -330,7 +374,7 @@ try {
         $report.status = 'PASS'
     }
 } catch {
-    $report.failures += "$($_.Exception.GetType().Name): $($_.Exception.Message)"
+    $report.failures += 'external UIA audit failed: unexpected automation error'
 } finally {
     if ($null -ne $process) {
         try {

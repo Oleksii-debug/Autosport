@@ -1,3 +1,4 @@
+import json
 import tempfile
 import unittest
 from pathlib import Path
@@ -89,6 +90,37 @@ class AccessibilityAuditTests(unittest.TestCase):
             workbench_result_readonly=workbench_result_readonly,
         )
 
+    def test_exported_failure_does_not_leak_private_exception_text(self):
+        marker = "PLAN6_SYNTHETIC_PRIVATE_VALUE_20261021"
+        with tempfile.TemporaryDirectory() as directory:
+            destination = Path(directory) / "accessibility.json"
+            with patch.object(
+                accessibility_audit,
+                "WindowsAutosportApp",
+                side_effect=RuntimeError("provider_token=" + marker),
+            ):
+                self.assertEqual(accessibility_audit.run_accessibility_audit(destination), 1)
+            raw = destination.read_text(encoding="utf-8")
+            report = json.loads(raw)
+        self.assertNotIn(marker, raw)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertEqual(report["failures"], ["RuntimeError: details redacted"])
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+        self.assertFalse(report["real_money_execution"])
+
+    def test_untrusted_exception_class_and_stringification_are_private(self):
+        marker = "PLAN6_SYNTHETIC_CLASS_MARKER_20261021"
+        secret_exception = type(marker, (Exception,), {})
+        self.assertEqual(
+            accessibility_audit._safe_exception_detail(secret_exception("hidden=" + marker)),
+            "Exception: details redacted",
+        )
+        self.assertEqual(
+            accessibility_audit._safe_exception_detail(ValueError("hidden=" + marker)),
+            "ValueError: details redacted",
+        )
+
     def test_v1_replay_speed_contract_includes_event_jump_and_1000x(self):
         self.assertEqual(
             _SPEEDS,
@@ -128,6 +160,78 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["nvda_verified"])
         self.assertFalse(report["human_tested"])
 
+    def test_whitespace_and_malformed_critical_accessible_names_fail_closed(self):
+        for bad_name in (" \t\u00a0", object()):
+            with self.subTest(name_type=type(bad_name).__name__):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == AUTOMATION_IDS["run_replay"]
+                )
+                target.name = bad_name
+                report = self._summarize(description)
+
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={AUTOMATION_IDS['run_replay']}: missing accessible name",
+                    report["failures"],
+                )
+                # Machine-readable evidence must remain serializable when a
+                # malformed provider does not return a text UIA Name.
+                json.dumps(report, ensure_ascii=False)
+                found = next(
+                    control for control in report["critical_controls"]
+                    if control["automation_id"] == AUTOMATION_IDS["run_replay"]
+                )
+                self.assertIsInstance(found["name"], str)
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+
+    def test_unrecognized_critical_provider_gap_is_blocking_and_redacted(self):
+        description = self._passing_description()
+        target = next(
+            widget for widget in description.widgets
+            if widget.automation_id == AUTOMATION_IDS["run_replay"]
+        )
+        secret = "UNTRUSTED_UIA_PROVIDER_GAP_SECRET_20261021"
+        target.gaps = (_Named(secret),)
+        report = self._summarize(description)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertIn(
+            f"automation_id={AUTOMATION_IDS['run_replay']}: blocking gaps=OTHER_GAP",
+            report["failures"],
+        )
+        serialized = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(secret, serialized)
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
+
+    def test_critical_automation_id_rejects_numeric_aliases(self):
+        class IntAlias(int):
+            pass
+
+        expected_id = AUTOMATION_IDS["run_replay"]
+        for malformed_id in (float(expected_id), IntAlias(expected_id)):
+            with self.subTest(type=type(malformed_id).__name__):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == expected_id
+                )
+                target.automation_id = malformed_id
+                report = self._summarize(description)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={expected_id}: critical control not found",
+                    report["failures"],
+                )
+                self.assertNotIn(
+                    expected_id,
+                    [item["automation_id"] for item in report["critical_controls"]],
+                )
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+
     def test_duplicate_critical_automation_id_fails_closed_without_overwrite(self):
         description = self._passing_description()
         original = next(
@@ -156,8 +260,6 @@ class AccessibilityAuditTests(unittest.TestCase):
             any(
                 "duplicate critical control identity" in failure
                 and f"automation_id={original.automation_id}" in failure
-                and f"first_path={original.path}" in failure
-                and f"duplicate_path={duplicate.path}" in failure
                 for failure in report["failures"]
             )
         )
@@ -167,7 +269,40 @@ class AccessibilityAuditTests(unittest.TestCase):
             if item["automation_id"] == original.automation_id
         ]
         self.assertEqual(len(matching_controls), 1)
-        self.assertEqual(matching_controls[0]["path"], original.path)
+        self.assertEqual(matching_controls[0]["path"], "[redacted]")
+
+    def test_machine_uia_export_redacts_untrusted_provider_metadata(self):
+        marker = "SYNTHETIC_PRIVATE_UIA_PROVIDER_CREDENTIAL_20261021"
+        description = self._passing_description()
+        target = next(
+            widget for widget in description.widgets
+            if widget.automation_id == AUTOMATION_IDS["run_replay"]
+        )
+        target.path = "/home/operator/.secret/" + marker
+        target.tk_class = marker
+        target.name = "credential=" + marker
+        target.role = _Named(marker)
+        target.patterns = (_Named(marker),)
+        target.gaps = (_Named(marker),)
+        description.provider_trouble = (RuntimeError("token=" + marker),)
+        description.providers_stood_down_because = "account=" + marker
+
+        report = self._summarize(description)
+        exported = json.dumps(report, ensure_ascii=False)
+        self.assertNotIn(marker, exported)
+        self.assertEqual(report["status"], "FAIL")
+        self.assertTrue(any("unexpected accessible role" in f for f in report["failures"]))
+        self.assertTrue(any("missing UIA patterns" in f for f in report["failures"]))
+        self.assertTrue(any("provider trouble" in f for f in report["failures"]))
+        self.assertEqual(report["providers_stood_down_because"], "provider details redacted")
+        critical = next(
+            item for item in report["critical_controls"]
+            if item["automation_id"] == AUTOMATION_IDS["run_replay"]
+        )
+        self.assertEqual(critical["path"], "[redacted]")
+        self.assertEqual(critical["name"], "[present]")
+        self.assertFalse(report["human_tested"])
+        self.assertFalse(report["nvda_verified"])
 
     def test_missing_export_evidence_control_fails_closed(self):
         description = self._passing_description()

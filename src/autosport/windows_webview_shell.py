@@ -2016,10 +2016,17 @@ class AutosportWebController:
 
     def _action_surface_select(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         key = payload.get("surface_key")
-        if not isinstance(key, str) or key not in SURFACE_BY_KEY:
+        if type(key) is not str or key not in SURFACE_BY_KEY:
             return self._fail("Невідомий екран продукту.")
+        # The canonical persistence helper deliberately returns False rather
+        # than raising on disk/permission failure. Do not acknowledge a
+        # successful navigation or mutate the in-memory selection when the
+        # restart-visible selection was not actually committed.
+        if not save_surface_selection(self.workspace, key):
+            return self._fail(
+                "Не вдалося зберегти вибраний екран. Попередній екран залишено без змін."
+            )
         self.surface_key = key
-        save_surface_selection(self.workspace, key)
         return self._ok("")
 
     def _action_owner_preview(self, payload: Mapping[str, Any]) -> dict[str, Any]:

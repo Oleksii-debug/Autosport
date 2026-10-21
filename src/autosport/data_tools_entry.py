@@ -27,8 +27,8 @@ Usage:
   Autosport-Data.exe observe-continuous [autosport-observe-continuous arguments]
   Autosport-Data.exe run-product [autosport-product arguments]
   Autosport-Data.exe install-release --archive <release.zip> --destination <new-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
-  Autosport-Data.exe verify-installed-release --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
-  Autosport-Data.exe uninstall-release --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
+  Autosport-Data.exe verify-installed-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
+  Autosport-Data.exe uninstall-release --archive <original-release.zip> --destination <existing-install-folder> --source-sha <canonical-sha> --package-sha256 <published-sha256>
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
@@ -46,7 +46,7 @@ Commands:
   observe-continuous         Run the existing canonical bounded read-only observation service; network opt-in, environment credentials, durable status and stop semantics remain owned by autosport.continuous_observation.
   run-product                Run the existing canonical autonomous product runtime through autosport.product_entrypoint; arguments and exit status are delegated unchanged.
   install-release           Install verified canonical PAPER release to a NEW folder using independent SHA anchors, without replacing existing files.
-  verify-installed-release  Verify every installed PAPER file and exact receipt without modifying any files.
+  verify-installed-release  Compare installed PAPER files and receipt to the independently pinned original release ZIP.
   uninstall-release         Remove only a fully matching inventoried PAPER release, refusing unowned user data or modified files.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
   export-evidence            Export the canonical deterministic metadata-only workspace evidence manifest.

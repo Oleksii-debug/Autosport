@@ -9,6 +9,7 @@ from .gui import AutosportApp
 from .localization import text
 from .recovery_worker import OneShotRecoveryWorker, RecoverySessionView, recover_workspace_once
 from .replay_worker import workspace_for_strategy
+from .secret_redaction import redact_operator_text
 from .ui_model import evaluation_lines, result_summary, ticket_lines
 
 
@@ -29,7 +30,9 @@ def _safe_exception_detail(exc: BaseException) -> str:
             "ui.error.exception.message_unavailable",
             exception_type=exception_type,
         )
-    return f"{exception_type}: {detail}"
+    # Untrusted exception text can contain bookmaker tokens, credentialed URLs,
+    # or private environment secrets. Never copy it raw into dialogs or logs.
+    return f"{exception_type}: {redact_operator_text(detail)}"
 
 
 class WindowsAutosportApp(AutosportApp):

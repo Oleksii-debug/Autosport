@@ -60,9 +60,29 @@ def _require_sha256(value: object, *, field: str) -> str:
 
 
 def _decode_json_object(payload: bytes, label: str) -> dict[str, object]:
+    """Reject ambiguous JSON metadata before promoting a Windows archive.
+
+    A checksum authenticates bytes, not the interpretation of duplicate keys.
+    Keep release flags and manifests unambiguous across independent readers.
+    """
+    def unique_pairs(pairs: list[tuple[str, object]]) -> dict[str, object]:
+        result: dict[str, object] = {}
+        for key, value in pairs:
+            if key in result:
+                raise ValueError(f"{label} contains duplicate JSON keys")
+            result[key] = value
+        return result
+
+    def reject_non_json_constant(value: str) -> object:
+        raise ValueError(f"{label} contains non-JSON constant")
+
     try:
-        decoded = json.loads(payload.decode("utf-8"))
-    except (UnicodeDecodeError, json.JSONDecodeError) as exc:
+        decoded = json.loads(
+            payload.decode("utf-8"),
+            object_pairs_hook=unique_pairs,
+            parse_constant=reject_non_json_constant,
+        )
+    except (UnicodeDecodeError, json.JSONDecodeError, RecursionError) as exc:
         raise ValueError(f"{label} is not valid UTF-8 JSON") from exc
     if not isinstance(decoded, dict):
         raise ValueError(f"{label} is not a JSON object")
@@ -120,8 +140,10 @@ def _validate_manifest(
     if manifest_payload is None:
         raise ValueError(f"{label} is missing PACKAGE_MANIFEST.json")
     manifest = _decode_json_object(manifest_payload, "PACKAGE_MANIFEST.json")
-    if manifest.get("schema_version") != 1 or not isinstance(
-        manifest.get("files"), dict
+    if (
+        type(manifest.get("schema_version")) is not int
+        or manifest["schema_version"] != 1
+        or not isinstance(manifest.get("files"), dict)
     ):
         raise ValueError("PACKAGE_MANIFEST.json schema is invalid")
 

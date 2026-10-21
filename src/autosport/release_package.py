@@ -13,6 +13,7 @@ from pathlib import Path, PurePosixPath
 from typing import Any
 
 from .release_sbom import validate_direct_dependency_metadata
+from .release_dependency_graph import validate_build_host_dependency_graph
 
 _FIXED_ZIP_TIME = (1980, 1, 1, 0, 0, 0)
 _PACKAGE_PREFIX = "Autosport-V1/"
@@ -498,6 +499,15 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
     "src/autosport/release_sbom.py",
+    # Bind the shipped operator configuration and durable on-disk schema
+    # authorities to the same immutable exact-Git release source declaration.
+    "src/autosport/windows_entry.py",
+    "src/autosport/windows_layout.py",
+    "src/autosport/paths.py",
+    "src/autosport/storage.py",
+    "src/autosport/workspace_lock.py",
+    "src/autosport/monotonic_workspace_authority.py",
+    "src/autosport/release_dependency_graph.py",
     "scripts/build_windows.ps1",
     "scripts/build_windows_candidate.ps1",
     ".github/workflows/windows-build.yml",
@@ -569,6 +579,7 @@ def build_windows_package(
     *,
     source_manifest: dict[str, Any] | None = None,
     dependency_metadata: dict[str, Any] | None = None,
+    dependency_graph: dict[str, Any] | None = None,
 ) -> tuple[Path, str]:
     _require_git_commit_sha(source_sha, field="source_sha")
     if source_manifest is not None:
@@ -577,6 +588,10 @@ def build_windows_package(
         if source_manifest is None:
             raise ValueError("dependency metadata requires source declarations")
         validate_direct_dependency_metadata(dependency_metadata, source_manifest)
+    if dependency_graph is not None:
+        if source_manifest is None:
+            raise ValueError("build-host graph requires source declarations")
+        validate_build_host_dependency_graph(dependency_graph, source_manifest)
     exe_path = Path(exe_path)
     start_file = Path(start_file)
     example_dir = Path(example_dir)
@@ -618,6 +633,8 @@ def build_windows_package(
             _write_json(package_dir / "SOURCE_MANIFEST.json", source_manifest)
         if dependency_metadata is not None:
             _write_json(package_dir / "DIRECT_DEPENDENCY_METADATA.json", dependency_metadata)
+        if dependency_graph is not None:
+            _write_json(package_dir / "DEPENDENCY_GRAPH_METADATA.json", dependency_graph)
 
         payload_hashes = {}
         for path in _sorted_package_files(package_dir):
@@ -654,6 +671,7 @@ def verify_windows_package(
     expected_source_sha: str,
     require_source_manifest: bool = False,
     require_dependency_metadata: bool = False,
+    require_dependency_graph: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -736,6 +754,17 @@ def verify_windows_package(
         validate_direct_dependency_metadata(direct_metadata, source_manifest)
         if members["DIRECT_DEPENDENCY_METADATA.json"] != _canonical_json_bytes(direct_metadata):
             raise ValueError("direct dependency metadata is not canonical JSON")
+    if require_dependency_graph and "DEPENDENCY_GRAPH_METADATA.json" not in members:
+        raise ValueError("release package is missing build-host dependency graph")
+    if "DEPENDENCY_GRAPH_METADATA.json" in members:
+        if "SOURCE_MANIFEST.json" not in members:
+            raise ValueError("build-host dependency graph has no source declarations")
+        graph = _decode_json_object(
+            members["DEPENDENCY_GRAPH_METADATA.json"], "DEPENDENCY_GRAPH_METADATA.json"
+        )
+        validate_build_host_dependency_graph(graph, source_manifest)
+        if members["DEPENDENCY_GRAPH_METADATA.json"] != _canonical_json_bytes(graph):
+            raise ValueError("build-host dependency graph is not canonical JSON")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")

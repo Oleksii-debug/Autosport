@@ -11,7 +11,12 @@ from enum import Enum
 from pathlib import Path
 from typing import Any, Mapping
 
-from .real_execution_ledger import ExecutionAction, ExecutionPlan
+from .real_execution_ledger import (
+    ExecutionAction,
+    ExecutionPlan,
+    _MAX_EXECUTION_DECIMAL_TEXT_LENGTH,
+    _validate_decimal_text_resource_bound,
+)
 
 
 _SCHEMA_VERSION = 2
@@ -77,19 +82,42 @@ def _timestamp_text(value: datetime) -> str:
 
 
 def _decimal(value: object, name: str, *, allow_zero: bool = False) -> Decimal:
-    try:
-        parsed = value if isinstance(value, Decimal) else Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError) as exc:
-        raise ValueError(f"{name} must be a finite Decimal") from exc
+    """Admit finite exact economics before Decimal can expand to fixed-point text."""
+    if type(value) is Decimal:
+        parsed = value
+    elif type(value) is str:
+        if len(value) > _MAX_EXECUTION_DECIMAL_TEXT_LENGTH:
+            raise ValueError("decimal input text exceeds resource limit")
+        try:
+            parsed = Decimal(value)
+        except (InvalidOperation, ValueError) as exc:
+            raise ValueError(f"{name} must be a finite Decimal") from exc
+    elif type(value) is int:
+        # A base-10 integer within the canonical limit needs fewer than 4N bits.
+        if value.bit_length() > _MAX_EXECUTION_DECIMAL_TEXT_LENGTH * 4:
+            raise ValueError("decimal integer input exceeds resource limit")
+        parsed = Decimal(value)
+    else:
+        raise ValueError(f"{name} must be a Decimal, decimal string, or int")
     if not parsed.is_finite() or parsed < 0 or (not allow_zero and parsed == 0):
         comparator = ">= 0" if allow_zero else "> 0"
         raise ValueError(f"{name} must be finite and {comparator}")
+    _validate_decimal_text_resource_bound(parsed)
     return parsed
 
 
+def _preflight_decimal_text_fields(*values: Decimal | None) -> None:
+    """Reject any oversized economic sibling before formatting the first one."""
+    for value in values:
+        if value is None:
+            continue
+        if type(value) is not Decimal or not value.is_finite():
+            raise ValueError("Decimal must be finite")
+        _validate_decimal_text_resource_bound(value)
+
+
 def _decimal_text(value: Decimal) -> str:
-    if not value.is_finite():
-        raise ValueError("Decimal must be finite")
+    _preflight_decimal_text_fields(value)
     return format(value, "f")
 
 
@@ -279,6 +307,7 @@ class PaperExecutionEvidenceRecord:
             raise ValueError("rejected/unknown evidence cannot claim accepted odds/stake")
 
     def to_dict(self) -> dict[str, Any]:
+        _preflight_decimal_text_fields(self.accepted_odds, self.accepted_stake)
         return {
             "action_id": self.action_id,
             "bookmaker_id": self.bookmaker_id,
@@ -521,6 +550,10 @@ class PaperLegAttempt:
             raise ValueError("rejected/unknown attempt cannot claim execution odds/stake")
 
     def to_dict(self) -> dict[str, Any]:
+        _preflight_decimal_text_fields(
+            self.decision_odds, self.requested_stake,
+            self.execution_odds, self.execution_stake,
+        )
         return {
             "attempt_id": self.attempt_id,
             "run_id": self.run_id,

@@ -74,6 +74,10 @@ public sealed class AutosportUiaNotificationBuffer
     private AutosportUiaNotificationRecord[] _items = new AutosportUiaNotificationRecord[16];
     private int _head = 0;
     private int _count = 0;
+    // External UIA callbacks are untrusted. Bound retained event count/text.
+    private const int MaxBufferedEvents = 10000;
+    private const int MaxEventTextCharacters = 8192;
+    private int _dropped = 0;
 
     public int Count
     {
@@ -85,6 +89,16 @@ public sealed class AutosportUiaNotificationBuffer
     public void Enqueue(AutosportUiaNotificationRecord item)
     {
         if (item == null) throw new ArgumentNullException(nameof(item));
+        // An event flood/oversized provider field must never cause an unbounded
+        // allocation or a false PASS. Record overflow without private text.
+        if (_count >= MaxBufferedEvents ||
+            (item.DisplayString != null && item.DisplayString.Length > MaxEventTextCharacters) ||
+            (item.ActivityId != null && item.ActivityId.Length > 256) ||
+            (item.SenderAutomationId != null && item.SenderAutomationId.Length > 256))
+        {
+            if (_dropped < int.MaxValue) _dropped++;
+            return;
+        }
         if (_count == _items.Length)
         {
             var bigger = new AutosportUiaNotificationRecord[checked(_items.Length * 2)];
@@ -95,6 +109,12 @@ public sealed class AutosportUiaNotificationBuffer
         }
         _items[(_head + _count) % _items.Length] = item;
         _count++;
+    }
+
+    public int Dropped
+    {
+        [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.Synchronized)]
+        get { return _dropped; }
     }
 
     [System.Runtime.CompilerServices.MethodImpl(System.Runtime.CompilerServices.MethodImplOptions.Synchronized)]
@@ -484,7 +504,10 @@ try {
 
     $listenStage = 'COLLECT'
     $raw = $null
-    while ($recorder.Records.TryDequeue([ref]$raw)) {
+    # A provider may continue delivering events while we collect. Use a fixed
+    # upper bound and O(n) list accumulation, never repeated array concatenation.
+    $eventRecords = [System.Collections.Generic.List[object]]::new()
+    while ($eventRecords.Count -lt 10000 -and $recorder.Records.TryDequeue([ref]$raw)) {
         $display = [string]$raw.DisplayString
         $record = [ordered]@{
             observed_at_utc = [string]$raw.ObservedAtUtc
@@ -499,7 +522,11 @@ try {
         if ($IncludeDisplayString) {
             $record.display_string = $display
         }
-        $report.events += $record
+        $eventRecords.Add($record)
+    }
+    $report.events = @($eventRecords.ToArray())
+    if ($recorder.Records.Dropped -gt 0 -or $recorder.Records.Count -gt 0) {
+        $report.failures += 'UIA notification event capture exceeded safe bounds'
     }
 
     $listenStage = 'VERIFY'

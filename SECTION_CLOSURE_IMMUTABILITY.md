@@ -26,3 +26,21 @@ Normal workers must skip Sections 0, 1 and 2 and select the earliest unfinished 
 
 Owner directive recorded 2026-10-07.
 
+## Plan 6 atomic terminal locks (canonical multi-plan register; 2026-10-21)
+
+The atomic identifiers below are distinct from the legacy Section 0–2 identifiers above. They are terminal in `MULTI_PLAN_CLOSURE_STATE.md` and `ATOMIC_OPEN_SECTIONS_2026-10-13.md` on the inspected `main@d4dc137a4ca498f9848af1c4c492c4e4eca569bf`. This paragraph **does not** reopen or requalify an already completed feature, claim a new CI PASS, or declare Plan 6 itself complete.
+
+| Plan 6 atomic Section | State | Existing accepted closure basis (no new implementation) |
+| --- | --- | --- |
+| 1А | DONE_IMMUTABLE | Ukrainian localization/source accessibility; PR #1303 and canonical Plan 6 §1 DONE. |
+| 1Б | DONE_IMMUTABLE | Inherited terminal §1 critical localization/semantic CI contract. |
+| 1В | DONE_IMMUTABLE | Inherited terminal §1 source keyboard/NVDA semantics; **not** physical NVDA attestation. |
+| 3Б | DONE_IMMUTABLE | Unsupported bookmaker surfaces visible-disabled with truthful reason; PR #2292; PAPER/SHADOW remains usable. |
+| 3В | DONE_IMMUTABLE | Deterministic focus, recovery and actionable status; PR #2297. |
+| 4А | DONE_IMMUTABLE | Canonical accessibility auditing, UIA/keyboard provenance and evidence export; PR #2289. |
+| 4В | DONE_IMMUTABLE | Machine audit does not falsely claim human/NVDA verification; existing qualified source, PR #2289. |
+| 5А | DONE_IMMUTABLE | Existing Windows package/build/start/supply-chain source reuse; PR #2290. |
+| 5В | DONE_IMMUTABLE | Fixture-only signing and update primitives; PR #2318; no production signed installer claimed. |
+| 6В | DONE_IMMUTABLE | Canonical private offline backup/fresh-root restore and Plan 5 lock coordination; PR #2325. |
+
+**Scope boundary:** Plan 6 §2А–2В, §3А, §4Б, §5Б, §6А–6Б, §7А–7В and their unfinished aggregate parents are **not** marked DONE here. Plan 7 M1 and Plan 8 remain separate. Neither external real-money betting nor physical Windows/NVDA tests are represented as having been done. Normal agents must skip the terminal atomic sections above unless they first record a concrete `REOPENED` reason under this file's rule. The exact integration/test evidence for each accepted closure remains in the canonical multi-plan register and linked evidence files, not redefined by this skip-list.

@@ -161,7 +161,9 @@ def test_external_uia_export_redacts_untrusted_element_and_window_names() -> Non
     """UIA provider names can contain private text; report and console stay bounded."""
     audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
     assert "$report.root_name = [string]$uiaRoot.Current.Name" not in audit
-    assert "$report.root_name = if ([string]::IsNullOrWhiteSpace($rootName)) { $null } else { '[redacted]' }" in audit
+    assert "$report.root_name = '[redacted]'" in audit
+    assert "if ([string]::IsNullOrWhiteSpace($rootName)) {" in audit
+    assert "$report.root_name = $null" in audit
     assert "name = $currentName" not in audit
     assert "name = $(if ($currentName -eq [string]$spec.name)" in audit
     assert "'[redacted mismatch]'" in audit

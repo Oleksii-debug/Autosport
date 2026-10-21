@@ -206,6 +206,32 @@ class AccessibilityAuditTests(unittest.TestCase):
         self.assertFalse(report["human_tested"])
         self.assertFalse(report["nvda_verified"])
 
+    def test_critical_automation_id_rejects_numeric_aliases(self):
+        class IntAlias(int):
+            pass
+
+        expected_id = AUTOMATION_IDS["run_replay"]
+        for malformed_id in (float(expected_id), IntAlias(expected_id)):
+            with self.subTest(type=type(malformed_id).__name__):
+                description = self._passing_description()
+                target = next(
+                    widget for widget in description.widgets
+                    if widget.automation_id == expected_id
+                )
+                target.automation_id = malformed_id
+                report = self._summarize(description)
+                self.assertEqual(report["status"], "FAIL")
+                self.assertIn(
+                    f"automation_id={expected_id}: critical control not found",
+                    report["failures"],
+                )
+                self.assertNotIn(
+                    expected_id,
+                    [item["automation_id"] for item in report["critical_controls"]],
+                )
+                self.assertFalse(report["human_tested"])
+                self.assertFalse(report["nvda_verified"])
+
     def test_duplicate_critical_automation_id_fails_closed_without_overwrite(self):
         description = self._passing_description()
         original = next(

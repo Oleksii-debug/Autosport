@@ -17,6 +17,7 @@ from autosport.release_sbom import (
     capture_dependency_license_evidence,
 )
 from autosport.release_dependency_graph import capture_build_host_dependency_graph
+from autosport.release_binary_attribution import capture_binary_module_attribution
 from autosport.windows_pe_integrity import validate_pe32plus_amd64
 from autosport.release_package import (
     _require_git_commit_sha,
@@ -708,6 +709,7 @@ _RELEASE_SOURCE_INPUTS = (
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
     "src/autosport/release_sbom.py",
+    "src/autosport/release_binary_attribution.py",
     "src/autosport/data_tool_package.py",
     # Bind the shipped operator configuration and durable on-disk schema
     # authorities to the same immutable exact-Git release source declaration.
@@ -828,6 +830,11 @@ def main() -> int:
         data_embedded_inventory = capture_embedded_executable_inventory(
             trusted_data_exe, args.source_sha, include_nested_pyz=True,
         )
+        # Host ownership mappings are review-only hints for binary PYZ modules.
+        # They do not claim executable wheel provenance or legal license approval.
+        binary_attribution = capture_binary_module_attribution(
+            dependency_graph, embedded_inventory,
+        )
         trusted_diagnostic = _capture_verified_evidence(
             args.diagnostic,
             args.diagnostic_sha256,
@@ -869,6 +876,7 @@ def main() -> int:
             dependency_license_manifest=dependency_license_manifest,
             dependency_license_members=dependency_license_members,
             embedded_executable_inventory=embedded_inventory,
+            binary_module_attribution=binary_attribution,
         )
         binding = bind_portable_data_tool(
             output,
@@ -885,6 +893,7 @@ def main() -> int:
         require_dependency_graph=True,
         require_dependency_license_evidence=True,
         require_embedded_executable_inventory=True,
+        require_binary_module_attribution=True,
     )
     package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(

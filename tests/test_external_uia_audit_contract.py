@@ -105,3 +105,16 @@ def test_external_uia_audit_fails_closed_on_writable_readonly_value() -> None:
     assert "value_read_only = $valueReadOnly" in audit
     assert "$valueReadOnlyRequired -and $valueReadOnly -ne $true" in audit
     assert "external UIA ValuePattern is writable or read-only state unavailable" in audit
+
+def test_external_uia_audit_rejects_duplicate_critical_automation_ids() -> None:
+    audit = _EXTERNAL_UIA_AUDIT.read_text(encoding="utf-8")
+
+    # FindFirst used to accept the first matching control despite a duplicate.
+    assert "function Find-UiaElementsForProcessFamily" in audit
+    assert "$found = $window.FindAll(" in audit
+    assert "[System.Windows.Automation.TreeScope]::Descendants" in audit
+    assert "$ProcessIds -contains [int]$item.Current.ProcessId" in audit
+    assert "$matchedElements.Count -eq 0" in audit
+    assert "$matchedElements.Count -gt 1" in audit
+    assert "duplicate external UIA control identity" in audit
+    assert "FindFirst(" not in audit

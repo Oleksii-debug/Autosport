@@ -190,6 +190,14 @@ def build_parser() -> argparse.ArgumentParser:
     install.add_argument("--destination", required=True, type=Path)
     install.add_argument("--source-sha", required=True)
     install.add_argument("--package-sha256", required=True)
+    uninstall = sub.add_parser(
+        "uninstall-release",
+        help="remove only an unchanged, independently SHA-pinned offline PAPER release",
+    )
+    uninstall.add_argument("--archive", required=True, type=Path)
+    uninstall.add_argument("--destination", required=True, type=Path)
+    uninstall.add_argument("--source-sha", required=True)
+    uninstall.add_argument("--package-sha256", required=True)
     sub.add_parser("gui", help="launch Windows-oriented GUI")
     return parser
 
@@ -607,6 +615,14 @@ def main(argv: list[str] | None = None) -> int:
     if args.command == "install-release":
         from .offline_release_install import main as offline_install_main
         return offline_install_main([
+            "--archive", str(args.archive),
+            "--destination", str(args.destination),
+            "--source-sha", args.source_sha,
+            "--package-sha256", args.package_sha256,
+        ])
+    if args.command == "uninstall-release":
+        from .offline_release_uninstall import main as offline_uninstall_main
+        return offline_uninstall_main([
             "--archive", str(args.archive),
             "--destination", str(args.destination),
             "--source-sha", args.source_sha,

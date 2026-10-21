@@ -864,9 +864,16 @@
     });
   });
   byId(335).addEventListener("click", async () => {
-    byId(332).value = "";
-    await dispatch("manual.clear");
-    byId(332).focus();
+    // Keep the operator's input if the backend rejects the clear, or the
+    // bridge outcome is unknown; only a confirmed clear may erase the draft.
+    const input = byId(332);
+    const pendingDraft = input.value;
+    const result = await dispatch("manual.clear");
+    // Never erase newer text entered while the asynchronous request ran.
+    // dispatch() already handles focus from the server-confirmed response.
+    if (result && result.status === "completed" && input.value === pendingDraft) {
+      input.value = "";
+    }
   });
 
   function hasShortcutModifier(event) {

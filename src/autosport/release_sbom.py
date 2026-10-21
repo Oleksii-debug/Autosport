@@ -582,18 +582,19 @@ def capture_dependency_license_evidence(
             parts = source_name.split("/")
             leaf = parts[-1]
             stem = leaf.split(".", 1)[0].upper()
+            allowed_name = (
+                leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+                or (
+                    stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+                    and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
+                )
+            )
             if (
-                len(source_name) <= 512 and parts
+                1 <= len(source_name) <= 512
                 and all(part not in ("", ".", "..") for part in parts)
+                and all(":" not in part and "\\x00" not in part for part in parts)
                 and any(part.endswith(".dist-info") for part in parts[:-1])
-                and stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
-                and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
-                    or (
-                        len(source_name) <= 512 and parts
-                        and all(part not in ("", ".", "..") for part in parts)
-                        and any(part.endswith(".dist-info") for part in parts[:-1])
-                        and leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
-                    )
+                and allowed_name
             ):
                 candidates.append((source_name, entry))
         if len(candidates) > 16:

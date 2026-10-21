@@ -69,8 +69,8 @@ def _census(data_exe: Path) -> dict:
     return capture_embedded_executable_inventory(
         data_exe, SOURCE,
         reader_factory=lambda _: SimpleNamespace(
-            toc={"PYZ.pyz": (0, 30, 60, True, "z"),
-                 "python312.dll": (30, 40, 70, True, "b")},
+            toc={"PYZ.pyz": (0, 10, 16, True, "z"),
+                 "python312.dll": (10, 12, 20, True, "b")},
         ),
     )
 

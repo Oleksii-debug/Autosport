@@ -99,18 +99,24 @@ _BLOCKING_GAPS = {
 }
 
 
-def _safe_exception_detail(exc: Exception) -> str:
-    """Render audit failure evidence without trusting exception formatting."""
+_PUBLIC_AUDIT_ERROR_TYPES = (
+    AssertionError, ConnectionError, FileNotFoundError, KeyError, OSError,
+    PermissionError, RuntimeError, TimeoutError, TypeError, ValueError,
+)
 
-    try:
-        exception_type = type.__getattribute__(type(exc), "__name__")
-    except BaseException:
-        exception_type = "Exception"
-    try:
-        rendered = str.__str__(str(exc))
-    except BaseException:
-        rendered = "exception details unavailable"
-    return f"{exception_type}: {rendered}"
+
+def _safe_exception_detail(exc: Exception) -> str:
+    """Return a fixed diagnostic category without exporting arbitrary private text.
+
+    UI/provider exceptions can contain access tokens, filesystem paths, account
+    identifiers or untrusted type metadata. Accessibility reports are exportable.
+    """
+    error_type = type(exc)
+    category = next(
+        (builtin.__name__ for builtin in _PUBLIC_AUDIT_ERROR_TYPES if error_type is builtin),
+        "Exception",
+    )
+    return f"{category}: details redacted"
 
 
 def _enum_name(value: Any) -> str | None:

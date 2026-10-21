@@ -107,3 +107,51 @@ def test_windows_reserved_device_name_never_enters_backup() -> None:
         _safe_relative("CON.txt")
     with pytest.raises(WorkspaceBackupError, match="nonportable"):
         _safe_relative("session/LPT1.txt")
+
+
+@pytest.mark.parametrize(
+    "name",
+    [
+        "COM¹.txt",
+        "nested/LPT².txt",
+        "nested/COM³",
+        "bad?.json",
+        "bad|name.txt",
+        "bad<name.txt",
+        'bad"name.txt',
+        "bad\x01name.txt",
+        "autosport_backup_manifest.JSON",
+        "nested/.ECONOMIC-RUN.LOCK",
+        "nested/\ud800",
+    ],
+)
+def test_reject_windows_nonportable_or_reserved_member_names(name: str) -> None:
+    from autosport.workspace_backup import _safe_relative
+
+    with pytest.raises(WorkspaceBackupError, match="nonportable|reserved"):
+        _safe_relative(name)
+
+
+def test_reject_windows_case_colliding_archive_entries(tmp_path: Path) -> None:
+    archive = tmp_path / "case-colliding.zip"
+    with zipfile.ZipFile(archive, "w") as z:
+        z.writestr("Report.txt", b"A")
+        z.writestr("report.TXT", b"B")
+        z.writestr("AUTOSPORT_BACKUP_MANIFEST.json", b"{}")
+    target = tmp_path / "restored"
+    with pytest.raises(WorkspaceBackupError, match="case-colliding"):
+        restore_workspace(archive, target)
+    assert not target.exists()
+
+
+def test_backup_rejects_windows_case_colliding_files(tmp_path: Path) -> None:
+    root = tmp_path / "workspace"
+    root.mkdir()
+    (root / "Report.txt").write_text("A", encoding="utf-8")
+    second = root / "report.TXT"
+    if second.exists():
+        pytest.skip("filesystem cannot materialize case-colliding source files")
+    second.write_text("B", encoding="utf-8")
+    with pytest.raises(WorkspaceBackupError, match="case-colliding"):
+        backup_workspace(root, tmp_path / "private.zip")
+    assert not (tmp_path / "private.zip").exists()

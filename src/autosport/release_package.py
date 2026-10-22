@@ -688,12 +688,18 @@ def _copy_release_regular_source(
         current = source.lstat()
         junction = getattr(source, "is_junction", None)
         initial = _release_source_fingerprint(opened)
+        # Some Windows file systems expose a stable handle/path metadata view
+        # with different timestamp precision. Pin each view independently:
+        # comparing the final path to the opened-handle tuple falsely rejects
+        # unchanged inputs, while comparing each to its own initial witness
+        # still detects path replacement and in-place source mutation.
+        initial_path = _release_source_fingerprint(current)
         if (
             not stat.S_ISREG(opened.st_mode)
             or not stat.S_ISREG(current.st_mode)
             or (junction is not None and junction())
             or (opened.st_dev, opened.st_ino) != (current.st_dev, current.st_ino)
-            or (expected_fingerprint is not None and initial != expected_fingerprint)
+            or (expected_fingerprint is not None and initial_path != expected_fingerprint)
         ):
             raise ValueError("unsafe release source identity changed")
         with os.fdopen(fd, "rb") as stream:
@@ -709,7 +715,7 @@ def _copy_release_regular_source(
                 (junction is not None and junction())
                 or not stat.S_ISREG(final_path.st_mode)
                 or _release_source_fingerprint(final_opened) != initial
-                or _release_source_fingerprint(final_path) != initial
+                or _release_source_fingerprint(final_path) != initial_path
             ):
                 raise ValueError("unsafe release source changed during copy")
     finally:

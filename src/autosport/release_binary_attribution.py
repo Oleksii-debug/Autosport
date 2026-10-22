@@ -66,10 +66,14 @@ def validate_binary_module_attribution(
         if entry["module"] != original["name"]:
             raise ValueError("binary attribution module inventory mismatch")
         candidates = entry["host_candidates"]
+        # Reject malformed JSON primitives before using set()/sort(). Otherwise
+        # dict/list candidates can raise TypeError instead of a bounded
+        # fail-closed validation error at the independent ZIP verifier.
         if (
             type(candidates) is not list or len(candidates) > 16
+            or any(type(name) is not str for name in candidates)
             or candidates != sorted(set(candidates))
-            or any(type(name) is not str or name not in names for name in candidates)
+            or any(name not in names for name in candidates)
         ):
             raise ValueError("binary attribution host candidates unbounded/untrusted")
         if entry["review"] != (

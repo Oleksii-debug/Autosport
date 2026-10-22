@@ -117,6 +117,7 @@ class Plan6QualifierTests(unittest.TestCase):
             path.relative_to(root).as_posix()
             for path in (root / "tests").glob("test_plan6_release_*.py")
         }
+        self.assertIn("tests/test_release_package_source_link_policy_r124.py", covered)
         self.assertTrue(present, "Plan-6 Windows release path tests must exist")
         self.assertFalse(present - covered, sorted(present - covered))
 

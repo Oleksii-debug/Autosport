@@ -45,6 +45,7 @@ GROUPS = (
         "tests/test_release_binary_attribution.py",
         "tests/test_release_build_dependency_metadata.py",
         "tests/test_release_package_source_identity.py",
+        "tests/test_release_package_source_link_policy_r124.py",
     )),
     ("paper_install_update_recovery", (
         "tests/test_offline_release_install.py",

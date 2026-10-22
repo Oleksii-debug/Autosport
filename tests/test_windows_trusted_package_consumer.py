@@ -31,6 +31,7 @@ def _write_snapshot(root: Path) -> dict[str, str]:
             "    return {}\n"
         ),
         "src/autosport/release_sbom.py": "SENTINEL = 'trusted-sbom-module'\n",
+        "src/autosport/release_binary_attribution.py": "SENTINEL = 'trusted-attribution-module'\n",
         "src/autosport/release_dependency_graph.py": "SENTINEL = 'trusted-graph-module'\n",
         "src/autosport/windows_pe_integrity.py": "SENTINEL = 'trusted-pe-module'\n",
         "src/autosport/windows_update_admission.py": "SENTINEL = 'trusted-update-admission'\n",
@@ -129,7 +130,7 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     archive = (
         "& $gitExecutable archive --format=zip \"--output=$trustedPackageArchive\" $sourceSha -- "
         "scripts/package_windows.py src/autosport/release_package.py "
-        "src/autosport/release_sbom.py src/autosport/release_dependency_graph.py "
+        "src/autosport/release_sbom.py src/autosport/release_binary_attribution.py src/autosport/release_dependency_graph.py "
         "src/autosport/data_tool_package.py "
         "src/autosport/windows_pe_integrity.py "
         "src/autosport/windows_update_admission.py "
@@ -156,6 +157,7 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     assert "$trustedPackageLauncher = @'" in script
     assert "sys.path.insert" not in launcher
     assert 'load_module("autosport.release_sbom", "src/autosport/release_sbom.py")' in launcher
+    assert 'load_module("autosport.release_binary_attribution", "src/autosport/release_binary_attribution.py")' in launcher
     assert 'load_module("autosport.release_dependency_graph", "src/autosport/release_dependency_graph.py")' in launcher
     assert 'load_module("autosport.windows_pe_integrity", "src/autosport/windows_pe_integrity.py")' in launcher
     assert 'load_module("autosport.windows_update_admission", "src/autosport/windows_update_admission.py")' in launcher
@@ -207,6 +209,7 @@ def test_trusted_launcher_imports_real_release_modules_in_isolation(tmp_path: Pa
     root = tmp_path / "snapshot"
     names = (
         "release_sbom",
+        "release_binary_attribution",
         "release_dependency_graph",
         "windows_pe_integrity",
         "windows_update_admission",

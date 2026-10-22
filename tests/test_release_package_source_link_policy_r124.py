@@ -133,3 +133,29 @@ def test_link_inserted_after_example_scan_is_rejected(tmp_path, monkeypatch):
     monkeypatch.setattr(release, "_copy_release_example_tree", copytree_after_insertion)
     _assert_no_publication(f, tmp_path)
     assert inserted
+
+
+@pytest.mark.parametrize("source_key", ["exe", "keyboard", "restart"])
+def test_regular_release_input_replaced_after_preflight_is_rejected(
+    tmp_path, monkeypatch, source_key,
+):
+    """A second ordinary inode may not replace a checked EXE or audit report."""
+    f = _fixture(tmp_path)
+    replacement = tmp_path / ("replacement-" + source_key)
+    replacement.write_bytes(b"synthetic-other-valid-regular-file")
+    original_copy = release._copy_release_regular_source
+    substituted = False
+
+    def substitute_during_staging(source, destination, *args, **kwargs):
+        nonlocal substituted
+        if source == f[source_key] and not substituted:
+            substituted = True
+            # Both source paths are ordinary files, not symlinks. Previously
+            # the copier established its first fingerprint only *after* this
+            # substitution, allowing the wrong file into a valid release ZIP.
+            os.replace(replacement, source)
+        return original_copy(source, destination, *args, **kwargs)
+
+    monkeypatch.setattr(release, "_copy_release_regular_source", substitute_during_staging)
+    _assert_no_publication(f, tmp_path)
+    assert substituted

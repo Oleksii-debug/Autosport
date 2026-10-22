@@ -57,7 +57,15 @@ def _transaction_root(destination: Path) -> Path:
 def _directory_witness(root: Path) -> tuple[int, int]:
     """Bind an inspected directory to its actual, non-symlink filesystem object."""
     info = root.lstat()
-    if not stat.S_ISDIR(info.st_mode):
+    # On Windows a junction/reparse directory may still report S_IFDIR, so
+    # S_ISDIR alone does not certify the object as a local real directory.
+    if (
+        not stat.S_ISDIR(info.st_mode)
+        or bool(
+            getattr(info, "st_file_attributes", 0)
+            & getattr(stat, "FILE_ATTRIBUTE_REPARSE_POINT", 0x400)
+        )
+    ):
         raise OfflineInstallError("verified release directory was replaced by a redirect")
     # Some Windows/network filesystems cannot supply a stable directory inode.
     # A zero/invalid inode is not a valid identity witness for the exact release

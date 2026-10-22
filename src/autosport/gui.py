@@ -109,7 +109,9 @@ def _safe_exception_text(exc: BaseException) -> str:
     malicious subclass names. Product UI, status and exportable logs must not
     render those values directly.
     """
-    return _operator_safe_exception_text(exc)
+    # Localize only the unavailable-detail fallback; do not bypass the
+    # canonical untrusted exception class-name and secret-redaction gates.
+    return _operator_safe_exception_text(exc, unavailable_detail="<повідомлення недоступне>")
 
 
 def _safe_worker_error_text(value: object) -> str:

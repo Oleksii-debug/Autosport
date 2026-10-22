@@ -400,6 +400,76 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             )
             self.assertTrue(txn.is_dir())
 
+    def test_recovery_rejects_in_place_previous_file_mutation_after_first_read(self):
+        # Mutating Autosport.exe does not change its parent directory inode.
+        # The final read must reject the changed bytes before restoring it.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, _new, _nd = self._installed(work)
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            previous = txn / "previous"
+            dest.rename(previous)
+            original_inspect = upgrade.inspect_installed_release
+            reads = 0
+
+            def tamper_after_first_read(path, **kwargs):
+                nonlocal reads
+                result = original_inspect(path, **kwargs)
+                if Path(path) == previous:
+                    reads += 1
+                    if reads == 1:
+                        witness = upgrade._directory_witness(previous)
+                        (previous / "Autosport.exe").write_bytes(b"forged-after-read")
+                        self.assertEqual(upgrade._directory_witness(previous), witness)
+                return result
+
+            with self._trusted(), patch.object(
+                upgrade, "inspect_installed_release",
+                side_effect=tamper_after_first_read,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.recover_update_gap(
+                        dest, old_archive=old, old_source_sha=self.OLD,
+                        old_package_sha256=od,
+                    )
+            self.assertEqual(reads, 1)
+            self.assertFalse(dest.exists())
+            self.assertTrue(previous.is_dir())
+
+    def test_rollback_rejects_in_place_previous_file_mutation_before_publication(self):
+        # Rollback must restore the incumbent if the previously verified old
+        # executable was altered in place before its last publication check.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                previous = upgrade._transaction_root(dest) / "previous"
+                original_inspect = upgrade.inspect_installed_release
+                reads = 0
+
+                def tamper_after_first_previous_read(path, **kwargs):
+                    nonlocal reads
+                    result = original_inspect(path, **kwargs)
+                    if Path(path) == previous:
+                        reads += 1
+                        if reads == 1:
+                            witness = upgrade._directory_witness(previous)
+                            (previous / "Autosport.exe").write_bytes(b"forged-before-rollback")
+                            self.assertEqual(upgrade._directory_witness(previous), witness)
+                    return result
+
+                with patch.object(
+                    upgrade, "inspect_installed_release",
+                    side_effect=tamper_after_first_previous_read,
+                ):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+            self.assertEqual(reads, 1)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertTrue(previous.is_dir())
+
     def test_recovery_rejects_same_bytes_replaced_after_trusted_read(self):
         # A byte-identical second directory is not the filesystem object
         # validated by the canonical recovery read.

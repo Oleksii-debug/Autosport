@@ -26,6 +26,7 @@ def validate_binary_module_attribution(
             "evidence_class", "modules",
         }
         or type(report["schema_version"]) is not int or report["schema_version"] != 1
+        or type(inventory) is not dict
         or report["source_sha"] != inventory.get("source_sha")
         or report["executable_sha256"] != inventory.get("executable_sha256")
         or report["evidence_class"] != _EVIDENCE_CLASS

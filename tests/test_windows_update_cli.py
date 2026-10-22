@@ -391,6 +391,81 @@ def test_preflight_success_receipt_with_wrong_migration_chain_cannot_show_previe
     assert "transaction_preview" not in report
 
 
+class _RequestHandleTimeView:
+    """Simulate ctime_ns as seen by Windows fstat rather than lstat."""
+
+    def __init__(self, info, *, offset_ns):
+        self._info = info
+        self._offset_ns = offset_ns
+
+    def __getattr__(self, name):
+        if name == "st_ctime_ns":
+            return self._info.st_ctime_ns + self._offset_ns
+        return getattr(self._info, name)
+
+
+def test_stable_different_handle_and_path_ctime_still_parse_one_request(
+    tmp_path, monkeypatch,
+):
+    path = write(tmp_path, request(tmp_path))
+    real_fstat = os.fstat
+
+    with monkeypatch.context() as scope:
+        scope.setattr(
+            cli.os, "fstat",
+            lambda fd: _RequestHandleTimeView(
+                real_fstat(fd), offset_ns=3_000_000_000,
+            ),
+        )
+        parsed, original_witness = cli._read_request(path)
+        assert parsed == request(tmp_path)
+        # The downstream witness must compare descriptors to descriptors,
+        # retaining the original parser's exact native change-time authority.
+        assert cli._request_witness(path) == original_witness
+
+
+def test_changed_handle_timestamp_during_request_read_still_fails_closed(
+    tmp_path, monkeypatch,
+):
+    path = write(tmp_path, request(tmp_path))
+    real_fstat = os.fstat
+    calls = [0]
+
+    def changing_handle_view(fd):
+        calls[0] += 1
+        return _RequestHandleTimeView(
+            real_fstat(fd),
+            offset_ns=(3_000_000_000 if calls[0] == 1 else 4_000_000_000),
+        )
+
+    with monkeypatch.context() as scope:
+        scope.setattr(cli.os, "fstat", changing_handle_view)
+        with pytest.raises(cli.UpdateCliError, match="request changed while being read"):
+            cli._read_request(path)
+    assert calls[0] >= 2
+
+
+def test_changed_handle_timestamp_after_parsing_still_fails_closed(
+    tmp_path, monkeypatch,
+):
+    path = write(tmp_path, request(tmp_path))
+    real_fstat = os.fstat
+    calls = [0]
+
+    def postparse_changed_view(fd):
+        calls[0] += 1
+        return _RequestHandleTimeView(
+            real_fstat(fd),
+            offset_ns=(4_000_000_000 if calls[0] >= 3 else 3_000_000_000),
+        )
+
+    with monkeypatch.context() as scope:
+        scope.setattr(cli.os, "fstat", postparse_changed_view)
+        with pytest.raises(cli.UpdateCliError, match="request changed after parsing"):
+            cli._read_request(path)
+    assert calls[0] >= 3
+
+
 def test_request_path_replacement_before_open_is_rejected(tmp_path, monkeypatch):
     """Do not silently validate a different JSON request after the path guard."""
     initial = write(tmp_path, request(tmp_path))

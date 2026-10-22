@@ -202,6 +202,39 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
             self.assertFalse((txn / "previous").exists())
 
+    def test_update_rejects_in_place_staged_file_tampering_after_old_move(self):
+        # Unlike a directory swap, overwriting one verified file does NOT
+        # change the staged directory's inode witness. Reject such bytes
+        # before publishing them and restore the exact old PAPER executable.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            candidate = txn / "candidate"
+            original_publish = upgrade._publish_directory_no_replace
+            seen_old_move = False
+
+            def overwrite_staged_file_after_quarantine(source, target):
+                nonlocal seen_old_move
+                original_publish(source, target)
+                if Path(source) == dest and Path(target) == txn / "previous":
+                    seen_old_move = True
+                    (candidate / "Autosport.exe").write_bytes(b"unauthorized-new-payload")
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=overwrite_staged_file_after_quarantine,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertTrue(seen_old_move)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertFalse((txn / "previous").exists())
+            self.assertEqual(
+                (candidate / "Autosport.exe").read_bytes(), b"unauthorized-new-payload",
+            )
+
     def test_update_preserves_previous_and_never_enables_money(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

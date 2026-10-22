@@ -55,6 +55,7 @@ const byId = id => {
   return nodes.get(key);
 };
 let transitions = [];
+let ownerReviewRevocations = 0;
 const setDisabledWithFocusFallback = (node, disabled) => {
   node.disabled = Boolean(disabled);
   transitions.push([node, node.disabled]);
@@ -62,8 +63,9 @@ const setDisabledWithFocusFallback = (node, disabled) => {
 const document = {querySelectorAll() {return [];}};
 const freezeControl = new Function(
   "byId", "setDisabledWithFocusFallback", "document", "latestState",
-  freeze + "\nreturn freezeUnverifiedOperatorControls;"
-)(byId, setDisabledWithFocusFallback, document, {manual:{operations:[]}});
+  "invalidateOwnerReview", freeze + "\nreturn freezeUnverifiedOperatorControls;"
+)(byId, setDisabledWithFocusFallback, document, {manual:{operations:[]}},
+  () => { ownerReviewRevocations += 1; });
 const restore = new Function(
   "byId", "state", "setSelectOptions", "setTextIfChanged",
   "setValueIfChanged", "setDisabledWithFocusFallback", recovery
@@ -75,12 +77,15 @@ const restoreCanonical = () => restore(
 assert.equal(byId(333).disabled, false);
 assert.equal(byId(335).disabled, false);
 freezeControl();
+assert.equal(ownerReviewRevocations, 1, "invalid snapshot revokes stale owner review");
 assert.equal(byId(333).disabled, true, "manual calculate must fail closed");
 assert.equal(byId(335).disabled, true, "manual clear must fail closed");
 restoreCanonical();
+assert.equal(ownerReviewRevocations, 1, "restoring snapshot cannot revive approval");
 assert.equal(byId(333).disabled, false, "confirmed snapshot restores calculate");
 assert.equal(byId(335).disabled, false, "confirmed snapshot restores clear");
 freezeControl();
+assert.equal(ownerReviewRevocations, 2, "second invalid snapshot revokes owner review again");
 assert.equal(byId(333).disabled, true, "second failure freezes calculate again");
 assert.equal(byId(335).disabled, true, "second failure freezes clear again");
 assert.equal(transitions.filter(([node]) => node === byId(333)).length, 3);

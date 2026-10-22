@@ -95,8 +95,15 @@ def _publish_directory_no_replace(source: Path, destination: Path) -> None:
     Fail closed when the platform lacks an atomic no-replace primitive.
     """
     if os.name == "nt":
-        # Windows os.rename fails if the target path already exists.
-        os.rename(source, destination)
+        # Windows os.rename never replaces an existing destination. Translate
+        # its collision to the same fail-closed domain error used on Linux,
+        # without leaking an owner-controlled local path through WinError.
+        try:
+            os.rename(source, destination)
+        except FileExistsError as exc:
+            raise OfflineInstallError(
+                "installation destination appeared during publication"
+            ) from exc
         return
     if sys.platform != "linux":
         raise OfflineInstallError("atomic no-replace installation is unsupported")

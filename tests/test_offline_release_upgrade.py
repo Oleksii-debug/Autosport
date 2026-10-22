@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -277,6 +278,68 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                 self.OLD.encode(),
             )
 
+
+    def test_update_rejects_same_bytes_replaced_after_second_trusted_read(self):
+        # Copied identical bytes must not gain authority from an earlier
+        # successful validation of a different filesystem directory.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            detached = work / "detached-original"
+            original_verify = upgrade.inspect_installed_release
+            inspected = 0
+
+            def replace_after_second_check(path, **kwargs):
+                nonlocal inspected
+                result = original_verify(path, **kwargs)
+                if Path(path) == dest:
+                    inspected += 1
+                    if inspected == 2:
+                        dest.rename(detached)
+                        shutil.copytree(detached, dest)
+                return result
+
+            with self._trusted():
+                with patch.object(upgrade, "inspect_installed_release", side_effect=replace_after_second_check):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "identity changed"
+                    ):
+                        upgrade.upgrade_verified_paper_release(
+                            dest, **self._args(old, od, new, nd)
+                        )
+            self.assertEqual(inspected, 2)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertEqual((detached / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertFalse((upgrade._transaction_root(dest) / "previous").exists())
+
+    def test_rollback_rejects_same_bytes_replaced_after_verified_read(self):
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            detached = work / "detached-active"
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                original_verify = upgrade.inspect_installed_release
+
+                def replace_after_active_check(path, **kwargs):
+                    result = original_verify(path, **kwargs)
+                    if Path(path) == dest:
+                        dest.rename(detached)
+                        shutil.copytree(detached, dest)
+                    return result
+
+                with patch.object(upgrade, "inspect_installed_release", side_effect=replace_after_active_check):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "identity changed"
+                    ):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertEqual((detached / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertEqual(
+                (upgrade._transaction_root(dest) / "previous" / "Autosport.exe").read_bytes(),
+                self.OLD.encode(),
+            )
 
     def test_windows_case_alias_uses_one_pending_update_namespace(self):
         # A case-only alternate spelling is the same Windows installation,

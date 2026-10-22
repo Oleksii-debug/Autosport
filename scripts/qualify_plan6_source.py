@@ -51,6 +51,7 @@ GROUPS = (
         "tests/test_offline_release_lifecycle.py",
         "tests/test_offline_release_recovery.py",
         "tests/test_offline_release_upgrade.py",
+        "tests/test_plan6_7a_workspace_backup_windows_stat_views.py",
         "tests/test_data_tools_installed_release_entry.py",
         "tests/test_offline_release_deflate_errors.py",
         "tests/test_offline_release_install_windows_namespace.py",

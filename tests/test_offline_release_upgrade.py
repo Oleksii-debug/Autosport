@@ -105,7 +105,22 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))
             with self._trusted():
-                with patch.object(upgrade, "_publish_directory_no_replace", side_effect=SystemExit(42)):
+                publish = upgrade._publish_directory_no_replace
+
+                def interrupt_after_old_release_is_quarantined(source, target):
+                    # The simulated crash must happen AFTER the incumbent
+                    # moves to "previous", not during the first move.
+                    if Path(source).name == "candidate" and Path(target) == dest:
+                        self.assertTrue(
+                            (upgrade._transaction_root(dest) / "previous" / "Autosport.exe").is_file()
+                        )
+                        raise SystemExit(42)
+                    return publish(source, target)
+
+                with patch.object(
+                    upgrade, "_publish_directory_no_replace",
+                    side_effect=interrupt_after_old_release_is_quarantined,
+                ):
                     with self.assertRaises(SystemExit):
                         upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
                 self.assertFalse(dest.exists())

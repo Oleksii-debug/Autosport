@@ -501,7 +501,53 @@ def _owned_distribution_license_record(record_path: str, name: str, version: str
     leaf = parts[-1]
     stem = leaf.split(".", 1)[0].upper()
     return (
-        leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+        (name == "packaging" and leaf in {"LICENSE.APACHE", "LICENSE.BSD"})
+        or leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+        or (
+            stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
+            and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
+        )
+    )
+
+
+def _nested_distribution_license_record(record_path: str, name: str) -> bool:
+    """Record a tightly bounded vendored license origin, never license clearance."""
+    if (
+        type(record_path) is not str or not (1 <= len(record_path) <= 512)
+        or record_path.startswith(("/", "\\")) or "\\" in record_path
+        or any(ord(c) < 32 or ord(c) == 127 for c in record_path)
+    ):
+        return False
+    if name == "setuptools" and record_path in {
+        "setuptools/config/NOTICE",
+        "setuptools/config/_validate_pyproject/NOTICE",
+    }:
+        return True
+    parts = record_path.split("/")
+    if (
+        len(parts) not in (4, 5)
+        or parts[1] != "_vendor"
+        or not parts[2].endswith(".dist-info")
+        or "-" not in parts[2][:-10]
+        or any(not p or p in (".", "..") or ":" in p for p in parts)
+        or (len(parts) == 5 and parts[3] != "licenses")
+    ):
+        return False
+    try:
+        vendor_name, vendor_version = parts[2][:-10].rsplit("-", 1)
+        if (
+            _normalize_name(parts[0]) != name
+            or _normalize_name(vendor_name) == name
+            or not _VERSION.fullmatch(vendor_version)
+        ):
+            return False
+    except ValueError:
+        return False
+    leaf = parts[-1]
+    stem = leaf.split(".", 1)[0].upper()
+    return (
+        (vendor_name == "packaging" and leaf in {"LICENSE.APACHE", "LICENSE.BSD"})
+        or leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
         or (
             stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
             and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
@@ -571,7 +617,7 @@ def validate_dependency_license_evidence(
             raise ValueError("distribution license identity/order mismatch")
         last = name
         files = item["files"]
-        if type(files) is not list or len(files) > 16:
+        if type(files) is not list or len(files) > 32:
             raise ValueError("distribution license file count is unbounded")
         if item["license_review"] != (
             "TEXT_PRESENT_REVIEW_REQUIRED" if files else "TEXT_ABSENT_REVIEW_REQUIRED"
@@ -588,7 +634,10 @@ def validate_dependency_license_evidence(
                 type(raw_path) is not str or not (1 <= len(raw_path) <= 512)
                 or "\\" in raw_path or raw_path.startswith("/")
                 or any(part in ("", ".", "..") for part in raw_path.split("/"))
-                or not _owned_distribution_license_record(raw_path, name, item["version"])
+                or not (
+                    _owned_distribution_license_record(raw_path, name, item["version"])
+                    or _nested_distribution_license_record(raw_path, name)
+                )
             ):
                 raise ValueError("distribution license origin path is unsafe")
             digest = record["sha256"]
@@ -700,18 +749,33 @@ def capture_dependency_license_evidence(
                     stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
                     and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
                 )
+                or (
+                    name == "packaging"
+                    and leaf in {"LICENSE.APACHE", "LICENSE.BSD"}
+                )
+                or (
+                    name == "setuptools"
+                    and source_name.startswith("setuptools/_vendor/packaging-")
+                    and leaf in {"LICENSE.APACHE", "LICENSE.BSD"}
+                )
             )
             if (
                 1 <= len(source_name) <= 512
                 and all(part not in ("", ".", "..") for part in parts)
                 and all(":" not in part and "\\x00" not in part for part in parts)
-                and any(part.endswith(".dist-info") for part in parts[:-1])
                 and allowed_name
+                and (
+                    any(part.endswith(".dist-info") for part in parts[:-1])
+                    or _nested_distribution_license_record(source_name, name)
+                )
             ):
-                if not _owned_distribution_license_record(source_name, name, version):
+                if not (
+                    _owned_distribution_license_record(source_name, name, version)
+                    or _nested_distribution_license_record(source_name, name)
+                ):
                     raise ValueError("distribution license RECORD origin mismatches owner/version")
                 candidates.append((source_name, entry))
-        if len(candidates) > 16:
+        if len(candidates) > 32:
             raise ValueError("distribution has unbounded license-file candidates")
         files = []
         for source_name, record in sorted(candidates):

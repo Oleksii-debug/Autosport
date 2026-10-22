@@ -240,3 +240,68 @@ def test_license_evidence_rejects_malformed_or_duplicate_graph_components(
         subject.validate_dependency_license_evidence(
             manifest, malformed_graph, members,
         )
+
+
+def test_a5_vendored_setuptools_license_evidence_stays_review_required(tmp_path, monkeypatch):
+    graph = _graph()
+    graph["components"][0].update(name="setuptools", version="84.2.1")
+    paths = [
+        PurePosixPath("setuptools-84.2.1.dist-info/licenses/LICENSE"),
+        PurePosixPath("setuptools/_vendor/packaging-26.0.dist-info/licenses/LICENSE.APACHE"),
+        PurePosixPath("setuptools/_vendor/packaging-26.0.dist-info/licenses/LICENSE.BSD"),
+        PurePosixPath("setuptools/config/NOTICE"),
+        PurePosixPath("setuptools/config/_validate_pyproject/NOTICE"),
+    ]
+    for path in paths:
+        target = tmp_path.joinpath(*path.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"Independent license text for review\n")
+    dist = SimpleNamespace(metadata={"Name": "setuptools"}, version="84.2.1",
+                           files=paths,
+                           locate_file=lambda item: tmp_path.joinpath(*item.parts))
+    monkeypatch.setattr(subject.metadata, "distribution", lambda _: dist)
+    manifest, members = subject.capture_dependency_license_evidence(graph)
+    assert len(members) == len(paths)
+    assert manifest["distributions"][0]["license_review"] == "TEXT_PRESENT_REVIEW_REQUIRED"
+    assert sorted(x["record_path"] for x in manifest["distributions"][0]["files"]) == sorted(map(str, paths))
+    subject.validate_dependency_license_evidence(manifest, graph, members)
+
+
+def test_a5_direct_packaging_dual_license_files_are_captured(tmp_path, monkeypatch):
+    graph = _graph()
+    graph["components"][0].update(name="packaging", version="26.3")
+    paths = [PurePosixPath(f"packaging-26.3.dist-info/licenses/{leaf}")
+             for leaf in ("LICENSE", "LICENSE.APACHE", "LICENSE.BSD")]
+    for path in paths:
+        target = tmp_path.joinpath(*path.parts)
+        target.parent.mkdir(parents=True, exist_ok=True)
+        target.write_bytes(b"License text for independent review\n")
+    dist = SimpleNamespace(metadata={"Name": "packaging"}, version="26.3",
+                           files=paths,
+                           locate_file=lambda item: tmp_path.joinpath(*item.parts))
+    monkeypatch.setattr(subject.metadata, "distribution", lambda _: dist)
+    manifest, members = subject.capture_dependency_license_evidence(graph)
+    assert len(members) == 3
+    assert manifest["distributions"][0]["license_review"] == "TEXT_PRESENT_REVIEW_REQUIRED"
+    subject.validate_dependency_license_evidence(manifest, graph, members)
+
+
+@pytest.mark.parametrize("origin", [
+    "setuptools/_vendor/packaging-26.0.dist-info/licenses/../LICENSE.BSD",
+    "setuptools/_vendor/packaging-26.0.dist-info/licenses/SECRET",
+    "setuptools/_vendor/other-1.0.dist-info/licenses/LICENSE.APACHE",
+    "setuptools/config/../NOTICE",
+    "setuptools/config/another/NOTICE",
+])
+def test_a5_vendored_license_origin_rejects_unsafe_paths(origin):
+    assert not subject._nested_distribution_license_record(origin, "setuptools")
+
+
+@pytest.mark.parametrize("origin", [
+    "another-26.3.dist-info/licenses/LICENSE.APACHE",
+    "packaging-26.2.dist-info/licenses/LICENSE.BSD",
+    "nested/packaging-26.3.dist-info/licenses/LICENSE.APACHE",
+    "packaging-26.3.dist-info/licenses/LICENSE.UNKNOWN",
+])
+def test_a5_direct_packaging_license_origin_rejects_wrong_owner(origin):
+    assert not subject._owned_distribution_license_record(origin, "packaging", "26.3")

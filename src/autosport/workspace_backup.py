@@ -91,8 +91,21 @@ def _read_regular_stable(path: Path) -> bytes:
         data = handle.read(MAX_FILE_BYTES + 1)
         after = os.fstat(handle.fileno())
     final = _regular(path, label="workspace entry")
+    # Windows lstat(path) and fstat(descriptor) may expose different ctime
+    # clocks for the SAME unchanged file. Compare metadata within each API
+    # view, while cross-checking portable identity/length between the views.
+    # Retain both before/after checks: a path replacement or an in-place edit
+    # during the read must still fail closed, even when bytes are identical.
     identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-    if len(data) > MAX_FILE_BYTES or len(data) != before.st_size or identity(before) != identity(after) or identity(after) != identity(final):
+    portable = lambda s: (s.st_dev, s.st_ino, s.st_size)
+    if (
+        len(data) > MAX_FILE_BYTES
+        or len(data) != before.st_size
+        or portable(before) != portable(opened)
+        or identity(before) != identity(final)
+        or identity(opened) != identity(after)
+        or portable(after) != portable(final)
+    ):
         raise WorkspaceBackupError("workspace entry changed during backup")
     return data
 

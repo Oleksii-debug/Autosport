@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import stat
 import shutil
 import tempfile
 import unittest
@@ -18,6 +19,25 @@ from autosport import offline_release_upgrade as upgrade
 class OfflineReleaseUpgradeTests(unittest.TestCase):
     OLD = "a" * 40
     NEW = "b" * 40
+
+    def test_directory_witness_rejects_windows_junction_reparse_flag(self):
+        # Windows junctions can advertise directory mode and a stable inode.
+        # Never let such an alias authorize the move/rollback of an install.
+        fake = SimpleNamespace(
+            st_mode=stat.S_IFDIR | 0o700, st_dev=7, st_ino=9,
+            st_file_attributes=0x400,
+        )
+        with patch.object(Path, "lstat", return_value=fake):
+            with self.assertRaisesRegex(
+                install.OfflineInstallError, "replaced by a redirect",
+            ):
+                upgrade._directory_witness(Path("/verified-paper"))
+        # An ordinary directory with the same mode/inode remains admissible.
+        fake.st_file_attributes = 0
+        with patch.object(Path, "lstat", return_value=fake):
+            self.assertEqual(
+                upgrade._directory_witness(Path("/verified-paper")), (7, 9),
+            )
 
     def _archive(self, root, name, source, version, schema):
         path = root / name

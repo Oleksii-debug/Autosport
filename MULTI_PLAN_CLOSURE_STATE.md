@@ -9,6 +9,17 @@
 Scoped fix [PR #2545](https://github.com/Oleksii-debug/Autosport/pull/2545) **MERGED** and independently read back from `main@cf73f51f92a8332b087d004a9465ae3f6ab5f551`. Canonical `offline_release_upgrade.py` rechecks exact old release payload and directory identity just before recovery/rollback publication, where an in-place executable rewrite previously retained a valid directory-inode witness. Two fault-injection regressions are integrated. Product source blob `4bc6323c5893d0b4336a582b65b543d11dd7af50`, test blob `6f6079aeb736bf80abfdf9e18cb34de379d8c7c1` both MATCH `main`. **Specific defect source-integration complete; full pytest and Windows candidate queued/NOT VERIFIED.** The unique Plan-6 `6А|IN_PROGRESS_NOT_DONE` row below is unchanged; cross-schema migration and exact Windows lifecycle acceptance remain. The other open atomic sections `5Б`, `7А`, `7В` and Plans 7/8 are not closed. `REAL_MONEY_EXECUTION=false`.
 
 
+## 2026-10-22 — Plan 6 §6А publication/recovery/rollback byte readback (scoped merged repairs; NOT parent DONE)
+
+Two independent, bounded repairs to the **existing** PAPER-only release lifecycle are accepted in canonical `main`; they do not constitute schema migration or Section closure:
+
+- [PR #2555](https://github.com/Oleksii-debug/Autosport/pull/2555) merged as `8bb4d27a77ed8d731520e0d0492190d762e25303`: after a verified update candidate is published by no-replace rename, the updater now re-reads the **actual installed** files against the exact independently pinned new ZIP/source digest rather than trusting only the stable directory inode. Adversarial test: in-place executable rewrite immediately after the publication move.
+- [PR #2557](https://github.com/Oleksii-debug/Autosport/pull/2557) merged as `08ec64ee2f9ac717e514e7e8fbd7498f2accdf74`: recovery and rollback also re-read the actual installed old files after publication, before claiming success (and before retiring the recovery transaction). Two adversarial regressions simulate post-move corruption while preserving the directory inode. Previous/rejected evidence is retained on failure.
+
+**Independent post-merge readback** at `main@08ec64ee2f9ac717e514e7e8fbd7498f2accdf74`: canonical production `src/autosport/offline_release_upgrade.py` blob `bd484fcb97a36bd41e2cc030e1b460cd235d6cc2`, test `tests/test_offline_release_upgrade.py` blob `0b6a016eadf5ef74d4d20e9ef511312edcde2783`; all three new source guards and three corresponding test-method definitions are present in the merged tree. **This is verified source integration, not a claim of executed test PASS.** The PR exact-head CI/Windows runs were QUEUED with no executed test jobs at the last check; complete local checkout/Windows/NVDA tests NOT_EXECUTED.
+
+**Status authority unchanged:** `Plan 6 §6А = IN_PROGRESS_NOT_DONE`; cross-schema migration, full install/upgrade/rollback/reinstall qualification, Plan6 §5Б complete bundled SBOM/licenses, and §7А/7В exact Windows qualification/aggregate closure are still outstanding. Plans 7/8 are not terminal. `REAL_MONEY_EXECUTION=false`, `HUMAN_TESTED=false`, `NVDA_VERIFIED=false`. Do not redevelop these merged publication byte-integrity repairs absent a demonstrated regression.
+
 This is the live status authority for the new architecture.
 
 ## Rules

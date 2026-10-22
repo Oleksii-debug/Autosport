@@ -79,11 +79,11 @@ def test_any_owner_contract_edit_invalidates_prior_confirmation() -> None:
 
     # Changing strategy or the bound research plan invalidates the backend review
     # workspace/context too, so the presentation freshness fence must follow it.
-    strategy = source.index('byId(106).addEventListener("change", () => {')
+    strategy = source.index('byId(106).addEventListener("change", async () => {')
     assert source.index("invalidateOwnerReview();", strategy) < source.index(
         'dispatch("strategy.set"', strategy
     )
-    plan = source.index('byId(107).addEventListener("click", () => {')
+    plan = source.index('byId(107).addEventListener("click", async () => {')
     assert source.index("invalidateOwnerReview();", plan) < source.index(
         'dispatch("research_plan.select"', plan
     )

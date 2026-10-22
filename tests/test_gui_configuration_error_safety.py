@@ -39,7 +39,9 @@ def _configuration_failure_app() -> AutosportApp:
 def _expected_error(key: str) -> str:
     detail = text(
         "ui.error.exception.message_unavailable",
-        exception_type="_BrokenTextError",
+        # Custom exception class names are not trusted UI data; the canonical
+        # redaction boundary exposes only the nearest genuine built-in type.
+        exception_type="RuntimeError",
     )
     return text(key, detail=detail)
 

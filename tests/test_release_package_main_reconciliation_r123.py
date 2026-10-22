@@ -77,7 +77,9 @@ def test_failed_release_build_preserves_prior_zip_and_existing_directory(tmp_pat
     zip_path.write_bytes(b"old package stays until publication")
     f = _fixture(tmp_path)
     f["exe"].unlink()  # source failure during private staging
-    with pytest.raises(FileNotFoundError):
+    # Canonical preflight now maps missing EXE input to a deterministic
+    # fail-closed ValueError before staging, preserving the existing ZIP.
+    with pytest.raises(ValueError, match="release executable must be an existing regular file"):
         release.build_windows_package(
             f["exe"], f["start"], f["examples"], f["diagnostic"],
             f["accessibility"], f["keyboard"], f["restart"],

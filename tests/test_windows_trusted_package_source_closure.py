@@ -52,7 +52,7 @@ def _source_contract():
     ]
 
     archive_match = re.search(
-        r"(?m)^& \$gitExecutable archive --format=zip .*$",
+        r"(?m)^& \$gitExecutable archive --format=zip \"--output=\$trustedPackageArchive\" .*$",
         source,
     )
     if archive_match is None:

@@ -14,6 +14,7 @@ from hashlib import sha256
 import json
 import os
 import tempfile
+import time
 from pathlib import Path
 from typing import Callable, Iterable, Mapping
 
@@ -522,7 +523,18 @@ class PreEvaluationEvidenceStore:
                 handle.write(data)
                 handle.flush()
                 os.fsync(handle.fileno())
-            os.replace(temporary, self._path)
+            # On Windows, simultaneous ReplaceFile/MoveFileEx publication can
+            # transiently fail with a sharing violation. Retry only known
+            # transient Win32 codes, for a strictly bounded interval; do not
+            # turn persistent permission errors into apparent success.
+            for attempt in range(4):
+                try:
+                    os.replace(temporary, self._path)
+                    break
+                except PermissionError as exc:
+                    if attempt == 3 or getattr(exc, "winerror", None) not in (5, 32, 33):
+                        raise
+                    time.sleep(0.01 * (attempt + 1))
         except BaseException:
             # Preserve the original publication error, including STOP signals;
             # only remove this writer's temporary, never another writer's.

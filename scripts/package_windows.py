@@ -830,6 +830,9 @@ def main() -> int:
         data_embedded_inventory = capture_embedded_executable_inventory(
             trusted_data_exe, args.source_sha, include_nested_pyz=True,
         )
+        data_binary_module_attribution = capture_binary_module_attribution(
+            dependency_graph, data_embedded_inventory,
+        )
         # Host ownership mappings are review-only hints for binary PYZ modules.
         # They do not claim executable wheel provenance or legal license approval.
         binary_attribution = capture_binary_module_attribution(
@@ -883,6 +886,7 @@ def main() -> int:
             trusted_data_exe,
             expected_base_package_sha256=base_digest,
             data_executable_inventory=data_embedded_inventory,
+            data_binary_module_attribution=data_binary_module_attribution,
         )
 
     release_verification = verify_windows_package(
@@ -898,6 +902,7 @@ def main() -> int:
     package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(
         output, require_data_executable_inventory=True,
+        require_data_binary_module_attribution=True,
     )
     _require_verified_package_digest(binding, data_verification)
     verification = dict(release_verification)

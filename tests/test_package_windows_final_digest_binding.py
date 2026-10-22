@@ -41,6 +41,28 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
         graph_patch.start()
         self.addCleanup(direct_patch.stop)
         self.addCleanup(graph_patch.stop)
+        # This suite isolates the final digest gate, not earlier binary/license
+        # admission. Those boundaries have their own adversarial tests. The
+        # official packager now seals TWO PE32+ executables and requires both
+        # nested PYZ inventories, host attribution and license evidence before
+        # checking the final package digest. Synthetic SHA-only fixtures cannot
+        # satisfy those independent preflight contracts.
+        for name, evidence in (
+            ("capture_dependency_license_evidence",
+             ({"evidence_class": "TEST_ONLY_LICENSE_TEXT"}, {})),
+            ("capture_embedded_executable_inventory",
+             {"evidence_class": "TEST_ONLY_EMBEDDED_CENSUS"}),
+            ("capture_binary_module_attribution",
+             {"evidence_class": "TEST_ONLY_BINARY_ATTRIBUTION"}),
+        ):
+            admission_patch = patch.object(
+                package_windows, name, return_value=evidence,
+            )
+            admission_patch.start()
+            self.addCleanup(admission_patch.stop)
+        pe_patch = patch.object(package_windows, "_require_executable_pe32plus")
+        pe_patch.start()
+        self.addCleanup(pe_patch.stop)
 
     @staticmethod
     def _argv(root: Path) -> list[str]:
@@ -265,6 +287,12 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
                 output,
                 root / "Autosport-Data.exe",
                 expected_base_package_sha256="0" * 64,
+                data_executable_inventory={
+                    "evidence_class": "TEST_ONLY_EMBEDDED_CENSUS",
+                },
+                data_binary_module_attribution={
+                    "evidence_class": "TEST_ONLY_BINARY_ATTRIBUTION",
+                },
             )
             report = json.loads((root / "verification.json").read_text(encoding="utf-8"))
             self.assertEqual(report, expected_report)

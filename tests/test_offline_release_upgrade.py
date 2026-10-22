@@ -103,6 +103,51 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertFalse(result["schema_migrated"])
             self.assertFalse(result["real_money_execution"])
 
+    def test_rollback_refuses_false_forward_lineage_before_moving_files(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(
+                    dest, **self._args(old, od, new, nd),
+                )
+                txn = upgrade._transaction_root(dest)
+                before_current = (dest / "Autosport.exe").read_bytes()
+                before_previous = (txn / "previous" / "Autosport.exe").read_bytes()
+                with patch.object(
+                    upgrade, "_identity",
+                    side_effect=[((2, 0, 0), 1), ((1, 0, 0), 1)],
+                ):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "forward same-schema lineage",
+                    ):
+                        upgrade.rollback_verified_paper_release(
+                            dest, **self._args(old, od, new, nd),
+                        )
+                self.assertEqual((dest / "Autosport.exe").read_bytes(), before_current)
+                self.assertEqual((txn / "previous" / "Autosport.exe").read_bytes(), before_previous)
+                self.assertFalse((txn / "rejected-current").exists())
+
+    def test_finalize_refuses_schema_mismatch_before_removal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(
+                    dest, **self._args(old, od, new, nd),
+                )
+                txn = upgrade._transaction_root(dest)
+                with patch.object(
+                    upgrade, "_identity",
+                    side_effect=[((1, 0, 0), 1), ((1, 1, 0), 2)],
+                ):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "forward same-schema lineage",
+                    ):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+                self.assertTrue((txn / "previous" / "Autosport.exe").is_file())
+                self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+
     def test_rollback_keeps_rejected_release_for_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

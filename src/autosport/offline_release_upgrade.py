@@ -221,6 +221,30 @@ def recover_update_gap(
             "real_money_execution": False}
 
 
+def _require_forward_update_lineage(
+    *, old_archive: Path, old_source_sha: str, old_package_sha256: str,
+    new_archive: Path, new_source_sha: str, new_package_sha256: str,
+) -> None:
+    """Authenticate the original upgrade order before a destructive disposition.
+
+    A recovered transaction directory does not prove that its previous product
+    predates the active one. Both independently pinned archives must describe
+    a strictly forward, same-schema PAPER upgrade.
+    """
+    old_version, old_schema = _identity(
+        Path(old_archive), old_source_sha, old_package_sha256,
+    )
+    new_version, new_schema = _identity(
+        Path(new_archive), new_source_sha, new_package_sha256,
+    )
+    if (
+        new_version <= old_version
+        or new_schema != old_schema
+        or new_package_sha256 == old_package_sha256
+    ):
+        raise OfflineInstallError("update transaction has no forward same-schema lineage")
+
+
 def rollback_verified_paper_release(
     destination: str | Path, *,
     old_archive: str | Path, old_source_sha: str, old_package_sha256: str,
@@ -242,6 +266,12 @@ def rollback_verified_paper_release(
     inspect_installed_release(
         root, archive=new_archive, expected_source_sha=new_source_sha,
         expected_package_sha256=new_package_sha256,
+    )
+    _require_forward_update_lineage(
+        old_archive=Path(old_archive), old_source_sha=old_source_sha,
+        old_package_sha256=old_package_sha256,
+        new_archive=Path(new_archive), new_source_sha=new_source_sha,
+        new_package_sha256=new_package_sha256,
     )
     original = root.lstat()
     if (not stat.S_ISDIR(original.st_mode)
@@ -300,6 +330,12 @@ def finalize_verified_paper_update(
     inspect_installed_release(
         obsolete, archive=discarded[0],
         expected_source_sha=discarded[1], expected_package_sha256=discarded[2],
+    )
+    _require_forward_update_lineage(
+        old_archive=Path(old_archive), old_source_sha=old_source_sha,
+        old_package_sha256=old_package_sha256,
+        new_archive=Path(new_archive), new_source_sha=new_source_sha,
+        new_package_sha256=new_package_sha256,
     )
     uninstall_verified_release(
         obsolete, archive=discarded[0],

@@ -126,6 +126,66 @@ class OfflineInstallTests(unittest.TestCase):
             self.assertFalse(list(root.glob(".autosport-install-staging-*")))
 
 
+    def test_swapped_archive_cannot_install_restored_path_bytes(self) -> None:
+        # The genuine verifier succeeds, then the archive pathname is swapped
+        # before extraction. The attacker would restore its original contents
+        # just before the final path hash; the installed bytes must not differ.
+        with tempfile.TemporaryDirectory() as root_text:
+            root = Path(root_text)
+            archive, digest = self._package(root)
+            pristine = archive.read_bytes()
+            with zipfile.ZipFile(archive) as original_zip:
+                members = {
+                    info.filename: original_zip.read(info)
+                    for info in original_zip.infolist()
+                }
+            members["Autosport-V1/Autosport.exe"] = b"unverified-fixture-executable"
+            other_zip = root / "substituted.zip"
+            with zipfile.ZipFile(other_zip, "w") as forged_zip:
+                for name, contents in members.items():
+                    forged_zip.writestr(name, contents)
+            swapped = other_zip.read_bytes()
+            self.assertNotEqual(hashlib.sha256(swapped).hexdigest(), digest)
+            canonical = {
+                "status": "PASS", "package_sha256": digest,
+                "source_sha": self.SOURCE,
+            }
+            original_hash = installer._sha_file
+            hash_calls = 0
+
+            def restore_at_last_hash(path: Path) -> str:
+                nonlocal hash_calls
+                hash_calls += 1
+                if hash_calls == 2:
+                    archive.write_bytes(pristine)
+                return original_hash(path)
+
+            def swap_after_verification(*_args, **_kwargs) -> dict:
+                archive.write_bytes(swapped)
+                return canonical
+
+            destination = root / "installed"
+            with (
+                patch.object(
+                    installer.release_package, "verify_windows_package",
+                    side_effect=swap_after_verification,
+                ),
+                patch.object(
+                    installer, "_sha_file", side_effect=restore_at_last_hash,
+                ),
+            ):
+                with self.assertRaisesRegex(
+                    installer.OfflineInstallError,
+                    "archive changed before trusted extraction snapshot",
+                ):
+                    installer.install_verified_release(
+                        archive, destination, expected_source_sha=self.SOURCE,
+                        expected_package_sha256=digest,
+                    )
+            self.assertEqual(hash_calls, 1)
+            self.assertFalse(destination.exists())
+            self.assertFalse(list(root.glob(".autosport-install-staging-*")))
+
     def test_symlink_in_ancestor_is_rejected_before_release_verification(self) -> None:
         """A safe-looking parent must not hide an earlier symlink component."""
         with tempfile.TemporaryDirectory() as root_text:

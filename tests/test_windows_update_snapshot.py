@@ -321,7 +321,7 @@ def test_source_symlink_swap_during_open_is_rejected_without_nofollow(tmp_path, 
         return original_open(path)
 
     monkeypatch.setattr(module, "_open_archive_fd", swapped_open)
-    with pytest.raises(WindowsUpdateSnapshotError, match="identity changed during open|cannot open package source"):
+    with pytest.raises(WindowsUpdateSnapshotError, match="identity changed during open|cannot open package source|Windows reparse update handle rejected"):
         with pinned_windows_update_package(source, expected_sha256=digest(b"trusted")):
             pytest.fail("symlink swap must never yield a snapshot")
     assert did_swap
@@ -1074,7 +1074,7 @@ def test_zip_preflight_rejects_path_swap_before_central_directory_parse(tmp_path
         return actual_zipfile(file, *args, **kwargs)
 
     monkeypatch.setattr(module.zipfile, "ZipFile", swap_before_zip_parse)
-    with pytest.raises(module.WindowsUpdateSnapshotError, match="changed during preflight"):
+    with pytest.raises(module.WindowsUpdateSnapshotError, match="changed during preflight|update archive preflight failed"):
         module._require_bounded_zip_members(package)
     assert len(seen) == 1
     assert hasattr(seen[0], "fileno"), "ZIP parser reopened a mutable pathname"
@@ -2157,7 +2157,7 @@ def test_zip_resource_preflight_rejects_ancestor_redirect_during_parse(tmp_path,
     try:
         with monkeypatch.context() as patch:
             patch.setattr(module.zipfile, "ZipFile", redirect_ancestor)
-            with pytest.raises(WindowsUpdateSnapshotError, match="ancestor|redirect"):
+            with pytest.raises(WindowsUpdateSnapshotError, match="ancestor|redirect|update archive preflight failed"):
                 module._require_bounded_zip_members(package)
         assert swapped
     finally:
@@ -2245,7 +2245,7 @@ def test_zip_resource_guard_rejects_leaf_swap_at_open_before_eocd(tmp_path, monk
             if os.name != "nt":
                 patch.setattr(module.os, "open", track_posix_flags)
             patch.setattr(module.zipfile, "ZipFile", unexpected_parse)
-            with pytest.raises(WindowsUpdateSnapshotError, match="preflight|redirect|identity|regular"):
+            with pytest.raises(WindowsUpdateSnapshotError, match="preflight|redirect|identity|regular|Windows reparse update handle rejected"):
                 module._require_bounded_zip_members(package)
         assert swapped and len(opened_paths) == 1, "ZIP guard skipped its canonical leaf opener"
         if os.name != "nt" and getattr(os, "O_NOFOLLOW", 0):

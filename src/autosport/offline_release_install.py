@@ -161,12 +161,29 @@ def install_verified_release(
     temp_root: Path | None = None
     try:
         temp_root = Path(tempfile.mkdtemp(prefix=".autosport-install-staging-", dir=destination.parent))
+        # Verification authenticates a snapshot, not a mutable pathname.
+        # Preserve exactly those SHA-pinned wire bytes inside private staging;
+        # extract exclusively from that copy, never by reopening the original.
+        archive_snapshot = temp_root / "verified-archive.zip"
+        snapshot_digest = hashlib.sha256()
+        snapshot_size = 0
+        with archive.open("rb") as reader, archive_snapshot.open("xb") as writer:
+            for chunk in iter(lambda: reader.read(1024 * 1024), b""):
+                snapshot_size += len(chunk)
+                if snapshot_size > _MAX_TOTAL_BYTES:
+                    raise OfflineInstallError("release archive exceeds bounded snapshot size")
+                snapshot_digest.update(chunk)
+                writer.write(chunk)
+            writer.flush()
+            os.fsync(writer.fileno())
+        if snapshot_digest.hexdigest() != expected_package_sha256:
+            raise OfflineInstallError("archive changed before trusted extraction snapshot")
         payload_root = temp_root / "payload"
         payload_root.mkdir(mode=0o700)
         file_hashes: dict[str, str] = {}
         windows_keys: set[str] = {_RECEIPT.casefold()}
         total = 0
-        with zipfile.ZipFile(archive) as source:
+        with zipfile.ZipFile(archive_snapshot) as source:
             infos = source.infolist()
             if len(infos) > _MAX_FILES or not infos:
                 raise OfflineInstallError("unsupported release member count")

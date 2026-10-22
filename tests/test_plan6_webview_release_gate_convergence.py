@@ -27,7 +27,14 @@ def test_webview2_build_preserves_exact_sbom_source_and_clean_env() -> None:
     assert 'load_module("autosport.release_sbom", "src/autosport/release_sbom.py")' in script
     assert script.index('load_module("autosport.release_sbom"') < script.index('load_module("autosport.release_package"')
     assert "& $packagingPython -I -c $script:trustedPackageLauncher" in script
-    assert "src/autosport/release_sbom.py src/autosport/release_dependency_graph.py src/autosport/data_tool_package.py" in script
+    archive_line = next(
+        line for line in script.splitlines()
+        if line.startswith('& $gitExecutable archive --format=zip "--output=$trustedPackageArchive"')
+    )
+    assert (
+        "src/autosport/release_sbom.py src/autosport/release_binary_attribution.py "
+        "src/autosport/release_dependency_graph.py src/autosport/data_tool_package.py"
+    ) in archive_line
     assert "$trustedWebAssetsSpec" in script
     assert "--add-data $trustedWebAssetsSpec" in script
 

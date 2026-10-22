@@ -323,6 +323,70 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                 self.assertTrue((txn / "previous" / "Autosport.exe").is_file())
                 self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
 
+    def test_recovery_rejects_inplace_payload_rewrite_after_publication(self):
+        # Recovery must not return a successful old-release receipt for bytes
+        # rewritten after the no-replace move, which preserves the inode.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, _new, _nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            previous = txn / "previous"
+            dest.rename(previous)
+            publish = upgrade._publish_directory_no_replace
+            bad = b"forged-after-recovery-publication"
+            seen = []
+
+            def tamper_after_recovery(source, target):
+                publish(source, target)
+                if Path(source) == previous and Path(target) == dest:
+                    seen.append(True)
+                    (dest / "Autosport.exe").write_bytes(bad)
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=tamper_after_recovery,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.recover_update_gap(
+                        dest, old_archive=old, old_source_sha=self.OLD,
+                        old_package_sha256=od,
+                    )
+            self.assertEqual(seen, [True])
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), bad)
+            self.assertFalse(previous.exists())
+
+    def test_rollback_rejects_inplace_payload_rewrite_after_publication(self):
+        # The old release must be reverified at the actual installed path,
+        # not certified merely by its unchanged directory inode.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            bad = b"forged-after-rollback-publication"
+            seen = []
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                publish = upgrade._publish_directory_no_replace
+
+                def tamper_after_rollback(source, target):
+                    publish(source, target)
+                    if Path(source).name == "previous" and Path(target) == dest:
+                        seen.append(True)
+                        (dest / "Autosport.exe").write_bytes(bad)
+
+                with patch.object(
+                    upgrade, "_publish_directory_no_replace",
+                    side_effect=tamper_after_rollback,
+                ):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+            self.assertEqual(seen, [True])
+            txn = upgrade._transaction_root(dest)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), bad)
+            self.assertEqual(
+                (txn / "rejected-current" / "Autosport.exe").read_bytes(),
+                self.NEW.encode(),
+            )
+
     def test_rollback_keeps_rejected_release_for_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

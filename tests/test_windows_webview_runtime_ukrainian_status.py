@@ -97,6 +97,11 @@ def _controller(tmp_path: Path, message: object) -> AutosportWebController:
     controller.live_worker = _IdleWorker()
     controller.recovery_worker = _IdleWorker()
     controller.evidence_export_worker = _IdleWorker()
+    # __new__ fixture must include every worker polled by the production controller.
+    controller.update_diagnostic_worker = _IdleWorker()
+    controller.update_diagnostic_status = ""
+    controller.learning_status_worker = _IdleWorker()
+    controller.learning_status_lines = []
     controller.product_worker = _QueuedProductWorker(message)
     controller.product_runtime_status = ""
     controller._product_runtime_identity = None

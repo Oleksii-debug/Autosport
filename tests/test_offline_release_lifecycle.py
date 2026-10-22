@@ -126,7 +126,7 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)
             directory, digest = self._installed(root)
-            with self.assertRaisesRegex(install.OfflineInstallError, "original release archive"):
+            with self.assertRaisesRegex(install.OfflineInstallError, "installed-release receipt differs from trusted anchors"):
                 self._uninstall(directory, "f" * 64)
             self.assertTrue(directory.exists())
 
@@ -191,7 +191,7 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
                 side_effect=inject_after_second_check,
             ):
                 with self.assertRaisesRegex(
-                    install.OfflineInstallError, "installed parent changed during removal"
+                    install.OfflineInstallError, "release member parent is redirected"
                 ):
                     self._uninstall(directory, digest)
             self.assertEqual(seen[0], 3)

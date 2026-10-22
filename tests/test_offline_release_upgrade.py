@@ -323,6 +323,67 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                 self.assertTrue((txn / "previous" / "Autosport.exe").is_file())
                 self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
 
+    def test_recovery_rejects_inplace_rewrite_after_restoration_move(self):
+        # The restored directory remains the same inode while its executable
+        # is overwritten as the atomic move completes. Never call this a
+        # successful crash recovery or clear its update-transaction lease.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            dest.rename(txn / "previous")
+            real_publish = upgrade._publish_directory_no_replace
+            mutated = []
+
+            def rewrite_after_recovery(source, target):
+                real_publish(source, target)
+                if Path(source) == txn / "previous" and Path(target) == dest:
+                    mutated.append(True)
+                    (dest / "Autosport.exe").write_bytes(b"corrupted-restored-payload")
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace", side_effect=rewrite_after_recovery,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.recover_update_gap(
+                        dest, old_archive=old, old_source_sha=self.OLD,
+                        old_package_sha256=od,
+                    )
+            self.assertEqual(mutated, [True])
+            self.assertTrue(txn.is_dir(), "uncertain restoration keeps recovery lease")
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"corrupted-restored-payload")
+
+    def test_rollback_rejects_inplace_rewrite_after_final_move(self):
+        # Reusing the verified previous directory's inode is insufficient if
+        # the active executable changes as the rollback move completes.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+            txn = upgrade._transaction_root(dest)
+            real_publish = upgrade._publish_directory_no_replace
+            mutated = []
+
+            def rewrite_after_rollback(source, target):
+                real_publish(source, target)
+                if Path(source) == txn / "previous" and Path(target) == dest:
+                    mutated.append(True)
+                    (dest / "Autosport.exe").write_bytes(b"corrupted-rollback-payload")
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace", side_effect=rewrite_after_rollback,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.rollback_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(mutated, [True])
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"corrupted-rollback-payload")
+            self.assertEqual(
+                (txn / "rejected-current" / "Autosport.exe").read_bytes(),
+                self.NEW.encode(),
+            )
+
     def test_rollback_keeps_rejected_release_for_evidence(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

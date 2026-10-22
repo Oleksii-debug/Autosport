@@ -265,6 +265,9 @@ class WindowsUpdateSnapshot:
             )
         ):
             raise WindowsUpdateSnapshotError("pinned package ancestor authority is invalid")
+        # Path stat/lstat and an opened-handle fstat may expose different
+        # creation/change-time views on Windows. Verify each view against its
+        # own baseline; never compare those timestamp tuples across APIs.
         digest = hashlib.sha256()
         total = 0
         try:
@@ -298,8 +301,7 @@ class WindowsUpdateSnapshot:
                     or self._file_identity != opened_identity
                     or opened_identity != entry_identity
                     or opened_change_time != self._change_time_100ns
-                    or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
-                    != self._file_metadata
+                    or opened.st_size != self.byte_count
                 ):
                     raise WindowsUpdateSnapshotError("pinned package file identity changed")
                 while block := stream.read(_CHUNK_BYTES):
@@ -321,7 +323,7 @@ class WindowsUpdateSnapshot:
                     or _require_file_identity(completed) != opened_identity
                     or completed_change_time != self._change_time_100ns
                     or (completed.st_size, completed.st_mtime_ns, completed.st_ctime_ns)
-                    != self._file_metadata
+                    != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
                     or (after_entry.st_size, after_entry.st_mtime_ns, after_entry.st_ctime_ns)
                     != self._file_metadata
                 ):
@@ -454,6 +456,8 @@ def pinned_windows_update_package(
                 # an attacker replaces the *source path* with another inode.
                 # Compare both the opened object and the path after copying;
                 # digest equality alone is not a filesystem identity proof.
+                # Compare path metadata with the original path witness,
+                # descriptor metadata with the original descriptor witness.
                 source_after = path.lstat()
                 if _source_parent_identity(path) != parent_identity:
                     raise WindowsUpdateSnapshotError("package ancestor changed during copy")
@@ -461,7 +465,7 @@ def pinned_windows_update_package(
                     not stat.S_ISREG(source_after.st_mode) or _is_redirected_file(source_after)
                     or _require_file_identity(source_after) != before_identity
                     or (source_after.st_size, source_after.st_mtime_ns, source_after.st_ctime_ns)
-                    != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    != (source_entry.st_size, source_entry.st_mtime_ns, source_entry.st_ctime_ns)
                 ):
                     raise WindowsUpdateSnapshotError("source changed while being copied")
                 if (

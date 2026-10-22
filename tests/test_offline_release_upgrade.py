@@ -66,10 +66,15 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             root = Path(temp)
             original = root.lstat()
-            self.assertEqual(
-                upgrade._directory_witness(root),
-                (original.st_dev, original.st_ino),
-            )
+            if type(original.st_ino) is int and original.st_ino > 0:
+                self.assertEqual(
+                    upgrade._directory_witness(root),
+                    (original.st_dev, original.st_ino),
+                )
+            else:
+                # The running filesystem may itself lack an inode witness.
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade._directory_witness(root)
             cases = (
                 (original.st_dev, 0),
                 (-1, original.st_ino),

@@ -25,8 +25,8 @@ def test_exported_control_identity_and_mismatches_are_trusted_or_fixed() -> None
 
 def test_mismatched_controls_still_fail_closed_without_raw_provider_values() -> None:
     audit = _audit()
-    assert "if ($currentName -ne $spec.name)" in audit
-    assert "$controlType -ne [string]$spec.expected_control_type" in audit
+    assert "if ($currentName -cne [string]$spec.name)" in audit
+    assert "$controlType -cne [string]$spec.expected_control_type" in audit
     assert "external UIA Name mismatch" in audit
     assert "external UIA ControlType mismatch" in audit
     assert "duplicate external UIA control identity" in audit

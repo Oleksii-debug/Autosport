@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest.mock import patch
 
 from autosport import offline_release_install as install
@@ -320,9 +320,10 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
         )
 
     def test_posix_case_distinction_retains_distinct_update_namespace(self):
-        with tempfile.TemporaryDirectory() as temp:
-            first = Path(temp) / "Autosport"
-            second = Path(temp) / "autosport"
+            # Use a platform-independent POSIX path: Path(temp) becomes a
+            # WindowsPath on Windows runners and correctly case-folds there.
+            first = PurePosixPath("/opt/Autosport")
+            second = PurePosixPath("/opt/autosport")
             self.assertNotEqual(
                 upgrade._transaction_root(first).name,
                 upgrade._transaction_root(second).name,

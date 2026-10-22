@@ -918,5 +918,72 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             )
 
 
+    def test_finalize_rejects_active_executable_rewrite_during_obsolete_disposal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+                txn = upgrade._transaction_root(dest)
+                original_uninstall = upgrade.uninstall_verified_release
+
+                def corrupt_active_after_disposal(path, **kwargs):
+                    result = original_uninstall(path, **kwargs)
+                    (dest / "Autosport.exe").write_bytes(b"corrupted-after-finalize")
+                    return result
+
+                with patch.object(upgrade, "uninstall_verified_release",
+                                  side_effect=corrupt_active_after_disposal):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+            self.assertTrue(txn.is_dir())
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"corrupted-after-finalize")
+
+    def test_finalize_rejects_identical_active_directory_swap_during_disposal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+                txn = upgrade._transaction_root(dest)
+                original_uninstall = upgrade.uninstall_verified_release
+
+                def replace_active_after_disposal(path, **kwargs):
+                    result = original_uninstall(path, **kwargs)
+                    dest.rename(txn / "verified-original")
+                    shutil.copytree(txn / "verified-original", dest)
+                    return result
+
+                with patch.object(upgrade, "uninstall_verified_release",
+                                  side_effect=replace_active_after_disposal):
+                    with self.assertRaisesRegex(install.OfflineInstallError,
+                                                "active release identity changed"):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+            self.assertTrue((txn / "verified-original").is_dir())
+
+    def test_finalize_rejects_active_pre_disposal_tamper_preserving_previous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+                txn = upgrade._transaction_root(dest)
+                original_lineage = upgrade._require_forward_update_lineage
+
+                def tamper_after_lineage(**kwargs):
+                    result = original_lineage(**kwargs)
+                    (dest / "Autosport.exe").write_bytes(b"corrupted-before-disposal")
+                    return result
+
+                with patch.object(upgrade, "_require_forward_update_lineage",
+                                  side_effect=tamper_after_lineage):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+            self.assertTrue((txn / "previous").is_dir())
+
+
 if __name__ == "__main__":
     unittest.main()

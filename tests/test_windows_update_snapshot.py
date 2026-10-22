@@ -2030,7 +2030,8 @@ def test_snapshot_rejects_nonlocal_or_ambiguous_path_before_any_filesystem_acces
 
 def test_snapshot_rejects_path_subclass_before_untrusted_fspath_callback():
     """A direct caller cannot inject a mutable/custom path protocol into admission."""
-    class HostilePath(Path):
+    # Concrete platform Path type is required for Python 3.11 (_flavour).
+    class HostilePath(type(Path())):
         def __fspath__(self):
             raise AssertionError("untrusted path callback executed")
 

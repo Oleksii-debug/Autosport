@@ -405,6 +405,7 @@ def finalize_verified_paper_update(
         discarded = (new_archive, new_source_sha, new_package_sha256)
     else:
         raise OfflineInstallError("unknown or ambiguous update transaction state")
+    active_witness = _directory_witness(root)
     inspect_installed_release(
         root, archive=active[0],
         expected_source_sha=active[1], expected_package_sha256=active[2],
@@ -419,10 +420,30 @@ def finalize_verified_paper_update(
         new_archive=Path(new_archive), new_source_sha=new_source_sha,
         new_package_sha256=new_package_sha256,
     )
+    # Do not delete the rollback source if the active product changed since
+    # the initial SHA-bound inspection or lineage verification.
+    if _directory_witness(root) != active_witness:
+        raise OfflineInstallError("active release identity changed before update finalization")
+    inspect_installed_release(
+        root, archive=active[0],
+        expected_source_sha=active[1], expected_package_sha256=active[2],
+    )
+    if _directory_witness(root) != active_witness:
+        raise OfflineInstallError("active release identity changed during finalization preflight")
     uninstall_verified_release(
         obsolete, archive=discarded[0],
         expected_source_sha=discarded[1], expected_package_sha256=discarded[2],
     )
+    # An in-place rewrite or directory swap during obsolete disposal must
+    # never be reported as a successful update finalization.
+    if _directory_witness(root) != active_witness:
+        raise OfflineInstallError("active release identity changed during update finalization")
+    inspect_installed_release(
+        root, archive=active[0],
+        expected_source_sha=active[1], expected_package_sha256=active[2],
+    )
+    if _directory_witness(root) != active_witness:
+        raise OfflineInstallError("active release identity changed during final readback")
     txn.rmdir()
     return {"status": "PAPER_UPDATE_FINALIZED", "source_sha": active[1],
             "real_money_execution": False}

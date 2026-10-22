@@ -137,7 +137,7 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     )
     package_command = "python scripts/package_windows.py `"
     isolated_runner = (
-        "& $script:pythonExecutable -I -S -c $script:trustedPackageLauncher "
+        "& $packagingPython -I -c $script:trustedPackageLauncher "
         "$script:trustedPackageRoot $script:trustedPackageManifestJson @remaining"
     )
 
@@ -148,6 +148,11 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
 
     assert final_gate_index < archive_index < package_index
     assert isolated_runner in script
+    # The trusted packager uses a freshly isolated, exact-requirements venv;
+    # unlike the source verifier, it needs installed dependency metadata.
+    assert "$packagingPython = Join-Path $packagingVenv 'Scripts/python.exe'" in script
+    assert "& $packagingPython -I -m pip --isolated install" in script
+    assert "& $packagingPython -I -c $autosportResolutionProbe" in script
     assert "$trustedPackageLauncher = @'" in script
     assert "sys.path.insert" not in launcher
     assert 'load_module("autosport.release_sbom", "src/autosport/release_sbom.py")' in launcher

@@ -92,5 +92,23 @@ class BinaryModuleAttributionTest(unittest.TestCase):
                     validate_binary_module_attribution(forged, self.graph, self.inventory)
 
 
+    def test_untrusted_host_graph_identities_fail_closed(self):
+        report = capture_binary_module_attribution(
+            self.graph, self.inventory, packages_distributions={},
+        )
+        for hostile_components in (
+            [{"name": ["nonhashable"]}],
+            [{"name": {"nested": "nonhashable"}}],
+            [{"other": "missing"}],
+            [None],
+            [],
+            [{"name": "example-dist"}] * 257,
+        ):
+            with self.subTest(components=repr(hostile_components)[:96]):
+                graph = {**self.graph, "components": hostile_components}
+                with self.assertRaises(ValueError):
+                    validate_binary_module_attribution(report, graph, self.inventory)
+
+
 if __name__ == "__main__":
     unittest.main()

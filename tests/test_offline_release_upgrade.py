@@ -92,6 +92,65 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                         ):
                             upgrade._directory_witness(root)
 
+    def test_update_rejects_staged_directory_replacement_before_old_release_moves(self):
+        # A syntactically valid, previously verified candidate can be
+        # replaced by an unverified directory when the old root is reread.
+        # The update must not publish that replacement or move old bytes.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            candidate = txn / "candidate"
+            real_inspection = upgrade.inspect_installed_release
+
+            def swap_after_old_read(root, **kwargs):
+                result = real_inspection(root, **kwargs)
+                if Path(root) == dest and candidate.is_dir():
+                    candidate.rename(txn / "checked-but-replaced")
+                    candidate.mkdir()
+                    (candidate / "Autosport.exe").write_bytes(b"unverified")
+                return result
+
+            with self._trusted(), patch.object(
+                upgrade, "inspect_installed_release", side_effect=swap_after_old_read,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "staged release identity changed",
+                ):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertFalse((txn / "previous").exists())
+
+    def test_update_restores_old_release_on_staged_replacement_after_quarantine(self):
+        # Publication is two moves. Replacing candidate between the two must
+        # fail closed and return the exact old directory to its original path.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            candidate = txn / "candidate"
+            real_publish = upgrade._publish_directory_no_replace
+
+            def replace_after_old_move(source, target):
+                real_publish(source, target)
+                if Path(source) == dest and Path(target) == txn / "previous":
+                    candidate.rename(txn / "checked-but-replaced")
+                    candidate.mkdir()
+                    (candidate / "Autosport.exe").write_bytes(b"unverified")
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=replace_after_old_move,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "staged release identity changed",
+                ):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertFalse((txn / "previous").exists())
+
     def test_update_preserves_previous_and_never_enables_money(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

@@ -4,6 +4,11 @@
 
 # Autosport — Multi-Plan Closure State
 
+## 2026-10-22 — Plan 6 §6А previous-release integrity source fix (not parent DONE)
+
+Scoped fix [PR #2545](https://github.com/Oleksii-debug/Autosport/pull/2545) **MERGED** and independently read back from `main@cf73f51f92a8332b087d004a9465ae3f6ab5f551`. Canonical `offline_release_upgrade.py` rechecks exact old release payload and directory identity just before recovery/rollback publication, where an in-place executable rewrite previously retained a valid directory-inode witness. Two fault-injection regressions are integrated. Product source blob `4bc6323c5893d0b4336a582b65b543d11dd7af50`, test blob `6f6079aeb736bf80abfdf9e18cb34de379d8c7c1` both MATCH `main`. **Specific defect source-integration complete; full pytest and Windows candidate queued/NOT VERIFIED.** The unique Plan-6 `6А|IN_PROGRESS_NOT_DONE` row below is unchanged; cross-schema migration and exact Windows lifecycle acceptance remain. The other open atomic sections `5Б`, `7А`, `7В` and Plans 7/8 are not closed. `REAL_MONEY_EXECUTION=false`.
+
+
 This is the live status authority for the new architecture.
 
 ## Rules

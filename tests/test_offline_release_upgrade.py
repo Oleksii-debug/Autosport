@@ -297,13 +297,13 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
         # Normal Win32 APIs strip trailing dots/spaces from path components.
         # Each variant could otherwise select a different pending-update
         # transaction for the same installed product.
-        canonical = PureWindowsPath(r"C:\\Apps\\Autosport Product")
+        canonical = PureWindowsPath(r"C:\Apps\Autosport Product")
         self.assertTrue(upgrade._transaction_root(canonical).name.startswith(".autosport-update-"))
         for alias in (
-            PureWindowsPath(r"C:\\Apps\\Autosport Product."),
+            PureWindowsPath(r"C:\Apps\Autosport Product."),
             PureWindowsPath("C:\\\\Apps\\\\Autosport Product "),
-            PureWindowsPath(r"C:\\Apps.\\Autosport Product"),
-            PureWindowsPath(r"C:\\Apps \\Autosport Product"),
+            PureWindowsPath(r"C:\Apps.\Autosport Product"),
+            PureWindowsPath(r"C:\Apps \Autosport Product"),
         ):
             with self.subTest(alias=str(alias)):
                 with self.assertRaisesRegex(

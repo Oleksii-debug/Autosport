@@ -128,7 +128,8 @@ class Plan6QualifierTests(unittest.TestCase):
         present = {
             path.relative_to(root).as_posix()
             for pattern in ("test_offline_release_*.py", "test_plan6_6a_*.py",
-                            "test_plan6_nested_release_*.py", "test_plan6_offline_install_*.py")
+                            "test_plan6_nested_release_*.py", "test_plan6_offline_install_*.py",
+                            "test_plan6_update_alias_*.py")
             for path in (root / "tests").glob(pattern)
         }
         present.add("tests/test_data_tools_installed_release_entry.py")

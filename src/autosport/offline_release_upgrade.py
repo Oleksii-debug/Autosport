@@ -140,15 +140,17 @@ def upgrade_verified_paper_release(
             new_archive, candidate, expected_source_sha=new_source_sha,
             expected_package_sha256=new_package_sha256,
         )
+        # Witness the exact staged directory before its trust inspection:
+        # capturing only afterwards admits a same-path replacement between
+        # verifier return and the identity read.
+        candidate_witness = _directory_witness(candidate)
         inspect_installed_release(
             candidate, archive=new_archive,
             expected_source_sha=new_source_sha,
             expected_package_sha256=new_package_sha256,
         )
-        # A matching file inventory is not enough if another actor replaces
-        # the entire staged directory after inspection. Bind its filesystem
-        # object, as we already do for the installed incumbent.
-        candidate_witness = _directory_witness(candidate)
+        if _directory_witness(candidate) != candidate_witness:
+            raise OfflineInstallError("staged release identity changed during verification")
         inspect_installed_release(
             root, archive=old_archive,
             expected_source_sha=old_source_sha,

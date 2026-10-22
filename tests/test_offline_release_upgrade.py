@@ -92,6 +92,37 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                         ):
                             upgrade._directory_witness(root)
 
+    def test_update_rejects_candidate_swap_at_verified_read_return(self):
+        # A replacement can occur *after* the verifier has accepted a
+        # candidate but *before* it returns to the updater. Its identity
+        # must already have been witnessed before that trusted inspection.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            candidate = txn / "candidate"
+            real_inspection = upgrade.inspect_installed_release
+
+            def replace_as_candidate_verification_returns(root, **kwargs):
+                report = real_inspection(root, **kwargs)
+                if Path(root) == candidate:
+                    candidate.rename(txn / "verified-but-replaced")
+                    candidate.mkdir()
+                    (candidate / "Autosport.exe").write_bytes(b"forged-new-binary")
+                return report
+
+            with self._trusted(), patch.object(
+                upgrade, "inspect_installed_release",
+                side_effect=replace_as_candidate_verification_returns,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "staged release identity changed",
+                ):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertFalse((txn / "previous").exists())
+
     def test_update_rejects_staged_directory_replacement_before_old_release_moves(self):
         # A syntactically valid, previously verified candidate can be
         # replaced by an unverified directory when the old root is reread.

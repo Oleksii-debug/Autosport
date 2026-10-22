@@ -136,12 +136,20 @@ def test_poll_value_projection_is_focus_safe_and_mutation_minimal() -> None:
     source = _source()
 
     stable_value_projections = (
-        'setValueUnlessFocused(byId("dataset-path"), state.dataset_path || "");',
-        'setValueUnlessFocused(byId("research-plan-path"), state.research_plan_path || "");',
+        'renderCanonicalPathUnlessDraft("dataset-path", state.dataset_path || "");',
+        'renderCanonicalPathUnlessDraft("research-plan-path", state.research_plan_path || "");',
         'setValueUnlessFocused(sourceSelect, productSource.selected_id);',
     )
     for projection in stable_value_projections:
         assert projection in source
+
+    # Preserve an unsubmitted operator path even after focus moves to Save.
+    # The old direct setter assertion predated the dirty-draft fence.
+    assert "function renderCanonicalPathUnlessDraft(id, value)" in source
+    assert "if (!unsavedPathDrafts.has(id))" in source
+    assert "setValueUnlessFocused(byId(id), value);" in source
+    assert 'for (const id of ["dataset-path", "research-plan-path"])' in source
+    assert 'unsavedPathDrafts.add(id);' in source
 
     stale_value_projections = (
         'byId("dataset-path").value = state.dataset_path || "";',

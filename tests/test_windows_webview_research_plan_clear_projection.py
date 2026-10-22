@@ -20,4 +20,7 @@ def test_cleared_bound_research_plan_clears_the_visible_path() -> None:
     # nonfocused stale research paths clear on poll, while active NVDA edits
     # retain keyboard focus and typed text until focus leaves the field.
     assert 'document.activeElement !== node && node.value !== text' in javascript
-    assert 'setValueUnlessFocused(byId("research-plan-path"), state.research_plan_path || "")' in javascript
+    assert 'renderCanonicalPathUnlessDraft("research-plan-path", state.research_plan_path || "")' in javascript
+    assert "function renderCanonicalPathUnlessDraft(id, value)" in javascript
+    assert "if (!unsavedPathDrafts.has(id))" in javascript
+    assert "setValueUnlessFocused(byId(id), value);" in javascript

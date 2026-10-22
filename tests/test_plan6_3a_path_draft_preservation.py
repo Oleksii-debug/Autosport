@@ -13,7 +13,7 @@ import unittest
 
 APP = Path(__file__).resolve().parents[1] / "src/autosport/windows_web/app.js"
 HELPER_START = "  const pathDraftEdits = new Map();"
-HELPER_END = "  function hasFocusedReadback(node) {"
+HELPER_END = "  // A provider/source choice is a pending operator draft"
 
 
 def _source() -> str:
@@ -37,6 +37,10 @@ class WebViewPathDraftTruthTest(unittest.TestCase):
         self.assertEqual(source.count('const editEpoch = pathDraftEdits.get("research-plan-path");'), 1)
         self.assertIn('await dispatch("dataset.select", { path });', source)
         self.assertIn('await dispatch("research_plan.select", { path });', source)
+        # Do not import unrelated provider-source DOM listeners into the isolated
+        # path-draft helper; preserve their real production reachability.
+        self.assertNotIn('byId("product-source-select")', _helper())
+        self.assertIn('byId("product-source-select").addEventListener("change"', source)
         self.assertIn('result.status === "completed"', _helper())
         self.assertIn('pathDraftEdits.get(id) === editEpoch', _helper())
         self.assertIn('dataset_validation_pending', _helper())

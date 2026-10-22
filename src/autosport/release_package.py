@@ -835,11 +835,17 @@ def build_windows_package(
         exe_path, start_file, example_dir, diagnostic_path,
         accessibility_path, keyboard_path, restart_recovery_path,
     )
+    # Bind all six independently supplied release inputs at preflight.
+    # The existing example-tree witness already prevents substitution there;
+    # without an equivalent witness for these regular inputs, a second valid
+    # executable or audit JSON can replace the checked file before staging.
+    regular_source_fingerprints: dict[Path, tuple[int, ...]] = {}
     for source in (
         exe_path, start_file, diagnostic_path, accessibility_path,
         keyboard_path, restart_recovery_path,
     ):
         _require_release_regular_source(source)
+        regular_source_fingerprints[source] = _release_source_fingerprint(source.lstat())
     example_witness = _require_release_source_tree_without_links(example_dir)
     output_zip.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(
@@ -848,12 +854,12 @@ def build_windows_package(
     ) as staging_root:
         package_dir = Path(staging_root) / "Autosport-V1"
         package_dir.mkdir()
-        _copy_release_regular_source(exe_path, package_dir / "Autosport.exe")
-        _copy_release_regular_source(start_file, package_dir / "WINDOWS_START_HERE.txt")
-        _copy_release_regular_source(diagnostic_path, package_dir / "packaged-diagnostic.json")
-        _copy_release_regular_source(accessibility_path, package_dir / "accessibility-audit.json")
-        _copy_release_regular_source(keyboard_path, package_dir / "keyboard-audit.json")
-        _copy_release_regular_source(restart_recovery_path, package_dir / "restart-recovery-audit.json")
+        _copy_release_regular_source(exe_path, package_dir / "Autosport.exe", expected_fingerprint=regular_source_fingerprints[exe_path])
+        _copy_release_regular_source(start_file, package_dir / "WINDOWS_START_HERE.txt", expected_fingerprint=regular_source_fingerprints[start_file])
+        _copy_release_regular_source(diagnostic_path, package_dir / "packaged-diagnostic.json", expected_fingerprint=regular_source_fingerprints[diagnostic_path])
+        _copy_release_regular_source(accessibility_path, package_dir / "accessibility-audit.json", expected_fingerprint=regular_source_fingerprints[accessibility_path])
+        _copy_release_regular_source(keyboard_path, package_dir / "keyboard-audit.json", expected_fingerprint=regular_source_fingerprints[keyboard_path])
+        _copy_release_regular_source(restart_recovery_path, package_dir / "restart-recovery-audit.json", expected_fingerprint=regular_source_fingerprints[restart_recovery_path])
         _copy_release_example_tree(
             example_dir, package_dir / "examples" / example_dir.name, example_witness,
         )

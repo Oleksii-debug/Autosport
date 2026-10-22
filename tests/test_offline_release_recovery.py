@@ -10,6 +10,7 @@ from unittest.mock import patch
 
 from autosport import offline_release_install as installer
 from autosport import offline_release_lifecycle as lifecycle
+from autosport import offline_release_recovery as recovery
 from autosport.offline_release_recovery import recover_interrupted_uninstall
 
 
@@ -55,6 +56,27 @@ class RecoverInterruptedUninstallTests(unittest.TestCase):
             self.assertFalse(quarant.exists())
             self.assertFalse(result["real_money_execution"])
             self.assertFalse(result["nvda_verified"])
+
+    def test_recovery_rejects_modified_executable_after_publication(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive, digest, dest, quarantine, trust = self._quarantined(Path(temp))
+            actual_publish = recovery._publish_directory_no_replace
+            calls = []
+
+            def modify_installed(source, target):
+                actual_publish(source, target)
+                if Path(source) == quarantine and Path(target) == dest:
+                    calls.append(True)
+                    (dest / "Autosport.exe").write_bytes(b"changed-after-publication")
+
+            with patch.object(recovery, "_publish_directory_no_replace",
+                              side_effect=modify_installed):
+                with self.assertRaises(installer.OfflineInstallError):
+                    self._recover(archive, digest, dest, quarantine, trust)
+            self.assertEqual(calls, [True])
+            self.assertEqual(
+                (dest / "Autosport.exe").read_bytes(), b"changed-after-publication")
+            self.assertFalse(quarantine.exists())
 
     def test_receipt_missing_can_be_recreated_only_from_independent_archive(self):
         with tempfile.TemporaryDirectory() as temp:

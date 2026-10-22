@@ -174,6 +174,16 @@ def recover_interrupted_uninstall(
     if destination.exists() or destination.is_symlink():
         raise OfflineInstallError("uninstall recovery destination was concurrently created")
     _publish_directory_no_replace(quarantine, destination)
+    # The payload is inspected before its atomic move; an in-place rewrite
+    # during publication keeps the directory inode unchanged. Verify the
+    # *published* installed bytes before reporting recovered success or
+    # retiring the staging directory. Never trust a pre-move receipt alone.
+    proof = inspect_installed_release(
+        destination,
+        archive=archive,
+        expected_source_sha=expected_source_sha,
+        expected_package_sha256=expected_package_sha256,
+    )
     try:
         quarantine.parent.rmdir()
     except OSError:

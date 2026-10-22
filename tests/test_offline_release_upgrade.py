@@ -293,6 +293,24 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                 ):
                     upgrade._transaction_root(alias)
 
+    def test_windows_trailing_dot_or_space_aliases_cannot_bypass_update_fence(self):
+        # Normal Win32 APIs strip trailing dots/spaces from path components.
+        # Each variant could otherwise select a different pending-update
+        # transaction for the same installed product.
+        canonical = PureWindowsPath(r"C:\\Apps\\Autosport Product")
+        self.assertTrue(upgrade._transaction_root(canonical).name.startswith(".autosport-update-"))
+        for alias in (
+            PureWindowsPath(r"C:\\Apps\\Autosport Product."),
+            PureWindowsPath("C:\\\\Apps\\\\Autosport Product "),
+            PureWindowsPath(r"C:\\Apps.\\Autosport Product"),
+            PureWindowsPath(r"C:\\Apps \\Autosport Product"),
+        ):
+            with self.subTest(alias=str(alias)):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "trailing-dot-or-space"
+                ):
+                    upgrade._transaction_root(alias)
+
     def test_normal_windows_unc_update_namespace_still_supported(self):
         first = PureWindowsPath(r"\\server\share\Autosport")
         second = PureWindowsPath(r"\\SERVER\SHARE\AUTOSPORT")

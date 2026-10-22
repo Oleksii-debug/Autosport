@@ -546,8 +546,9 @@ def _require_bounded_zip_members(path: Path) -> None:
                 or _is_redirected_file(entry_opened)
                 or _require_file_identity(initial) != entry_identity
                 or _require_file_identity(entry_opened) != entry_identity
-                or (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns)
-                != (entry_before.st_size, entry_before.st_mtime_ns, entry_before.st_ctime_ns)
+                # Windows fstat(handle) and lstat(path) timestamps may differ.
+                # Size and file identity may be compared across API views.
+                or initial.st_size != entry_before.st_size
                 or (entry_opened.st_size, entry_opened.st_mtime_ns, entry_opened.st_ctime_ns)
                 != (entry_before.st_size, entry_before.st_mtime_ns, entry_before.st_ctime_ns)
             ):
@@ -612,7 +613,9 @@ def _require_bounded_zip_members(path: Path) -> None:
                 or initial_change != completed_change
                 or (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns)
                 != (completed.st_size, completed.st_mtime_ns, completed.st_ctime_ns)
-                or (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns)
+                # Compare pathname metadata to the original pathname view,
+                # never to the held descriptor's Windows timestamp view.
+                or (entry_before.st_size, entry_before.st_mtime_ns, entry_before.st_ctime_ns)
                 != (current_entry.st_size, current_entry.st_mtime_ns, current_entry.st_ctime_ns)
             ):
                 raise WindowsUpdateSnapshotError("update archive changed during preflight")
@@ -674,8 +677,9 @@ def _verified_embedded_update_identity(snapshot: WindowsUpdateSnapshot, *, expec
             if (
                 not stat.S_ISREG(before.st_mode)
                 or _require_file_identity(before) != snapshot._file_identity
-                or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-                != snapshot._file_metadata
+                # recheck() already bound the pathname metadata and digest;
+                # the opened handle has its own native change-time witness.
+                or before.st_size != snapshot.byte_count
                 or before_change != snapshot._change_time_100ns
             ):
                 raise WindowsUpdateSnapshotError("embedded update source identity changed")
@@ -694,8 +698,10 @@ def _verified_embedded_update_identity(snapshot: WindowsUpdateSnapshot, *, expec
                 or _require_file_identity(after) != snapshot._file_identity
                 or _require_file_identity(entry) != snapshot._file_identity
                 or after_change != snapshot._change_time_100ns
+                # Compare the held descriptor with its own initial witness,
+                # not lstat(path)'s unrelated timestamp representation.
                 or (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-                != snapshot._file_metadata
+                != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                 or (entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns)
                 != snapshot._file_metadata
             ):

@@ -109,7 +109,10 @@ def test_pinned_embedded_identity_rejects_handle_mutation_during_read(
             scope.setattr(snapshot.zipfile, "ZipFile", MutatingReadZip)
             with pytest.raises(
                 snapshot.WindowsUpdateSnapshotError,
-                match="embedded update source changed during read",
+                # The canonical parser deliberately redacts all internal
+                # ZIP/descriptor rejection messages at this trust boundary.
+                # mutation_visible below proves the injected read occurred.
+                match="^embedded update identity is invalid$",
             ):
                 snapshot._verified_embedded_update_identity(
                     pinned, expected_source_sha=_SOURCE_SHA

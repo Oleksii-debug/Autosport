@@ -8,6 +8,7 @@ import tempfile
 import unittest
 import zipfile
 from pathlib import Path, PurePosixPath, PureWindowsPath
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from autosport import offline_release_install as install
@@ -57,6 +58,34 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             return {"status": "PASS", "source_sha": kwargs["expected_source_sha"],
                     "package_sha256": digest}
         return patch.object(install.release_package, "verify_windows_package", side_effect=respond)
+
+    def test_directory_identity_rejects_zero_inode_before_update_or_rollback(self):
+        # An OS/filesystem reporting inode=0 cannot distinguish an intact
+        # install from a same-content directory replacement. Never approve a
+        # destructive release move using an unavailable identity witness.
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            original = root.lstat()
+            self.assertEqual(
+                upgrade._directory_witness(root),
+                (original.st_dev, original.st_ino),
+            )
+            cases = (
+                (original.st_dev, 0),
+                (-1, original.st_ino),
+                (original.st_dev, True),
+            )
+            for device, inode in cases:
+                with self.subTest(device=device, inode=inode):
+                    fake = SimpleNamespace(
+                        st_mode=original.st_mode, st_dev=device, st_ino=inode
+                    )
+                    with patch.object(Path, "lstat", return_value=fake):
+                        with self.assertRaisesRegex(
+                            install.OfflineInstallError,
+                            "directory identity unavailable",
+                        ):
+                            upgrade._directory_witness(root)
 
     def test_update_preserves_previous_and_never_enables_money(self):
         with tempfile.TemporaryDirectory() as temp:

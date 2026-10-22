@@ -392,6 +392,7 @@ required = {
     "scripts/package_windows.py",
     "src/autosport/release_package.py",
     "src/autosport/release_sbom.py",
+    "src/autosport/release_binary_attribution.py",
     "src/autosport/release_dependency_graph.py",
     "src/autosport/data_tool_package.py",
     "src/autosport/windows_pe_integrity.py",
@@ -432,6 +433,7 @@ def load_module(name, relative):
     return module
 
 load_module("autosport.release_sbom", "src/autosport/release_sbom.py")
+load_module("autosport.release_binary_attribution", "src/autosport/release_binary_attribution.py")
 load_module("autosport.release_dependency_graph", "src/autosport/release_dependency_graph.py")
 load_module("autosport.windows_pe_integrity", "src/autosport/windows_pe_integrity.py")
 load_module("autosport.windows_update_admission", "src/autosport/windows_update_admission.py")
@@ -1092,6 +1094,7 @@ $trustedPackagePathsJson = ConvertTo-Json -Compress -InputObject @(
   'scripts/package_windows.py',
   'src/autosport/release_package.py',
   'src/autosport/release_sbom.py',
+  'src/autosport/release_binary_attribution.py',
   'src/autosport/release_dependency_graph.py',
   'src/autosport/data_tool_package.py',
   'src/autosport/windows_pe_integrity.py',
@@ -1108,7 +1111,7 @@ $trustedPackageManifestJson = [string]$trustedPackageManifestLines[0]
 # imported or executed by the package assembly process.
 $trustedPackageArchive = Join-Path $boundArtifactRoot 'trusted-package-source.zip'
 $trustedPackageRoot = Join-Path $boundArtifactRoot 'trusted-package-source'
-& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/release_sbom.py src/autosport/release_dependency_graph.py src/autosport/data_tool_package.py src/autosport/windows_pe_integrity.py src/autosport/windows_update_admission.py src/autosport/windows_update_release_metadata.py
+& $gitExecutable archive --format=zip "--output=$trustedPackageArchive" $sourceSha -- scripts/package_windows.py src/autosport/release_package.py src/autosport/release_sbom.py src/autosport/release_binary_attribution.py src/autosport/release_dependency_graph.py src/autosport/data_tool_package.py src/autosport/windows_pe_integrity.py src/autosport/windows_update_admission.py src/autosport/windows_update_release_metadata.py
 if ($LASTEXITCODE -ne 0) { throw "Exact package source archive exited $LASTEXITCODE" }
 if (Test-Path $trustedPackageRoot) { Remove-Item -LiteralPath $trustedPackageRoot -Recurse -Force }
 New-Item -ItemType Directory -Path $trustedPackageRoot | Out-Null

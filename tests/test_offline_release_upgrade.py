@@ -301,7 +301,7 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
         self.assertTrue(upgrade._transaction_root(canonical).name.startswith(".autosport-update-"))
         for alias in (
             PureWindowsPath(r"C:\Apps\Autosport Product."),
-            PureWindowsPath("C:\\\\Apps\\\\Autosport Product "),
+            PureWindowsPath(r"C:\Apps\Autosport Product "),
             PureWindowsPath(r"C:\Apps.\Autosport Product"),
             PureWindowsPath(r"C:\Apps \Autosport Product"),
         ):

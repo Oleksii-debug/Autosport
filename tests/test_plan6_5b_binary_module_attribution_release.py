@@ -171,13 +171,12 @@ def test_data_executable_seals_distinct_review_only_attribution(tmp_path: Path):
     )
     assert verified["status"] == "PASS"
     assert verified["package_sha256"] == receipt["package_sha256"]
-    assert attribution["executable_sha256"] != (
-        json.loads(
-            __import__("zipfile").ZipFile(package).read(
-                "Autosport-V1/EMBEDDED_EXECUTABLE_INVENTORY.json"
-            )
-        )["executable_sha256"]
-    )
+    import zipfile
+    with zipfile.ZipFile(package) as archive:
+        main_inventory = json.loads(
+            archive.read("Autosport-V1/EMBEDDED_EXECUTABLE_INVENTORY.json")
+        )
+    assert attribution["executable_sha256"] != main_inventory["executable_sha256"]
     assert attribution["modules"][0]["review"] == "HOST_MATCH_REVIEW_REQUIRED"
 
 

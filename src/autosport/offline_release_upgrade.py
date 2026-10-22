@@ -92,6 +92,8 @@ def upgrade_verified_paper_release(
     directory for explicit rollback, never silently removed. A crash after
     moving the old release is recoverable via recover_update_gap.
     """
+    # Reject lexical destination aliases before installed receipt/archive reads.
+    _transaction_root(Path(destination))
     root = _inspection_root(destination)
     old_archive, new_archive = Path(old_archive), Path(new_archive)
     inspect_installed_release(
@@ -163,9 +165,9 @@ def recover_update_gap(
 ) -> dict[str, object]:
     """Restore exact previous release when a crash left no installed directory."""
     root = Path(destination)
+    txn = _transaction_root(root)
     if root.exists() or root.is_symlink():
         raise OfflineInstallError("recovery cannot replace an occupied update destination")
-    txn = _transaction_root(root)
     previous = _inspection_root(txn / "previous")
     inspect_installed_release(
         previous, archive=old_archive, expected_source_sha=old_source_sha,
@@ -182,8 +184,8 @@ def rollback_verified_paper_release(
     new_archive: str | Path, new_source_sha: str, new_package_sha256: str,
 ) -> dict[str, object]:
     """Rollback only verified product bytes; keep new release quarantined."""
+    txn = _transaction_root(Path(destination))
     root = _inspection_root(destination)
-    txn = _transaction_root(root)
     previous = _inspection_root(txn / "previous")
     rejected = txn / "rejected-current"
     if rejected.exists() or rejected.is_symlink():
@@ -226,8 +228,9 @@ def finalize_verified_paper_update(
     An exact active product and one exact previous/rejected product are
     independently reverified. Unknown transaction contents stop disposal.
     """
+    txn_path = _transaction_root(Path(destination))
     root = _inspection_root(destination)
-    txn = _inspection_root(_transaction_root(root))
+    txn = _inspection_root(txn_path)
     entries = {item.name for item in txn.iterdir()}
     if entries == {"previous"}:
         active = (new_archive, new_source_sha, new_package_sha256)

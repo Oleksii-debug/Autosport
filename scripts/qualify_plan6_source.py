@@ -38,6 +38,7 @@ GROUPS = (
         "tests/test_plan6_5b_pyz_nonoverlap.py",
         "tests/test_plan6_5b_second_executable_inventory.py",
         "tests/test_plan6_5b_source_sha_evidence_boundary.py",
+        "tests/test_plan6_release_windows_handle_path_fingerprint.py",
         "tests/test_plan6_source_qualifier.py",
         "tests/test_release_binary_attribution.py",
         "tests/test_release_build_dependency_metadata.py",
@@ -53,6 +54,8 @@ GROUPS = (
         "tests/test_offline_release_install_windows_namespace.py",
         "tests/test_plan6_6a_data_tool_zip_preflight.py",
         "tests/test_plan6_6a_uninstall_atomic_quarantine.py",
+        "tests/test_plan6_nested_release_reparse_boundary.py",
+        "tests/test_plan6_offline_install_reparse_boundary.py",
     )),
 )
 _SHA = re.compile(r"[0-9a-f]{40}\Z")

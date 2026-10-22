@@ -186,3 +186,55 @@ def test_restore_publication_never_replaces_racing_empty_directory(
     assert target.is_dir()
     assert list(target.iterdir()) == []
     assert not list(tmp_path.glob(".autosport-restoring-*"))
+
+def test_regular_backup_tolerates_stable_windows_path_handle_timestamp_precision(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Path and handle timestamp precision may differ without any file change."""
+    from types import SimpleNamespace
+    from autosport import workspace_backup as implementation
+
+    source = tmp_path / "stable-input"
+    source.write_bytes(b"paper state")
+    original_regular = implementation._regular
+
+    def distinct_path_view(path: Path, *, label: str):
+        info = original_regular(path, label=label)
+        return SimpleNamespace(
+            st_dev=info.st_dev, st_ino=info.st_ino,
+            st_mode=info.st_mode, st_nlink=info.st_nlink,
+            st_size=info.st_size, st_mtime_ns=info.st_mtime_ns + 1000,
+            st_ctime_ns=info.st_ctime_ns + 1000,
+        )
+
+    monkeypatch.setattr(implementation, "_regular", distinct_path_view)
+    assert implementation._read_regular_stable(source) == b"paper state"
+
+
+def test_regular_backup_rejects_changed_path_witness_with_split_timestamp_views(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Tolerance for timestamp precision must not permit source mutation."""
+    from types import SimpleNamespace
+    from autosport import workspace_backup as implementation
+
+    source = tmp_path / "stable-input"
+    source.write_bytes(b"paper state")
+    original_regular = implementation._regular
+    calls = 0
+
+    def altered_path_view(path: Path, *, label: str):
+        nonlocal calls
+        calls += 1
+        info = original_regular(path, label=label)
+        return SimpleNamespace(
+            st_dev=info.st_dev, st_ino=info.st_ino,
+            st_mode=info.st_mode, st_nlink=info.st_nlink,
+            st_size=info.st_size,
+            st_mtime_ns=info.st_mtime_ns + 1000 + (1 if calls == 2 else 0),
+            st_ctime_ns=info.st_ctime_ns + 1000,
+        )
+
+    monkeypatch.setattr(implementation, "_regular", altered_path_view)
+    with pytest.raises(WorkspaceBackupError, match="changed during backup"):
+        implementation._read_regular_stable(source)

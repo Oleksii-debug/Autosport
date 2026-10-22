@@ -138,10 +138,15 @@ def test_poll_value_projection_is_focus_safe_and_mutation_minimal() -> None:
     stable_value_projections = (
         'renderCanonicalPathUnlessDraft("dataset-path", state.dataset_path || "");',
         'renderCanonicalPathUnlessDraft("research-plan-path", state.research_plan_path || "");',
-        'setValueUnlessFocused(sourceSelect, productSource.selected_id);',
+        'setValueUnlessFocused(sourceSelect, productSource.selected_id || "");',
     )
     for projection in stable_value_projections:
         assert projection in source
+
+    # A source choice is a draft until explicitly saved. Polling must not
+    # overwrite it after focus moves away from the select.
+    assert "if (!sourceSelectionDraft.dirty) {" in source
+    assert "sourceSelectionDraft.dirty = true;" in source
 
     # Preserve an unsubmitted operator path even after focus moves to Save.
     # The old direct setter assertion predated the dirty-draft fence.

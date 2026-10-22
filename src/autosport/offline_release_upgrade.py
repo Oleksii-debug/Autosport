@@ -59,6 +59,15 @@ def _directory_witness(root: Path) -> tuple[int, int]:
     info = root.lstat()
     if not stat.S_ISDIR(info.st_mode):
         raise OfflineInstallError("verified release directory was replaced by a redirect")
+    # Some Windows/network filesystems cannot supply a stable directory inode.
+    # A zero/invalid inode is not a valid identity witness for the exact release
+    # that will be moved during upgrade/rollback; fail closed instead of
+    # falsely proving continuity from two indistinguishable (dev, 0) tuples.
+    if (
+        type(info.st_dev) is not int or info.st_dev < 0
+        or type(info.st_ino) is not int or info.st_ino <= 0
+    ):
+        raise OfflineInstallError("verified release directory identity unavailable")
     return info.st_dev, info.st_ino
 
 

@@ -92,7 +92,10 @@ def _packaging_fixture(root, source_manifest, dependency_metadata, *, embedded_i
     exe = root / "Autosport.exe"
     guide = root / "WINDOWS_START_HERE.txt"
     sample = root / "sample"
-    sample.mkdir()
+    # This fixture is reused with the same root to test rejection of forged
+    # binary evidence. Existing sample input is intentional; a non-directory
+    # at this path must still fail closed.
+    sample.mkdir(exist_ok=True)
     (sample / "market.jsonl").write_text("{}\\n", encoding="utf-8")
     exe.write_bytes(b"fake-windows-executable")
     guide.write_text("start\\n", encoding="utf-8")

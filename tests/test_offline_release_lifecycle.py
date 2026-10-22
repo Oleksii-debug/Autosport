@@ -102,6 +102,57 @@ class InstalledReleaseLifecycleTests(unittest.TestCase):
             self.assertEqual(private.read_bytes(), b"preserve_owner_bytes")
             self.assertTrue((directory / "Autosport.exe").is_file())
 
+    def test_forged_receipt_after_quarantine_check_cannot_expand_unlink_targets(self):
+        """Simulate a receipt/owner-file swap after the second trusted scan."""
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            directory, digest = self._installed(root)
+            original_inspect = lifecycle.inspect_installed_release
+            inspections = [0]
+            owner_bytes = b"private_owner_bankroll_keep"
+
+            def tamper_after_second_check(*args, **kwargs):
+                report = original_inspect(*args, **kwargs)
+                inspections[0] += 1
+                if inspections[0] == 2:
+                    quarantined = Path(args[0])
+                    owner = quarantined / "owner-bankroll-secret.db"
+                    owner.write_bytes(owner_bytes)
+                    receipt_path = quarantined / ".autosport-installed-release.json"
+                    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+                    receipt["files"][owner.name] = hashlib.sha256(owner_bytes).hexdigest()
+                    receipt_path.write_text(
+                        json.dumps(receipt, sort_keys=True, separators=(",", ":")),
+                        encoding="utf-8",
+                    )
+                return report
+
+            with self._trusted_verifier(digest):
+                with patch.object(
+                    lifecycle, "inspect_installed_release",
+                    side_effect=tamper_after_second_check,
+                ):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError,
+                        "changed after quarantine verification",
+                    ):
+                        lifecycle.uninstall_verified_release(
+                            directory, archive=root / "source.zip",
+                            expected_source_sha=self.SOURCE,
+                            expected_package_sha256=digest,
+                        )
+            self.assertGreaterEqual(inspections[0], 2)
+            staging = list(root.glob(".autosport-uninstall-*"))
+            self.assertEqual(len(staging), 1)
+            quarantined = staging[0] / "verified-product"
+            self.assertEqual(
+                (quarantined / "owner-bankroll-secret.db").read_bytes(), owner_bytes
+            )
+            self.assertEqual(
+                (quarantined / "Autosport.exe").read_bytes(),
+                b"safe-test-executable",
+            )
+
     def test_rejects_unowned_user_data_without_uninstall(self):
         with tempfile.TemporaryDirectory() as tmp:
             root = Path(tmp)

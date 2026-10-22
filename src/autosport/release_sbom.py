@@ -524,6 +524,9 @@ def validate_dependency_license_evidence(
         or set(manifest) != {"schema_version", "source_sha", "evidence_class", "distributions"}
         or type(manifest["schema_version"]) is not int
         or manifest["schema_version"] != 1
+        or type(dependency_graph) is not dict
+        or type(manifest["source_sha"]) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", manifest["source_sha"]) is None
         or manifest["source_sha"] != dependency_graph.get("source_sha")
         or manifest["evidence_class"] != "BUILD_HOST_LICENSE_TEXT_ONLY_NOT_CLEARANCE"
         or type(dependency_graph.get("components")) is not list

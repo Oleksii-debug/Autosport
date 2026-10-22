@@ -207,6 +207,16 @@ def recover_update_gap(
     _publish_directory_no_replace(previous, root)
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during recovery")
+    # Moving the sole `previous` release back leaves an empty transaction
+    # directory. Keeping that empty lease would reject every future upgrade
+    # as "previous update transaction requires disposition", even though the
+    # old release was successfully recovered. Only retire an empty directory;
+    # retained candidate/unknown artifacts must remain for explicit review.
+    try:
+        txn.rmdir()
+    except OSError:
+        if not any(txn.iterdir()):
+            raise OfflineInstallError("empty recovered transaction could not be retired")
     return {"status": "OLD_RELEASE_RECOVERED", "source_sha": old_source_sha,
             "real_money_execution": False}
 

@@ -166,6 +166,52 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual(result["status"], "OLD_RELEASE_RECOVERED")
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
 
+    def test_crash_recovery_retires_empty_lease_and_allows_next_upgrade(self):
+        # A successful recovery with no candidate/quarantine left must not
+        # permanently lock this exact installation out of future upgrades.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            dest.rename(txn / "previous")
+            with self._trusted():
+                result = upgrade.recover_update_gap(
+                    dest, old_archive=old, old_source_sha=self.OLD,
+                    old_package_sha256=od,
+                )
+                self.assertEqual(result["status"], "OLD_RELEASE_RECOVERED")
+                self.assertFalse(txn.exists(), "an empty recovery lease must retire")
+                updated = upgrade.upgrade_verified_paper_release(
+                    dest, **self._args(old, od, new, nd)
+                )
+            self.assertEqual(updated["status"], "UPDATED_PAPER_ONLY")
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+
+    def test_crash_recovery_keeps_unverified_candidate_for_disposition(self):
+        # Recovery must never remove leftover staged release/private debris
+        # merely to obtain an empty transaction namespace.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, _new, _nd = self._installed(work)
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            dest.rename(txn / "previous")
+            candidate = txn / "candidate"
+            candidate.mkdir()
+            (candidate / "unverified.bin").write_bytes(b"owner-review-required")
+            with self._trusted():
+                result = upgrade.recover_update_gap(
+                    dest, old_archive=old, old_source_sha=self.OLD,
+                    old_package_sha256=od,
+                )
+            self.assertEqual(result["status"], "OLD_RELEASE_RECOVERED")
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertEqual(
+                (candidate / "unverified.bin").read_bytes(), b"owner-review-required"
+            )
+            self.assertTrue(txn.is_dir())
+
     def test_recovery_rejects_same_bytes_replaced_after_trusted_read(self):
         # A byte-identical second directory is not the filesystem object
         # validated by the canonical recovery read.

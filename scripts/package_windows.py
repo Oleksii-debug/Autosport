@@ -835,6 +835,9 @@ def main() -> int:
         binary_attribution = capture_binary_module_attribution(
             dependency_graph, embedded_inventory,
         )
+        data_binary_attribution = capture_binary_module_attribution(
+            dependency_graph, data_embedded_inventory,
+        )
         trusted_diagnostic = _capture_verified_evidence(
             args.diagnostic,
             args.diagnostic_sha256,
@@ -883,6 +886,7 @@ def main() -> int:
             trusted_data_exe,
             expected_base_package_sha256=base_digest,
             data_executable_inventory=data_embedded_inventory,
+            data_binary_module_attribution=data_binary_attribution,
         )
 
     release_verification = verify_windows_package(
@@ -898,6 +902,7 @@ def main() -> int:
     package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(
         output, require_data_executable_inventory=True,
+        require_data_binary_module_attribution=True,
     )
     _require_verified_package_digest(binding, data_verification)
     verification = dict(release_verification)

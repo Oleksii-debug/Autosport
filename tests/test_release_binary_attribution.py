@@ -37,6 +37,15 @@ class BinaryModuleAttributionTest(unittest.TestCase):
         )
         validate_binary_module_attribution(report, self.graph, self.inventory)
 
+    def test_nonmapping_binary_inventory_is_bounded_validation_error(self):
+        report = capture_binary_module_attribution(
+            self.graph, self.inventory, packages_distributions={},
+        )
+        for hostile in (None, [], "not-an-inventory"):
+            with self.subTest(hostile=hostile):
+                with self.assertRaisesRegex(ValueError, "identity/evidence class mismatch"):
+                    validate_binary_module_attribution(report, self.graph, hostile)
+
     def test_missing_sealed_module_refused(self):
         report = capture_binary_module_attribution(
             self.graph, self.inventory, packages_distributions={},
@@ -81,6 +90,24 @@ class BinaryModuleAttributionTest(unittest.TestCase):
                 forged["modules"][0]["host_candidates"] = hostile
                 with self.assertRaises(ValueError):
                     validate_binary_module_attribution(forged, self.graph, self.inventory)
+
+
+    def test_untrusted_host_graph_identities_fail_closed(self):
+        report = capture_binary_module_attribution(
+            self.graph, self.inventory, packages_distributions={},
+        )
+        for hostile_components in (
+            [{"name": ["nonhashable"]}],
+            [{"name": {"nested": "nonhashable"}}],
+            [{"other": "missing"}],
+            [None],
+            [],
+            [{"name": "example-dist"}] * 257,
+        ):
+            with self.subTest(components=repr(hostile_components)[:96]):
+                graph = {**self.graph, "components": hostile_components}
+                with self.assertRaises(ValueError):
+                    validate_binary_module_attribution(report, graph, self.inventory)
 
 
 if __name__ == "__main__":

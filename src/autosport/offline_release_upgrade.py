@@ -43,6 +43,11 @@ def _transaction_root(destination: Path) -> Path:
         # pending-update namespace. Refuse them rather than permit bypass.
         if destination.drive.startswith(("\\\\?\\", "\\\\.\\")):
             raise OfflineInstallError("Windows device namespace update path is unsafe")
+        # Ordinary Win32 file APIs resolve trailing dots/spaces to the same
+        # component. Those aliases must not obtain a second sibling pending-
+        # update lease, even when the final installed directory is unchanged.
+        if any(part.endswith((".", " ")) for part in destination.parts[1:]):
+            raise OfflineInstallError("Windows trailing-dot-or-space update path is unsafe")
         spelling = ntpath.normcase(spelling)
     name = hashlib.sha256(os.fsencode(spelling)).hexdigest()[:24]
     return destination.parent / (".autosport-update-" + name)

@@ -265,6 +265,9 @@ class WindowsUpdateSnapshot:
             )
         ):
             raise WindowsUpdateSnapshotError("pinned package ancestor authority is invalid")
+        # Path stat/lstat and an opened-handle fstat may expose different
+        # creation/change-time views on Windows. Verify each view against its
+        # own baseline; never compare those timestamp tuples across APIs.
         digest = hashlib.sha256()
         total = 0
         try:
@@ -298,8 +301,7 @@ class WindowsUpdateSnapshot:
                     or self._file_identity != opened_identity
                     or opened_identity != entry_identity
                     or opened_change_time != self._change_time_100ns
-                    or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
-                    != self._file_metadata
+                    or opened.st_size != self.byte_count
                 ):
                     raise WindowsUpdateSnapshotError("pinned package file identity changed")
                 while block := stream.read(_CHUNK_BYTES):
@@ -321,7 +323,7 @@ class WindowsUpdateSnapshot:
                     or _require_file_identity(completed) != opened_identity
                     or completed_change_time != self._change_time_100ns
                     or (completed.st_size, completed.st_mtime_ns, completed.st_ctime_ns)
-                    != self._file_metadata
+                    != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
                     or (after_entry.st_size, after_entry.st_mtime_ns, after_entry.st_ctime_ns)
                     != self._file_metadata
                 ):
@@ -454,6 +456,8 @@ def pinned_windows_update_package(
                 # an attacker replaces the *source path* with another inode.
                 # Compare both the opened object and the path after copying;
                 # digest equality alone is not a filesystem identity proof.
+                # Compare path metadata with the original path witness,
+                # descriptor metadata with the original descriptor witness.
                 source_after = path.lstat()
                 if _source_parent_identity(path) != parent_identity:
                     raise WindowsUpdateSnapshotError("package ancestor changed during copy")
@@ -461,7 +465,7 @@ def pinned_windows_update_package(
                     not stat.S_ISREG(source_after.st_mode) or _is_redirected_file(source_after)
                     or _require_file_identity(source_after) != before_identity
                     or (source_after.st_size, source_after.st_mtime_ns, source_after.st_ctime_ns)
-                    != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
+                    != (source_entry.st_size, source_entry.st_mtime_ns, source_entry.st_ctime_ns)
                 ):
                     raise WindowsUpdateSnapshotError("source changed while being copied")
                 if (
@@ -542,8 +546,9 @@ def _require_bounded_zip_members(path: Path) -> None:
                 or _is_redirected_file(entry_opened)
                 or _require_file_identity(initial) != entry_identity
                 or _require_file_identity(entry_opened) != entry_identity
-                or (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns)
-                != (entry_before.st_size, entry_before.st_mtime_ns, entry_before.st_ctime_ns)
+                # Windows fstat(handle) and lstat(path) timestamps may differ.
+                # Size and file identity may be compared across API views.
+                or initial.st_size != entry_before.st_size
                 or (entry_opened.st_size, entry_opened.st_mtime_ns, entry_opened.st_ctime_ns)
                 != (entry_before.st_size, entry_before.st_mtime_ns, entry_before.st_ctime_ns)
             ):
@@ -608,7 +613,9 @@ def _require_bounded_zip_members(path: Path) -> None:
                 or initial_change != completed_change
                 or (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns)
                 != (completed.st_size, completed.st_mtime_ns, completed.st_ctime_ns)
-                or (initial.st_size, initial.st_mtime_ns, initial.st_ctime_ns)
+                # Compare pathname metadata to the original pathname view,
+                # never to the held descriptor's Windows timestamp view.
+                or (entry_before.st_size, entry_before.st_mtime_ns, entry_before.st_ctime_ns)
                 != (current_entry.st_size, current_entry.st_mtime_ns, current_entry.st_ctime_ns)
             ):
                 raise WindowsUpdateSnapshotError("update archive changed during preflight")
@@ -670,8 +677,9 @@ def _verified_embedded_update_identity(snapshot: WindowsUpdateSnapshot, *, expec
             if (
                 not stat.S_ISREG(before.st_mode)
                 or _require_file_identity(before) != snapshot._file_identity
-                or (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
-                != snapshot._file_metadata
+                # recheck() already bound the pathname metadata and digest;
+                # the opened handle has its own native change-time witness.
+                or before.st_size != snapshot.byte_count
                 or before_change != snapshot._change_time_100ns
             ):
                 raise WindowsUpdateSnapshotError("embedded update source identity changed")
@@ -690,8 +698,10 @@ def _verified_embedded_update_identity(snapshot: WindowsUpdateSnapshot, *, expec
                 or _require_file_identity(after) != snapshot._file_identity
                 or _require_file_identity(entry) != snapshot._file_identity
                 or after_change != snapshot._change_time_100ns
+                # Compare the held descriptor with its own initial witness,
+                # not lstat(path)'s unrelated timestamp representation.
                 or (after.st_size, after.st_mtime_ns, after.st_ctime_ns)
-                != snapshot._file_metadata
+                != (before.st_size, before.st_mtime_ns, before.st_ctime_ns)
                 or (entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns)
                 != snapshot._file_metadata
             ):

@@ -524,6 +524,9 @@ def validate_dependency_license_evidence(
         or set(manifest) != {"schema_version", "source_sha", "evidence_class", "distributions"}
         or type(manifest["schema_version"]) is not int
         or manifest["schema_version"] != 1
+        or type(dependency_graph) is not dict
+        or type(manifest["source_sha"]) is not str
+        or re.fullmatch(r"[0-9a-f]{40}", manifest["source_sha"]) is None
         or manifest["source_sha"] != dependency_graph.get("source_sha")
         or manifest["evidence_class"] != "BUILD_HOST_LICENSE_TEXT_ONLY_NOT_CLEARANCE"
         or type(dependency_graph.get("components")) is not list
@@ -533,7 +536,23 @@ def validate_dependency_license_evidence(
     components = dependency_graph["components"]
     if not (1 <= len(components) <= 256):
         raise ValueError("license evidence has an invalid source graph")
-    expected = {item["name"]: item["version"] for item in components}
+    # A duplicate or malformed build-host component cannot disappear under a
+    # dictionary comprehension and thereby borrow another distribution's
+    # LICENSE/NOTICE evidence. Validate the independent graph boundary even
+    # when this verifier is invoked outside the full ZIP verifier.
+    expected: dict[str, str] = {}
+    for component in components:
+        if (
+            type(component) is not dict
+            or type(component.get("name")) is not str
+            or not _NAME.fullmatch(component["name"])
+            or _normalize_name(component["name"]) != component["name"]
+            or type(component.get("version")) is not str
+            or not _VERSION.fullmatch(component["version"])
+            or component["name"] in expected
+        ):
+            raise ValueError("license evidence has an invalid source graph")
+        expected[component["name"]] = component["version"]
     entries = manifest["distributions"]
     if type(entries) is not list or len(entries) != len(expected):
         raise ValueError("distribution license evidence is incomplete")

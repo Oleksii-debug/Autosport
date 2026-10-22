@@ -26,6 +26,7 @@ def validate_binary_module_attribution(
             "evidence_class", "modules",
         }
         or type(report["schema_version"]) is not int or report["schema_version"] != 1
+        or type(inventory) is not dict
         or report["source_sha"] != inventory.get("source_sha")
         or report["executable_sha256"] != inventory.get("executable_sha256")
         or report["evidence_class"] != _EVIDENCE_CLASS
@@ -41,11 +42,14 @@ def validate_binary_module_attribution(
     if inventory.get("schema_version") != 2:
         raise ValueError("binary attribution requires sealed nested PYZ census")
     components = dependency_graph["components"]
-    names = [
-        component["name"]
+    # Reject hostile, omitted or nonhashable component identities BEFORE
+    # running set/sort. Even a source-bound release verifier may parse JSON.
+    if not 0 < len(components) <= 256 or any(
+        type(component) is not dict or type(component.get("name")) is not str
         for component in components
-        if type(component) is dict and "name" in component
-    ]
+    ):
+        raise ValueError("binary attribution host component identities are invalid")
+    names = [component["name"] for component in components]
     if (
         not 0 < len(names) <= 256 or names != sorted(set(names))
         or any(type(name) is not str or _normalize_name(name) != name for name in names)

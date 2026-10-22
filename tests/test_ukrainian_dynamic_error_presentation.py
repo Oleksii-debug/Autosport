@@ -111,10 +111,11 @@ class UkrainianDynamicErrorPresentationTests(unittest.TestCase):
             rendered,
             text(
                 "ui.error.exception.message_unavailable",
-                exception_type="_ExplodingStringException",
+                exception_type="Exception",
             ),
         )
         self.assertIn("повідомлення недоступне", rendered)
+        self.assertNotIn("_ExplodingStringException", rendered)
         self.assertNotIn("exception detail must not escape", rendered)
 
 

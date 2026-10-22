@@ -84,6 +84,26 @@ def test_uninstall_refuses_competing_quarantine_without_moving_product():
         assert proof["status"] == "VERIFIED"
 
 
+
+def test_windows_quarantine_collision_is_domain_error_without_mutation():
+    """WinError 183 must fail closed like Linux EEXIST, preserving both trees."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        source = root / "release"
+        destination = root / "competing-quarantine"
+        source.mkdir()
+        destination.mkdir()
+        (source / "Autosport.exe").write_bytes(b"intact product")
+        (destination / "owner-file").write_bytes(b"intact private data")
+        with patch.object(install.os, "name", "nt"), patch.object(
+            install.os, "rename", side_effect=FileExistsError(17, "target already exists"),
+        ) as rename:
+            with pytest.raises(install.OfflineInstallError, match="destination appeared"):
+                install._publish_directory_no_replace(source, destination)
+            rename.assert_called_once_with(source, destination)
+        assert (source / "Autosport.exe").read_bytes() == b"intact product"
+        assert (destination / "owner-file").read_bytes() == b"intact private data"
+
 def test_uninstall_uses_canonical_no_replace_primitive():
     source = Path(__file__).resolve().parents[1] / "src/autosport/offline_release_lifecycle.py"
     body = source.read_text(encoding="utf-8")

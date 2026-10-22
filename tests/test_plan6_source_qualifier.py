@@ -109,13 +109,25 @@ class Plan6QualifierTests(unittest.TestCase):
         self.assertFalse(expected - included, sorted(expected - included))
         self.assertIn("tests/test_plan6_source_qualifier.py", included)
 
+    def test_current_release_path_integrity_sources_are_covered(self):
+        """New release Windows/path regression modules must join exact-HEAD source gates."""
+        root = SCRIPT.parents[1]
+        covered = set(dict(qualifier.GROUPS)["release_integrity"])
+        present = {
+            path.relative_to(root).as_posix()
+            for path in (root / "tests").glob("test_plan6_release_*.py")
+        }
+        self.assertTrue(present, "Plan-6 Windows release path tests must exist")
+        self.assertFalse(present - covered, sorted(present - covered))
+
     def test_current_install_update_recovery_sources_are_covered(self):
         """An added 6A or offline release negative test must enter the source gate."""
         root = SCRIPT.parents[1]
         covered = set(dict(qualifier.GROUPS)["paper_install_update_recovery"])
         present = {
             path.relative_to(root).as_posix()
-            for pattern in ("test_offline_release_*.py", "test_plan6_6a_*.py")
+            for pattern in ("test_offline_release_*.py", "test_plan6_6a_*.py",
+                            "test_plan6_nested_release_*.py", "test_plan6_offline_install_*.py")
             for path in (root / "tests").glob(pattern)
         }
         present.add("tests/test_data_tools_installed_release_entry.py")

@@ -28,5 +28,5 @@ def test_gui_exception_handles_malicious_stringification_without_ui_crash() -> N
             raise RuntimeError("do not expose exception internals")
 
     rendered = _safe_exception_text(BrokenError())
-    assert rendered == "ValueError: exception details unavailable"
+    assert rendered == "ValueError: <повідомлення недоступне>"
     assert "do not expose" not in rendered

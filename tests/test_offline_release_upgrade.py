@@ -6,7 +6,7 @@ import json
 import tempfile
 import unittest
 import zipfile
-from pathlib import Path, PureWindowsPath
+from pathlib import Path, PurePosixPath, PureWindowsPath
 from unittest.mock import patch
 
 from autosport import offline_release_install as install
@@ -105,7 +105,22 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))
             with self._trusted():
-                with patch.object(upgrade, "_publish_directory_no_replace", side_effect=SystemExit(42)):
+                publish = upgrade._publish_directory_no_replace
+
+                def interrupt_after_old_release_is_quarantined(source, target):
+                    # The simulated crash must happen AFTER the incumbent
+                    # moves to "previous", not during the first move.
+                    if Path(source).name == "candidate" and Path(target) == dest:
+                        self.assertTrue(
+                            (upgrade._transaction_root(dest) / "previous" / "Autosport.exe").is_file()
+                        )
+                        raise SystemExit(42)
+                    return publish(source, target)
+
+                with patch.object(
+                    upgrade, "_publish_directory_no_replace",
+                    side_effect=interrupt_after_old_release_is_quarantined,
+                ):
                     with self.assertRaises(SystemExit):
                         upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
                 self.assertFalse(dest.exists())
@@ -293,6 +308,24 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                 ):
                     upgrade._transaction_root(alias)
 
+    def test_windows_trailing_dot_or_space_aliases_cannot_bypass_update_fence(self):
+        # Normal Win32 APIs strip trailing dots/spaces from path components.
+        # Each variant could otherwise select a different pending-update
+        # transaction for the same installed product.
+        canonical = PureWindowsPath(r"C:\Apps\Autosport Product")
+        self.assertTrue(upgrade._transaction_root(canonical).name.startswith(".autosport-update-"))
+        for alias in (
+            PureWindowsPath(r"C:\Apps\Autosport Product."),
+            PureWindowsPath(r"C:\Apps\Autosport Product "),
+            PureWindowsPath(r"C:\Apps.\Autosport Product"),
+            PureWindowsPath(r"C:\Apps \Autosport Product"),
+        ):
+            with self.subTest(alias=str(alias)):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "trailing-dot-or-space"
+                ):
+                    upgrade._transaction_root(alias)
+
     def test_normal_windows_unc_update_namespace_still_supported(self):
         first = PureWindowsPath(r"\\server\share\Autosport")
         second = PureWindowsPath(r"\\SERVER\SHARE\AUTOSPORT")
@@ -302,9 +335,10 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
         )
 
     def test_posix_case_distinction_retains_distinct_update_namespace(self):
-        with tempfile.TemporaryDirectory() as temp:
-            first = Path(temp) / "Autosport"
-            second = Path(temp) / "autosport"
+            # Use a platform-independent POSIX path: Path(temp) becomes a
+            # WindowsPath on Windows runners and correctly case-folds there.
+            first = PurePosixPath("/opt/Autosport")
+            second = PurePosixPath("/opt/autosport")
             self.assertNotEqual(
                 upgrade._transaction_root(first).name,
                 upgrade._transaction_root(second).name,

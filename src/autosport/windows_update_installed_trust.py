@@ -153,6 +153,8 @@ def load_pinned_installed_update_authority(
             completed = os.fstat(stream.fileno())
             completed_change_time = _native_change_time_100ns(stream.fileno())
             final_entry = path.lstat()
+            # Distinguish Windows path-stat from descriptor-stat time views.
+            # File identity and each view's before/after drift are still gated.
             if (
                 _source_parent_identity(path) != parent_identity
                 or _identity(completed) != entry_id
@@ -161,7 +163,7 @@ def load_pinned_installed_update_authority(
                 or not stat.S_ISREG(final_entry.st_mode) or _is_redirected_file(final_entry)
                 or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
                 != (completed.st_size, completed.st_mtime_ns, completed.st_ctime_ns)
-                or (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                or (entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns)
                 != (final_entry.st_size, final_entry.st_mtime_ns, final_entry.st_ctime_ns)
             ):
                 raise InstalledWindowsTrustError("installed manifest changed during read")
@@ -198,7 +200,7 @@ def load_pinned_installed_update_authority(
             or not stat.S_ISREG(final_path_entry.st_mode) or _is_redirected_file(final_path_entry)
             or _identity(final_path_entry) != entry_id
             or (final_path_entry.st_size, final_path_entry.st_mtime_ns, final_path_entry.st_ctime_ns)
-            != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+            != (entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns)
         ):
             raise InstalledWindowsTrustError("installed manifest path changed after validation")
         # The post-validation readback is a second trust boundary: do not
@@ -223,7 +225,7 @@ def load_pinned_installed_update_authority(
                 or not stat.S_ISREG(final_path_entry.st_mode)
                 or _identity(final_path_entry) != entry_id
                 or (final_path_entry.st_size, final_path_entry.st_mtime_ns, final_path_entry.st_ctime_ns)
-                != (opened.st_size, opened.st_mtime_ns, opened.st_ctime_ns)
+                != (entry.st_size, entry.st_mtime_ns, entry.st_ctime_ns)
             ):
                 raise InstalledWindowsTrustError("installed manifest path changed during final readback")
         return PinnedInstalledWindowsAuthority(

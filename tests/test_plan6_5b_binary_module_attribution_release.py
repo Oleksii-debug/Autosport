@@ -9,6 +9,9 @@ from pathlib import Path
 import pytest
 
 from autosport.release_binary_attribution import capture_binary_module_attribution
+from autosport.data_tool_package import (
+    bind_portable_data_tool, verify_portable_data_tool,
+)
 from autosport.release_package import (
     _SOURCE_MANIFEST_INPUTS, build_windows_package, verify_windows_package,
 )
@@ -139,3 +142,79 @@ def test_forged_clearance_rejected_before_package_publication(tmp_path: Path):
             binary_module_attribution=forged,
         )
     assert not output.exists()
+
+
+def _data_candidate(root: Path):
+    data_exe = root / "Autosport-Data.exe"
+    data_exe.write_bytes(b"synthetic independent Data executable")
+    census = {
+        "schema_version": 2, "source_sha": SHA,
+        "executable_sha256": sha256(data_exe.read_bytes()).hexdigest(),
+        "evidence_class": "EMBEDDED_PYINSTALLER_CARCHIVE_AND_PYZ_TOC_ONLY",
+        "components": [{
+            "name": "PYZ-00.pyz", "typecode": "z",
+            "packed_bytes": 100, "unpacked_bytes": 500,
+        }],
+        "pyz_modules": [{
+            "name": "example.module", "typecode": 0,
+            "position": 1, "packed_bytes": 25,
+        }],
+    }
+    report = capture_binary_module_attribution(
+        GRAPH, census, packages_distributions={"example": ["tk-uia"]},
+    )
+    return data_exe, census, report
+
+
+def test_independent_data_binary_hints_sealed_and_verified(tmp_path: Path):
+    files, _main_census, _main_report = _input_files(tmp_path)
+    package, _ = build_windows_package(
+        *files, tmp_path / "release.zip", SHA,
+        source_manifest=SOURCE, dependency_graph=GRAPH,
+    )
+    data_exe, census, attribution = _data_candidate(tmp_path)
+    bind_portable_data_tool(
+        package, data_exe,
+        data_executable_inventory=census,
+        data_binary_module_attribution=attribution,
+    )
+    verified = verify_portable_data_tool(
+        package, require_data_executable_inventory=True,
+        require_data_binary_module_attribution=True,
+    )
+    assert verified["status"] == "PASS"
+    assert verified["autosport_data_exe_sha256"] == census["executable_sha256"]
+
+
+def test_data_binary_report_required_only_at_official_gate(tmp_path: Path):
+    files, _main_census, _main_report = _input_files(tmp_path)
+    package, _ = build_windows_package(
+        *files, tmp_path / "release.zip", SHA,
+        source_manifest=SOURCE, dependency_graph=GRAPH,
+    )
+    data_exe, census, _attribution = _data_candidate(tmp_path)
+    bind_portable_data_tool(package, data_exe, data_executable_inventory=census)
+    assert verify_portable_data_tool(package)["status"] == "PASS"
+    with pytest.raises(ValueError, match="missing Data binary module attribution"):
+        verify_portable_data_tool(
+            package, require_data_binary_module_attribution=True,
+        )
+
+
+def test_data_binary_fake_license_approval_rejected_before_zip_write(tmp_path: Path):
+    files, _main_census, _main_report = _input_files(tmp_path)
+    package, _ = build_windows_package(
+        *files, tmp_path / "release.zip", SHA,
+        source_manifest=SOURCE, dependency_graph=GRAPH,
+    )
+    data_exe, census, attribution = _data_candidate(tmp_path)
+    before = package.read_bytes()
+    forged = copy.deepcopy(attribution)
+    forged["modules"][0]["review"] = "CLEARANCE_APPROVED"
+    with pytest.raises(ValueError, match="license clearance"):
+        bind_portable_data_tool(
+            package, data_exe,
+            data_executable_inventory=census,
+            data_binary_module_attribution=forged,
+        )
+    assert package.read_bytes() == before

@@ -184,3 +184,33 @@ def test_resealed_license_evidence_rejects_foreign_or_non_license_origin(
     forged["distributions"][0]["files"][0]["record_path"] = origin
     with pytest.raises(ValueError, match="origin path is unsafe"):
         subject.validate_dependency_license_evidence(forged, _graph(), members)
+
+
+@pytest.mark.parametrize("source_sha", [
+    None, False, "", "A" * 40, "x" * 40, "0" * 39,
+])
+def test_license_evidence_does_not_accept_matching_invalid_source_identity(
+    tmp_path: Path, monkeypatch, source_sha,
+):
+    """Matching malformed source identities never become release provenance."""
+    monkeypatch.setattr(subject.metadata, "distribution",
+                        lambda name: _distribution(tmp_path))
+    manifest, members = subject.capture_dependency_license_evidence(_graph())
+    altered_manifest = deepcopy(manifest)
+    altered_graph = deepcopy(_graph())
+    altered_manifest["source_sha"] = source_sha
+    altered_graph["source_sha"] = source_sha
+    with pytest.raises(ValueError, match="schema/source mismatch"):
+        subject.validate_dependency_license_evidence(
+            altered_manifest, altered_graph, members,
+        )
+
+
+def test_license_evidence_rejects_nonmapping_source_graph(
+    tmp_path: Path, monkeypatch,
+):
+    monkeypatch.setattr(subject.metadata, "distribution",
+                        lambda name: _distribution(tmp_path))
+    manifest, members = subject.capture_dependency_license_evidence(_graph())
+    with pytest.raises(ValueError, match="schema/source mismatch"):
+        subject.validate_dependency_license_evidence(manifest, None, members)

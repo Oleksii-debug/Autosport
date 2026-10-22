@@ -239,6 +239,14 @@ def recover_update_gap(
     )
     if _directory_witness(previous) != previous_witness:
         raise OfflineInstallError("previous release identity changed during recovery")
+    # Directory identity alone does not seal in-place executable writes. This
+    # last read prevents publishing bytes modified after the first inspection.
+    inspect_installed_release(
+        previous, archive=old_archive, expected_source_sha=old_source_sha,
+        expected_package_sha256=old_package_sha256,
+    )
+    if _directory_witness(previous) != previous_witness:
+        raise OfflineInstallError("previous release identity changed before recovery publication")
     _publish_directory_no_replace(previous, root)
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during recovery")
@@ -321,6 +329,17 @@ def rollback_verified_paper_release(
     ):
         raise OfflineInstallError("installed identity changed during rollback")
     try:
+        # The prior read occurred before the active product moved to its
+        # quarantine location. Reverify actual previous files here: an in-place
+        # executable mutation does not alter the directory's inode witness.
+        if _directory_witness(previous) != previous_witness:
+            raise OfflineInstallError("previous release identity changed before rollback publication")
+        inspect_installed_release(
+            previous, archive=old_archive, expected_source_sha=old_source_sha,
+            expected_package_sha256=old_package_sha256,
+        )
+        if _directory_witness(previous) != previous_witness:
+            raise OfflineInstallError("previous release identity changed on final rollback inspection")
         _publish_directory_no_replace(previous, root)
     except Exception:
         if not root.exists() and rejected.is_dir():

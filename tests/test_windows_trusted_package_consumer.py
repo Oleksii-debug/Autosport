@@ -31,6 +31,7 @@ def _write_snapshot(root: Path) -> dict[str, str]:
             "    return {}\n"
         ),
         "src/autosport/release_sbom.py": "SENTINEL = 'trusted-sbom-module'\n",
+        "src/autosport/release_binary_attribution.py": "SENTINEL = 'trusted-binary-attribution'\n",
         "src/autosport/release_dependency_graph.py": "SENTINEL = 'trusted-graph-module'\n",
         "src/autosport/windows_pe_integrity.py": "SENTINEL = 'trusted-pe-module'\n",
         "src/autosport/windows_update_admission.py": "SENTINEL = 'trusted-update-admission'\n",
@@ -129,7 +130,7 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     archive = (
         "& $gitExecutable archive --format=zip \"--output=$trustedPackageArchive\" $sourceSha -- "
         "scripts/package_windows.py src/autosport/release_package.py "
-        "src/autosport/release_sbom.py src/autosport/release_dependency_graph.py "
+        "src/autosport/release_sbom.py src/autosport/release_binary_attribution.py src/autosport/release_dependency_graph.py "
         "src/autosport/data_tool_package.py "
         "src/autosport/windows_pe_integrity.py "
         "src/autosport/windows_update_admission.py "
@@ -156,6 +157,7 @@ def test_windows_build_materializes_exact_package_consumer_after_final_source_ga
     assert "$trustedPackageLauncher = @'" in script
     assert "sys.path.insert" not in launcher
     assert 'load_module("autosport.release_sbom", "src/autosport/release_sbom.py")' in launcher
+    assert 'load_module("autosport.release_binary_attribution", "src/autosport/release_binary_attribution.py")' in launcher
     assert 'load_module("autosport.release_dependency_graph", "src/autosport/release_dependency_graph.py")' in launcher
     assert 'load_module("autosport.windows_pe_integrity", "src/autosport/windows_pe_integrity.py")' in launcher
     assert 'load_module("autosport.windows_update_admission", "src/autosport/windows_update_admission.py")' in launcher
@@ -182,6 +184,27 @@ def test_trusted_launcher_refuses_mutated_graph_module_before_execution(tmp_path
     assert not marker.exists()
 
 
+
+def test_trusted_launcher_refuses_mutated_binary_attribution_before_execution(tmp_path: Path) -> None:
+    """Reject a swapped attribution module before it can execute."""
+    launcher = _trusted_package_launcher_source()
+    root = tmp_path / "snapshot"
+    manifest = _write_snapshot(root)
+    attribution = root / "src" / "autosport" / "release_binary_attribution.py"
+    attribution.write_text(
+        "raise AssertionError('untrusted attribution executed')\n", encoding="utf-8"
+    )
+    marker = tmp_path / "marker.txt"
+    result = subprocess.run(
+        [sys.executable, "-I", "-S", "-c", launcher, str(root),
+         json.dumps(manifest, sort_keys=True, separators=(",", ":")), str(marker)],
+        capture_output=True, text=True,
+    )
+    assert result.returncode != 0
+    assert "trusted package source SHA-256 mismatch" in result.stderr
+    assert "untrusted attribution executed" not in result.stderr
+    assert not marker.exists()
+
 def test_trusted_launcher_refuses_mutated_pe_oracle_before_script_runs(tmp_path: Path) -> None:
     launcher = _trusted_package_launcher_source()
     root = tmp_path / "snapshot"
@@ -207,6 +230,7 @@ def test_trusted_launcher_imports_real_release_modules_in_isolation(tmp_path: Pa
     root = tmp_path / "snapshot"
     names = (
         "release_sbom",
+        "release_binary_attribution",
         "release_dependency_graph",
         "windows_pe_integrity",
         "windows_update_admission",

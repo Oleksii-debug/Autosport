@@ -159,7 +159,10 @@ def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]
     with _owned_request_fd(path) as fd:
         before = _request_identity(os.fstat(fd))
         before_change = _native_change_time_100ns(fd)
-        if before != entry_before:
+        # On Windows the ctime/mtime views of lstat(path) and fstat(fd)
+        # can differ even for one unchanged file. Cross-check stable
+        # device/inode/size, not cross-API timestamp representations.
+        if before[:3] != entry_before[:3]:
             raise UpdateCliError("request path changed while opening")
         with os.fdopen(fd, "rb", closefd=False) as stream:
             data = stream.read(_MAX_REQUEST_BYTES + 1)
@@ -207,7 +210,8 @@ def _read_request(path: str | Path) -> tuple[dict[str, object], _RequestWitness]
         postparse_entry = _request_identity(path.lstat())
         _reject_redirected_path(path)
         if (
-            postparse_opened != entry_after
+            postparse_opened[:3] != entry_after[:3]
+            or postparse_opened != after
             or postparse_entry != entry_after
             or postparse_change != after_change
             or _source_parent_identity(path) != parents_before
@@ -237,7 +241,9 @@ def _request_witness(path: Path) -> _RequestWitness:
         changed = _native_change_time_100ns(fd)
         leaf = _request_identity(path.lstat())
         _reject_redirected_path(path)
-        if (entry != opened or leaf != entry
+        # Across path/descriptor APIs compare identity and size only;
+        # preserve each API's full metadata for same-view rechecks.
+        if (entry[:3] != opened[:3] or leaf != entry
                 or _source_parent_identity(path) != parents):
             raise UpdateCliError("request changed during consistency witness")
     return parents, opened, changed

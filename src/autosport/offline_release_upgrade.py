@@ -9,6 +9,7 @@ from __future__ import annotations
 import hashlib
 import ntpath
 import os
+import stat
 import zipfile
 from pathlib import Path, PureWindowsPath
 
@@ -53,6 +54,14 @@ def _transaction_root(destination: Path) -> Path:
     return destination.parent / (".autosport-update-" + name)
 
 
+def _directory_witness(root: Path) -> tuple[int, int]:
+    """Bind an inspected directory to its actual, non-symlink filesystem object."""
+    info = root.lstat()
+    if not stat.S_ISDIR(info.st_mode):
+        raise OfflineInstallError("verified release directory was replaced by a redirect")
+    return info.st_dev, info.st_ino
+
+
 def _identity(archive: Path, source_sha: str, digest: str) -> tuple[tuple[int, int, int], int]:
     trusted = _trusted_archive_inventory(
         archive, expected_source_sha=source_sha,
@@ -95,12 +104,15 @@ def upgrade_verified_paper_release(
     # Reject lexical destination aliases before installed receipt/archive reads.
     _transaction_root(Path(destination))
     root = _inspection_root(destination)
+    incumbent_witness = _directory_witness(root)
     old_archive, new_archive = Path(old_archive), Path(new_archive)
     inspect_installed_release(
         root, archive=old_archive,
         expected_source_sha=old_source_sha,
         expected_package_sha256=old_package_sha256,
     )
+    if _directory_witness(root) != incumbent_witness:
+        raise OfflineInstallError("installed directory identity changed during initial verification")
     old_version, old_schema = _identity(old_archive, old_source_sha, old_package_sha256)
     new_version, new_schema = _identity(new_archive, new_source_sha, new_package_sha256)
     if (
@@ -137,7 +149,10 @@ def upgrade_verified_paper_release(
         except OSError:
             pass
         raise
-    original = root.stat()
+    original = root.lstat()
+    if (not stat.S_ISDIR(original.st_mode)
+            or (original.st_dev, original.st_ino) != incumbent_witness):
+        raise OfflineInstallError("installed directory identity changed before update commit")
     # Atomic no-replace is required here too: on POSIX rename() can silently
     # replace an empty quarantine directory created by a concurrent worker.
     _publish_directory_no_replace(root, previous)
@@ -187,6 +202,8 @@ def rollback_verified_paper_release(
     txn = _transaction_root(Path(destination))
     root = _inspection_root(destination)
     previous = _inspection_root(txn / "previous")
+    previous_witness = _directory_witness(previous)
+    incumbent_witness = _directory_witness(root)
     rejected = txn / "rejected-current"
     if rejected.exists() or rejected.is_symlink():
         raise OfflineInstallError("rollback candidate already exists")
@@ -198,7 +215,11 @@ def rollback_verified_paper_release(
         root, archive=new_archive, expected_source_sha=new_source_sha,
         expected_package_sha256=new_package_sha256,
     )
-    original = root.stat()
+    original = root.lstat()
+    if (not stat.S_ISDIR(original.st_mode)
+            or (original.st_dev, original.st_ino) != incumbent_witness
+            or _directory_witness(previous) != previous_witness):
+        raise OfflineInstallError("release identity changed before rollback commit")
     # Do not allow a concurrent newly-created quarantine directory to be
     # replaced by the installed product on POSIX.
     _publish_directory_no_replace(root, rejected)
@@ -212,6 +233,8 @@ def rollback_verified_paper_release(
         if not root.exists() and rejected.is_dir():
             _publish_directory_no_replace(rejected, root)
         raise
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("restored release identity changed during rollback")
     return {"status": "ROLLED_BACK_PAPER_ONLY", "source_sha": old_source_sha,
             "rejected_release_path": str(rejected), "real_money_execution": False}
 

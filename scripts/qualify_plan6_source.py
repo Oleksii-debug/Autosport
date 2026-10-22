@@ -40,6 +40,7 @@ GROUPS = (
         "tests/test_plan6_5b_source_sha_evidence_boundary.py",
         "tests/test_plan6_release_windows_handle_path_fingerprint.py",
         "tests/test_plan6_7a_windows_update_stat_views.py",
+        "tests/test_plan6_7a_installed_trust_stat_views.py",
         "tests/test_plan6_source_qualifier.py",
         "tests/test_release_binary_attribution.py",
         "tests/test_release_build_dependency_metadata.py",

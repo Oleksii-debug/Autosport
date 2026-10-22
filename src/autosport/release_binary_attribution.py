@@ -106,14 +106,29 @@ def capture_binary_module_attribution(
     )
     if type(dependency_graph) is not dict or type(dependency_graph.get("components")) is not list:
         raise ValueError("build-host graph is required")
+    # Validate untrusted host graphs before enumerating installed distributions.
+    # The independent release verifier also validates this canonical contract.
+    components = dependency_graph["components"]
+    if (
+        dependency_graph.get("source_sha") != source_sha
+        or not 0 < len(components) <= 256
+        or any(
+            type(component) is not dict or type(component.get("name")) is not str
+            for component in components
+        )
+    ):
+        raise ValueError("binary attribution host graph identity is invalid")
+    ordered_names = [component["name"] for component in components]
+    if (
+        ordered_names != sorted(set(ordered_names))
+        or any(_normalize_name(name) != name for name in ordered_names)
+    ):
+        raise ValueError("binary attribution requires canonical host distribution graph")
     if packages_distributions is None:
         packages_distributions = metadata.packages_distributions()
     if type(packages_distributions) is not dict:
         raise ValueError("build-host module owners are not a mapping")
-    names = {
-        component["name"] for component in dependency_graph["components"]
-        if type(component) is dict and type(component.get("name")) is str
-    }
+    names = set(ordered_names)
     modules: list[dict[str, Any]] = []
     for item in inventory["pyz_modules"]:
         root = item["name"].split(".", 1)[0]

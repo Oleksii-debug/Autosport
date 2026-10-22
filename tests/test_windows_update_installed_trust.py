@@ -192,16 +192,28 @@ def test_installed_trust_and_real_ed25519_signed_preflight(tmp_path, monkeypatch
 
 
 def _test_snapshot(tmp_path):
-    from autosport.windows_update_snapshot import WindowsUpdateSnapshot, _source_parent_identity
+    from autosport.windows_update_snapshot import (
+        WindowsUpdateSnapshot, _native_change_time_100ns, _open_archive_fd,
+        _source_parent_identity,
+    )
     path = tmp_path / "pinned-candidate.zip"
     data = b"pinned test-only candidate"
     path.write_bytes(data)
     stat_info = path.stat()
+    # A Windows pin must carry the native handle ChangeTime witness. The
+    # synthetic fixture previously omitted it, so the real fail-closed
+    # snapshot recheck rejected the fixture before each adversarial test.
+    fd = _open_archive_fd(path)
+    try:
+        change_time = _native_change_time_100ns(fd)
+    finally:
+        os.close(fd)
     return WindowsUpdateSnapshot(
         path, hashlib.sha256(data).hexdigest(), len(data),
         _file_identity=(stat_info.st_dev, stat_info.st_ino),
         _file_metadata=(stat_info.st_size, stat_info.st_mtime_ns, stat_info.st_ctime_ns),
         _parent_identity=_source_parent_identity(path),
+        _change_time_100ns=change_time,
     )
 
 

@@ -93,7 +93,8 @@ class ReleasePackageInstalledTreePreservationTests(unittest.TestCase):
             previous_zip = archive.read_bytes()
             with patch.object(
                 release_package.shutil,
-                "copy2",
+                # Stage copy uses a pinned descriptor, not the older copy2 path.
+                "copyfileobj",
                 side_effect=OSError("synthetic interrupted package copy"),
             ):
                 with self.assertRaisesRegex(OSError, "synthetic interrupted"):

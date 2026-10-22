@@ -10,6 +10,7 @@ from pathlib import Path
 from typing import Any, BinaryIO
 
 from autosport.release_sbom import validate_embedded_executable_inventory
+from autosport.release_binary_attribution import validate_binary_module_attribution
 from autosport.release_package import (
     _decode_json_object,
     _require_release_zip_resource_bounds,
@@ -24,6 +25,8 @@ from autosport.release_package import (
 _PREFIX = "Autosport-V1/"
 _DATA_TOOL = "Autosport-Data.exe"
 _DATA_INVENTORY = "DATA_EXECUTABLE_INVENTORY.json"
+_DATA_ATTRIBUTION = "DATA_BINARY_MODULE_ATTRIBUTION.json"
+_DEPENDENCY_GRAPH = "DEPENDENCY_GRAPH_METADATA.json"
 _BUILD_INFO = "BUILD_INFO.json"
 _MANIFEST = "PACKAGE_MANIFEST.json"
 _SUMS = "SHA256SUMS.txt"
@@ -153,6 +156,7 @@ def bind_portable_data_tool(
     *,
     expected_base_package_sha256: str | None = None,
     data_executable_inventory: dict[str, Any] | None = None,
+    data_binary_module_attribution: dict[str, Any] | None = None,
 ) -> dict[str, str]:
     """Add the data tool only after the exact expected base package verifies cleanly."""
 
@@ -188,6 +192,16 @@ def bind_portable_data_tool(
             executable_sha256=data_sha,
         )
         members[_DATA_INVENTORY] = _json_bytes(data_executable_inventory)
+    if data_binary_module_attribution is not None:
+        if data_executable_inventory is None or _DEPENDENCY_GRAPH not in members:
+            raise ValueError("Data binary attribution requires sealed inventory and dependency graph")
+        dependency_graph = _decode_json_object(
+            members[_DEPENDENCY_GRAPH], _DEPENDENCY_GRAPH,
+        )
+        validate_binary_module_attribution(
+            data_binary_module_attribution, dependency_graph, data_executable_inventory,
+        )
+        members[_DATA_ATTRIBUTION] = _json_bytes(data_binary_module_attribution)
     members[_BUILD_INFO] = _json_bytes(build_info)
 
     manifest_files = {
@@ -209,6 +223,7 @@ def bind_portable_data_tool(
 
 def verify_portable_data_tool(
     package_zip: str | Path, *, require_data_executable_inventory: bool = False,
+    require_data_binary_module_attribution: bool = False,
 ) -> dict[str, Any]:
     members, build_info, verification = _verified_base_members(Path(package_zip))
     if _DATA_TOOL not in members:
@@ -229,6 +244,18 @@ def verify_portable_data_tool(
         )
         if members[_DATA_INVENTORY] != _json_bytes(inventory):
             raise ValueError("Data executable inventory is not canonical JSON")
+    if require_data_binary_module_attribution and _DATA_ATTRIBUTION not in members:
+        raise ValueError("release package is missing Data binary module attribution")
+    if _DATA_ATTRIBUTION in members:
+        if _DATA_INVENTORY not in members or _DEPENDENCY_GRAPH not in members:
+            raise ValueError("Data binary attribution lacks sealed inventory or dependency graph")
+        attribution = _decode_json_object(members[_DATA_ATTRIBUTION], _DATA_ATTRIBUTION)
+        dependency_graph = _decode_json_object(
+            members[_DEPENDENCY_GRAPH], _DEPENDENCY_GRAPH,
+        )
+        validate_binary_module_attribution(attribution, dependency_graph, inventory)
+        if members[_DATA_ATTRIBUTION] != _json_bytes(attribution):
+            raise ValueError("Data binary attribution is not canonical JSON")
     return {
         **verification,
         "status": "PASS",

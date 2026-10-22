@@ -261,6 +261,15 @@ def recover_update_gap(
     _publish_directory_no_replace(previous, root)
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during recovery")
+    # Moving the verified directory retains its inode, but a concurrent
+    # in-place rewrite of Autosport.exe can change the published bytes.
+    # Revalidate the installed path itself before retiring the transaction.
+    inspect_installed_release(
+        root, archive=old_archive, expected_source_sha=old_source_sha,
+        expected_package_sha256=old_package_sha256,
+    )
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("recovered release identity changed during readback")
     # Moving the sole `previous` release back leaves an empty transaction
     # directory. Keeping that empty lease would reject every future upgrade
     # as "previous update transaction requires disposition", even though the
@@ -358,6 +367,15 @@ def rollback_verified_paper_release(
         raise
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during rollback")
+    # The old bytes may be changed in place as the no-replace move completes;
+    # preserve the rejected current release until readback has authenticated
+    # the actually published rollback tree, not only its directory inode.
+    inspect_installed_release(
+        root, archive=old_archive, expected_source_sha=old_source_sha,
+        expected_package_sha256=old_package_sha256,
+    )
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("rolled-back release identity changed during readback")
     return {"status": "ROLLED_BACK_PAPER_ONLY", "source_sha": old_source_sha,
             "rejected_release_path": str(rejected), "real_money_execution": False}
 

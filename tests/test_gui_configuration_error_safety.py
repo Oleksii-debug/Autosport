@@ -39,8 +39,11 @@ def _configuration_failure_app() -> AutosportApp:
 def _expected_error(key: str) -> str:
     detail = text(
         "ui.error.exception.message_unavailable",
-        exception_type="_BrokenTextError",
+        exception_type="RuntimeError",
     )
+    # The canonical redaction boundary never exposes a plugin-defined class
+    # name; _BrokenTextError inherits the built-in RuntimeError.
+    assert "_BrokenTextError" not in detail
     return text(key, detail=detail)
 
 

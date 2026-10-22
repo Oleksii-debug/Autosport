@@ -71,5 +71,17 @@ class BinaryModuleAttributionTest(unittest.TestCase):
             )
 
 
+    def test_unhashable_and_mixed_owner_candidates_are_validation_errors(self):
+        report = capture_binary_module_attribution(
+            self.graph, self.inventory, packages_distributions={},
+        )
+        for hostile in ([["unhashable"]], [{"nested": "dict"}], ["example-dist", None]):
+            with self.subTest(hostile=hostile):
+                forged = copy.deepcopy(report)
+                forged["modules"][0]["host_candidates"] = hostile
+                with self.assertRaises(ValueError):
+                    validate_binary_module_attribution(forged, self.graph, self.inventory)
+
+
 if __name__ == "__main__":
     unittest.main()

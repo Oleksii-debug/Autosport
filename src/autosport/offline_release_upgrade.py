@@ -261,6 +261,15 @@ def recover_update_gap(
     _publish_directory_no_replace(previous, root)
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during recovery")
+    # A final publication may alter an executable in place without changing
+    # the directory inode. Read back the exact *restored* payload before
+    # clearing its recovery lease or reporting successful restoration.
+    inspect_installed_release(
+        root, archive=old_archive, expected_source_sha=old_source_sha,
+        expected_package_sha256=old_package_sha256,
+    )
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("restored release identity changed during readback")
     # Moving the sole `previous` release back leaves an empty transaction
     # directory. Keeping that empty lease would reject every future upgrade
     # as "previous update transaction requires disposition", even though the
@@ -358,6 +367,14 @@ def rollback_verified_paper_release(
         raise
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during rollback")
+    # Recheck final installed bytes after the atomic rollback move, not only
+    # the former previous/ pathname: an in-place tamper keeps its inode.
+    inspect_installed_release(
+        root, archive=old_archive, expected_source_sha=old_source_sha,
+        expected_package_sha256=old_package_sha256,
+    )
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("restored release identity changed during rollback readback")
     return {"status": "ROLLED_BACK_PAPER_ONLY", "source_sha": old_source_sha,
             "rejected_release_path": str(rejected), "real_money_execution": False}
 

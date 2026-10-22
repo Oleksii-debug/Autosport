@@ -1658,15 +1658,15 @@ def test_embedded_identity_rejects_wrong_inode_even_if_zip_payload_is_valid(
                 "product": "Autosport", "source_sha": "a" * 40,
                 "version": version, "update_version": version, "update_schema": 1,
             }))
-    real_open = os.open
+    real_open = module._open_archive_fd
     with module.pinned_windows_update_package(original, expected_sha256=digest(original.read_bytes())) as snap:
-        def redirected_open(path, flags, *args, **kwargs):
+        def redirected_open(path):
             if Path(path) == snap.path:
-                return real_open(decoy, flags, *args, **kwargs)
-            return real_open(path, flags, *args, **kwargs)
+                return real_open(decoy)
+            return real_open(path)
 
         with monkeypatch.context() as patch:
-            patch.setattr(module.os, "open", redirected_open)
+            patch.setattr(module, "_open_archive_fd", redirected_open)
             with pytest.raises(module.WindowsUpdateSnapshotError, match="^embedded update identity is invalid$"):
                 module._verified_embedded_update_identity(snap, expected_source_sha="a" * 40)
         snap.recheck()
@@ -1981,18 +1981,18 @@ def test_package_source_rejects_parent_replacement_during_open(tmp_path, monkeyp
     source = active / "candidate.zip"
     source.write_bytes(b"same signed bytes")
     (other / "candidate.zip").write_bytes(b"same signed bytes")
-    original_open = os.open
+    original_open = module._open_archive_fd
     swapped = False
 
-    def replace_parent(path, flags, *args, **kwargs):
+    def replace_parent(path):
         nonlocal swapped
         if Path(path) == source and not swapped:
             swapped = True
             active.rename(tmp_path / "original")
             other.rename(active)
-        return original_open(path, flags, *args, **kwargs)
+        return original_open(path)
 
-    monkeypatch.setattr(module.os, "open", replace_parent)
+    monkeypatch.setattr(module, "_open_archive_fd", replace_parent)
     with pytest.raises(WindowsUpdateSnapshotError, match="ancestor changed during open"):
         with pinned_windows_update_package(source, expected_sha256=digest(b"same signed bytes")):            pytest.fail("same-byte parent replacement must not yield snapshot")
     assert swapped
@@ -2095,10 +2095,10 @@ def test_private_snapshot_recheck_rejects_ancestor_swap_during_descriptor_open(t
     with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())) as snapshot:
         parent = snapshot.path.parent
         moved = parent.with_name(parent.name + "-original")
-        original_open = os.open
+        original_open = module._open_archive_fd
         swapped = False
 
-        def swap_at_open(path, flags, *args, **kwargs):
+        def swap_at_open(path):
             nonlocal swapped
             if Path(path) == snapshot.path and not swapped:
                 parent.rename(moved)
@@ -2108,12 +2108,12 @@ def test_private_snapshot_recheck_rejects_ancestor_swap_during_descriptor_open(t
                     moved.rename(parent)
                     raise
                 swapped = True
-            return original_open(path, flags, *args, **kwargs)
+            return original_open(path)
 
         try:
             with monkeypatch.context() as patch:
-                patch.setattr(module.os, "open", swap_at_open)
-                with pytest.raises(WindowsUpdateSnapshotError, match="ancestor|redirect"):
+                patch.setattr(module, "_open_archive_fd", swap_at_open)
+                with pytest.raises(WindowsUpdateSnapshotError, match="ancestor|redirect|unreadable"):
                     snapshot.recheck()
         finally:
             if parent.is_symlink():
@@ -2286,12 +2286,12 @@ def test_zip_resource_guard_fdopen_failure_releases_raw_descriptor(tmp_path, mon
     package = tmp_path / "candidate.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
-    original_open = os.open
+    original_open = module._open_archive_fd
     original_fdopen = os.fdopen
     owned = []
 
-    def record_open(path, flags, *args, **kwargs):
-        fd = original_open(path, flags, *args, **kwargs)
+    def record_open(path):
+        fd = original_open(path)
         if path == package:
             owned.append(fd)
         return fd
@@ -2302,7 +2302,7 @@ def test_zip_resource_guard_fdopen_failure_releases_raw_descriptor(tmp_path, mon
         return original_fdopen(fd, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(module.os, "open", record_open)
+        patch.setattr(module, "_open_archive_fd", record_open)
         patch.setattr(module.os, "fdopen", fail_fdopen)
         with pytest.raises(WindowsUpdateSnapshotError, match="preflight"):
             module._require_bounded_zip_members(package)
@@ -2319,17 +2319,17 @@ def test_zip_resource_guard_malformed_zip_closes_raw_descriptor(tmp_path, monkey
 
     package = tmp_path / "broken.zip"
     package.write_bytes(b"not a zip file with a valid end record")
-    original_open = os.open
+    original_open = module._open_archive_fd
     owned = []
 
-    def record_open(path, flags, *args, **kwargs):
-        fd = original_open(path, flags, *args, **kwargs)
+    def record_open(path):
+        fd = original_open(path)
         if path == package:
             owned.append(fd)
         return fd
 
     with monkeypatch.context() as patch:
-        patch.setattr(module.os, "open", record_open)
+        patch.setattr(module, "_open_archive_fd", record_open)
         with pytest.raises(WindowsUpdateSnapshotError):
             module._require_bounded_zip_members(package)
     assert len(owned) == 1
@@ -2526,13 +2526,13 @@ def test_source_fdopen_cleanup_failure_does_not_leak_private_path(tmp_path, monk
     source = tmp_path / "приватний шлях" / "кандидат.zip"
     source.parent.mkdir()
     source.write_bytes(b"fixture-only ZIP bytes")
-    real_open = os.open
+    real_open = module._open_archive_fd
     real_fdopen = os.fdopen
     real_close = os.close
     source_fd = []
 
-    def record_open(path, *args, **kwargs):
-        fd = real_open(path, *args, **kwargs)
+    def record_open(path):
+        fd = real_open(path)
         if os.fspath(path) == os.fspath(source):
             source_fd.append(fd)
         return fd
@@ -2548,7 +2548,7 @@ def test_source_fdopen_cleanup_failure_does_not_leak_private_path(tmp_path, monk
             raise RuntimeError("PRIVATE_CLEANUP_PATH descriptor close failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(module.os, "open", record_open)
+        patch.setattr(module, "_open_archive_fd", record_open)
         patch.setattr(module.os, "fdopen", fail_fdopen)
         patch.setattr(module.os, "close", close_then_fail)
         with pytest.raises(module.WindowsUpdateSnapshotError, match="snapshot I/O failure") as error:

@@ -117,8 +117,8 @@ def test_windows_build_uses_independent_oracle_for_build_and_package_snapshots()
         # direct build-host distribution evidence and its bounded graph module
         # in addition to the original release packaging/source modules.
         "scripts/package_windows.py src/autosport/release_package.py "
-        "src/autosport/release_sbom.py src/autosport/release_dependency_graph.py "
-        "src/autosport/data_tool_package.py"
+        "src/autosport/release_sbom.py src/autosport/release_binary_attribution.py "
+        "src/autosport/release_dependency_graph.py src/autosport/data_tool_package.py"
     )
     snapshot_gate = (
         "$trustedBuildManifestJson | & $pythonExecutable -I -S -c "

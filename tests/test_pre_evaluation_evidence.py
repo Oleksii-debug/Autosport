@@ -265,6 +265,66 @@ def test_parallel_writers_use_unique_temporary_files_and_complete_envelopes(
     assert not (tmp_path / ".evidence.json.tmp").exists()
 
 
+
+def test_windows_transient_replace_sharing_violation_recovers_without_temp_leak(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    evidence = authority.evaluate_session(
+        session_id="s-windows", candidate_ids=["c1"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    native_replace = evidence_module.os.replace
+    calls = []
+
+    def sharing_then_success(source, destination):
+        calls.append(Path(source))
+        if len(calls) < 3:
+            error = PermissionError("simulated Windows sharing violation")
+            error.winerror = 32
+            raise error
+        return native_replace(source, destination)
+
+    monkeypatch.setattr(evidence_module.os, "replace", sharing_then_success)
+    store.save(evidence)
+    assert len(calls) == 3
+    assert calls[0] == calls[1] == calls[2]
+    assert store.load() == evidence
+    assert not list(tmp_path.glob(".evidence.json.*.tmp"))
+
+
+def test_windows_persistent_replace_denial_is_bounded_and_keeps_previous(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    authority = PreEvaluationEvidenceAuthority(PreEvaluationPolicy(max_age_ns=200))
+    original = authority.evaluate_session(
+        session_id="existing", candidate_ids=["a"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    replacement = authority.evaluate_session(
+        session_id="candidate", candidate_ids=["b"],
+        resolver=lambda name: facts(name), evaluated_at_ns=1000,
+    )
+    store = PreEvaluationEvidenceStore(tmp_path / "evidence.json")
+    store.save(original)
+    calls = []
+
+    def permanently_denied(source, destination):
+        calls.append(Path(source))
+        error = PermissionError("persistent Windows access denial")
+        error.winerror = 5
+        raise error
+
+    monkeypatch.setattr(evidence_module.os, "replace", permanently_denied)
+    with pytest.raises(PermissionError, match="persistent Windows access denial"):
+        store.save(replacement)
+    assert len(calls) == 4
+    assert store.load() == original
+    assert not list(tmp_path.glob(".evidence.json.*.tmp"))
+
+
+
 def test_failed_atomic_replace_preserves_prior_evidence_and_cleans_only_own_temp(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:

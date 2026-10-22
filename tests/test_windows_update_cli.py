@@ -473,17 +473,18 @@ def test_request_path_replacement_before_open_is_rejected(tmp_path, monkeypatch)
     altered = request(tmp_path)
     altered["expected_package_sha256"] = "e" * 64
     replacement.write_text(json.dumps(altered), encoding="utf-8")
-    real_open = cli.os.open
+    # Inject at the canonical opener; Windows uses CreateFileW, not os.open.
+    real_open = cli._open_request_fd
     switched = False
 
-    def replacing_open(path, flags, *args, **kwargs):
+    def replacing_open(path):
         nonlocal switched
         if not switched and Path(path) == initial:
             switched = True
             os.replace(replacement, initial)
-        return real_open(path, flags, *args, **kwargs)
+        return real_open(path)
 
-    monkeypatch.setattr(cli.os, "open", replacing_open)
+    monkeypatch.setattr(cli, "_open_request_fd", replacing_open)
     monkeypatch.setattr(cli, "preflight_signed_windows_update", lambda **_: pytest.fail(
         "substituted request reached the verifier"
     ))
@@ -810,10 +811,11 @@ def test_request_postparse_reopen_rejects_same_byte_path_swap(tmp_path, monkeypa
     """A replacement between final lstat and the postparse open is rejected."""
     path = write(tmp_path, request(tmp_path))
     original = path.read_bytes()
-    original_open = cli.os.open
+    # Both the first and postparse reads use the portable canonical opener.
+    original_open = cli._open_request_fd
     opens = 0
 
-    def swapped_open(file, flags, *args, **kwargs):
+    def swapped_open(file):
         nonlocal opens
         if str(file) == str(path):
             opens += 1
@@ -821,9 +823,9 @@ def test_request_postparse_reopen_rejects_same_byte_path_swap(tmp_path, monkeypa
                 replacement = tmp_path / "swap.json"
                 replacement.write_bytes(original)
                 os.replace(replacement, path)
-        return original_open(file, flags, *args, **kwargs)
+        return original_open(file)
 
-    monkeypatch.setattr(cli.os, "open", swapped_open)
+    monkeypatch.setattr(cli, "_open_request_fd", swapped_open)
     monkeypatch.setattr(cli, "preflight_signed_windows_update", lambda **_: pytest.fail(
         "postparse replacement reached preflight"
     ))

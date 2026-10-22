@@ -265,25 +265,38 @@ def uninstall_verified_release(
             moved, archive=archive, expected_source_sha=expected_source_sha,
             expected_package_sha256=expected_package_sha256,
         )
+        # Even after the second installed-tree verification, another local
+        # process can modify the quarantine receipt before we read it again.
+        # Never derive DELETE targets from that newly read, mutable receipt.
+        # The independently pinned original archive is the sole deletion
+        # authority, including if the receipt is replaced with a validly
+        # rehashed list of owner files during this gap.
+        trusted_files = _trusted_archive_inventory(
+            archive, expected_source_sha=expected_source_sha,
+            expected_package_sha256=expected_package_sha256,
+        )
         receipt = release_package._decode_json_object(
             (moved / _RECEIPT).read_bytes(), "installed-release receipt"
         )
-        # Only the hash-verified product inventory may be removed. Never
-        # recursively delete an entire directory with untrusted extra members.
-        for name in sorted(receipt["files"]):
+        if receipt.get("files") != trusted_files:
+            raise OfflineInstallError(
+                "installed release changed after quarantine verification"
+            )
+        # Only archive-authorized names are ever passed to unlink().
+        for name in sorted(trusted_files):
             member = moved / Path(*name.split("/"))
             # A file may still look regular after a parent directory was
             # swapped for a symlink. Refuse traversal outside the quarantine.
             _assert_release_parents_unredirected(moved, member)
             if (_is_redirected_install_path(member) or not _regular_file(member)
-                    or _hash_file(member) != receipt["files"][name]):
+                    or _hash_file(member) != trusted_files[name]):
                 raise OfflineInstallError("installed file changed during removal")
             deletion_started = True
             member.unlink()
         (moved / _RECEIPT).unlink()
         dirs = {
             "/".join(name.split("/")[:i])
-            for name in receipt["files"]
+            for name in trusted_files
             for i in range(1, len(name.split("/")))
         }
         for name in sorted(dirs, key=lambda value: (-value.count("/"), value)):

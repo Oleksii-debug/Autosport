@@ -9,6 +9,7 @@ from pathlib import Path
 import pytest
 
 from autosport.release_binary_attribution import capture_binary_module_attribution
+from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 from autosport.release_package import (
     _SOURCE_MANIFEST_INPUTS, build_windows_package, verify_windows_package,
 )
@@ -139,3 +140,80 @@ def test_forged_clearance_rejected_before_package_publication(tmp_path: Path):
             binary_module_attribution=forged,
         )
     assert not output.exists()
+
+
+def _portable_data_candidate(tmp_path: Path):
+    files, main_inventory, _ = _input_files(tmp_path)
+    package, _ = build_windows_package(
+        *files, tmp_path / "release.zip", SHA,
+        source_manifest=SOURCE, dependency_graph=GRAPH,
+        embedded_executable_inventory=main_inventory,
+    )
+    data_exe = tmp_path / "Autosport-Data.exe"
+    data_exe.write_bytes(b"synthetic independently sealed Data executable")
+    data_inventory = copy.deepcopy(main_inventory)
+    data_inventory["executable_sha256"] = sha256(data_exe.read_bytes()).hexdigest()
+    data_attribution = capture_binary_module_attribution(
+        GRAPH, data_inventory, packages_distributions={"example": ["tk-uia"]},
+    )
+    return package, data_exe, data_inventory, data_attribution
+
+
+def test_data_executable_seals_distinct_review_only_attribution(tmp_path: Path):
+    package, data_exe, inventory, attribution = _portable_data_candidate(tmp_path)
+    receipt = bind_portable_data_tool(
+        package, data_exe, data_executable_inventory=inventory,
+        data_binary_module_attribution=attribution,
+    )
+    verified = verify_portable_data_tool(
+        package, require_data_executable_inventory=True,
+        require_data_binary_module_attribution=True,
+    )
+    assert verified["status"] == "PASS"
+    assert verified["package_sha256"] == receipt["package_sha256"]
+    assert attribution["executable_sha256"] != (
+        json.loads(
+            __import__("zipfile").ZipFile(package).read(
+                "Autosport-V1/EMBEDDED_EXECUTABLE_INVENTORY.json"
+            )
+        )["executable_sha256"]
+    )
+    assert attribution["modules"][0]["review"] == "HOST_MATCH_REVIEW_REQUIRED"
+
+
+def test_data_binary_attribution_required_only_in_official_verifier(tmp_path: Path):
+    package, data_exe, inventory, _ = _portable_data_candidate(tmp_path)
+    bind_portable_data_tool(package, data_exe, data_executable_inventory=inventory)
+    assert verify_portable_data_tool(package)["status"] == "PASS"
+    with pytest.raises(ValueError, match="missing Data binary module attribution"):
+        verify_portable_data_tool(
+            package, require_data_binary_module_attribution=True,
+        )
+
+
+def test_data_binary_attribution_forged_clearance_refused_before_zip_change(
+    tmp_path: Path,
+):
+    package, data_exe, inventory, attribution = _portable_data_candidate(tmp_path)
+    forged = copy.deepcopy(attribution)
+    forged["modules"][0]["review"] = "LICENSE_APPROVED"
+    before = package.read_bytes()
+    with pytest.raises(ValueError, match="license clearance"):
+        bind_portable_data_tool(
+            package, data_exe, data_executable_inventory=inventory,
+            data_binary_module_attribution=forged,
+        )
+    assert package.read_bytes() == before
+
+
+def test_data_attribution_cannot_reuse_main_executable_identity(tmp_path: Path):
+    package, data_exe, inventory, attribution = _portable_data_candidate(tmp_path)
+    forged = copy.deepcopy(attribution)
+    forged["executable_sha256"] = "0" * 64
+    before = package.read_bytes()
+    with pytest.raises(ValueError, match="identity/evidence class mismatch"):
+        bind_portable_data_tool(
+            package, data_exe, data_executable_inventory=inventory,
+            data_binary_module_attribution=forged,
+        )
+    assert package.read_bytes() == before

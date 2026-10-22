@@ -31,7 +31,18 @@ def _link(source: Path, destination: Path, *, directory: bool = False) -> None:
 def _assert_no_publication(f: dict[str, Path], tmp_path: Path) -> None:
     package = tmp_path / "published.zip"
     package.write_bytes(b"existing-good-package")
-    with pytest.raises(ValueError, match="unsafe release source|forbidden private/test state"):
+    # The stricter preflight rejects untrusted links before the staged-source
+    # guard. Each accepted diagnostic is still an explicit fail-closed source
+    # rejection; the published archive must remain byte-for-byte unchanged.
+    with pytest.raises(
+        ValueError,
+        match=(
+            "unsafe release source|forbidden private/test state|"
+            "release examples contain a symlink or nonregular source|"
+            "release examples must be a non-symlink directory|"
+            "release executable must be a regular non-symlink file"
+        ),
+    ):
         _build(f, package)
     assert package.read_bytes() == b"existing-good-package"
     assert not list(tmp_path.glob(".autosport-release-stage-*"))

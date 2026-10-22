@@ -37,6 +37,15 @@ class BinaryModuleAttributionTest(unittest.TestCase):
         )
         validate_binary_module_attribution(report, self.graph, self.inventory)
 
+    def test_nonmapping_binary_inventory_is_bounded_validation_error(self):
+        report = capture_binary_module_attribution(
+            self.graph, self.inventory, packages_distributions={},
+        )
+        for hostile in (None, [], "not-an-inventory"):
+            with self.subTest(hostile=hostile):
+                with self.assertRaisesRegex(ValueError, "identity/evidence class mismatch"):
+                    validate_binary_module_attribution(report, self.graph, hostile)
+
     def test_missing_sealed_module_refused(self):
         report = capture_binary_module_attribution(
             self.graph, self.inventory, packages_distributions={},

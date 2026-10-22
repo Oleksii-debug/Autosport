@@ -91,8 +91,20 @@ def _read_regular_stable(path: Path) -> bytes:
         data = handle.read(MAX_FILE_BYTES + 1)
         after = os.fstat(handle.fileno())
     final = _regular(path, label="workspace entry")
+    # Windows may report timestamps with different precision via a pathname
+    # versus an open file descriptor. Keep both witnesses independently stable,
+    # and bind them together with the same device/inode and byte count.
+    # Comparing a path timestamp directly to a handle timestamp can reject
+    # untouched files, preventing the owner from making a private backup.
     identity = lambda s: (s.st_dev, s.st_ino, s.st_size, s.st_mtime_ns, s.st_ctime_ns)
-    if len(data) > MAX_FILE_BYTES or len(data) != before.st_size or identity(before) != identity(after) or identity(after) != identity(final):
+    if (
+        len(data) > MAX_FILE_BYTES
+        or len(data) != before.st_size
+        or identity(before) != identity(final)
+        or identity(opened) != identity(after)
+        or (final.st_dev, final.st_ino) != (opened.st_dev, opened.st_ino)
+        or final.st_size != after.st_size
+    ):
         raise WorkspaceBackupError("workspace entry changed during backup")
     return data
 

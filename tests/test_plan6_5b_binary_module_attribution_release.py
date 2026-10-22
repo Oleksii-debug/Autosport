@@ -216,3 +216,52 @@ def test_data_attribution_cannot_reuse_main_executable_identity(tmp_path: Path):
             data_binary_module_attribution=forged,
         )
     assert package.read_bytes() == before
+
+
+def test_general_release_verifier_checks_data_binary_attribution(tmp_path: Path):
+    package, data_exe, inventory, attribution = _portable_data_candidate(tmp_path)
+    bind_portable_data_tool(
+        package, data_exe, data_executable_inventory=inventory,
+        data_binary_module_attribution=attribution,
+    )
+    assert verify_windows_package(package, expected_source_sha=SHA)["status"] == "PASS"
+
+
+def test_general_verifier_rejects_hash_resealed_data_clearance(tmp_path: Path):
+    """Manifest and SHA256SUMS rehashing must not authorize a false license claim."""
+    from autosport.data_tool_package import _json_bytes, _read_members
+    from autosport.release_package import _write_canonical_zip
+
+    package, data_exe, inventory, attribution = _portable_data_candidate(tmp_path)
+    bind_portable_data_tool(
+        package, data_exe, data_executable_inventory=inventory,
+        data_binary_module_attribution=attribution,
+    )
+    assert verify_windows_package(package, expected_source_sha=SHA)["status"] == "PASS"
+
+    members = _read_members(package)
+    forged = copy.deepcopy(attribution)
+    forged["modules"][0]["review"] = "LICENSE_APPROVED"
+    members["DATA_BINARY_MODULE_ATTRIBUTION.json"] = _json_bytes(forged)
+    manifest_files = {
+        name: sha256(data).hexdigest()
+        for name, data in sorted(members.items())
+        if name not in {"PACKAGE_MANIFEST.json", "SHA256SUMS.txt"}
+    }
+    members["PACKAGE_MANIFEST.json"] = _json_bytes({
+        "schema_version": 1, "files": manifest_files,
+    })
+    members["SHA256SUMS.txt"] = (
+        "\n".join(
+            f"{sha256(data).hexdigest()}  {name}"
+            for name, data in sorted(members.items())
+            if name != "SHA256SUMS.txt"
+        ) + "\n"
+    ).encode("utf-8")
+    _write_canonical_zip(
+        package,
+        {"Autosport-V1/" + name: data for name, data in members.items()},
+    )
+
+    with pytest.raises(ValueError, match="license clearance"):
+        verify_windows_package(package, expected_source_sha=SHA)

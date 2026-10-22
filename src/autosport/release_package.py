@@ -1093,6 +1093,38 @@ def verify_windows_package(
         if members["BINARY_MODULE_ATTRIBUTION.json"] != _canonical_json_bytes(attribution):
             raise ValueError("binary attribution is not canonical JSON")
 
+    # A generic release/installation verifier must not accept a re-sealed,
+    # internally hash-consistent *Data* ownership report claiming legal
+    # clearance. This uses the same validators as the dedicated Data verifier
+    # and remains optional for older fixture archives.
+    if "DATA_BINARY_MODULE_ATTRIBUTION.json" in members:
+        if not {
+            "DEPENDENCY_GRAPH_METADATA.json",
+            "DATA_EXECUTABLE_INVENTORY.json",
+            "Autosport-Data.exe",
+        }.issubset(members):
+            raise ValueError("Data binary attribution lacks trusted evidence")
+        data_sha = _sha256_bytes(members["Autosport-Data.exe"])
+        if build_info.get("autosport_data_exe_sha256") != data_sha:
+            raise ValueError("Data binary attribution executable identity mismatch")
+        data_inventory = _decode_json_object(
+            members["DATA_EXECUTABLE_INVENTORY.json"],
+            "DATA_EXECUTABLE_INVENTORY.json",
+        )
+        validate_embedded_executable_inventory(
+            data_inventory, source_sha=expected_source_sha,
+            executable_sha256=data_sha,
+        )
+        if members["DATA_EXECUTABLE_INVENTORY.json"] != _canonical_json_bytes(data_inventory):
+            raise ValueError("Data binary attribution inventory is not canonical JSON")
+        data_attribution = _decode_json_object(
+            members["DATA_BINARY_MODULE_ATTRIBUTION.json"],
+            "DATA_BINARY_MODULE_ATTRIBUTION.json",
+        )
+        validate_binary_module_attribution(data_attribution, graph, data_inventory)
+        if members["DATA_BINARY_MODULE_ATTRIBUTION.json"] != _canonical_json_bytes(data_attribution):
+            raise ValueError("Data binary attribution is not canonical JSON")
+
     manifest = _decode_json_object(
         members["PACKAGE_MANIFEST.json"],
         "PACKAGE_MANIFEST.json",

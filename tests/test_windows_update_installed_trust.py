@@ -126,17 +126,17 @@ def test_same_byte_path_swap_during_open_rejected(tmp_path, monkeypatch):
     path.write_bytes(raw)
     replacement = tmp_path / "replacement.json"
     replacement.write_bytes(raw)
-    actual_open = module.os.open
+    actual_open = module._snapshot._open_archive_fd
     swapped = False
 
-    def replace_before_open(candidate, flags, *args, **kwargs):
+    def replace_before_open(candidate):
         nonlocal swapped
         if not swapped and Path(candidate) == path:
             swapped = True
             os.replace(replacement, path)
-        return actual_open(candidate, flags, *args, **kwargs)
+        return actual_open(candidate)
 
-    monkeypatch.setattr(module.os, "open", replace_before_open)
+    monkeypatch.setattr(module._snapshot, "_open_archive_fd", replace_before_open)
     with pytest.raises(InstalledWindowsTrustError, match="changed while opening"):
         load_pinned_installed_update_authority(path, expected_manifest_sha256=hashlib.sha256(raw).hexdigest())
     assert swapped
@@ -471,7 +471,7 @@ def test_installed_manifest_open_failure_does_not_log_private_os_error(tmp_path,
     path.write_bytes(raw)
     def reject_open(*args, **kwargs):
         raise OSError("PRIVATE_MARKER installed-secret-path")
-    monkeypatch.setattr(module.os, "open", reject_open)
+    monkeypatch.setattr(module._snapshot, "_open_archive_fd", reject_open)
     with pytest.raises(InstalledWindowsTrustError, match="installed manifest could not be read") as error:
         load_pinned_installed_update_authority(
             path, expected_manifest_sha256=hashlib.sha256(raw).hexdigest()
@@ -647,18 +647,18 @@ def test_parent_directory_same_byte_swap_during_open_is_rejected(tmp_path, monke
     replacement = tmp_path / "replacement"
     replacement.mkdir()
     (replacement / "installed.json").write_bytes(raw)
-    actual_open = module.os.open
+    actual_open = module._snapshot._open_archive_fd
     swapped = False
 
-    def replace_parent_during_open(candidate, flags, *args, **kwargs):
+    def replace_parent_during_open(candidate):
         nonlocal swapped
         if not swapped and Path(candidate) == path:
             swapped = True
             os.rename(directory, tmp_path / "old-installed")
             os.rename(replacement, directory)
-        return actual_open(candidate, flags, *args, **kwargs)
+        return actual_open(candidate)
 
-    monkeypatch.setattr(module.os, "open", replace_parent_during_open)
+    monkeypatch.setattr(module._snapshot, "_open_archive_fd", replace_parent_during_open)
     with pytest.raises(InstalledWindowsTrustError):
         load_pinned_installed_update_authority(
             path, expected_manifest_sha256=hashlib.sha256(raw).hexdigest()
@@ -807,11 +807,11 @@ def test_installed_manifest_fdopen_and_close_failure_stays_sanitized(tmp_path, m
     manifest.parent.mkdir()
     data = _bytes()
     manifest.write_bytes(data)
-    real_open, real_fdopen, real_close = os.open, os.fdopen, os.close
+    real_open, real_fdopen, real_close = module._snapshot._open_archive_fd, os.fdopen, os.close
     owned = []
 
-    def capture_open(path, *args, **kwargs):
-        fd = real_open(path, *args, **kwargs)
+    def capture_open(path):
+        fd = real_open(path)
         if os.fspath(path) == os.fspath(manifest):
             owned.append(fd)
         return fd
@@ -827,7 +827,7 @@ def test_installed_manifest_fdopen_and_close_failure_stays_sanitized(tmp_path, m
             raise RuntimeError("PRIVATE_CLOSE_PATH close wrapper failed")
 
     with monkeypatch.context() as patch:
-        patch.setattr(module.os, "open", capture_open)
+        patch.setattr(module._snapshot, "_open_archive_fd", capture_open)
         patch.setattr(module.os, "fdopen", fail_fdopen)
         patch.setattr(module.os, "close", close_then_fail)
         with pytest.raises(module.InstalledWindowsTrustError, match="could not be read") as error:

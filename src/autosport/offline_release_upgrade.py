@@ -190,6 +190,17 @@ def upgrade_verified_paper_release(
         # before publication; restore previous on a witnessed replacement.
         if _directory_witness(candidate) != candidate_witness:
             raise OfflineInstallError("staged release identity changed before publication")
+        # The directory inode alone does not bind the files inside it. A
+        # concurrent in-place write to Autosport.exe keeps that inode stable.
+        # Recheck the complete SHA-pinned payload after the incumbent moves,
+        # while the previous release can still be restored without overwrite.
+        inspect_installed_release(
+            candidate, archive=new_archive,
+            expected_source_sha=new_source_sha,
+            expected_package_sha256=new_package_sha256,
+        )
+        if _directory_witness(candidate) != candidate_witness:
+            raise OfflineInstallError("staged release identity changed on final inspection")
         _publish_directory_no_replace(candidate, root)
     except Exception:
         if not root.exists() and previous.is_dir():

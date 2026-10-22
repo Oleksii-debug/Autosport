@@ -2211,13 +2211,15 @@ def test_zip_resource_guard_rejects_leaf_swap_at_open_before_eocd(tmp_path, monk
     for path in (package, replacement):
         with zipfile.ZipFile(path, "w") as archive:
             archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
-    original_open = os.open
+    original_open = module._open_archive_fd
+    original_os_open = os.open
     swapped = []
+    opened_paths = []
     opened_flags = []
 
-    def replace_during_open(path, flags, *args, **kwargs):
+    def replace_during_open(path):
         if path == package:
-            opened_flags.append(flags)
+            opened_paths.append(path)
             if not swapped:
                 package.unlink()
                 try:
@@ -2227,21 +2229,27 @@ def test_zip_resource_guard_rejects_leaf_swap_at_open_before_eocd(tmp_path, monk
                         archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
                     pytest.skip("file symlinks unavailable")
                 swapped.append(True)
-        return original_open(path, flags, *args, **kwargs)
+        return original_open(path)
+
+    def track_posix_flags(path, flags, *args, **kwargs):
+        if path == package:
+            opened_flags.append(flags)
+        return original_os_open(path, flags, *args, **kwargs)
 
     def unexpected_parse(*args, **kwargs):
         raise AssertionError("redirected leaf reached ZIP parser")
 
     try:
         with monkeypatch.context() as patch:
-            patch.setattr(module.os, "open", replace_during_open)
+            patch.setattr(module, "_open_archive_fd", replace_during_open)
+            if os.name != "nt":
+                patch.setattr(module.os, "open", track_posix_flags)
             patch.setattr(module.zipfile, "ZipFile", unexpected_parse)
             with pytest.raises(WindowsUpdateSnapshotError, match="preflight|redirect|identity|regular"):
                 module._require_bounded_zip_members(package)
-        assert swapped, "the ZIP guard did not use descriptor-bound os.open"
-        assert opened_flags
-        if getattr(os, "O_NOFOLLOW", 0):
-            assert all(flags & os.O_NOFOLLOW for flags in opened_flags)
+        assert swapped and len(opened_paths) == 1, "ZIP guard skipped its canonical leaf opener"
+        if os.name != "nt" and getattr(os, "O_NOFOLLOW", 0):
+            assert opened_flags and all(flags & os.O_NOFOLLOW for flags in opened_flags)
     finally:
         if package.is_symlink():
             package.unlink()
@@ -2259,20 +2267,29 @@ def test_zip_resource_guard_opens_stable_leaf_via_descriptor(tmp_path, monkeypat
     package = tmp_path / "оновлення з пробілами.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
-    original_open = os.open
+    original_open = module._open_archive_fd
+    original_os_open = os.open
     opened = []
+    flags_seen = []
 
-    def observed_open(path, flags, *args, **kwargs):
+    def observed_open(path):
         if path == package:
-            opened.append(flags)
-        return original_open(path, flags, *args, **kwargs)
+            opened.append(path)
+        return original_open(path)
+
+    def track_posix_flags(path, flags, *args, **kwargs):
+        if path == package:
+            flags_seen.append(flags)
+        return original_os_open(path, flags, *args, **kwargs)
 
     with monkeypatch.context() as patch:
-        patch.setattr(module.os, "open", observed_open)
+        patch.setattr(module, "_open_archive_fd", observed_open)
+        if os.name != "nt":
+            patch.setattr(module.os, "open", track_posix_flags)
         module._require_bounded_zip_members(package)
     assert len(opened) == 1, "ZIP guard must open the source exactly once"
-    if getattr(os, "O_NOFOLLOW", 0):
-        assert opened[0] & os.O_NOFOLLOW
+    if os.name != "nt" and getattr(os, "O_NOFOLLOW", 0):
+        assert flags_seen and all(flags & os.O_NOFOLLOW for flags in flags_seen)
 
 
 
@@ -2387,7 +2404,7 @@ def test_embedded_identity_rejects_ancestor_redirect_during_read(
             "product": "Autosport", "source_sha": "a" * 40,
             "version": "1.2.3", "update_version": "1.2.3", "update_schema": 1,
         }))
-    original_open = module.os.open
+    original_open = module._open_archive_fd
     original_zipfile = zipfile.ZipFile
     with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())) as snap:
         parent = snap.path.parent
@@ -2404,13 +2421,13 @@ def test_embedded_identity_rejects_ancestor_redirect_during_read(
                 pytest.skip("directory symlinks unavailable")
             swapped.append(True)
 
-        def redirect_during_open(path, flags, *args, **kwargs):
+        def redirect_during_open(path):
             if Path(path) == snap.path:
                 opens.append(True)
                 # The first open is snapshot.recheck(), the second is BUILD_INFO.
                 if len(opens) == 2:
                     swap_parent()
-            return original_open(path, flags, *args, **kwargs)
+            return original_open(path)
 
         def redirect_during_parse(file, *args, **kwargs):
             if not swapped:
@@ -2420,7 +2437,7 @@ def test_embedded_identity_rejects_ancestor_redirect_during_read(
         try:
             with monkeypatch.context() as patch:
                 if swap_stage == "open":
-                    patch.setattr(module.os, "open", redirect_during_open)
+                    patch.setattr(module, "_open_archive_fd", redirect_during_open)
                 else:
                     patch.setattr(module.zipfile, "ZipFile", redirect_during_parse)
                 with pytest.raises(module.WindowsUpdateSnapshotError, match="^embedded update identity is invalid$"):
@@ -2454,13 +2471,13 @@ def test_zip_resource_guard_rejects_descriptor_reparse_attribute(tmp_path, monke
     package = tmp_path / "кандидат оновлення.zip"
     with zipfile.ZipFile(package, "w") as archive:
         archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
-    real_open = os.open
+    real_open = module._open_archive_fd
     real_fstat = os.fstat
     opened = []
     calls = []
 
-    def observe_open(path, flags, *args, **kwargs):
-        fd = real_open(path, flags, *args, **kwargs)
+    def observe_open(path):
+        fd = real_open(path)
         if path == package:
             opened.append(fd)
         return fd
@@ -2483,7 +2500,7 @@ def test_zip_resource_guard_rejects_descriptor_reparse_attribute(tmp_path, monke
         )
 
     with monkeypatch.context() as patch:
-        patch.setattr(module.os, "open", observe_open)
+        patch.setattr(module, "_open_archive_fd", observe_open)
         patch.setattr(module.os, "fstat", marked_fstat)
         with pytest.raises(WindowsUpdateSnapshotError, match="redirect|identity|preflight"):
             module._require_bounded_zip_members(package)

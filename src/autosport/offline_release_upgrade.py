@@ -193,11 +193,20 @@ def recover_update_gap(
     if root.exists() or root.is_symlink():
         raise OfflineInstallError("recovery cannot replace an occupied update destination")
     previous = _inspection_root(txn / "previous")
+    # Recovery is also a destructive directory publication. Bind the exact
+    # previously inspected filesystem object, not just reproducible bytes:
+    # another process could replace it with an identical copy after the
+    # trusted installed-release read and before it is moved into place.
+    previous_witness = _directory_witness(previous)
     inspect_installed_release(
         previous, archive=old_archive, expected_source_sha=old_source_sha,
         expected_package_sha256=old_package_sha256,
     )
+    if _directory_witness(previous) != previous_witness:
+        raise OfflineInstallError("previous release identity changed during recovery")
     _publish_directory_no_replace(previous, root)
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("restored release identity changed during recovery")
     return {"status": "OLD_RELEASE_RECOVERED", "source_sha": old_source_sha,
             "real_money_execution": False}
 

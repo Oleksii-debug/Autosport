@@ -57,6 +57,8 @@ GROUPS = (
         "tests/test_offline_release_install_windows_namespace.py",
         "tests/test_plan6_6a_data_tool_zip_preflight.py",
         "tests/test_plan6_6a_uninstall_atomic_quarantine.py",
+        "tests/test_plan6_6a_windows_stat_view_boundary.py",
+        "tests/test_plan6_update_alias_preinspection.py",
         "tests/test_plan6_nested_release_reparse_boundary.py",
         "tests/test_plan6_offline_install_reparse_boundary.py",
     )),

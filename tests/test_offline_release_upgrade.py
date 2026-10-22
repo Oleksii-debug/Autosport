@@ -166,6 +166,85 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual(result["status"], "OLD_RELEASE_RECOVERED")
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
 
+    def test_recovery_rejects_same_bytes_replaced_after_trusted_read(self):
+        # A byte-identical second directory is not the filesystem object
+        # validated by the canonical recovery read.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, _new, _nd = self._installed(work)
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            previous = txn / "previous"
+            dest.rename(previous)
+            detached = work / "original-previous"
+            original_verify = upgrade.inspect_installed_release
+            checks = 0
+
+            def replace_verified_previous(path, **kwargs):
+                nonlocal checks
+                report = original_verify(path, **kwargs)
+                if Path(path) == previous:
+                    checks += 1
+                    previous.rename(detached)
+                    shutil.copytree(detached, previous)
+                return report
+
+            with self._trusted():
+                with patch.object(
+                    upgrade, "inspect_installed_release",
+                    side_effect=replace_verified_previous,
+                ):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "identity changed"
+                    ):
+                        upgrade.recover_update_gap(
+                            dest, old_archive=old, old_source_sha=self.OLD,
+                            old_package_sha256=od,
+                        )
+            self.assertEqual(checks, 1)
+            self.assertFalse(dest.exists())
+            self.assertEqual((previous / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertEqual((detached / "Autosport.exe").read_bytes(), self.OLD.encode())
+
+    def test_recovery_rejects_symlink_substituted_after_trusted_read(self):
+        # The post-read identity guard must not publish a redirect into the
+        # nominally empty installed-product directory.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, _new, _nd = self._installed(work)
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            previous = txn / "previous"
+            dest.rename(previous)
+            detached = work / "original-previous"
+            original_verify = upgrade.inspect_installed_release
+
+            def redirect_verified_previous(path, **kwargs):
+                report = original_verify(path, **kwargs)
+                if Path(path) == previous:
+                    previous.rename(detached)
+                    try:
+                        previous.symlink_to(detached, target_is_directory=True)
+                    except (OSError, NotImplementedError) as exc:
+                        self.skipTest(f"directory symlink creation unavailable: {type(exc).__name__}")
+                return report
+
+            with self._trusted():
+                with patch.object(
+                    upgrade, "inspect_installed_release",
+                    side_effect=redirect_verified_previous,
+                ):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "redirect"
+                    ):
+                        upgrade.recover_update_gap(
+                            dest, old_archive=old, old_source_sha=self.OLD,
+                            old_package_sha256=od,
+                        )
+            self.assertFalse(dest.exists())
+            self.assertTrue(previous.is_symlink())
+            self.assertEqual((detached / "Autosport.exe").read_bytes(), self.OLD.encode())
+
     def test_normal_publication_failure_restores_existing_release(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

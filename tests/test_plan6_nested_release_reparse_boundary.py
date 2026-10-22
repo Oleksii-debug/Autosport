@@ -122,7 +122,7 @@ class NestedWindowsReparseReleaseTests(unittest.TestCase):
                 return_value=verified,
             ):
                 with self.assertRaisesRegex(
-                    install.OfflineInstallError, "redirected",
+                    install.OfflineInstallError, "unexpected quarantine subdirectory",
                 ):
                     recovery.recover_interrupted_uninstall(
                         quarantine, installed, archive=archive,
@@ -236,7 +236,7 @@ class NestedWindowsReparseReleaseTests(unittest.TestCase):
                 return_value=verified,
             ):
                 with self.assertRaisesRegex(
-                    install.OfflineInstallError, "receipt is unsafe",
+                    install.OfflineInstallError, "interrupted release receipt is redirected",
                 ):
                     recovery.recover_interrupted_uninstall(
                         quarantine, installed, archive=archive,

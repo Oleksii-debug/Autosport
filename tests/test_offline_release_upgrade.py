@@ -235,6 +235,38 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                 (candidate / "Autosport.exe").read_bytes(), b"unauthorized-new-payload",
             )
 
+    def test_update_rejects_inplace_payload_change_during_final_publication(self):
+        # The candidate is clean before its no-replace move. An in-place
+        # rewrite immediately after that move retains the directory inode;
+        # checking only directory identity used to return false success.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            real_publish = upgrade._publish_directory_no_replace
+            committed = []
+            corrupt = b"forged-post-publish-executable"
+
+            def corrupt_after_publishing_candidate(source, target):
+                real_publish(source, target)
+                if Path(source).name == "candidate" and Path(target) == dest:
+                    committed.append(True)
+                    (dest / "Autosport.exe").write_bytes(corrupt)
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=corrupt_after_publishing_candidate,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(committed, [True])
+            txn = upgrade._transaction_root(dest)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), corrupt)
+            self.assertEqual(
+                (txn / "previous" / "Autosport.exe").read_bytes(),
+                self.OLD.encode(),
+            )
+
     def test_update_preserves_previous_and_never_enables_money(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

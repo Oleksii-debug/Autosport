@@ -145,6 +145,10 @@ def upgrade_verified_paper_release(
             expected_source_sha=new_source_sha,
             expected_package_sha256=new_package_sha256,
         )
+        # A matching file inventory is not enough if another actor replaces
+        # the entire staged directory after inspection. Bind its filesystem
+        # object, as we already do for the installed incumbent.
+        candidate_witness = _directory_witness(candidate)
         inspect_installed_release(
             root, archive=old_archive,
             expected_source_sha=old_source_sha,
@@ -162,6 +166,8 @@ def upgrade_verified_paper_release(
     if (not stat.S_ISDIR(original.st_mode)
             or (original.st_dev, original.st_ino) != incumbent_witness):
         raise OfflineInstallError("installed directory identity changed before update commit")
+    if _directory_witness(candidate) != candidate_witness:
+        raise OfflineInstallError("staged release identity changed before update commit")
     # Atomic no-replace is required here too: on POSIX rename() can silently
     # replace an empty quarantine directory created by a concurrent worker.
     _publish_directory_no_replace(root, previous)
@@ -170,11 +176,19 @@ def upgrade_verified_paper_release(
     ):
         raise OfflineInstallError("installed identity changed during update")
     try:
+        # The old release has moved, so re-check the exact vetted candidate
+        # before publication; restore previous on a witnessed replacement.
+        if _directory_witness(candidate) != candidate_witness:
+            raise OfflineInstallError("staged release identity changed before publication")
         _publish_directory_no_replace(candidate, root)
     except Exception:
         if not root.exists() and previous.is_dir():
             _publish_directory_no_replace(previous, root)
         raise
+    if _directory_witness(root) != candidate_witness:
+        # Never report success for bytes published from an unverified
+        # replacement. Preserve previous for explicit recovery/disposition.
+        raise OfflineInstallError("published release identity changed during update")
     return {
         "status": "UPDATED_PAPER_ONLY", "old_source_sha": old_source_sha,
         "source_sha": new_source_sha, "package_sha256": new_package_sha256,

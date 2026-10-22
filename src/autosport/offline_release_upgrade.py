@@ -210,6 +210,17 @@ def upgrade_verified_paper_release(
         # Never report success for bytes published from an unverified
         # replacement. Preserve previous for explicit recovery/disposition.
         raise OfflineInstallError("published release identity changed during update")
+    # The directory inode remains stable if a file is rewritten as the final
+    # no-replace rename publishes the candidate. Verify *published* bytes,
+    # not just the earlier staging pathname, before reporting success.
+    # On failure preserve the exact old release in txn/previous so the
+    # operator can make an explicit, independently verified disposition.
+    inspect_installed_release(
+        root, archive=new_archive, expected_source_sha=new_source_sha,
+        expected_package_sha256=new_package_sha256,
+    )
+    if _directory_witness(root) != candidate_witness:
+        raise OfflineInstallError("published release identity changed during readback")
     return {
         "status": "UPDATED_PAPER_ONLY", "old_source_sha": old_source_sha,
         "source_sha": new_source_sha, "package_sha256": new_package_sha256,

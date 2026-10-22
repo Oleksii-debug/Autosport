@@ -536,7 +536,23 @@ def validate_dependency_license_evidence(
     components = dependency_graph["components"]
     if not (1 <= len(components) <= 256):
         raise ValueError("license evidence has an invalid source graph")
-    expected = {item["name"]: item["version"] for item in components}
+    # A duplicate or malformed build-host component cannot disappear under a
+    # dictionary comprehension and thereby borrow another distribution's
+    # LICENSE/NOTICE evidence. Validate the independent graph boundary even
+    # when this verifier is invoked outside the full ZIP verifier.
+    expected: dict[str, str] = {}
+    for component in components:
+        if (
+            type(component) is not dict
+            or type(component.get("name")) is not str
+            or not _NAME.fullmatch(component["name"])
+            or _normalize_name(component["name"]) != component["name"]
+            or type(component.get("version")) is not str
+            or not _VERSION.fullmatch(component["version"])
+            or component["name"] in expected
+        ):
+            raise ValueError("license evidence has an invalid source graph")
+        expected[component["name"]] = component["version"]
     entries = manifest["distributions"]
     if type(entries) is not list or len(entries) != len(expected):
         raise ValueError("distribution license evidence is incomplete")

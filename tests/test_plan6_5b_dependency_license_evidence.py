@@ -214,3 +214,29 @@ def test_license_evidence_rejects_nonmapping_source_graph(
     manifest, members = subject.capture_dependency_license_evidence(_graph())
     with pytest.raises(ValueError, match="schema/source mismatch"):
         subject.validate_dependency_license_evidence(manifest, None, members)
+
+
+@pytest.mark.parametrize("components", [
+    [None], [False], [{}],
+    [{"name": "example-dist"}],
+    [{"name": "example-dist", "version": False}],
+    [{"name": "Example_Dist", "version": "1.2.3"}],
+    [{"name": "bad/name", "version": "1.2.3"}],
+    [
+        {"name": "example-dist", "version": "1.2.3"},
+        {"name": "example-dist", "version": "1.2.3"},
+    ],
+])
+def test_license_evidence_rejects_malformed_or_duplicate_graph_components(
+    tmp_path: Path, monkeypatch, components,
+):
+    """Bad component identities cannot collapse into a valid license receipt."""
+    monkeypatch.setattr(subject.metadata, "distribution",
+                        lambda name: _distribution(tmp_path))
+    manifest, members = subject.capture_dependency_license_evidence(_graph())
+    malformed_graph = deepcopy(_graph())
+    malformed_graph["components"] = components
+    with pytest.raises(ValueError, match="invalid source graph"):
+        subject.validate_dependency_license_evidence(
+            manifest, malformed_graph, members,
+        )

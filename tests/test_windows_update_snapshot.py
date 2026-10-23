@@ -1,6 +1,7 @@
 """Negative, restart and tamper tests for update-package byte pinning."""
 
 import hashlib
+import os
 import struct
 from pathlib import Path
 
@@ -333,7 +334,13 @@ def test_snapshot_recheck_rejects_midread_same_byte_path_swap(tmp_path, monkeypa
 
     source = tmp_path / "candidate.zip"
     source.write_bytes(b"same verified bytes")
-    with pytest.raises(WindowsUpdateSnapshotError, match="changed during recheck"):
+    attempts, denied = [], []
+    # Windows may deny a rename while the verified descriptor is held. That
+    # native sharing denial is fail-closed, but it is not an inode-swap proof.
+    expected = "changed during recheck"
+    if os.name == "nt":
+        expected += "|pinned package unreadable"
+    with pytest.raises(WindowsUpdateSnapshotError, match=expected):
         with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())) as snap:
             real_fdopen = module.os.fdopen
 
@@ -357,7 +364,12 @@ def test_snapshot_recheck_rejects_midread_same_byte_path_swap(tmp_path, monkeypa
                     if data and not self.swapped:
                         replacement = snap.path.with_name("same-content-new-inode.zip")
                         replacement.write_bytes(data)
-                        replacement.replace(snap.path)
+                        attempts.append(True)
+                        try:
+                            replacement.replace(snap.path)
+                        except PermissionError:
+                            denied.append(True)
+                            raise
                         self.swapped = True
                     return data
 
@@ -367,6 +379,9 @@ def test_snapshot_recheck_rejects_midread_same_byte_path_swap(tmp_path, monkeypa
             with monkeypatch.context() as context:
                 context.setattr(module.os, "fdopen", swap_on_read)
                 snap.recheck()
+    assert attempts, "the held-stream replacement must actually be attempted"
+    if denied:
+        assert os.name == "nt", "unexpected platform-level sharing denial"
 
 
 def test_snapshot_recheck_rejects_metadata_only_inplace_change(tmp_path, monkeypatch):
@@ -418,6 +433,7 @@ def test_source_path_replacement_during_copy_rejected_even_with_same_bytes(tmp_p
     replacement.write_bytes(source.read_bytes())
     original_fdopen = module.os.fdopen
     swapped = False
+    attempts, denied = [], []
 
     class SwappingRead:
         def __init__(self, raw):
@@ -437,7 +453,12 @@ def test_source_path_replacement_during_copy_rejected_even_with_same_bytes(tmp_p
             nonlocal swapped
             block = self.raw.read(amount)
             if block and not swapped:
-                replacement.replace(source)
+                attempts.append(True)
+                try:
+                    replacement.replace(source)
+                except PermissionError:
+                    denied.append(True)
+                    raise
                 swapped = True
             return block
 
@@ -447,10 +468,19 @@ def test_source_path_replacement_during_copy_rejected_even_with_same_bytes(tmp_p
 
     with monkeypatch.context() as context:
         context.setattr(module.os, "fdopen", wrap_source)
-        with pytest.raises(WindowsUpdateSnapshotError, match="source changed while being copied"):
+        expected = "source changed while being copied"
+        if os.name == "nt":
+            expected += "|package snapshot I/O failure"
+        with pytest.raises(WindowsUpdateSnapshotError, match=expected):
             with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())):
                 pytest.fail("source replacement must be rejected")
-    assert swapped
+    assert attempts, "the source replacement must actually be attempted"
+    if denied:
+        assert os.name == "nt", "unexpected platform-level sharing denial"
+        assert source.read_bytes() == b"same bytes across a source path replacement"
+        assert replacement.exists()
+    else:
+        assert swapped
 
 
 def test_source_metadata_mutation_during_copy_rejected(tmp_path, monkeypatch):
@@ -1066,19 +1096,32 @@ def test_zip_preflight_rejects_path_swap_before_central_directory_parse(tmp_path
         archive.writestr("Autosport-V1/extra.txt", "extra")
     original_inode = package.stat().st_ino
     actual_zipfile = zipfile.ZipFile
-    seen = []
+    seen, attempts, denied = [], [], []
 
     def swap_before_zip_parse(file, *args, **kwargs):
-        replacement.replace(package)
+        attempts.append(file)
+        try:
+            replacement.replace(package)
+        except PermissionError:
+            denied.append(True)
+            raise
         seen.append(file)
         return actual_zipfile(file, *args, **kwargs)
 
     monkeypatch.setattr(module.zipfile, "ZipFile", swap_before_zip_parse)
     with pytest.raises(module.WindowsUpdateSnapshotError, match="changed during preflight|update archive preflight failed"):
         module._require_bounded_zip_members(package)
-    assert len(seen) == 1
-    assert hasattr(seen[0], "fileno"), "ZIP parser reopened a mutable pathname"
-    assert package.stat().st_ino != original_inode
+    assert len(attempts) == 1, "ZIP parse boundary must be reached"
+    assert hasattr(attempts[0], "fileno"), "ZIP parser reopened a mutable pathname"
+    if denied:
+        # A Windows sharing violation rejects the attack before ZIP parsing;
+        # never count that as a successful inode-swap regression.
+        assert os.name == "nt"
+        assert package.stat().st_ino == original_inode
+        assert replacement.exists()
+    else:
+        assert len(seen) == 1
+        assert package.stat().st_ino != original_inode
 
 
 def test_zip_preflight_rejects_in_place_rewrite_after_eocd(tmp_path, monkeypatch):
@@ -2142,11 +2185,16 @@ def test_zip_resource_preflight_rejects_ancestor_redirect_during_parse(tmp_path,
         archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
     relocated = tmp_path / "переміщений каталог"
     original_zipfile = zipfile.ZipFile
-    swapped = []
+    swapped, attempts, denied = [], [], []
 
     def redirect_ancestor(file, *args, **kwargs):
         if not swapped:
-            parent.rename(relocated)
+            attempts.append(True)
+            try:
+                parent.rename(relocated)
+            except PermissionError:
+                denied.append(True)
+                raise
             try:
                 parent.symlink_to(relocated, target_is_directory=True)
             except (OSError, NotImplementedError):
@@ -2160,7 +2208,10 @@ def test_zip_resource_preflight_rejects_ancestor_redirect_during_parse(tmp_path,
             patch.setattr(module.zipfile, "ZipFile", redirect_ancestor)
             with pytest.raises(WindowsUpdateSnapshotError, match="ancestor|redirect|update archive preflight failed"):
                 module._require_bounded_zip_members(package)
-        assert swapped
+        assert attempts, "the parse-time ancestor redirect must be attempted"
+        if not swapped:
+            assert os.name == "nt" and denied, "redirect did not execute or fail at the OS fence"
+            assert parent.is_dir() and not parent.is_symlink()
     finally:
         if parent.is_symlink():
             parent.unlink()
@@ -2410,11 +2461,16 @@ def test_embedded_identity_rejects_ancestor_redirect_during_read(
     with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())) as snap:
         parent = snap.path.parent
         relocated = parent.with_name(parent.name + "-relocated")
-        swapped = []
+        swapped, attempts, denied = [], [], []
         opens = []
 
         def swap_parent():
-            parent.rename(relocated)
+            attempts.append(True)
+            try:
+                parent.rename(relocated)
+            except PermissionError:
+                denied.append(True)
+                raise
             try:
                 parent.symlink_to(relocated, target_is_directory=True)
             except (OSError, NotImplementedError):
@@ -2443,7 +2499,9 @@ def test_embedded_identity_rejects_ancestor_redirect_during_read(
                     patch.setattr(module.zipfile, "ZipFile", redirect_during_parse)
                 with pytest.raises(module.WindowsUpdateSnapshotError, match="^embedded update identity is invalid$"):
                     module._verified_embedded_update_identity(snap, expected_source_sha="a" * 40)
-            assert swapped, "the adversarial redirect must actually execute"
+            assert attempts, "the adversarial redirect must actually be attempted"
+            if not swapped:
+                assert os.name == "nt" and denied, "unexpected early rejection before redirect hook"
         finally:
             if parent.is_symlink():
                 parent.unlink()
@@ -2580,3 +2638,67 @@ def test_source_fdopen_cleanup_failure_does_not_leak_private_path(tmp_path, monk
     diagnostic = "".join(traceback.format_exception(error.value))
     assert "PRIVATE_SOURCE_PATH" not in diagnostic
     assert "PRIVATE_CLEANUP_PATH" not in diagnostic
+
+
+def test_snapshot_recheck_rejects_deterministic_postread_inode_drift(tmp_path, monkeypatch):
+    """Even if Windows prevents a real rename, post-read identity is checked."""
+    from autosport import windows_update_snapshot as module
+
+    source = tmp_path / "candidate.zip"
+    source.write_bytes(b"identical digest is not object identity")
+    with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())) as snap:
+        real_identity = module._require_file_identity
+        calls = []
+
+        def changed_identity(info):
+            calls.append(True)
+            identity = real_identity(info)
+            # First witness is the pathname, second is the opened handle.
+            # Forge only the post-read pathname witness, not initial admission.
+            if len(calls) == 3:
+                return (identity[0], identity[1] + 1)
+            return identity
+
+        with monkeypatch.context() as patch:
+            patch.setattr(module, "_require_file_identity", changed_identity)
+            with pytest.raises(WindowsUpdateSnapshotError, match="changed during recheck"):
+                snap.recheck()
+        assert len(calls) >= 3
+        snap.recheck()
+
+
+def test_zip_preflight_rejects_deterministic_postparse_ancestor_drift(tmp_path, monkeypatch):
+    """Exercise the post-parse witness even on Windows sharing-denial hosts."""
+    import zipfile
+    from autosport import windows_update_snapshot as module
+
+    package = tmp_path / "candidate.zip"
+    with zipfile.ZipFile(package, "w", compression=zipfile.ZIP_STORED) as archive:
+        archive.writestr("Autosport-V1/BUILD_INFO.json", "{}")
+    real_parent = module._source_parent_identity
+    real_zipfile = zipfile.ZipFile
+    probes, parses = [], []
+
+    def changed_parent(path):
+        identity = real_parent(path)
+        probes.append(True)
+        # First: preflight, second: after open, third: after ZIP parsing.
+        if len(probes) == 3:
+            last = identity[-1]
+            return identity[:-1] + ((last[0], last[1] + 1),)
+        return identity
+
+    def observed_zipfile(*args, **kwargs):
+        parses.append(True)
+        return real_zipfile(*args, **kwargs)
+
+    with monkeypatch.context() as patch:
+        patch.setattr(module, "_source_parent_identity", changed_parent)
+        patch.setattr(module.zipfile, "ZipFile", observed_zipfile)
+        with pytest.raises(WindowsUpdateSnapshotError, match="ancestor changed during parse"):
+            module._require_bounded_zip_members(package)
+    assert len(probes) >= 3
+    assert parses, "ZIP parser must execute before the forged ancestor witness"
+    module._require_bounded_zip_members(package)
+
+

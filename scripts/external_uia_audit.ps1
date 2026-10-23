@@ -38,6 +38,8 @@ $script:semanticWorkerTimedOut = $false
 # Only fixed audit-owned stage codes are retained. Never persist a UIA provider
 # exception message, arbitrary COM property, user path, or window title.
 $script:lastDesktopWorkerStage = 'NOT_RUN'
+# Audit-owned fixed failure classification only; never serialize provider text.
+$script:semanticFailureClass = 'NOT_OBSERVED'
 # Fixed OS-only class-bucket counts reveal whether a provider-backed render
 # HWND was even available. These are diagnostic counts, never UIA proof.
 $script:nativeSemanticCandidateBuckets = [ordered]@{
@@ -818,6 +820,7 @@ function Find-BoundedUiaSemanticViaChildren {
         # Keep the hung ThreadJob owned by the isolated audit process; do not
         # synchronously Stop-Job/Remove-Job or treat the timeout as PASS.
         $script:semanticWorkerTimedOut = $true
+        $script:semanticFailureClass = 'NATIVE_WORKER_TIMEOUT'
         throw "External UIA semantic worker timed out without a real AutomationId witness; last_worker_stage=$lastWorkerStage; native_class_bucket=$nativeCandidateBucket"
     }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'
@@ -921,7 +924,12 @@ function Find-UiaRootWithElementForProcessFamily {
     # semantic root. The previous direct caller-runspace PropertyCondition
     # blocked >120s. Search the REAL scoped UIA provider in a bounded MTA job.
     $remainingSeconds = [int][Math]::Ceiling(($Deadline - [DateTime]::UtcNow).TotalSeconds)
-    if ($remainingSeconds -le 0) { return $null }
+    if ($remainingSeconds -le 0) {
+        # A native candidate consumed the remaining launch deadline. This is
+        # missing UIA proof, not an unknown COM exception or an audit PASS.
+        $script:semanticFailureClass = 'DESKTOP_BUDGET_EXHAUSTED'
+        return $null
+    }
     $budgetSeconds = [int][Math]::Min(4, $remainingSeconds)
     $workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
     $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
@@ -1101,6 +1109,7 @@ function Find-UiaRootWithElementForProcessFamily {
             'UNKNOWN_FIXED_STAGE'
         }
         $script:semanticWorkerTimedOut = $true
+        $script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'
         # Do not synchronously Stop-Job or reenter a stalled COM provider.
         # The enclosing audit process owns cleanup; timeout is always FAIL.
         throw "External desktop UIA worker timed out without a real semantic witness; last_desktop_stage=$lastWorkerStage"
@@ -1334,6 +1343,9 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($null -eq $semanticReady -or $null -eq $uiaRoot) {
+        if ($script:semanticFailureClass -eq 'NOT_OBSERVED') {
+            $script:semanticFailureClass = 'SEMANTIC_NOT_OBSERVED'
+        }
         throw "Timed out waiting for WebView2 semantic UIA readiness (automation_id=330) across packaged process family"
     }
 
@@ -1838,6 +1850,12 @@ try {
 } catch {
     if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {
         $report.failures += 'external UIA audit failed: desktop semantic worker timeout'
+    } elseif ($script:semanticFailureClass -eq 'NATIVE_WORKER_TIMEOUT') {
+        $report.failures += 'external UIA audit failed: native semantic worker timeout'
+    } elseif ($script:semanticFailureClass -eq 'DESKTOP_BUDGET_EXHAUSTED') {
+        $report.failures += 'external UIA audit failed: desktop semantic budget exhausted'
+    } elseif ($script:semanticFailureClass -eq 'SEMANTIC_NOT_OBSERVED') {
+        $report.failures += 'external UIA audit failed: semantic readiness not observed'
     } else {
         $report.failures += 'external UIA audit failed: unexpected automation error'
     }

@@ -128,3 +128,48 @@ def test_cleanup_preserves_existing_fixed_window_classification() -> None:
     assert "$report.observed_window_class =" not in cleanup
     assert "$report.semantic_desktop_worker_last_stage" in cleanup
     assert "$report.native_semantic_candidate_buckets" in cleanup
+
+
+
+def test_semantic_budget_exhaustion_is_classified_without_fabricated_uia_pass() -> None:
+    """The real Windows deadline can expire before desktop fallback starts."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "$script:semanticFailureClass = 'NOT_OBSERVED'" in source
+    assert "$script:semanticFailureClass = 'NATIVE_WORKER_TIMEOUT'" in native
+    assert "$script:semanticFailureClass = 'DESKTOP_BUDGET_EXHAUSTED'" in desktop
+    assert "if ($remainingSeconds -le 0)" in desktop
+    assert "$script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'" in desktop
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert "$script:semanticFailureClass = 'SEMANTIC_NOT_OBSERVED'" in source
+    # Deadline exhaustion is not UIA evidence and cannot enter PASS state.
+    assert "$report.status = 'PASS'" not in desktop
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_semantic_failure_classes_are_fixed_and_redact_provider_exceptions() -> None:
+    """Failure receipts must distinguish native/desktop exhaustion safely."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    failure = source.split("} catch {\n    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {", 1)[1].split(
+        "} finally {", 1
+    )[0]
+    for category in (
+        "desktop semantic worker timeout",
+        "native semantic worker timeout",
+        "desktop semantic budget exhausted",
+        "semantic readiness not observed",
+        "unexpected automation error",
+    ):
+        assert f"external UIA audit failed: {category}" in failure
+    assert "$script:semanticFailureClass -eq 'NATIVE_WORKER_TIMEOUT'" in failure
+    assert "$script:semanticFailureClass -eq 'DESKTOP_BUDGET_EXHAUSTED'" in failure
+    assert "$script:semanticFailureClass -eq 'SEMANTIC_NOT_OBSERVED'" in failure
+    assert "$_.Exception" not in failure
+    assert "$report.status = 'PASS'" not in failure
+    assert "$report.failures +=" in failure

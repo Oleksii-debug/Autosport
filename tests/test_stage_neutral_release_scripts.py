@@ -98,13 +98,13 @@ def test_stage_neutral_release_is_independently_checked_and_published() -> None:
 def _staged_release_module_names(script: str) -> set[str]:
     """Read only the explicitly pinned Git-blob staging map."""
     match = re.search(
-        r"\\$trustedSources = \\[ordered\\]@\\{(?P<entries>.*?)\\n    \\}",
+        r"\$trustedSources = \[ordered\]@\{(?P<entries>.*?)\n    \}",
         script,
         flags=re.DOTALL,
     )
     assert match is not None, "exact-source module staging map missing"
     pairs = re.findall(
-        r"(?m)^\\s*'src/autosport/([a-z_]+\\.py)'\\s*=\\s*'([a-z_]+\\.py)'\\s*$",
+        r"(?m)^\s*'src/autosport/([a-z_]+\.py)'\s*=\s*'([a-z_]+\.py)'\s*$",
         match.group("entries"),
     )
     assert len(pairs) == len(set(pairs)), "duplicate staged source entry"

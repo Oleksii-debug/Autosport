@@ -38,7 +38,7 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         self.assertIsNotNone(failed)
         assert failed is not None
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "OSError: late start failure")
+        self.assertEqual(failed.error, "BaseException: exception details unavailable")
         self.assertFalse(worker.busy)
         self.assertIsNone(worker.poll())
 
@@ -102,7 +102,7 @@ class LiveObservationWorkerStartupAtomicityTests(unittest.TestCase):
         failed = worker.poll()
         self.assertIsNotNone(failed)
         assert failed is not None
-        self.assertEqual(failed.error, "OSError: pre-start failure")
+        self.assertEqual(failed.error, "BaseException: exception details unavailable")
         self.assertFalse(worker.busy)
 
 

@@ -3,6 +3,10 @@ name: Windows UIA environment control (diagnostic only)
 on:
   pull_request:
     paths:
+      # When the real packaged UIA probe changes, independently qualify the
+      # hosted WinForms provider before attributing its COM stalls to WebView2.
+      # This workflow is diagnostic only; it never substitutes for product UIA.
+      - 'scripts/external_uia_audit.ps1'
       - 'scripts/windows_uia_environment_control.ps1'
       - 'tests/test_windows_uia_environment_control_contract.py'
       - 'tests/test_as05_focused_uia_control_contract.py'

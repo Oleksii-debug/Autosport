@@ -171,6 +171,54 @@ public static class AutosportNativeWindows
                 ? "CHROME_WIDGET" : "OTHER";
         return kind + (IsWindowVisible(window) ? "_VISIBLE" : "_HIDDEN");
     }
+    // OS-only top-level HWND census: never enumerate UIA/COM, window titles,
+    // command lines or foreign-process descendants. Counts are fixed categories.
+    public static int[] TopLevelProcessOwnershipCounts(int launcherId, int[] familyIds)
+    {
+        if (launcherId <= 0 || familyIds == null ||
+            Array.IndexOf(familyIds, launcherId) < 0)
+            throw new ArgumentException("Invalid launched process family");
+        var counts = new int[4]; // launcher visible/hidden, child visible/hidden
+        var matched = 0;
+        EnumWindowsCallback callback = (window, state) =>
+        {
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) == 0 ||
+                owner > (uint)int.MaxValue ||
+                Array.IndexOf(familyIds, (int)owner) < 0)
+                return true;
+            if (++matched > 4096) return false;
+            var offset = owner == (uint)launcherId ? 0 : 2;
+            counts[offset + (IsWindowVisible(window) ? 0 : 1)]++;
+            return true;
+        };
+        if (!EnumWindows(callback, IntPtr.Zero))
+            throw new InvalidOperationException("Top-level HWND census failed or exceeded bound");
+        return counts;
+    }
+    // SetForegroundWindow accepts top-level windows; do not retry child HWNDs
+    // from ForProcessFamily, even if those child HWNDs share the launcher PID.
+    public static IntPtr[] VisibleTopLevelWindowsForProcess(int launcherId)
+    {
+        if (launcherId <= 0) return Array.Empty<IntPtr>();
+        var windows = new IntPtr[256];
+        var count = 0;
+        EnumWindowsCallback callback = (window, state) =>
+        {
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) == 0 ||
+                owner != (uint)launcherId || !IsWindowVisible(window))
+                return true;
+            if (count >= windows.Length) return false;
+            windows[count++] = window;
+            return true;
+        };
+        if (!EnumWindows(callback, IntPtr.Zero))
+            throw new InvalidOperationException("Top-level launcher HWND limit exceeded");
+        var result = new IntPtr[count];
+        Array.Copy(windows, result, count);
+        return result;
+    }
     public static IntPtr[] ForProcessFamily(int[] allowedIds)
     {
         if (allowedIds == null || allowedIds.Length == 0) return Array.Empty<IntPtr>();
@@ -1300,6 +1348,8 @@ $report = [ordered]@{
     launcher_exit_code = $null
     initial_window_observed = $false
     native_foreground_activation_status = 'NOT_RUN'
+    native_foreground_top_level_counts = $null
+    native_foreground_top_level_class = 'NOT_OBSERVED'
     observed_window_class = 'NOT_OBSERVED'
     last_observed_process_family_count = 0
     native_semantic_candidate_buckets = $null
@@ -1426,6 +1476,31 @@ try {
     # A denied foreground claim remains diagnostic; no HWND or focus state
     # substitutes for the mandatory automation_id=330 semantic witness.
     $report.native_foreground_activation_status = 'NOT_CLAIMED'
+    # A native HWND may belong to the launcher or a WebView2 child process.
+    # Count only OS-enumerated top-level HWNDs, in four fixed categories.
+    # This cannot establish UIA/keyboard/STOP/LiveRegion acceptance.
+    try {
+        $foregroundFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+        $topLevelCounts = [AutosportNativeWindows]::TopLevelProcessOwnershipCounts(
+            [int]$process.Id, [int[]]$foregroundFamilyIds
+        )
+        $report.native_foreground_top_level_counts = [ordered]@{
+            LAUNCHER_VISIBLE = [int]$topLevelCounts[0]
+            LAUNCHER_HIDDEN = [int]$topLevelCounts[1]
+            FAMILY_CHILD_VISIBLE = [int]$topLevelCounts[2]
+            FAMILY_CHILD_HIDDEN = [int]$topLevelCounts[3]
+        }
+        if ($topLevelCounts[0] -gt 0) {
+            $report.native_foreground_top_level_class = 'LAUNCHER_VISIBLE'
+        } elseif ($topLevelCounts[2] -gt 0) {
+            $report.native_foreground_top_level_class = 'FAMILY_CHILD_VISIBLE_ONLY'
+        } else {
+            $report.native_foreground_top_level_class = 'NO_VISIBLE_FAMILY_TOP_LEVEL'
+        }
+    } catch {
+        # A failed OS census is UNKNOWN, not UIA success or provider evidence.
+        $report.native_foreground_top_level_class = 'UNAVAILABLE'
+    }
     try {
         $process.Refresh()
         if ([AutosportNativeWindows]::TryClaimForegroundForProcess(
@@ -1434,13 +1509,11 @@ try {
             $report.native_foreground_activation_status = 'CLAIMED'
         }
         if ($report.native_foreground_activation_status -ne 'CLAIMED') {
-            # MainWindowHandle can be zero/stale even when EnumWindows observes
-            # the launched WinForms host. Retry using only OS-enumerated top-level
-            # HWNDs owned by the exact launcher PID, NEVER the child process family.
-            # TryClaimForegroundForProcess rechecks visibility and PID for each
-            # candidate. This does not establish any semantic UIA witness.
-            $exactLauncherWindows = [AutosportNativeWindows]::ForProcessFamily(
-                [int[]]@([int]$process.Id)
+            # MainWindowHandle can be zero/stale. Only actual visible TOP-LEVEL
+            # HWNDs of the exact launcher may be foreground candidates; never
+            # retry renderer/child HWNDs or use native focus as semantic evidence.
+            $exactLauncherWindows = [AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(
+                [int]$process.Id
             )
             foreach ($candidateHandle in $exactLauncherWindows) {
                 if ([AutosportNativeWindows]::TryClaimForegroundForProcess(

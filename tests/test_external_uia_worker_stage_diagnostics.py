@@ -304,8 +304,9 @@ def test_foreground_retry_uses_only_exact_launcher_pid() -> None:
     )[1].split("$semanticReady = $null", 1)[0]
     assert activation.count("TryClaimForegroundForProcess(") == 2
     assert "if ($report.native_foreground_activation_status -ne 'CLAIMED')" in activation
-    assert "[AutosportNativeWindows]::ForProcessFamily(" in activation
-    assert "[int[]]@([int]$process.Id)" in activation
+    assert "[AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(" in activation
+    assert "[int]$process.Id" in activation
+    assert "[AutosportNativeWindows]::ForProcessFamily(" not in activation
     assert "foreach ($candidateHandle in $exactLauncherWindows)" in activation
     assert "$candidateHandle, [int]$process.Id" in activation
     assert "$lastFamilyIds" not in activation
@@ -322,3 +323,59 @@ def test_foreground_retry_remains_os_only_and_uia_gate_is_required() -> None:
     assert "Find-UiaRootWithElementForProcessFamily" in source
     assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
     assert 'throw "Timed out waiting for WebView2 semantic UIA readiness' in source
+
+
+def test_foreground_os_census_distinguishes_launcher_and_child_top_level_windows() -> None:
+    """Never confuse a renderer-owned top-level window with launcher foreground."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    census = native.split("public static int[] TopLevelProcessOwnershipCounts(", 1)[1].split(
+        "public static IntPtr[] VisibleTopLevelWindowsForProcess(", 1
+    )[0]
+    assert "EnumWindows(callback, IntPtr.Zero)" in census
+    assert "Array.IndexOf(familyIds, launcherId) < 0" in census
+    assert "Array.IndexOf(familyIds, (int)owner) < 0" in census
+    assert "owner == (uint)launcherId ? 0 : 2" in census
+    assert "IsWindowVisible(window) ? 0 : 1" in census
+    assert "if (++matched > 4096) return false" in census
+    assert "AutomationElement" not in census
+    assert "GetWindowText" not in census
+    for token in (
+        "LAUNCHER_VISIBLE", "LAUNCHER_HIDDEN",
+        "FAMILY_CHILD_VISIBLE", "FAMILY_CHILD_HIDDEN",
+        "FAMILY_CHILD_VISIBLE_ONLY", "NO_VISIBLE_FAMILY_TOP_LEVEL",
+        "UNAVAILABLE",
+    ):
+        assert token in source
+    assert "native_foreground_top_level_counts = $null" in source
+    assert "native_foreground_top_level_class = 'NOT_OBSERVED'" in source
+    assert "$report.status = 'PASS'" not in source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+
+
+def test_foreground_retry_uses_top_level_hwnds_only_and_preserves_real_uia_gate() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    helper = native.split("public static IntPtr[] VisibleTopLevelWindowsForProcess(", 1)[1].split(
+        "public static IntPtr[] ForProcessFamily(", 1
+    )[0]
+    assert "EnumWindows(callback, IntPtr.Zero)" in helper
+    assert "owner != (uint)launcherId || !IsWindowVisible(window)" in helper
+    assert "if (count >= windows.Length) return false" in helper
+    assert "GetWindow(" not in helper
+    assert "AutomationElement" not in helper
+    activation = source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+    assert "VisibleTopLevelWindowsForProcess(" in activation
+    assert "TryClaimForegroundForProcess(" in activation
+    assert "FAMILY_CHILD_VISIBLE_ONLY" in activation
+    assert "Find-UiaRootWithElementForProcessFamily" in source
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source

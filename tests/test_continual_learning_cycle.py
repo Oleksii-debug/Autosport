@@ -275,6 +275,31 @@ def test_training_holdout_contamination_fails_before_update() -> None:
         )
 
 
+def test_training_holdout_source_evidence_contamination_fails_before_update() -> None:
+    champion, new, replay, retention, holdout, recipe = _inputs()
+    contaminated = (
+        replace(
+            new[0],
+            source_evidence_sha256=holdout.cases[0].source_evidence_sha256,
+        ),
+    )
+
+    with pytest.raises(
+        ContinualLearningCycleError,
+        match="training source evidence contaminates",
+    ):
+        run_continual_learning_cycle(
+            champion,
+            new_experiences=contaminated,
+            replay_experiences=replay,
+            retention_suite=retention,
+            holdout_suite=holdout,
+            recipe=recipe,
+            completed_at=COMPLETED_AT,
+            counterfactual_authority=_authority(),
+        )
+
+
 def test_cycle_receipt_cannot_self_authorize_promotion() -> None:
     champion, new, replay, retention, holdout, recipe = _inputs()
     result = run_continual_learning_cycle(

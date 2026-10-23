@@ -380,6 +380,11 @@ def run_continual_learning_cycle(
         raise ContinualLearningCycleError(
             "training population contaminates retention or untouched holdout"
         )
+    train_evidence = {item.source_evidence_sha256 for item in (*new, *replay)}
+    if train_evidence.intersection(retention_evidence | holdout_evidence):
+        raise ContinualLearningCycleError(
+            "training source evidence contaminates retention or untouched holdout"
+        )
     train_experience_ids = [item.experience_id for item in (*new, *replay)]
     if len(train_experience_ids) != len(set(train_experience_ids)):
         raise ContinualLearningCycleError("new and replay experiences overlap")

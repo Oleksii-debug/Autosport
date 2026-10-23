@@ -1865,24 +1865,15 @@ try {
             $report.launcher_exit_state = 'UNAVAILABLE'
         }
     }
-    # Classify only fixed, product-owned window titles. Never export an
-    # arbitrary UIA Name, which could contain user data or a filesystem path.
-    # This is a pre-cleanup diagnostic, NOT proof of WebView readiness or PASS.
-    if ($null -ne $uiaRoot -and -not $script:semanticWorkerTimedOut) {
-        $report.observed_window_class = 'OTHER_OR_UNAVAILABLE'
-        try {
-            $observedWindowName = [string]$uiaRoot.Current.Name
-            if ([string]::Equals($observedWindowName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
-                $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
-            } elseif ([string]::Equals($observedWindowName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
-                $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
-            } elseif ([string]::Equals($observedWindowName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
-                $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
-            }
-        } catch {
-            $report.observed_window_class = 'OTHER_OR_UNAVAILABLE'
-        }
-    }
+    # Never reenter the UIA COM provider during failure cleanup. A Windows
+    # candidate watchdog has observed a provider stall with no serialized audit
+    # JSON (run 39951554204, stage SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED).
+    # Even if the bounded desktop worker has not marked a timeout, a separate
+    # native/desktop provider read can still be poisoned. Re-reading
+    # $uiaRoot.Current.Name here could hang beyond the independent watchdog.
+    # Preserve only the fixed class recorded during the initial native-root
+    # probe above. Unknown stays NOT_OBSERVED/OTHER_OR_UNAVAILABLE, never PASS.
+    # No COM/UIA access is permitted in this cleanup path.
     if ($null -ne $liveRegionProbe) {
         try {
             $liveRegionProbe.Dispose()

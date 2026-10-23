@@ -123,6 +123,60 @@ class RecoverInterruptedUninstallTests(unittest.TestCase):
             self.assertEqual((dest / "Autosport.exe").read_bytes(), b"product")
             self.assertEqual((moved / "Autosport.exe").read_bytes(), b"product")
 
+    def test_recovery_rejects_same_bytes_quarantine_swap_after_inspection(self):
+        # A verified directory replaced by an identical copy is not the
+        # directory that was actually inspected. Preserve the original and
+        # refuse to publish the replacement as a trusted recovery.
+        with tempfile.TemporaryDirectory() as temp:
+            archive, digest, dest, quarantine, trust = self._quarantined(Path(temp))
+            real_inspect = recovery.inspect_installed_release
+            replaced = []
+            saved = quarantine.parent / "original-quarantine"
+
+            def swap_after_inspection(path, **kwargs):
+                result = real_inspect(path, **kwargs)
+                if Path(path) == quarantine and not replaced:
+                    quarantine.rename(saved)
+                    shutil.copytree(saved, quarantine)
+                    replaced.append(True)
+                return result
+
+            with patch.object(recovery, "inspect_installed_release",
+                              side_effect=swap_after_inspection):
+                with self.assertRaisesRegex(
+                    installer.OfflineInstallError, "identity changed"
+                ):
+                    self._recover(archive, digest, dest, quarantine, trust)
+            self.assertEqual(replaced, [True])
+            self.assertFalse(dest.exists())
+            self.assertEqual((saved / "Autosport.exe").read_bytes(), b"product")
+
+    def test_recovery_rejects_same_bytes_directory_swap_during_publication(self):
+        # Even if the no-replace publisher returns successfully, a concurrent
+        # same-byte directory replacement must not be reported as recovered.
+        with tempfile.TemporaryDirectory() as temp:
+            archive, digest, dest, quarantine, trust = self._quarantined(Path(temp))
+            actual_publish = recovery._publish_directory_no_replace
+            saved = quarantine.parent / "published-original"
+            replaced = []
+
+            def replace_during_publication(source, target):
+                actual_publish(source, target)
+                if Path(source) == quarantine and Path(target) == dest:
+                    dest.rename(saved)
+                    shutil.copytree(saved, dest)
+                    replaced.append(True)
+
+            with patch.object(recovery, "_publish_directory_no_replace",
+                              side_effect=replace_during_publication):
+                with self.assertRaisesRegex(
+                    installer.OfflineInstallError, "identity changed"
+                ):
+                    self._recover(archive, digest, dest, quarantine, trust)
+            self.assertEqual(replaced, [True])
+            self.assertTrue(dest.is_dir())
+            self.assertEqual((saved / "Autosport.exe").read_bytes(), b"product")
+
     def test_receipt_missing_can_be_recreated_only_from_independent_archive(self):
         with tempfile.TemporaryDirectory() as temp:
             archive, digest, dest, quarant, trusted = self._quarantined(Path(temp))

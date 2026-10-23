@@ -1433,6 +1433,24 @@ try {
         )) {
             $report.native_foreground_activation_status = 'CLAIMED'
         }
+        if ($report.native_foreground_activation_status -ne 'CLAIMED') {
+            # MainWindowHandle can be zero/stale even when EnumWindows observes
+            # the launched WinForms host. Retry using only OS-enumerated top-level
+            # HWNDs owned by the exact launcher PID, NEVER the child process family.
+            # TryClaimForegroundForProcess rechecks visibility and PID for each
+            # candidate. This does not establish any semantic UIA witness.
+            $exactLauncherWindows = [AutosportNativeWindows]::ForProcessFamily(
+                [int[]]@([int]$process.Id)
+            )
+            foreach ($candidateHandle in $exactLauncherWindows) {
+                if ([AutosportNativeWindows]::TryClaimForegroundForProcess(
+                    $candidateHandle, [int]$process.Id
+                )) {
+                    $report.native_foreground_activation_status = 'CLAIMED'
+                    break
+                }
+            }
+        }
     } catch {
         # Foreground restrictions are not semantic evidence; retain fail-closed UIA.
     }

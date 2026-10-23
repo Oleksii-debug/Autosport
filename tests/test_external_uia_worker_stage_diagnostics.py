@@ -294,3 +294,31 @@ def test_foreground_attempt_precedes_semantic_probe_without_fabricating_pass() -
     assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
     assert "if ($report.status -ne 'PASS')" in source
     assert "exit 1" in source
+
+
+def test_foreground_retry_uses_only_exact_launcher_pid() -> None:
+    """Retry a missing MainWindowHandle without accepting child-process HWNDs."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    activation = source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+    assert activation.count("TryClaimForegroundForProcess(") == 2
+    assert "if ($report.native_foreground_activation_status -ne 'CLAIMED')" in activation
+    assert "[AutosportNativeWindows]::ForProcessFamily(" in activation
+    assert "[int[]]@([int]$process.Id)" in activation
+    assert "foreach ($candidateHandle in $exactLauncherWindows)" in activation
+    assert "$candidateHandle, [int]$process.Id" in activation
+    assert "$lastFamilyIds" not in activation
+    assert "status = 'PASS'" not in activation
+
+
+def test_foreground_retry_remains_os_only_and_uia_gate_is_required() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    activation = source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+    assert "AutomationElement" not in activation
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'" in source
+    assert "Find-UiaRootWithElementForProcessFamily" in source
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert 'throw "Timed out waiting for WebView2 semantic UIA readiness' in source

@@ -469,6 +469,71 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual(updated["status"], "UPDATED_PAPER_ONLY")
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
 
+    def test_recovery_rejects_executable_corruption_during_lease_retirement(self):
+        # A valid restored product can be corrupted during the last rmdir.
+        # Recovery must not report success after the last filesystem mutation.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, _new, _nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            dest.rename(txn / "previous")
+            original_rmdir = Path.rmdir
+
+            def corrupt_on_retirement(path):
+                result = original_rmdir(path)
+                if Path(path) == txn:
+                    (dest / "Autosport.exe").write_bytes(b"corrupted-after-recovery")
+                return result
+
+            with self._trusted(), patch.object(Path, "rmdir", new=corrupt_on_retirement):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.recover_update_gap(
+                        dest, old_archive=old, old_source_sha=self.OLD,
+                        old_package_sha256=od,
+                    )
+            self.assertFalse(txn.exists())
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"corrupted-after-recovery")
+
+    def test_recovery_rejects_directory_identity_drift_during_lease_retirement(self):
+        # Exercise the post-rmdir directory identity check deterministically,
+        # without depending on whether Windows permits an open directory swap.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, _new, _nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            dest.rename(txn / "previous")
+            original_rmdir = Path.rmdir
+            original_witness = upgrade._directory_witness
+            retired = False
+
+            def retire_and_mark(path):
+                nonlocal retired
+                result = original_rmdir(path)
+                if Path(path) == txn:
+                    retired = True
+                return result
+
+            def drifted_witness(path):
+                witness = original_witness(path)
+                if Path(path) == dest and retired:
+                    return witness[0], witness[1] + 1
+                return witness
+
+            with self._trusted(), patch.object(
+                Path, "rmdir", new=retire_and_mark,
+            ), patch.object(
+                upgrade, "_directory_witness", side_effect=drifted_witness,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "restored release identity changed",
+                ):
+                    upgrade.recover_update_gap(
+                        dest, old_archive=old, old_source_sha=self.OLD,
+                        old_package_sha256=od,
+                    )
+            self.assertFalse(txn.exists())
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+
     def test_crash_recovery_keeps_unverified_candidate_for_disposition(self):
         # Recovery must never remove leftover staged release/private debris
         # merely to obtain an empty transaction namespace.

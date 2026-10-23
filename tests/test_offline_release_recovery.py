@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import hashlib
+import shutil
 import tempfile
 import unittest
 import zipfile
@@ -77,6 +78,50 @@ class RecoverInterruptedUninstallTests(unittest.TestCase):
             self.assertEqual(
                 (dest / "Autosport.exe").read_bytes(), b"changed-after-publication")
             self.assertFalse(quarantine.exists())
+
+    def test_recovery_rechecks_executable_after_quarantine_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            archive, digest, dest, quarantine, trusted = self._quarantined(Path(temp))
+            original_rmdir = Path.rmdir
+            reached = []
+
+            def corrupt_on_retirement(path):
+                result = original_rmdir(path)
+                if path == quarantine.parent:
+                    reached.append(True)
+                    (dest / "Autosport.exe").write_bytes(b"tampered-during-cleanup")
+                return result
+
+            with patch.object(Path, "rmdir", new=corrupt_on_retirement):
+                with self.assertRaises(installer.OfflineInstallError):
+                    self._recover(archive, digest, dest, quarantine, trusted)
+            self.assertEqual(reached, [True])
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"tampered-during-cleanup")
+
+    def test_recovery_rejects_same_bytes_new_directory_after_cleanup(self):
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            archive, digest, dest, quarantine, trusted = self._quarantined(root)
+            original_rmdir = Path.rmdir
+            moved = root / "original-installed"
+            reached = []
+
+            def swap_on_retirement(path):
+                result = original_rmdir(path)
+                if path == quarantine.parent:
+                    reached.append(True)
+                    dest.rename(moved)
+                    shutil.copytree(moved, dest)
+                return result
+
+            with patch.object(Path, "rmdir", new=swap_on_retirement):
+                with self.assertRaisesRegex(
+                    installer.OfflineInstallError, "identity changed during cleanup"
+                ):
+                    self._recover(archive, digest, dest, quarantine, trusted)
+            self.assertEqual(reached, [True])
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"product")
+            self.assertEqual((moved / "Autosport.exe").read_bytes(), b"product")
 
     def test_receipt_missing_can_be_recreated_only_from_independent_archive(self):
         with tempfile.TemporaryDirectory() as temp:

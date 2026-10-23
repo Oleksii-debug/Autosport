@@ -1105,5 +1105,26 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertFalse((dest / "Autosport.exe").exists())
 
 
+    def test_finalize_retirement_rmdir_failure_never_reports_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                original_rmdir = Path.rmdir
+
+                def fail_retirement(path):
+                    if Path(path) == txn:
+                        raise OSError("injected transaction retirement failure")
+                    return original_rmdir(path)
+
+                with patch.object(Path, "rmdir", new=fail_retirement):
+                    with self.assertRaisesRegex(OSError, "injected transaction retirement failure"):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertTrue(txn.is_dir())
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+
+
 if __name__ == "__main__":
     unittest.main()

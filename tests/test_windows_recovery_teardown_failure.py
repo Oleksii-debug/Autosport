@@ -157,6 +157,91 @@ class WindowsRecoveryTeardownFailureTests(unittest.TestCase):
             self.assertEqual(app._ticket_sessions, [None])
             error.assert_not_called()
 
+    def test_window_close_is_blocked_while_recovery_worker_owns_workspace(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            active_workspace = root / "active-workspace"
+            app = self._app(root, active_workspace)
+            session_close_calls: list[str] = []
+            destroy_calls: list[str] = []
+            bell_calls: list[str] = []
+
+            class _Session:
+                workspace = active_workspace
+
+                def close(self) -> None:
+                    session_close_calls.append("close")
+
+            app.session = _Session()
+            app.recovery_worker.busy = True
+            app.evidence_export_worker = SimpleNamespace(busy=False)
+            app.live_status = _Value()
+            app.destroy = lambda: destroy_calls.append("destroy")
+            app.bell = lambda: bell_calls.append("bell")
+
+            WindowsAutosportApp.close_app(app)
+
+            self.assertFalse(app._closing)
+            self.assertIsNotNone(app.session)
+            self.assertEqual(session_close_calls, [])
+            self.assertEqual(destroy_calls, [])
+            self.assertEqual(bell_calls, ["bell"])
+            self.assertIn("Відновлення робочої області ще виконується", app.status.value)
+            self.assertTrue(
+                any("Відновлення робочої області ще виконується" in line for line in app._logs),
+                app._logs,
+            )
+
+    def test_window_close_failure_routes_to_windows_recovery_quarantine(self) -> None:
+        with TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            stale_active_workspace = root / "stale-active-workspace"
+            exact_session_workspace = root / "attached-workspace"
+            app = self._app(root, stale_active_workspace)
+            ticket_lines: list[str] = []
+            destroy_calls: list[str] = []
+            bell_calls: list[str] = []
+
+            class _FailingCloseSession:
+                workspace = exact_session_workspace
+
+                def close(self) -> None:
+                    self_detached = app.session is None
+                    if not self_detached:
+                        raise AssertionError("economic session must detach before close teardown")
+                    raise RuntimeError("window close teardown exploded")
+
+            app.session = _FailingCloseSession()
+            app.evidence_export_worker = SimpleNamespace(busy=False)
+            app.live_status = _Value()
+            app.tickets = SimpleNamespace(
+                delete=lambda _start, _end: ticket_lines.clear(),
+                insert=lambda _index, value: ticket_lines.append(value),
+            )
+            app.destroy = lambda: destroy_calls.append("destroy")
+            app.bell = lambda: bell_calls.append("bell")
+
+            with patch("autosport.gui.messagebox.showerror") as error:
+                WindowsAutosportApp.close_app(app)
+
+            self.assertIsNone(app.session)
+            self.assertFalse(app._closing)
+            self.assertEqual(destroy_calls, [])
+            self.assertEqual(bell_calls, ["bell"])
+            self.assertEqual(app._recovery_blocked_workspace, exact_session_workspace)
+            self.assertEqual(app._recovery_blocked_workspaces, {exact_session_workspace})
+            self.assertTrue(app._workspace_requires_recovery(exact_session_workspace))
+            self.assertNotIn(stale_active_workspace, app._recovery_blocked_workspaces)
+            self.assertEqual(len(ticket_lines), 1)
+            self.assertIn("Економічний стан приховано", ticket_lines[0])
+            self.assertIn("Закриття програми заблоковано", app.status.value)
+            self.assertTrue(
+                any("RuntimeError: window close teardown exploded" in line for line in app._logs),
+                app._logs,
+            )
+            error.assert_called_once()
+
+
     def test_hostile_teardown_exception_metadata_cannot_escape_fail_closed_handler(self) -> None:
         with TemporaryDirectory() as temporary:
             root = Path(temporary)

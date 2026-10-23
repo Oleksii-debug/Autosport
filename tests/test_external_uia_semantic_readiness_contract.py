@@ -63,16 +63,22 @@ def test_external_uia_avoids_early_unready_webview2_provider_probe() -> None:
     assert "Timed out waiting for WebView2 semantic UIA readiness" in script
 
 
-def test_external_uia_semantic_readiness_reuses_bounded_startup_deadline() -> None:
+def test_external_uia_semantic_readiness_has_a_fresh_bounded_provider_budget() -> None:
     script = _audit_script_text()
 
+    witness_guard_index = script.index(
+        'throw "Packaged WebView2 runtime witness unavailable before semantic UIA probe"'
+    )
+    semantic_deadline = "$semanticDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)"
     semantic_state_index = script.index("$semanticReady = $null")
     semantic_timeout_index = script.index(
         'throw "Timed out waiting for WebView2 semantic UIA readiness '
     )
     semantic_block = script[semantic_state_index:semantic_timeout_index]
 
-    assert "while ([DateTime]::UtcNow -lt $deadline)" in semantic_block
+    assert script.count(semantic_deadline) == 1
+    assert witness_guard_index < script.index(semantic_deadline) < semantic_state_index
+    assert "while ([DateTime]::UtcNow -lt $semanticDeadline)" in semantic_block
     direct_probe = "if ([string]$uiaRoot.Current.AutomationId -eq '330') {"
     family_probe = "Get-ProcessFamilyIds -RootProcessId $process.Id"
     assert direct_probe in semantic_block
@@ -83,6 +89,7 @@ def test_external_uia_semantic_readiness_reuses_bounded_startup_deadline() -> No
     assert "if ($now -ge $nextFamilyRefresh)" in semantic_block
     assert "$nextFamilyRefresh = $now.AddMilliseconds(1000)" in semantic_block
     assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in semantic_block
+    assert "-Deadline $semanticDeadline" in semantic_block
     assert "$uiaRoot = $semanticSurface.Root" in semantic_block
     assert "$semanticReady = $semanticSurface.Element" in semantic_block
     assert "Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds" not in semantic_block

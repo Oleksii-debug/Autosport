@@ -1469,6 +1469,15 @@ try {
             throw "Packaged WebView2 runtime witness unavailable before semantic UIA probe"
         }
     }
+    # Startup and semantic provider readiness are two independent bounded
+    # phases. Windows Candidate 40032504012 published the genuine runtime
+    # witness near the end of the launch budget, leaving zero time for the
+    # mandatory desktop UIA probe and producing DESKTOP_BUDGET_EXHAUSTED.
+    # Start a fresh finite semantic budget only after the product-owned witness
+    # exists. The workflow's independent 120-second process watchdog remains
+    # authoritative, and every AutomationId/keyboard/STOP/LiveRegion gate below
+    # is still required; this does not turn a native HWND or witness into PASS.
+    $semanticDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
     # WinForms UIA calibration #40017780628 succeeded only after native host
     # activation. The packaged WebView2 client may otherwise be backgrounded
     # before its first accessibility request. Claim only the exact launched
@@ -1529,7 +1538,7 @@ try {
     }
     $semanticReady = $null
     $nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)
-    while ([DateTime]::UtcNow -lt $deadline) {
+    while ([DateTime]::UtcNow -lt $semanticDeadline) {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'
         try {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_ROOT_ID_PROBE'
@@ -1550,7 +1559,7 @@ try {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'
             $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
             Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_IDS_READY'
-            $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330' -RootProcessId $process.Id -Deadline $deadline
+            $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330' -RootProcessId $process.Id -Deadline $semanticDeadline
             if ($null -ne $semanticSurface) {
                 $uiaRoot = $semanticSurface.Root
                 $semanticReady = $semanticSurface.Element

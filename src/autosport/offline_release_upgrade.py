@@ -280,6 +280,18 @@ def recover_update_gap(
     except OSError:
         if not any(txn.iterdir()):
             raise OfflineInstallError("empty recovered transaction could not be retired")
+    # Retiring the recovery lease is a filesystem mutation. An in-place
+    # rewrite of the restored executable leaves its directory inode stable.
+    # Reinspect the published bytes after retirement before acknowledging
+    # success, including when retained candidate files prevent lease removal.
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("restored release identity changed during transaction retirement")
+    inspect_installed_release(
+        root, archive=old_archive, expected_source_sha=old_source_sha,
+        expected_package_sha256=old_package_sha256,
+    )
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("restored release identity changed after transaction retirement")
     return {"status": "OLD_RELEASE_RECOVERED", "source_sha": old_source_sha,
             "real_money_execution": False}
 

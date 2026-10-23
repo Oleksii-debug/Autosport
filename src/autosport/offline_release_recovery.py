@@ -184,11 +184,32 @@ def recover_interrupted_uninstall(
         expected_source_sha=expected_source_sha,
         expected_package_sha256=expected_package_sha256,
     )
+    published_identity = destination.lstat()
     try:
         quarantine.parent.rmdir()
     except OSError:
         # Never recursively clean another actor's unrelated data.
         pass
+    # Retiring the quarantine is a final filesystem mutation. An in-place
+    # executable rewrite leaves its directory inode unchanged, while a copied
+    # replacement can preserve all bytes but change the directory identity.
+    final_identity = destination.lstat()
+    if (
+        not stat.S_ISDIR(final_identity.st_mode)
+        or _is_redirected_install_path(destination)
+        or (final_identity.st_dev, final_identity.st_ino)
+        != (published_identity.st_dev, published_identity.st_ino)
+    ):
+        raise OfflineInstallError("recovered release identity changed during cleanup")
+    proof = inspect_installed_release(
+        destination, archive=archive,
+        expected_source_sha=expected_source_sha,
+        expected_package_sha256=expected_package_sha256,
+    )
+    if (destination.lstat().st_dev, destination.lstat().st_ino) != (
+        published_identity.st_dev, published_identity.st_ino
+    ):
+        raise OfflineInstallError("recovered release identity changed after cleanup")
     return {**proof, "status": "UNINSTALL_RECOVERED", "restored_files": len(missing)}
 
 

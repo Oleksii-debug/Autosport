@@ -76,7 +76,11 @@ def validate_binary_module_attribution(
         # fail-closed validation error at the independent ZIP verifier.
         if (
             type(candidates) is not list or len(candidates) > 16
-            or any(type(name) is not str for name in candidates)
+            # Reject oversized report candidates before hashing or sorting.
+            # Capture bounds host names, but the independent ZIP verifier must
+            # enforce the same limit on untrusted serialized report content.
+            or any(type(name) is not str or not 1 <= len(name) <= 512
+                   for name in candidates)
             or candidates != sorted(set(candidates))
             or any(name not in names for name in candidates)
         ):

@@ -130,6 +130,32 @@ class Plan6QualifierTests(unittest.TestCase):
             self.assertIn("tests/test_plan6_5b_license_record_capture.py",
                           execute.call_args_list[2].args[2])
 
+    def test_tracked_symlinked_5b_source_is_rejected_before_execution(self):
+        """Git may report a clean HEAD even when a tracked test link escapes it."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._fake_root(root)
+            linked = root / "tests/test_plan6_5b_external.py"
+            linked.write_text("def test_external(): assert False\\n")
+            with patch.object(Path, "is_symlink", lambda path: path == linked):
+                with patch.object(qualifier, "_identity", return_value=self.SHA):
+                    with patch.object(qualifier, "_test_group") as execute:
+                        with self.assertRaisesRegex(ValueError, "symlink"):
+                            qualifier.run(root)
+                        execute.assert_not_called()
+
+    def test_symlinked_test_directory_is_rejected_before_execution(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._fake_root(root)
+            tests_dir = root / "tests"
+            with patch.object(Path, "is_symlink", lambda path: path == tests_dir):
+                with patch.object(qualifier, "_identity", return_value=self.SHA):
+                    with patch.object(qualifier, "_test_group") as execute:
+                        with self.assertRaisesRegex(ValueError, "symlink"):
+                            qualifier.run(root)
+                        execute.assert_not_called()
+
     def test_unrelated_test_is_not_added_to_release_group(self):
         with tempfile.TemporaryDirectory() as d:
             root = Path(d)

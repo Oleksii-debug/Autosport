@@ -148,9 +148,17 @@ $trustedPackageRoot = Join-Path $trustedSourceRoot 'autosport'
 New-Item -ItemType Directory -Path $trustedPackageRoot -Force | Out-Null
 
 try {
+    # Keep the isolated importer closed over every package-relative module used
+    # by the exact-source release verifier. Never fall back to live checkout or
+    # installed autosport modules when this list changes.
     $trustedSources = [ordered]@{
         'src/autosport/stage_neutral_release.py' = 'stage_neutral_release.py'
         'src/autosport/release_package.py' = 'release_package.py'
+        'src/autosport/release_sbom.py' = 'release_sbom.py'
+        'src/autosport/release_dependency_graph.py' = 'release_dependency_graph.py'
+        'src/autosport/release_binary_attribution.py' = 'release_binary_attribution.py'
+        'src/autosport/windows_update_release_metadata.py' = 'windows_update_release_metadata.py'
+        'src/autosport/windows_update_admission.py' = 'windows_update_admission.py'
     }
     foreach ($entry in $trustedSources.GetEnumerator()) {
         [byte[]]$payload = Get-ExactGitBlobBytes -RepoPath ([string]$entry.Key)

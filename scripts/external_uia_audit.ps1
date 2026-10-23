@@ -54,6 +54,7 @@ $script:nativeSemanticCandidateBuckets = [ordered]@{
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName WindowsBase
 
 # PowerShell 7 Add-Type replaces default .NET references with explicit ones.
 # The live-region probe resolves runtime Monitor Enter/Exit once via delegates:
@@ -107,6 +108,27 @@ public static class AutosportNativeWindows
     private static extern int GetClassName(IntPtr window, System.Text.StringBuilder className, int maxCount);
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left, Top, Right, Bottom;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr window, out NativeRect rectangle);
+    // A Win32-only candidate point, never a UIA witness. Do not serialize
+    // screen coordinates or inspect a foreign-process UIA subtree.
+    public static int[] VisibleScreenCenterForHandle(IntPtr window)
+    {
+        if (window == IntPtr.Zero || !IsWindowVisible(window)) return Array.Empty<int>();
+        NativeRect rectangle;
+        if (!GetWindowRect(window, out rectangle) ||
+            rectangle.Right <= rectangle.Left || rectangle.Bottom <= rectangle.Top)
+            return Array.Empty<int>();
+        long x = (long)rectangle.Left + ((long)rectangle.Right - rectangle.Left) / 2;
+        long y = (long)rectangle.Top + ((long)rectangle.Bottom - rectangle.Top) / 2;
+        return new[] { (int)x, (int)y };
+    }
     public static int ProcessIdForHandle(IntPtr window)
     {
         uint processId;
@@ -874,10 +896,16 @@ function Find-UiaRootWithElementForProcessFamily {
         OTHER_HIDDEN = 0
         UNKNOWN = 0
     }
+    # A visible render HWND is only an OS-owned location candidate. The
+    # subsequent FromPoint call must return a genuine in-family UIA element.
+    [int[]]$pointCoordinates = @()
     foreach ($candidateHandle in $nativeWindows) {
         $classBucket = [string][AutosportNativeWindows]::DiagnosticClassBucket($candidateHandle)
         if (-not $bucketCounts.Contains($classBucket)) { $classBucket = 'UNKNOWN' }
         $bucketCounts[$classBucket] = [int]$bucketCounts[$classBucket] + 1
+        if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and $pointCoordinates.Count -eq 0) {
+            $pointCoordinates = [AutosportNativeWindows]::VisibleScreenCenterForHandle($candidateHandle)
+        }
     }
     $script:nativeSemanticCandidateBuckets = $bucketCounts
     Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_READY'
@@ -934,13 +962,20 @@ function Find-UiaRootWithElementForProcessFamily {
     $workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
     $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
     $workerProgress = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $pointX = [int]::MinValue
+    $pointY = [int]::MinValue
+    if ($pointCoordinates.Count -eq 2) {
+        $pointX = [int]$pointCoordinates[0]
+        $pointY = [int]$pointCoordinates[1]
+    }
     $processIdsCsv = (@($ProcessIds | Sort-Object -Unique) -join ',')
     $childSearchScript = ${function:Find-UiaSemanticViaChildren}
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_START_PROBE'
     $desktopJob = Start-ThreadJob -ScriptBlock {
         param(
             [string]$ProcessIdsCsv, [string]$AutomationId, [int]$RootProcessId,
-            [DateTime]$Deadline, [object]$ResultQueue, [object]$CompletionSignal,
+            [int]$PointX, [int]$PointY, [DateTime]$Deadline,
+            [object]$ResultQueue, [object]$CompletionSignal,
             [object]$ProgressQueue, [scriptblock]$ChildSearchScript
         )
         function Write-ExternalUiaProgress {
@@ -966,6 +1001,55 @@ function Find-UiaRootWithElementForProcessFamily {
             $ProcessIds = [int[]]@($ProcessIdsCsv.Split(',') | ForEach-Object {
                 [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
             })
+        # Exact-head Windows 39977206535 blocked on FocusedElement. Probe the
+        # real UIA provider from the OS-observed visible render HWND center
+        # first, within this same bounded MTA worker. Neither HWND nor point
+        # nor process ID alone is semantic evidence; require real ID=330.
+        if ($PointX -ne [int]::MinValue -and $PointY -ne [int]::MinValue) {
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_PROBE'
+            $pointElement = [System.Windows.Automation.AutomationElement]::FromPoint(
+                [System.Windows.Point]::new([double]$PointX, [double]$PointY)
+            )
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_READY'
+            if ($null -ne $pointElement) {
+                $pointPid = [int]$pointElement.Current.ProcessId
+                if ($ProcessIds -contains $pointPid) {
+                    $pointWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+                    $pointRoot = $pointElement
+                    $pointHops = 0
+                    while ($pointHops -lt 64 -and [DateTime]::UtcNow -lt $Deadline) {
+                        $pointHops += 1
+                        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_ID_PROBE'
+                        if ([string]$pointRoot.Current.AutomationId -ceq $AutomationId) {
+                            $ResultQueue.Enqueue([object](New-BoundedUiaPair -Window $pointRoot -Element $pointRoot))
+                            return
+                        }
+                        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_PARENT_PROBE'
+                        $pointParent = $pointWalker.GetParent($pointRoot)
+                        if ($null -eq $pointParent) { break }
+                        if (-not ($ProcessIds -contains [int]$pointParent.Current.ProcessId)) { break }
+                        $pointRoot = $pointParent
+                    }
+                    if ($pointHops -ge 64) {
+                        throw 'External UIA point ancestor traversal exceeded its bound'
+                    }
+                    if ([DateTime]::UtcNow -lt $Deadline) {
+                        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_CHILD_PROBE'
+                        $pointSemantic = Find-BoundedUiaSemanticViaChildren -Root $pointRoot -AutomationId $AutomationId -Deadline $Deadline
+                        if ($null -ne $pointSemantic) {
+                            if (
+                                [string]$pointSemantic.Current.AutomationId -cne $AutomationId -or
+                                -not ($ProcessIds -contains [int]$pointSemantic.Current.ProcessId)
+                            ) {
+                                throw 'External UIA point candidate failed semantic identity'
+                            }
+                            $ResultQueue.Enqueue([object](New-BoundedUiaPair -Window $pointRoot -Element $pointSemantic))
+                            return
+                        }
+                    }
+                }
+            }
+        }
         # Desktop ProcessIdProperty FindAll (38861632532) and FindFirst
         # (38874072815) both blocked on this real Windows provider. Before
         # querying all desktop children, try a different *real UIA* entry point:
@@ -1071,7 +1155,7 @@ function Find-UiaRootWithElementForProcessFamily {
             $CompletionSignal.Set()
         }
     } -ArgumentList @(
-        $processIdsCsv, $AutomationId, $RootProcessId, $Deadline,
+        $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY, $Deadline,
         $workerResults, $workerCompleted, $workerProgress, $childSearchScript
     )
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_WAIT_PROBE'
@@ -1088,6 +1172,11 @@ function Find-UiaRootWithElementForProcessFamily {
         # Fail closed for anything not in the audit's exact fixed vocabulary.
         $allowedDesktopWorkerStages = @(
             'NOT_ENTERED',
+            'SEMANTIC_DESKTOP_POINT_PROBE',
+            'SEMANTIC_DESKTOP_POINT_READY',
+            'SEMANTIC_DESKTOP_POINT_ID_PROBE',
+            'SEMANTIC_DESKTOP_POINT_PARENT_PROBE',
+            'SEMANTIC_DESKTOP_POINT_CHILD_PROBE',
             'SEMANTIC_DESKTOP_FOCUS_PROBE',
             'SEMANTIC_DESKTOP_FOCUS_READY',
             'SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE',

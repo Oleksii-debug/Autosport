@@ -255,7 +255,7 @@ def test_unknown_method_never_inherits_ambiguous_any_row(tmp_path: Path) -> None
     )
 
     with pytest.raises(BetdaqRateDeferred) as denied:
-        governor.admit("ListBlacklistInformation")
+        governor.admit("GetPrices2")
     assert denied.value.reason == "unmodeled_provider_rate_axis"
     assert denied.value.retry_after_seconds is None
 
@@ -807,3 +807,246 @@ def test_unknown_blacklist_observation_cannot_replace_known_operation_fence(
     with pytest.raises(BetdaqRateDeferred) as denied:
         governor.admit("GetPrices")
     assert denied.value.reason == "provider_api_blacklisted"
+
+
+def test_getoddsladder_uses_conservative_shared_any_other_default_axis(
+    tmp_path: Path,
+) -> None:
+    configured = default_betdaq_rate_policy()
+    governor, _, _, _, _ = make_ready(tmp_path, configured)
+
+    receipt = governor.admit("GetOddsLadder")
+
+    assert receipt.operation_id == "GetOddsLadder"
+    assert receipt.rate_policy_key == "Any Other"
+    assert receipt.any_axis_status == "CONSERVATIVE_SHARED_DEFAULT_ANY_OTHER"
+    assert receipt.documented_policy_sha256 == governor.documented_policy_sha256
+    assert receipt.grants_execution_authority is False
+    assert receipt.grants_write_permission is False
+    assert receipt.grants_freshness is False
+
+
+def test_getoddsladder_conservative_any_other_default_denies_101st_call(
+    tmp_path: Path,
+) -> None:
+    configured = default_betdaq_rate_policy()
+    governor, _, _, _, _ = make_ready(tmp_path, configured)
+
+    for _ in range(100):
+        governor.admit("GetOddsLadder")
+
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit("GetOddsLadder")
+
+    assert denied.value.reason == "provider_rate_capacity_exhausted"
+    assert denied.value.retry_after_seconds == pytest.approx(60.0)
+
+
+def test_getoddsladder_any_other_capacity_cannot_be_widened_by_local_policy() -> None:
+    with pytest.raises(BetdaqRateGovernorError, match="1..100"):
+        BetdaqMethodRatePolicy("GetOddsLadder", 101)
+
+
+def test_getoddsladder_blacklist_identity_is_api_scoped_and_canonical(
+    tmp_path: Path,
+) -> None:
+    configured = policy(
+        ("GetOddsLadder", 3, 0),
+        ("GetPrices", 3, 0),
+        combined=6,
+    )
+    governor, _, _, _, _ = make_ready(tmp_path, configured)
+
+    observation = governor.observe_blacklist(
+        api_name="GetOddsLadder",
+        remaining_ms=60_000,
+        provider_observation_sha256=SHA_A,
+    )
+
+    assert observation.operation_id == "GetOddsLadder"
+    assert (
+        governor.blacklist_status("GetOddsLadder")
+        is BetdaqBlacklistStatus.BLACKLISTED
+    )
+    assert governor.blacklist_status("GetPrices") is BetdaqBlacklistStatus.UNKNOWN
+
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit("GetOddsLadder")
+    assert denied.value.reason == "provider_api_blacklisted"
+
+    assert governor.admit("GetPrices").operation_id == "GetPrices"
+
+
+def test_unknown_operation_still_cannot_inherit_any_other_allowance(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit("GetPrices2")
+
+    assert denied.value.reason == "unmodeled_provider_rate_axis"
+    assert denied.value.retry_after_seconds is None
+
+
+def test_allowlisted_any_other_operations_share_one_conservative_axis(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    for _ in range(60):
+        governor.admit("GetOddsLadder")
+    for _ in range(40):
+        governor.admit("ListBlacklistInformation")
+
+    for operation_id in ("GetOddsLadder", "ListBlacklistInformation"):
+        with pytest.raises(BetdaqRateDeferred) as denied:
+            governor.admit(operation_id)
+        assert denied.value.reason == "provider_rate_capacity_exhausted"
+        assert denied.value.retry_after_seconds == pytest.approx(60.0)
+
+
+def test_any_other_safety_reserve_is_shared_across_sibling_operations(
+    tmp_path: Path,
+) -> None:
+    configured = default_betdaq_rate_policy(
+        safety_reserve_by_method={"ListBlacklistInformation": 10},
+    )
+    governor, _, _, _, _ = make_ready(tmp_path, configured)
+
+    for _ in range(90):
+        governor.admit("GetOddsLadder")
+
+    for operation_id in ("GetOddsLadder", "ListBlacklistInformation"):
+        with pytest.raises(BetdaqRateDeferred) as denied:
+            governor.admit(operation_id)
+        assert denied.value.reason == "safety_capacity_reserved"
+
+    safety = governor.admit(
+        "ListBlacklistInformation",
+        priority=BetdaqRatePriority.SAFETY,
+    )
+    assert safety.rate_policy_key == "Any Other"
+    assert safety.any_axis_status == "CONSERVATIVE_SHARED_DEFAULT_ANY_OTHER"
+    assert safety.method_active == 91
+    assert safety.method_remaining_total == 9
+    assert safety.method_remaining_background == 0
+
+
+def test_custom_policy_cannot_split_one_shared_rate_axis() -> None:
+    with pytest.raises(
+        BetdaqRateGovernorError,
+        match="sharing one BETDAQ rate-policy axis",
+    ):
+        BetdaqRatePolicy(
+            policy_revision="split-any-other-axis",
+            methods=(
+                BetdaqMethodRatePolicy("GetOddsLadder", 100, 0),
+                BetdaqMethodRatePolicy("ListBlacklistInformation", 99, 0),
+            ),
+        )
+
+
+def test_listblacklistinformation_is_explicit_any_other_allowlist_member(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    receipt = governor.admit(
+        "ListBlacklistInformation",
+        priority=BetdaqRatePriority.RECONCILIATION,
+    )
+
+    assert receipt.operation_id == "ListBlacklistInformation"
+    assert receipt.rate_policy_key == "Any Other"
+    assert receipt.any_axis_status == "CONSERVATIVE_SHARED_DEFAULT_ANY_OTHER"
+    assert receipt.grants_execution_authority is False
+    assert receipt.grants_write_permission is False
+    assert receipt.grants_freshness is False
+
+
+
+def test_named_provider_rows_dominate_generic_any_other_policy() -> None:
+    configured = default_betdaq_rate_policy()
+    by_method = configured.by_method()
+
+    assert by_method["ListSelectionTrades"].rate_policy_key == "ListSelectionTrades"
+    assert by_method["ListSelectionTrades"].capacity == 1
+    assert by_method["GetPrices"].rate_policy_key == "GetPrices"
+    assert by_method["GetPrices"].capacity == 130
+    assert (
+        by_method["UpdateOrdersNoReceipt"].rate_policy_key
+        == "ChangeOrderNoReceipt"
+    )
+    assert by_method["UpdateOrdersNoReceipt"].capacity == 100
+
+    for operation_id in ("GetOddsLadder", "ListBlacklistInformation"):
+        assert by_method[operation_id].rate_policy_key == "Any Other"
+        assert by_method[operation_id].capacity == 100
+
+
+def test_default_policy_covers_only_named_rows_and_explicit_any_other_allowlist() -> None:
+    configured = default_betdaq_rate_policy()
+    expected_operations = {
+        "GetEventSubTreeNoSelections",
+        "GetEventSubTreeWithSelections",
+        "GetOddsLadder",
+        "GetPrices",
+        "ListBlacklistInformation",
+        "ListBootstrapOrders",
+        "ListOrdersChangedSince",
+        "ListSelectionTrades",
+        "PlaceOrdersNoReceipt",
+        "PlaceOrdersWithReceipt",
+        "UpdateOrdersNoReceipt",
+    }
+
+    assert set(configured.by_method()) == expected_operations
+
+
+def test_unlisted_service_operations_do_not_inherit_any_other_axis(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    for operation_id in (
+        "GetAccountBalances",
+        "GetMarketInformation",
+        "Pulse",
+        "CancelOrders",
+    ):
+        with pytest.raises(BetdaqRateDeferred) as denied:
+            governor.admit(operation_id)
+        assert denied.value.reason == "unmodeled_provider_rate_axis"
+        assert denied.value.retry_after_seconds is None
+
+
+def test_rate_table_label_still_cannot_be_used_as_transport_operation(
+    tmp_path: Path,
+) -> None:
+    governor, _, _, _, _ = make_ready(
+        tmp_path,
+        default_betdaq_rate_policy(),
+    )
+
+    with pytest.raises(BetdaqRateDeferred) as denied:
+        governor.admit("ChangeOrderNoReceipt")
+
+    assert denied.value.reason == "unmodeled_provider_rate_axis"
+    assert denied.value.retry_after_seconds is None
+
+    update = governor.admit("UpdateOrdersNoReceipt")
+    assert update.rate_policy_key == "ChangeOrderNoReceipt"
+    assert update.grants_write_permission is False

@@ -46,6 +46,7 @@ def validate_binary_module_attribution(
     # running set/sort. Even a source-bound release verifier may parse JSON.
     if not 0 < len(components) <= 256 or any(
         type(component) is not dict or type(component.get("name")) is not str
+        or not 1 <= len(component["name"]) <= 512
         for component in components
     ):
         raise ValueError("binary attribution host component identities are invalid")
@@ -114,6 +115,7 @@ def capture_binary_module_attribution(
         or not 0 < len(components) <= 256
         or any(
             type(component) is not dict or type(component.get("name")) is not str
+            or not 1 <= len(component["name"]) <= 512
             for component in components
         )
     ):
@@ -137,7 +139,7 @@ def capture_binary_module_attribution(
             raise ValueError("unbounded build-host ownership candidates")
         candidates = set()
         for value in raw:
-            if type(value) is not str:
+            if type(value) is not str or not 1 <= len(value) <= 512:
                 raise ValueError("malformed build-host ownership identity")
             normalized = _normalize_name(value)
             if normalized in names:

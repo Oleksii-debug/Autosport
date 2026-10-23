@@ -445,6 +445,16 @@ def finalize_verified_paper_update(
     if _directory_witness(root) != active_witness:
         raise OfflineInstallError("active release identity changed during final readback")
     txn.rmdir()
+    # Retiring the transaction namespace is the final filesystem mutation.
+    # Do not acknowledge an active release replaced or rewritten during it.
+    if _directory_witness(root) != active_witness:
+        raise OfflineInstallError("active release identity changed during transaction retirement")
+    inspect_installed_release(
+        root, archive=active[0],
+        expected_source_sha=active[1], expected_package_sha256=active[2],
+    )
+    if _directory_witness(root) != active_witness:
+        raise OfflineInstallError("active release identity changed after transaction retirement")
     return {"status": "PAPER_UPDATE_FINALIZED", "source_sha": active[1],
             "real_money_execution": False}
 

@@ -1126,5 +1126,129 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
 
 
+    def test_finalize_empty_lease_after_retirement_failure_is_retryable(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                original_rmdir = Path.rmdir
+
+                def fail_retirement(path):
+                    if Path(path) == txn:
+                        raise OSError("injected retirement interruption")
+                    return original_rmdir(path)
+
+                with patch.object(Path, "rmdir", new=fail_retirement):
+                    with self.assertRaisesRegex(OSError, "retirement interruption"):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+                self.assertEqual(list(txn.iterdir()), [])
+                recovered = upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual(recovered["status"], "EMPTY_UPDATE_TRANSACTION_RETIRED")
+            self.assertEqual(recovered["source_sha"], self.NEW)
+            self.assertFalse(recovered["real_money_execution"])
+            self.assertFalse(txn.exists())
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+
+    def test_finalize_empty_lease_after_failed_staging_is_not_false_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            with self._trusted():
+                result = upgrade.finalize_verified_paper_update(
+                    dest, **self._args(old, od, new, nd),
+                )
+            self.assertEqual(result["status"], "EMPTY_UPDATE_TRANSACTION_RETIRED")
+            self.assertEqual(result["source_sha"], self.OLD)
+            self.assertFalse(result["real_money_execution"])
+            self.assertFalse(txn.exists())
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+
+    def test_finalize_empty_lease_preserves_unknown_owner_content(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            (txn / "owner.txt").write_bytes(b"preserve")
+            with self._trusted():
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "unknown or ambiguous",
+                ):
+                    upgrade.finalize_verified_paper_update(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual((txn / "owner.txt").read_bytes(), b"preserve")
+
+    def test_finalize_empty_lease_refuses_unverified_active_product(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            (dest / "Autosport.exe").write_bytes(b"untrusted")
+            with self._trusted():
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "no verified active release",
+                ):
+                    upgrade.finalize_verified_paper_update(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertTrue(txn.is_dir())
+
+    def test_finalize_empty_lease_rejects_transaction_identity_drift(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            witness = upgrade._directory_witness
+            checks = 0
+
+            def injected_witness(path):
+                nonlocal checks
+                actual = witness(path)
+                if Path(path) == txn:
+                    checks += 1
+                    if checks == 2:
+                        return actual[0], actual[1] + 1
+                return actual
+
+            with self._trusted(), patch.object(
+                upgrade, "_directory_witness", side_effect=injected_witness,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "empty update transaction identity changed",
+                ):
+                    upgrade.finalize_verified_paper_update(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(checks, 2)
+            self.assertTrue(txn.is_dir())
+
+    def test_finalize_empty_lease_rejects_post_retirement_payload_corruption(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            original_rmdir = Path.rmdir
+
+            def corrupt_on_retirement(path):
+                result = original_rmdir(path)
+                if Path(path) == txn:
+                    (dest / "Autosport.exe").write_bytes(b"corrupted-after-retirement")
+                return result
+
+            with self._trusted(), patch.object(
+                Path, "rmdir", new=corrupt_on_retirement,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.finalize_verified_paper_update(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertFalse(txn.exists())
+            self.assertEqual(
+                (dest / "Autosport.exe").read_bytes(), b"corrupted-after-retirement",
+            )
+
 if __name__ == "__main__":
     unittest.main()

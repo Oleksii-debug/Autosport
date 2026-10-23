@@ -240,11 +240,16 @@ def test_render_point_timeout_stages_are_fixed_and_not_provider_text() -> None:
     global_progress = source.split("function Write-ExternalUiaProgress {", 1)[1].split(
         "Write-ExternalUiaProgress -Stage 'START'", 1
     )[0]
+    progress_tokens = global_progress.split("[ValidateSet(", 1)[1].split(")]", 1)[0]
+    progress_stages = tuple(token.strip().strip("'") for token in progress_tokens.split(","))
     for stage in stage_names:
         assert f"Write-ExternalUiaProgress -Stage '{stage}'" in desktop
         assert f"'{stage}'" in allowed
-        # These are bounded in-worker diagnostic stages, not public progress values.
-        assert f"'{stage}'" not in global_progress
+        # These are fixed audit-owned diagnostics and must be accepted by the
+        # public watchdog without treating a stage as semantic UIA PASS.
+        assert stage in progress_stages
+    assert "PASS" not in progress_stages
+    assert len(progress_stages) == len(set(progress_stages))
     assert "$allowedDesktopWorkerStages -ccontains $lastWorkerStage" in desktop
     assert "'UNKNOWN_FIXED_STAGE'" in desktop
     assert "if (-not $workerTerminal)" in desktop

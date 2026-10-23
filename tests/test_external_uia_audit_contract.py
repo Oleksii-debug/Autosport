@@ -514,22 +514,29 @@ def test_external_uia_runtime_witness_wait_is_bounded_and_never_fabricates_evide
 
 
 def test_external_uia_failure_classifies_only_known_windows_before_cleanup() -> None:
+    """Classify native windows once; never reenter a stalled COM provider in cleanup."""
     audit = _audit()
     assert "observed_window_class = 'NOT_OBSERVED'" in audit
-    finalizer = audit[audit.index("} finally {"):]
-    classification = finalizer[: finalizer.index("if ($null -ne $liveRegionProbe)")]
-    assert "[string]$uiaRoot.Current.Name" in classification
-    assert "[System.StringComparison]::Ordinal" in classification
-    assert "NATIVE_EMERGENCY_STOP" in classification
-    assert "NATIVE_STARTUP_ERROR" in classification
-    assert "PRODUCT_MAIN_WINDOW" in classification
-    assert "OTHER_OR_UNAVAILABLE" in classification
-    assert "Never export an" in classification
-    assert classification.index("observed_window_class") < finalizer.index(
-        "$report | ConvertTo-Json -Depth 8"
+    native = audit.split(
+        "Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'", 1
+    )[1].split("    $semanticReady = $null", 1)[0]
+    assert "[string]$uiaRoot.Current.Name" in native
+    assert "[System.StringComparison]::Ordinal" in native
+    assert "observed_window_class = 'NATIVE_EMERGENCY_STOP'" in native
+    assert "observed_window_class = 'NATIVE_STARTUP_ERROR'" in native
+    assert "observed_window_class = 'PRODUCT_MAIN_WINDOW'" in native
+    cleanup = audit.split(
+        "} catch {\n    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {", 1
+    )[1].split("} finally {", 1)[1]
+    assert "Never reenter the UIA COM provider during failure cleanup" in cleanup
+    assert "$report.observed_window_class =" not in cleanup
+    assert not any(
+        "$uiaRoot.Current.Name" in line
+        for line in cleanup.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
     )
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in cleanup
     assert "if ($report.status -ne 'PASS')" in audit
-
 
 def test_windows_candidate_requires_packaged_runtime_witness_binding() -> None:
     workflow = _windows_workflow()
@@ -1331,8 +1338,7 @@ def test_external_uia_monotonic_worker_wait_fails_closed() -> None:
 
 
 def test_stalled_uia_worker_aborts_provider_reentry_and_cleanup_probe() -> None:
-    """A real COM timeout must not trigger another HWND/desktop probe or
-    an unbounded cleanup UIA Name read. This does not constitute UIA PASS."""
+    """A COM timeout must fail closed and serialize evidence without provider reentry."""
     audit = _audit()
     wrapper = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
         "function Find-UiaRootWithElementForProcessFamily {", 1
@@ -1351,11 +1357,17 @@ def test_stalled_uia_worker_aborts_provider_reentry_and_cleanup_probe() -> None:
         "# The existing UIA desktop search", 1
     )[0]
     cleanup = audit.split("} finally {\n    # Preserve a bounded count", 1)[1]
-    assert "if ($null -ne $uiaRoot -and -not $script:semanticWorkerTimedOut)" in cleanup
-    assert "observed_window_class = 'OTHER_OR_UNAVAILABLE'" in cleanup
+    assert "Never reenter the UIA COM provider during failure cleanup" in cleanup
+    assert "$report.observed_window_class =" not in cleanup
+    assert not any(
+        "$uiaRoot.Current.Name" in line or "AutomationElement]::" in line
+        for line in cleanup.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    assert "$report.semantic_desktop_worker_last_stage" in cleanup
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in cleanup
     assert "if ($report.status -ne 'PASS')" in audit
     assert "exit 1" in audit
-
 
 def test_external_uia_watchdog_distinguishes_native_enumeration_from_desktop_com() -> None:
     """The 120s failure must identify the exact boundary, not grant UIA PASS.

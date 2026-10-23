@@ -90,3 +90,41 @@ def test_desktop_worker_timeout_stage_is_allowlisted_and_persisted_fail_closed()
     # The output report must not derive its reason from provider exception text.
     serialized = source.split("$report.semantic_desktop_worker_last_stage =", 1)[1]
     assert "$_.Exception.Message" not in serialized
+
+
+def test_failure_cleanup_never_reenters_uia_provider() -> None:
+    """A blocked Windows provider must not suppress the fail-closed JSON receipt."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    final_cleanup = source.split(
+        "} catch {\n    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {", 1
+    )[1].split("} finally {", 1)[1]
+    # The initial main-window classification occurs BEFORE the semantic probes.
+    # Cleanup may only retain that bounded class; it must never query COM again.
+    assert "if ([string]::Equals($initialNativeName, 'Автоспорт'" in source
+    assert "observed_window_class = 'PRODUCT_MAIN_WINDOW'" in source
+    assert "Never reenter the UIA COM provider during failure cleanup" in final_cleanup
+    assert "$uiaRoot.Current.Name" not in final_cleanup.replace(
+        "# $uiaRoot.Current.Name", "# redacted cleanup comment"
+    )
+    assert "AutomationElement]::" not in final_cleanup
+    assert "Find-UiaRootWithElementForProcessFamily" not in final_cleanup
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in final_cleanup
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_cleanup_preserves_existing_fixed_window_classification() -> None:
+    """Do not overwrite a real pre-semantic native window classification."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    initial = source.split(
+        "Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'", 1
+    )[1].split("    $semanticReady = $null", 1)[0]
+    assert "observed_window_class = 'NATIVE_EMERGENCY_STOP'" in initial
+    assert "observed_window_class = 'NATIVE_STARTUP_ERROR'" in initial
+    assert "observed_window_class = 'PRODUCT_MAIN_WINDOW'" in initial
+    cleanup = source.split(
+        "} catch {\n    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {", 1
+    )[1].split("} finally {", 1)[1]
+    assert "$report.observed_window_class =" not in cleanup
+    assert "$report.semantic_desktop_worker_last_stage" in cleanup
+    assert "$report.native_semantic_candidate_buckets" in cleanup

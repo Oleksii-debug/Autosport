@@ -58,3 +58,35 @@ def test_stages_do_not_replace_real_semantic_or_process_witness() -> None:
     assert "throw 'External UIA semantic worker returned an invalid element'" in bounded
     assert "if (-not $hasResult) { return $null }" in bounded
     assert "return $result" in bounded
+
+
+def test_desktop_worker_timeout_stage_is_allowlisted_and_persisted_fail_closed() -> None:
+    """A real Windows provider stall must retain a fixed stage, not arbitrary COM text."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    helper = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    timeout = helper.split("if (-not $workerTerminal) {", 1)[1].split(
+        "Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_RESULT_PROBE'", 1
+    )[0]
+    assert "$script:lastDesktopWorkerStage = 'NOT_RUN'" in source
+    assert "$allowedDesktopWorkerStages = @(" in timeout
+    assert "'NOT_ENTERED'" in timeout
+    assert "'SEMANTIC_DESKTOP_FOCUS_PROBE'" in timeout
+    assert "'SEMANTIC_DESKTOP_ENUM_PROBE'" in timeout
+    assert "'UNKNOWN_FIXED_STAGE'" in timeout
+    assert "$allowedDesktopWorkerStages -ccontains $lastWorkerStage" in timeout
+    assert "$script:semanticWorkerTimedOut = $true" in timeout
+    assert 'throw "External desktop UIA worker timed out' in timeout
+    assert "Stop-Job -Job" not in timeout
+    assert "Receive-Job" not in timeout
+    assert "semantic_desktop_worker_timeout = $false" in source
+    assert "semantic_desktop_worker_last_stage = 'NOT_RUN'" in source
+    assert "$report.semantic_desktop_worker_timeout = ($script:lastDesktopWorkerStage -ne 'NOT_RUN')" in source
+    assert "$report.semantic_desktop_worker_last_stage = $script:lastDesktopWorkerStage" in source
+    assert "'external UIA audit failed: desktop semantic worker timeout'" in source
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+    # The output report must not derive its reason from provider exception text.
+    serialized = source.split("$report.semantic_desktop_worker_last_stage =", 1)[1]
+    assert "$_.Exception.Message" not in serialized

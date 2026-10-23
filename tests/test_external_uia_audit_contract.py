@@ -1268,7 +1268,12 @@ def test_external_uia_worker_diagnostic_stages_are_accepted_by_windows_watchdog(
         "function ", 1
     )[0]
     emitted = set(re.findall(r"Write-ExternalUiaProgress -Stage '([A-Z_]+)'", source))
-    declared = set(re.findall(r"'([A-Z_]+)'", declaration))
+    # Only ValidateSet declares progress tokens; later fixed diagnostics are
+    # not progress tokens even when no PowerShell function separates them.
+    assert "[ValidateSet(" in declaration
+    validate_set = declaration.split("[ValidateSet(", 1)[1].split(")]", 1)[0]
+    declared = set(re.findall(r"'([A-Z_]+)'", validate_set))
+    assert "NOT_RUN" not in declared
     allowlist = workflow.split("$allowedStages = @(", 1)[1].split(")", 1)[0]
     accepted = set(re.findall(r"'([A-Z_]+)'", allowlist))
     assert emitted and emitted <= declared

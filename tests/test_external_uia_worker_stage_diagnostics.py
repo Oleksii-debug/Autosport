@@ -173,3 +173,80 @@ def test_semantic_failure_classes_are_fixed_and_redact_provider_exceptions() -> 
     assert "$_.Exception" not in failure
     assert "$report.status = 'PASS'" not in failure
     assert "$report.failures +=" in failure
+
+
+def test_render_point_probe_is_bounded_real_uia_not_native_hwnd_acceptance() -> None:
+    """The stalled desktop FocusedElement path has a genuine, bounded alternative."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
+        "} -ArgumentList @(", 1
+    )[0]
+    assert worker.index("SEMANTIC_DESKTOP_POINT_PROBE") < worker.index(
+        "[System.Windows.Automation.AutomationElement]::FromPoint("
+    ) < worker.index("SEMANTIC_DESKTOP_POINT_READY")
+    assert worker.index("::FromPoint(") < worker.index("::FocusedElement")
+    assert "$pointPid = [int]$pointElement.Current.ProcessId" in worker
+    assert "if ($ProcessIds -contains $pointPid)" in worker
+    assert "$pointRoot.Current.AutomationId -ceq $AutomationId" in worker
+    assert "$ProcessIds -contains [int]$pointParent.Current.ProcessId" in worker
+    assert "$pointHops -lt 64 -and [DateTime]::UtcNow -lt $Deadline" in worker
+    assert "$pointSemantic.Current.AutomationId -cne $AutomationId" in worker
+    assert "$ProcessIds -contains [int]$pointSemantic.Current.ProcessId" in worker
+    assert "New-BoundedUiaPair -Window $pointRoot -Element $pointSemantic" in worker
+    assert "$report.status = 'PASS'" not in worker
+    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in desktop
+    assert "$script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'" in desktop
+
+
+def test_render_point_is_win32_only_and_process_family_scoped() -> None:
+    """No screen location or native HWND may become a semantic PASS witness."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "VisibleScreenCenterForHandle(IntPtr window)" in native
+    assert "window == IntPtr.Zero || !IsWindowVisible(window)" in native
+    assert "GetWindowRect(window, out rectangle)" in native
+    assert "rectangle.Right <= rectangle.Left || rectangle.Bottom <= rectangle.Top" in native
+    assert "if ($classBucket -eq 'RENDER_WIDGET_VISIBLE'" in desktop
+    assert "[AutosportNativeWindows]::VisibleScreenCenterForHandle($candidateHandle)" in desktop
+    assert "if ($pointCoordinates.Count -eq 2)" in desktop
+    assert "$pointX = [int]$pointCoordinates[0]" in desktop
+    assert "$pointY = [int]$pointCoordinates[1]" in desktop
+    assert "$processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY, $Deadline" in desktop
+    assert "$report.status = 'PASS'" not in desktop
+
+
+def test_render_point_timeout_stages_are_fixed_and_not_provider_text() -> None:
+    """The new bounded worker cannot publish arbitrary COM data as evidence."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    stage_names = (
+        "SEMANTIC_DESKTOP_POINT_PROBE",
+        "SEMANTIC_DESKTOP_POINT_READY",
+        "SEMANTIC_DESKTOP_POINT_ID_PROBE",
+        "SEMANTIC_DESKTOP_POINT_PARENT_PROBE",
+        "SEMANTIC_DESKTOP_POINT_CHILD_PROBE",
+    )
+    allowed = desktop.split("$allowedDesktopWorkerStages = @(", 1)[1].split(")", 1)[0]
+    global_progress = source.split("function Write-ExternalUiaProgress {", 1)[1].split(
+        "Write-ExternalUiaProgress -Stage 'START'", 1
+    )[0]
+    for stage in stage_names:
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in desktop
+        assert f"'{stage}'" in allowed
+        # These are bounded in-worker diagnostic stages, not public progress values.
+        assert f"'{stage}'" not in global_progress
+    assert "$allowedDesktopWorkerStages -ccontains $lastWorkerStage" in desktop
+    assert "'UNKNOWN_FIXED_STAGE'" in desktop
+    assert "if (-not $workerTerminal)" in desktop
+    assert "Stop-Job -Job $desktopJob" not in desktop
+    assert "$report.status = 'PASS'" not in desktop

@@ -99,7 +99,7 @@ class Plan6QualifierTests(unittest.TestCase):
     def test_all_current_plan6_5b_sources_are_covered(self):
         """Future 5B releases cannot gain a source test outside exact-head qualification."""
         root = SCRIPT.parents[1]
-        groups = dict(qualifier.GROUPS)
+        groups = dict(qualifier._source_groups(root))
         included = set(groups["release_integrity"])
         expected = {
             path.relative_to(root).as_posix()
@@ -108,6 +108,62 @@ class Plan6QualifierTests(unittest.TestCase):
         self.assertTrue(expected, "Plan 6 5B tests must exist")
         self.assertFalse(expected - included, sorted(expected - included))
         self.assertIn("tests/test_plan6_source_qualifier.py", included)
+
+    def test_new_5b_regression_is_discovered_exactly_once(self):
+        """A concurrent 5B fix must not evade Plan-6 exact-source tests."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._fake_root(root)
+            new_test = root / "tests/test_plan6_5b_license_record_capture.py"
+            new_test.write_text("def test_license_record(): assert True\\n")
+            groups = dict(qualifier._source_groups(root))
+            paths = groups["release_integrity"]
+            self.assertEqual(paths.count("tests/test_plan6_5b_license_record_capture.py"), 1)
+            self.assertNotIn("tests/test_plan6_5b_license_record_capture.py",
+                             dict(qualifier.GROUPS)["release_integrity"])
+            with patch.object(qualifier, "_identity", return_value=self.SHA):
+                with patch.object(qualifier, "_test_group", side_effect=lambda r, n, p, timeout: {
+                    "group": n, "status": "PASS", "passed": 1, "exit_code": 0,
+                }) as execute:
+                    report = qualifier.run(root)
+            self.assertEqual(report["status"], "PASS_SOURCE_ONLY")
+            self.assertIn("tests/test_plan6_5b_license_record_capture.py",
+                          execute.call_args_list[2].args[2])
+
+    def test_tracked_symlinked_5b_source_is_rejected_before_execution(self):
+        """Git may report a clean HEAD even when a tracked test link escapes it."""
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._fake_root(root)
+            linked = root / "tests/test_plan6_5b_external.py"
+            linked.write_text("def test_external(): assert False\\n")
+            with patch.object(Path, "is_symlink", lambda path: path == linked):
+                with patch.object(qualifier, "_identity", return_value=self.SHA):
+                    with patch.object(qualifier, "_test_group") as execute:
+                        with self.assertRaisesRegex(ValueError, "symlink"):
+                            qualifier.run(root)
+                        execute.assert_not_called()
+
+    def test_symlinked_test_directory_is_rejected_before_execution(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._fake_root(root)
+            tests_dir = root / "tests"
+            with patch.object(Path, "is_symlink", lambda path: path == tests_dir):
+                with patch.object(qualifier, "_identity", return_value=self.SHA):
+                    with patch.object(qualifier, "_test_group") as execute:
+                        with self.assertRaisesRegex(ValueError, "symlink"):
+                            qualifier.run(root)
+                        execute.assert_not_called()
+
+    def test_unrelated_test_is_not_added_to_release_group(self):
+        with tempfile.TemporaryDirectory() as d:
+            root = Path(d)
+            self._fake_root(root)
+            extra = root / "tests/test_unrelated.py"
+            extra.write_text("def test_unrelated(): assert True\\n")
+            paths = dict(qualifier._source_groups(root))["release_integrity"]
+            self.assertNotIn("tests/test_unrelated.py", paths)
 
     def test_current_release_path_integrity_sources_are_covered(self):
         """New release Windows/path regression modules must join exact-HEAD source gates."""

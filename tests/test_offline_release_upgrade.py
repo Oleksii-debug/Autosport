@@ -918,5 +918,213 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             )
 
 
+    def test_finalize_rejects_active_executable_rewrite_during_obsolete_disposal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+                txn = upgrade._transaction_root(dest)
+                original_uninstall = upgrade.uninstall_verified_release
+
+                def corrupt_active_after_disposal(path, **kwargs):
+                    result = original_uninstall(path, **kwargs)
+                    (dest / "Autosport.exe").write_bytes(b"corrupted-after-finalize")
+                    return result
+
+                with patch.object(upgrade, "uninstall_verified_release",
+                                  side_effect=corrupt_active_after_disposal):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+            self.assertTrue(txn.is_dir())
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"corrupted-after-finalize")
+
+    def test_finalize_rejects_identical_active_directory_swap_during_disposal(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+                txn = upgrade._transaction_root(dest)
+                original_uninstall = upgrade.uninstall_verified_release
+
+                def replace_active_after_disposal(path, **kwargs):
+                    result = original_uninstall(path, **kwargs)
+                    dest.rename(txn / "verified-original")
+                    shutil.copytree(txn / "verified-original", dest)
+                    return result
+
+                with patch.object(upgrade, "uninstall_verified_release",
+                                  side_effect=replace_active_after_disposal):
+                    with self.assertRaisesRegex(install.OfflineInstallError,
+                                                "active release identity changed"):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+            self.assertTrue((txn / "verified-original").is_dir())
+
+    def test_finalize_rejects_active_pre_disposal_tamper_preserving_previous(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+                txn = upgrade._transaction_root(dest)
+                original_lineage = upgrade._require_forward_update_lineage
+
+                def tamper_after_lineage(**kwargs):
+                    result = original_lineage(**kwargs)
+                    (dest / "Autosport.exe").write_bytes(b"corrupted-before-disposal")
+                    return result
+
+                with patch.object(upgrade, "_require_forward_update_lineage",
+                                  side_effect=tamper_after_lineage):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+            self.assertTrue((txn / "previous").is_dir())
+
+
+    def test_finalize_rejects_active_rewrite_during_transaction_retirement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+                txn = upgrade._transaction_root(dest)
+                original_rmdir = Path.rmdir
+
+                def corrupt_on_retirement(path):
+                    result = original_rmdir(path)
+                    if Path(path) == txn:
+                        (dest / "Autosport.exe").write_bytes(b"corrupted-at-retirement")
+                    return result
+
+                with patch.object(Path, "rmdir", new=corrupt_on_retirement):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"corrupted-at-retirement")
+
+    def test_finalize_rejects_identical_directory_swap_during_transaction_retirement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **self._args(old, od, new, nd))
+                txn = upgrade._transaction_root(dest)
+                original_rmdir = Path.rmdir
+                original_directory = dest.parent / "verified-active-before-retirement"
+
+                def replace_on_retirement(path):
+                    result = original_rmdir(path)
+                    if Path(path) == txn:
+                        dest.rename(original_directory)
+                        shutil.copytree(original_directory, dest)
+                    return result
+
+                with patch.object(Path, "rmdir", new=replace_on_retirement):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "active release identity changed",
+                    ):
+                        upgrade.finalize_verified_paper_update(
+                            dest, **self._args(old, od, new, nd),
+                        )
+            self.assertTrue(original_directory.is_dir())
+
+    def test_finalize_rejects_rejected_current_rewrite_during_transaction_retirement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                upgrade.rollback_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                self.assertTrue((txn / "rejected-current").is_dir())
+                original_rmdir = Path.rmdir
+
+                def corrupt_on_retirement(path):
+                    result = original_rmdir(path)
+                    if Path(path) == txn:
+                        (dest / "Autosport.exe").write_bytes(b"corrupted-old-at-retirement")
+                    return result
+
+                with patch.object(Path, "rmdir", new=corrupt_on_retirement):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"corrupted-old-at-retirement")
+
+    def test_finalize_rejects_candidate_rewrite_during_transaction_retirement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            txn = upgrade._transaction_root(dest)
+            publish = upgrade._publish_directory_no_replace
+
+            def interrupted_upgrade(source, target):
+                if Path(target) == txn / "previous":
+                    raise OSError("injected crash before old release move")
+                return publish(source, target)
+
+            with self._trusted():
+                with patch.object(upgrade, "_publish_directory_no_replace", side_effect=interrupted_upgrade):
+                    with self.assertRaisesRegex(OSError, "injected crash"):
+                        upgrade.upgrade_verified_paper_release(dest, **args)
+                self.assertTrue((txn / "candidate").is_dir())
+                self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+                original_rmdir = Path.rmdir
+
+                def corrupt_on_retirement(path):
+                    result = original_rmdir(path)
+                    if Path(path) == txn:
+                        (dest / "Autosport.exe").write_bytes(b"corrupted-candidate-retirement")
+                    return result
+
+                with patch.object(Path, "rmdir", new=corrupt_on_retirement):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), b"corrupted-candidate-retirement")
+
+    def test_finalize_rejects_deleted_executable_during_transaction_retirement(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                original_rmdir = Path.rmdir
+
+                def delete_active_on_retirement(path):
+                    result = original_rmdir(path)
+                    if Path(path) == txn:
+                        (dest / "Autosport.exe").unlink()
+                    return result
+
+                with patch.object(Path, "rmdir", new=delete_active_on_retirement):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertFalse((dest / "Autosport.exe").exists())
+
+
+    def test_finalize_retirement_rmdir_failure_never_reports_success(self):
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                original_rmdir = Path.rmdir
+
+                def fail_retirement(path):
+                    if Path(path) == txn:
+                        raise OSError("injected transaction retirement failure")
+                    return original_rmdir(path)
+
+                with patch.object(Path, "rmdir", new=fail_retirement):
+                    with self.assertRaisesRegex(OSError, "injected transaction retirement failure"):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertTrue(txn.is_dir())
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+
+
 if __name__ == "__main__":
     unittest.main()

@@ -112,7 +112,13 @@ def _identity(root: Path) -> str:
     return sha
 
 def _test_group(root: Path, name: str, paths: tuple[str, ...], *, timeout: int) -> dict:
-    if not paths or not all((root / path).is_file() for path in paths):
+    # A clean Git HEAD can contain a tracked symlink. Never let pytest execute
+    # a fixed-group test through a link to bytes outside the pinned source.
+    # Dynamic Plan-6 5B discovery is separately guarded in _source_groups().
+    if not paths or not all(
+        (root / path).is_file() and not (root / path).is_symlink()
+        for path in paths
+    ):
         return {"group": name, "status": "FAIL_MISSING_TEST_SOURCE",
                 "passed": 0, "exit_code": None}
     try:

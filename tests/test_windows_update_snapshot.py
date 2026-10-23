@@ -2646,24 +2646,29 @@ def test_snapshot_recheck_rejects_deterministic_postread_inode_drift(tmp_path, m
 
     source = tmp_path / "candidate.zip"
     source.write_bytes(b"identical digest is not object identity")
+    import stat
+
     with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())) as snap:
         real_identity = module._require_file_identity
-        calls = []
+        regular_file_probes = []
 
         def changed_identity(info):
-            calls.append(True)
             identity = real_identity(info)
-            # First witness is the pathname, second is the opened handle.
-            # Forge only the post-read pathname witness, not initial admission.
-            if len(calls) == 3:
-                return (identity[0], identity[1] + 1)
+            # The shared identity helper also inspects every ancestor directory.
+            # Count only the snapshot file, never those ancestor probes.
+            if stat.S_ISREG(info.st_mode) and identity == snap._file_identity:
+                regular_file_probes.append(identity)
+                # File lstat, opened descriptor fstat, then post-read lstat.
+                # Corrupt only the final pathname witness.
+                if len(regular_file_probes) == 3:
+                    return (identity[0], identity[1] + 1)
             return identity
 
         with monkeypatch.context() as patch:
             patch.setattr(module, "_require_file_identity", changed_identity)
             with pytest.raises(WindowsUpdateSnapshotError, match="changed during recheck"):
                 snap.recheck()
-        assert len(calls) >= 3
+        assert len(regular_file_probes) >= 3
         snap.recheck()
 
 

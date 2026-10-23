@@ -255,3 +255,42 @@ def test_render_point_timeout_stages_are_fixed_and_not_provider_text() -> None:
     assert "if (-not $workerTerminal)" in desktop
     assert "Stop-Job -Job $desktopJob" not in desktop
     assert "$report.status = 'PASS'" not in desktop
+
+
+def test_foreground_activation_only_targets_visible_exact_launch_process() -> None:
+    """Win32 activation cannot target a foreign HWND or count as UIA proof."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    helper = native.split("public static bool TryClaimForegroundForProcess(", 1)[1].split(
+        "public static", 1
+    )[0]
+    assert "window == IntPtr.Zero || expectedProcessId <= 0 || !IsWindowVisible(window)" in helper
+    assert "GetWindowThreadProcessId(window, out ownerPid) == 0" in helper
+    assert "ownerPid != (uint)expectedProcessId" in helper
+    assert "GetForegroundWindow() == window" in helper
+    assert "if (!SetForegroundWindow(window)) return false" in helper
+    assert "return GetForegroundWindow() == window" in helper
+    assert "AutomationElement" not in helper
+
+
+def test_foreground_attempt_precedes_semantic_probe_without_fabricating_pass() -> None:
+    """An OS focus claim is neither AutomationId=330 nor release acceptance."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    activation = source.split(
+        "# WinForms UIA calibration #40017780628 succeeded", 1
+    )[1].split("    $semanticReady = $null", 1)[0]
+    assert "$process.Refresh()" in activation
+    assert "[AutosportNativeWindows]::TryClaimForegroundForProcess(" in activation
+    assert "$process.MainWindowHandle, [int]$process.Id" in activation
+    assert "$report.native_foreground_activation_status = 'CLAIMED'" in activation
+    assert "$report.native_foreground_activation_status = 'NOT_CLAIMED'" in activation
+    assert "$report.status = 'PASS'" not in activation
+    assert "AutomationElement" not in activation
+    assert source.index("TryClaimForegroundForProcess(") < source.index(
+        "Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'"
+    )
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source

@@ -135,6 +135,26 @@ public static class AutosportNativeWindows
         return GetWindowThreadProcessId(window, out processId) == 0 || processId > (uint)int.MaxValue
             ? 0 : (int)processId;
     }
+    // The independent WinForms UIA control explicitly activates its window
+    // before reading UIA. Make the same bounded OS-only attempt for the real
+    // packaged host; foreground ownership is NEVER semantic accessibility.
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    public static bool TryClaimForegroundForProcess(IntPtr window, int expectedProcessId)
+    {
+        if (window == IntPtr.Zero || expectedProcessId <= 0 || !IsWindowVisible(window))
+            return false;
+        uint ownerPid;
+        if (GetWindowThreadProcessId(window, out ownerPid) == 0 ||
+            ownerPid != (uint)expectedProcessId)
+            return false;
+        if (GetForegroundWindow() == window) return true;
+        if (!SetForegroundWindow(window)) return false;
+        return GetForegroundWindow() == window;
+    }
     // Privacy-bounded OS-only classification BEFORE any UIA COM provider call.
     // Never persist HWND, PID, raw class/title, executable path or user data.
     // These fixed buckets are forensic hints, NEVER accessibility PASS.
@@ -1279,6 +1299,7 @@ $report = [ordered]@{
     launcher_exit_state = 'NOT_OBSERVED'
     launcher_exit_code = $null
     initial_window_observed = $false
+    native_foreground_activation_status = 'NOT_RUN'
     observed_window_class = 'NOT_OBSERVED'
     last_observed_process_family_count = 0
     native_semantic_candidate_buckets = $null
@@ -1397,6 +1418,23 @@ try {
         if (-not (Test-Path -LiteralPath $preSemanticWitness -PathType Leaf)) {
             throw "Packaged WebView2 runtime witness unavailable before semantic UIA probe"
         }
+    }
+    # WinForms UIA calibration #40017780628 succeeded only after native host
+    # activation. The packaged WebView2 client may otherwise be backgrounded
+    # before its first accessibility request. Claim only the exact launched
+    # process's visible main HWND, without querying the UIA COM provider.
+    # A denied foreground claim remains diagnostic; no HWND or focus state
+    # substitutes for the mandatory automation_id=330 semantic witness.
+    $report.native_foreground_activation_status = 'NOT_CLAIMED'
+    try {
+        $process.Refresh()
+        if ([AutosportNativeWindows]::TryClaimForegroundForProcess(
+            $process.MainWindowHandle, [int]$process.Id
+        )) {
+            $report.native_foreground_activation_status = 'CLAIMED'
+        }
+    } catch {
+        # Foreground restrictions are not semantic evidence; retain fail-closed UIA.
     }
     $semanticReady = $null
     $nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)

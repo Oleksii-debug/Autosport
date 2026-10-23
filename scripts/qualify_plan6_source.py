@@ -74,9 +74,17 @@ def _source_groups(root: Path) -> tuple[tuple[str, tuple[str, ...]], ...]:
     adds a regression file. The clean-Git-HEAD guard in run() still rejects
     untracked or modified test hooks before execution.
     """
+    tests_dir = root / "tests"
+    if tests_dir.is_symlink():
+        raise ValueError("Plan 6 test directory is a symlink")
+    candidates = tuple(tests_dir.glob("test_plan6_5b_*.py"))
+    # A clean Git index may legitimately track a symlink. Following that
+    # link would execute test code outside the exact Git HEAD being qualified.
+    if any(path.is_symlink() for path in candidates):
+        raise ValueError("Plan 6 5B test source is a symlink")
     discovered = tuple(sorted(
         path.relative_to(root).as_posix()
-        for path in (root / "tests").glob("test_plan6_5b_*.py")
+        for path in candidates
         if path.is_file()
     ))
     return tuple(

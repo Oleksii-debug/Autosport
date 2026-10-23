@@ -165,3 +165,25 @@ def test_maximum_bounded_graph_name_is_still_accepted():
     )
     assert report["modules"][0]["review"] == "UNKNOWN_OWNER_REVIEW_REQUIRED"
     validate_binary_module_attribution(report, graph, deepcopy(INVENTORY))
+
+
+@pytest.mark.parametrize("oversized", [513, 4096])
+def test_verifier_rejects_oversized_report_owner_before_sort(monkeypatch, oversized):
+    """Reject forged ZIP-side owner hints before any unbounded sort."""
+    import autosport.release_binary_attribution as attribution
+
+    report = capture_binary_module_attribution(
+        deepcopy(GRAPH), deepcopy(INVENTORY), packages_distributions={},
+    )
+    report["modules"][0]["host_candidates"] = ["x" * oversized]
+    original_sorted = sorted
+
+    def bounded_sorted(values, *args, **kwargs):
+        values = list(values)
+        if any(type(value) is str and len(value) > 512 for value in values):
+            raise AssertionError("oversized report candidate reached sorted()")
+        return original_sorted(values, *args, **kwargs)
+
+    monkeypatch.setattr(attribution, "sorted", bounded_sorted, raising=False)
+    with pytest.raises(ValueError, match="host candidates"):
+        validate_binary_module_attribution(report, deepcopy(GRAPH), deepcopy(INVENTORY))

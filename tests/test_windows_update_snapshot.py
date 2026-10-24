@@ -2030,7 +2030,12 @@ def test_snapshot_rejects_nonlocal_or_ambiguous_path_before_any_filesystem_acces
 
 def test_snapshot_rejects_path_subclass_before_untrusted_fspath_callback():
     """A direct caller cannot inject a mutable/custom path protocol into admission."""
-    class HostilePath(Path):
+    # ``Path`` is a factory whose concrete implementation is selected for the
+    # host OS.  Subclassing the factory itself happens to work on newer Python,
+    # but Python 3.11 correctly refuses to instantiate it because it has no
+    # concrete ``_flavour``.  Use the host's concrete class so this test reaches
+    # the Autosport admission boundary on every supported Python version.
+    class HostilePath(type(Path())):
         def __fspath__(self):
             raise AssertionError("untrusted path callback executed")
 

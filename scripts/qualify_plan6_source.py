@@ -162,9 +162,10 @@ def _test_group(root: Path, name: str, paths: tuple[str, ...], *, timeout: int) 
                 "passed": 0, "exit_code": None}
     # Ambient pytest selectors/plugins are not part of the pinned Git HEAD.
     # PYTEST_ADDOPTS=-k can deselect a failing tracked test and return zero;
-    # PYTEST_PLUGINS can load an untracked/external pytest plugin. Never
-    # publish PASS_SOURCE_ONLY under either caller-controlled override.
-    if any(os.environ.get(key) for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS")):
+    # PYTEST_PLUGINS can load an untracked/external pytest plugin, while
+    # PYTHONPATH can replace `python -m pytest` with an external fake module.
+    # Reject all three caller-controlled overrides before source execution.
+    if any(os.environ.get(key) for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH")):
         return {"group": name, "status": "FAIL_UNTRUSTED_TEST_ENV",
                 "passed": 0, "exit_code": None}
     try:

@@ -54,10 +54,12 @@ jobs:
         run: |
           $reportPath = Join-Path $PWD 'webview2-uia-control.json'
           & ./dist/Autosport-WebView2-UIA-Control.exe run $reportPath
-          $launcherExit = $LASTEXITCODE
           # PyInstaller windowed onefile can return from its bootloader before
-          # the GUI child has finished. A process exit 0 is NEVER a UIA PASS.
-          # Poll the atomically published fixed-code report, not process exit.
+          # the GUI child has finished, and exact run 40062623389 returned a
+          # stale/non-authoritative launcher code while the independent MTA
+          # client atomically published SEMANTIC_BUTTON_RETURNED with exact ID.
+          # A process exit is NEVER UIA evidence. Poll and validate only the
+          # atomically published fixed-code semantic report.
           $deadline = [DateTime]::UtcNow.AddSeconds(120)
           $observed = 'NO_REPORT'
           $evidence = $null
@@ -73,7 +75,6 @@ jobs:
             }
             Start-Sleep -Milliseconds 250
           }
-          if ($launcherExit -ne 0) { throw 'Minimal WebView2 UIA control launcher failed' }
           if ($observed -cne 'SEMANTIC_BUTTON_RETURNED') {
             throw "Minimal WebView2 UIA control did not return real semantic evidence; fixed_stage=$observed"
           }

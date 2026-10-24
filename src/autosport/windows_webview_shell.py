@@ -3447,7 +3447,19 @@ def launch_windows_shell(
             # injects window.pywebview into each document. Re-check every load so
             # a navigated document cannot inherit the privileged Python API.
             window.events.before_load += bind_trusted_document
-            window.events.loaded += seed_initial_accessibility_focus
+            # Legacy fake pywebview windows used by existing launch/restart
+            # tests do not model the optional loaded event.  Never abort those
+            # established host paths before webview.start().  A real native
+            # pywebview Window must expose the event or fail closed.
+            if hasattr(window.events, "loaded"):
+                window.events.loaded += seed_initial_accessibility_focus
+            elif (
+                type(window).__module__ == "webview.window"
+                and type(window).__name__ == "Window"
+            ):
+                raise WindowsWebViewUnavailable(
+                    "The native WebView2 host has no loaded event for keyboard focus"
+                )
             # closing is blocking on WinForms. The first close is vetoed quickly;
             # canonical teardown runs off the UI thread and destroys the window
             # only after STOP/worker terminalization succeeds.

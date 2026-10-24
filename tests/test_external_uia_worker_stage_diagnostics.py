@@ -524,3 +524,54 @@ def test_independent_desktop_uia_routes_publish_fixed_failure_stages() -> None:
     assert "Stop-Job" not in timeout
     assert "Receive-Job" not in timeout
     assert "$report.status = 'PASS'" not in timeout
+
+
+def test_native_host_win32_differential_is_bounded_and_not_semantic_acceptance() -> None:
+    """OS responsiveness and GUI focus cannot be substituted for real UIA."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static string[] ProbeVisibleFamilyHost(", 1)[1].split(
+        "// WebView2 can defer renderer accessibility", 1
+    )[0]
+    assert "IsVisibleFamilyHost(window, familyIds)" in native
+    assert "GetAncestor(window, GA_ROOT) == window" in source
+    assert "GetForegroundWindow() != window" in native
+    assert "GetGUIThreadInfo(threadId, ref info)" in native
+    assert "WM_NULL" in native and "SMTO_ABORTIFHUNG, 250" in native
+    assert "ProcessIdForHandle(window) != owner" in native
+    assert "RESPONSIVE" in native and "NO_REPLY" in native
+    assert "FOCUS_IN_FAMILY" in native and "FOCUS_FOREIGN" in native
+    assert "native_host_message_status = 'NOT_ATTEMPTED'" in source
+    assert "native_host_focus_status = 'NOT_ATTEMPTED'" in source
+    assert "$report.native_host_message_status = $script:nativeHostMessageStatus" in source
+    assert "$report.native_host_focus_status = $script:nativeHostFocusStatus" in source
+    assert "return new[] { messageStatus" in native
+    assert "$report.status = 'PASS'" not in native
+
+
+def test_process_isolated_from_handle_is_bounded_and_fail_closed() -> None:
+    """Host/renderer provider stalls cannot hang the parent diagnostic."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    worker = source.split("function Get-IsolatedMtaHandleDiagnostic {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    caller = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "ProcessIdForHandle($Window)" in worker
+    assert "AutomationElement]::FromHandle(" in worker
+    assert "$allowed -notcontains [int]$element.Current.ProcessId" in worker
+    assert "[string]$element.Current.AutomationId -ceq '330'" in worker
+    assert "'-Mta'" in worker and "'-NonInteractive'" in worker
+    assert "$child.WaitForExit(2500)" in worker
+    assert "$child.Kill($true)" in worker
+    assert "'TIMEOUT'" in worker and "'FOREIGN_ELEMENT'" in worker
+    assert "'INVALID_RESULT'" in worker and "'PROVIDER_ERROR'" in worker
+    assert "Get-IsolatedMtaHandleDiagnostic -Window $nativeHostHandle" in caller
+    assert "Get-IsolatedMtaHandleDiagnostic -Window $nativeRendererHandle" in caller
+    assert "[DateTime]::UtcNow.AddSeconds(6) -lt $Deadline" in caller
+    assert "isolated_host_handle_status = 'NOT_ATTEMPTED'" in source
+    assert "isolated_renderer_handle_status = 'NOT_ATTEMPTED'" in source
+    assert "$report.isolated_host_handle_status = $script:isolatedHostHandleStatus" in source
+    assert "$report.isolated_renderer_handle_status = $script:isolatedRendererHandleStatus" in source
+    assert "$report.status = 'PASS'" not in worker
+    assert "Receive-Job" not in worker

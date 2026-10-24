@@ -37,6 +37,10 @@ Write-ExternalUiaProgress -Stage 'START'
 $script:semanticWorkerTimedOut = $false
 $script:nativeRendererAccessibilityMessageStatus = 'NOT_ATTEMPTED'
 $script:nativeRendererAccessibilityRequestAttempted = $false
+$script:nativeHostMessageStatus = 'NOT_ATTEMPTED'
+$script:nativeHostFocusStatus = 'NOT_ATTEMPTED'
+$script:isolatedHostHandleStatus = 'NOT_ATTEMPTED'
+$script:isolatedRendererHandleStatus = 'NOT_ATTEMPTED'
 # Only fixed audit-owned stage codes are retained. Never persist a UIA provider
 # exception message, arbitrary COM property, user path, or window title.
 $script:lastDesktopWorkerStage = 'NOT_RUN'
@@ -162,6 +166,62 @@ public static class AutosportNativeWindows
         if (GetForegroundWindow() == window) return true;
         if (!SetForegroundWindow(window)) return false;
         return GetForegroundWindow() == window;
+    }
+    // Diagnostic only: the real packaged host may accept native Win32 messages
+    // while its UIA provider blocks. Query only in-family visible top-level
+    // non-Chromium hosts; no HWND, PID, coordinates or user text are persisted.
+    private const uint GA_ROOT = 2;
+    private const uint WM_NULL = 0;
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GuiThreadInfo
+    {
+        public uint cbSize, flags;
+        public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+        public NativeRect rcCaret;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+    public static bool IsVisibleFamilyHost(IntPtr window, int[] familyIds)
+    {
+        return window != IntPtr.Zero && familyIds != null &&
+            GetAncestor(window, GA_ROOT) == window &&
+            DiagnosticClassBucket(window) == "OTHER_VISIBLE" &&
+            Array.IndexOf(familyIds, ProcessIdForHandle(window)) >= 0;
+    }
+    // Both outputs use fixed vocabulary and are OS-only forensic hints.
+    // WM_NULL is bounded; a reply cannot satisfy AutomationId or focus gates.
+    public static string[] ProbeVisibleFamilyHost(IntPtr window, int[] familyIds)
+    {
+        if (!IsVisibleFamilyHost(window, familyIds))
+            return new[] { "NOT_ATTEMPTED", "NOT_ATTEMPTED" };
+        var owner = ProcessIdForHandle(window);
+        IntPtr ignoredReply;
+        var dispatched = SendMessageTimeout(
+            window, WM_NULL, IntPtr.Zero, IntPtr.Zero,
+            SMTO_ABORTIFHUNG, 250, out ignoredReply);
+        if (ProcessIdForHandle(window) != owner ||
+            !IsVisibleFamilyHost(window, familyIds))
+            return new[] { "STALE", "STALE" };
+        var messageStatus = dispatched == IntPtr.Zero ? "NO_REPLY" : "RESPONSIVE";
+        if (GetForegroundWindow() != window)
+            return new[] { messageStatus, "NOT_FOREGROUND" };
+        uint currentPid;
+        var threadId = GetWindowThreadProcessId(window, out currentPid);
+        if (threadId == 0 || currentPid != (uint)owner)
+            return new[] { messageStatus, "STALE" };
+        var info = new GuiThreadInfo();
+        info.cbSize = (uint)Marshal.SizeOf(typeof(GuiThreadInfo));
+        if (!GetGUIThreadInfo(threadId, ref info))
+            return new[] { messageStatus, "GUI_INFO_UNAVAILABLE" };
+        if (info.hwndFocus == IntPtr.Zero)
+            return new[] { messageStatus, "FOCUS_NOT_SET" };
+        var focusPid = ProcessIdForHandle(info.hwndFocus);
+        return new[] { messageStatus,
+            Array.IndexOf(familyIds, focusPid) >= 0
+                ? "FOCUS_IN_FAMILY" : "FOCUS_FOREIGN" };
     }
     // WebView2 can defer renderer accessibility until a client requests it.
     // Request the standard Win32 OBJID_CLIENT object once on a genuine, visible
@@ -1093,6 +1153,88 @@ try {
     }
 }
 
+# Diagnostic only: isolate FromHandle in a separately killable MTA process.
+# An exact ID here is not a UIA witness for the packaged audit and cannot
+# replace the real keyboard, STOP, LiveRegion or runtime gates.
+function Get-IsolatedMtaHandleDiagnostic {
+    param([IntPtr]$Window, [int[]]$ProcessIds)
+
+    if ($Window -eq [IntPtr]::Zero) { return 'NOT_ATTEMPTED' }
+    if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) { return 'NO_PROCESS_FAMILY' }
+    if ($ProcessIds -notcontains [AutosportNativeWindows]::ProcessIdForHandle($Window)) {
+        return 'STALE'
+    }
+    $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -eq $pwshCommand) { return 'UNAVAILABLE' }
+    $probe = @'
+$ErrorActionPreference = 'Stop'
+try {
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+        Write-Output 'APARTMENT_ERROR'; exit 1
+    }
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $allowed = [int[]]@($env:AUTOSPORT_UIA_DIAGNOSTIC_PIDS.Split(',') | ForEach-Object {
+        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+    })
+    $handleValue = [long]::Parse(
+        $env:AUTOSPORT_UIA_DIAGNOSTIC_HANDLE,
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($handleValue))
+    if ($null -eq $element) { Write-Output 'NO_ELEMENT'; exit 0 }
+    if ($allowed -notcontains [int]$element.Current.ProcessId) {
+        Write-Output 'FOREIGN_ELEMENT'; exit 0
+    }
+    if ([string]$element.Current.AutomationId -ceq '330') {
+        Write-Output 'EXACT_ID_330'; exit 0
+    }
+    Write-Output 'IN_FAMILY_OTHER_ID'; exit 0
+} catch {
+    Write-Output 'PROVIDER_ERROR'; exit 1
+}
+'@
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = [string]$pwshCommand.Source
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta',
+        '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+    )) { [void]$start.ArgumentList.Add($argument) }
+    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@($ProcessIds | Sort-Object -Unique) -join ',')
+    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_HANDLE'] = [string]$Window.ToInt64()
+    $child = [System.Diagnostics.Process]::new()
+    $child.StartInfo = $start
+    $started = $false
+    try {
+        $started = $child.Start()
+        if (-not $started) { return 'LAUNCH_ERROR' }
+        if (-not $child.WaitForExit(2500)) {
+            try { $child.Kill($true) } catch {}
+            return 'TIMEOUT'
+        }
+        $code = [string]$child.StandardOutput.ReadToEnd().Trim()
+        if ($child.ExitCode -ne 0) {
+            if ($code -cin @('APARTMENT_ERROR', 'PROVIDER_ERROR')) { return $code }
+            return 'INVALID_RESULT'
+        }
+        if ($code -cin @('NO_ELEMENT', 'FOREIGN_ELEMENT', 'EXACT_ID_330', 'IN_FAMILY_OTHER_ID')) {
+            return $code
+        }
+        return 'INVALID_RESULT'
+    } catch {
+        return 'LAUNCH_ERROR'
+    } finally {
+        if ($started) {
+            try { if (-not $child.HasExited) { $child.Kill($true) } } catch {}
+        }
+        $child.Dispose()
+    }
+}
+
 function Find-UiaRootWithElementForProcessFamily {
     param(
         [int[]]$ProcessIds,
@@ -1124,7 +1266,13 @@ function Find-UiaRootWithElementForProcessFamily {
     # A visible render HWND is only an OS-owned location candidate. The
     # subsequent FromPoint call must return a genuine in-family UIA element.
     [int[]]$pointCoordinates = @()
+    [IntPtr]$nativeHostHandle = [IntPtr]::Zero
+    [IntPtr]$nativeRendererHandle = [IntPtr]::Zero
     foreach ($candidateHandle in $nativeWindows) {
+        if (
+            $nativeHostHandle -eq [IntPtr]::Zero -and
+            [AutosportNativeWindows]::IsVisibleFamilyHost($candidateHandle, [int[]]$ProcessIds)
+        ) { $nativeHostHandle = $candidateHandle }
         $classBucket = [string][AutosportNativeWindows]::DiagnosticClassBucket($candidateHandle)
         if (-not $bucketCounts.Contains($classBucket)) { $classBucket = 'UNKNOWN' }
         $bucketCounts[$classBucket] = [int]$bucketCounts[$classBucket] + 1
@@ -1138,11 +1286,27 @@ function Find-UiaRootWithElementForProcessFamily {
                 $candidateHandle, [int[]]$ProcessIds
             )
         }
+        if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and $nativeRendererHandle -eq [IntPtr]::Zero) {
+            $nativeRendererHandle = $candidateHandle
+        }
         if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and $pointCoordinates.Count -eq 0) {
             $pointCoordinates = [AutosportNativeWindows]::VisibleScreenCenterForHandle($candidateHandle)
         }
     }
     $script:nativeSemanticCandidateBuckets = $bucketCounts
+    # Bounded Win32 and independently killable FromHandle differentials precede
+    # the known-blocking in-process UIA worker. They never create a PASS.
+    if ($nativeHostHandle -ne [IntPtr]::Zero) {
+        $hostProbe = [AutosportNativeWindows]::ProbeVisibleFamilyHost(
+            $nativeHostHandle, [int[]]$ProcessIds
+        )
+        $script:nativeHostMessageStatus = [string]$hostProbe[0]
+        $script:nativeHostFocusStatus = [string]$hostProbe[1]
+    }
+    if ([DateTime]::UtcNow.AddSeconds(6) -lt $Deadline) {
+        $script:isolatedHostHandleStatus = Get-IsolatedMtaHandleDiagnostic -Window $nativeHostHandle -ProcessIds ([int[]]$ProcessIds)
+        $script:isolatedRendererHandleStatus = Get-IsolatedMtaHandleDiagnostic -Window $nativeRendererHandle -ProcessIds ([int[]]$ProcessIds)
+    }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_READY'
     foreach ($nativeHandle in $nativeWindows) {
         if ([DateTime]::UtcNow -ge $Deadline) { break }
@@ -1576,6 +1740,10 @@ $report = [ordered]@{
     last_observed_process_family_count = 0
     native_semantic_candidate_buckets = $null
     native_renderer_accessibility_message_status = 'NOT_ATTEMPTED'
+    native_host_message_status = 'NOT_ATTEMPTED'
+    native_host_focus_status = 'NOT_ATTEMPTED'
+    isolated_host_handle_status = 'NOT_ATTEMPTED'
+    isolated_renderer_handle_status = 'NOT_ATTEMPTED'
     isolated_mta_focus_diagnostic_status = 'NOT_RUN'
     semantic_desktop_worker_timeout = $false
     semantic_desktop_worker_last_stage = 'NOT_RUN'
@@ -2333,6 +2501,10 @@ try {
     $report.last_observed_process_family_count = [int]@($lastFamilyIds).Count
     $report.native_semantic_candidate_buckets = $script:nativeSemanticCandidateBuckets
     $report.native_renderer_accessibility_message_status = $script:nativeRendererAccessibilityMessageStatus
+    $report.native_host_message_status = $script:nativeHostMessageStatus
+    $report.native_host_focus_status = $script:nativeHostFocusStatus
+    $report.isolated_host_handle_status = $script:isolatedHostHandleStatus
+    $report.isolated_renderer_handle_status = $script:isolatedRendererHandleStatus
     $report.semantic_desktop_worker_timeout = ($script:lastDesktopWorkerStage -ne 'NOT_RUN')
     $report.semantic_desktop_worker_last_stage = $script:lastDesktopWorkerStage
     $report.semantic_desktop_worker_route_stages = $script:lastDesktopWorkerRouteStages

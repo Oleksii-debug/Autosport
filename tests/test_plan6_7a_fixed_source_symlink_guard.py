@@ -108,6 +108,44 @@ def _real_git_fixture(root: Path) -> Path:
     return source
 
 
+@pytest.mark.parametrize("ignore_location", ["gitignore", "info_exclude"])
+@pytest.mark.parametrize(
+    "hook_name", ["test_plan6_5b_ignored_payload.py", "conftest.py"],
+)
+def test_real_git_ignored_python_hook_rejected(
+    ignore_location: str, hook_name: str,
+) -> None:
+    """Ignored Python hooks evade git status but must not run as HEAD tests."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "проєкт з пробілом"
+        _real_git_fixture(root)
+        rule = f"tests/{hook_name}\\n"
+        if ignore_location == "gitignore":
+            (root / ".gitignore").write_text(rule, encoding="utf-8")
+            subprocess.run(
+                ["git", "add", ".gitignore"], cwd=root, check=True,
+                capture_output=True, text=True, timeout=20,
+            )
+            subprocess.run(
+                ["git", "commit", "-qm", "ignore test hook"], cwd=root,
+                check=True, capture_output=True, text=True, timeout=20,
+            )
+        else:
+            (root / ".git" / "info" / "exclude").write_text(
+                rule, encoding="utf-8",
+            )
+        hook = root / "tests" / hook_name
+        hook.write_text("def test_untrusted(): assert False\\n", encoding="utf-8")
+        assert not subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        if hook_name.startswith("test_plan6_5b_"):
+            assert hook in (root / "tests").glob("test_plan6_5b_*.py")
+        with pytest.raises(ValueError, match="ignored Python test hooks"):
+            qualifier._identity(root)
+
+
 def test_real_git_clean_head_remains_qualifiable() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "проєкт з пробілом"

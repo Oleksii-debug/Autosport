@@ -36,6 +36,7 @@ Write-ExternalUiaProgress -Stage 'START'
 # probes. Never retry another HWND or query the stalled provider in cleanup.
 $script:semanticWorkerTimedOut = $false
 $script:nativeRendererAccessibilityMessageStatus = 'NOT_ATTEMPTED'
+$script:nativeRendererAccessibilityRequestAttempted = $false
 # Only fixed audit-owned stage codes are retained. Never persist a UIA provider
 # exception message, arbitrary COM property, user path, or window title.
 $script:lastDesktopWorkerStage = 'NOT_RUN'
@@ -1042,7 +1043,10 @@ function Find-UiaRootWithElementForProcessFamily {
         $classBucket = [string][AutosportNativeWindows]::DiagnosticClassBucket($candidateHandle)
         if (-not $bucketCounts.Contains($classBucket)) { $classBucket = 'UNKNOWN' }
         $bucketCounts[$classBucket] = [int]$bucketCounts[$classBucket] + 1
-        if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and $script:nativeRendererAccessibilityMessageStatus -eq 'NOT_ATTEMPTED') {
+        if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and -not $script:nativeRendererAccessibilityRequestAttempted) {
+            # A stale/foreign HWND must not permit another request. The entire
+            # candidate set gets at most ONE finite OS message attempt.
+            $script:nativeRendererAccessibilityRequestAttempted = $true
             # Bounded WM_GETOBJECT requests the actual renderer's accessibility
             # provider; DELIVERED is diagnostic only, never semantic PASS.
             $script:nativeRendererAccessibilityMessageStatus = [AutosportNativeWindows]::RequestRendererAccessibility(

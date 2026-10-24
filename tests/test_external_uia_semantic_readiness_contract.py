@@ -412,7 +412,9 @@ def test_renderer_accessibility_request_precedes_real_uia_and_cannot_pass_audit(
     helper = source[start:end]
     request = "[AutosportNativeWindows]::RequestRendererAccessibility("
     assert helper.count(request) == 1
-    assert "$script:nativeRendererAccessibilityMessageStatus -eq 'NOT_ATTEMPTED'" in helper
+    assert "$script:nativeRendererAccessibilityRequestAttempted = $false" in source
+    assert "-not $script:nativeRendererAccessibilityRequestAttempted" in helper
+    assert helper.index("$script:nativeRendererAccessibilityRequestAttempted = $true") < helper.index(request)
     assert "if ($classBucket -eq 'RENDER_WIDGET_VISIBLE'" in helper
     assert helper.index(request) < helper.index("SEMANTIC_NATIVE_HANDLES_READY")
     assert helper.index(request) < helper.index("SEMANTIC_NATIVE_UIA_PROBE")

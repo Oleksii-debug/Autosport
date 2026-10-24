@@ -118,6 +118,15 @@ def _identity(root: Path) -> str:
         for entry in flags.split("\0")
     ):
         raise ValueError("source index masks tracked changes")
+    # Ignored Python files do not appear in git status, yet pytest can
+    # import tests/conftest.py and dynamic 5B discovery can execute ignored
+    # test_plan6_5b_*.py files. Neither belongs to the pinned Git HEAD.
+    ignored = _git(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard",
+        "-z", "--", "tests",
+    )
+    if any(path.endswith(".py") for path in ignored.split("\0") if path):
+        raise ValueError("source tree contains ignored Python test hooks")
     return sha
 
 def _test_group(root: Path, name: str, paths: tuple[str, ...], *, timeout: int) -> dict:

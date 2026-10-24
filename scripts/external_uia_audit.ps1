@@ -1008,6 +1008,81 @@ function Find-BoundedUiaSemanticViaChildren {
     return $result
 }
 
+# Differential only: the minimal packaged WebView2 control returned an exact UIA
+# AutomationId from a separate pwsh -Mta process while the production
+# Start-ThreadJob hung at FocusedElement. Probe the REAL launched product in a
+# separately killable MTA process, but never treat this result as audit PASS.
+# Only fixed codes cross the boundary; no names, HWNDs, PIDs or provider text.
+function Get-IsolatedMtaFocusDiagnostic {
+    param([int[]]$ProcessIds)
+
+    if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) { return 'NO_PROCESS_FAMILY' }
+    $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -eq $pwshCommand) { return 'UNAVAILABLE' }
+    $probe = @'
+$ErrorActionPreference = 'Stop'
+try {
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+        Write-Output 'APARTMENT_ERROR'; exit 1
+    }
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $allowed = [int[]]@($env:AUTOSPORT_UIA_DIAGNOSTIC_PIDS.Split(',') | ForEach-Object {
+        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+    })
+    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+    if ($null -eq $focused) { Write-Output 'NO_FOCUS'; exit 0 }
+    $actualPid = [int]$focused.Current.ProcessId
+    if ($allowed -notcontains $actualPid) { Write-Output 'FOREIGN_FOCUS'; exit 0 }
+    if ([string]$focused.Current.AutomationId -ceq '330') {
+        Write-Output 'EXACT_ID_330'; exit 0
+    }
+    Write-Output 'IN_FAMILY_OTHER_ID'; exit 0
+} catch {
+    Write-Output 'PROVIDER_ERROR'; exit 1
+}
+'@
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = [string]$pwshCommand.Source
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta',
+        '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+    )) {
+        [void]$start.ArgumentList.Add($argument)
+    }
+    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@($ProcessIds | Sort-Object -Unique) -join ',')
+    $child = [System.Diagnostics.Process]::new()
+    $child.StartInfo = $start
+    try {
+        if (-not $child.Start()) { return 'LAUNCH_ERROR' }
+        if (-not $child.WaitForExit(6000)) {
+            try { $child.Kill($true) } catch {}
+            return 'TIMEOUT'
+        }
+        $code = [string]$child.StandardOutput.ReadToEnd().Trim()
+        # A nonzero child exit is never an exact semantic witness.
+        if ($child.ExitCode -ne 0) {
+            if ($code -cin @('APARTMENT_ERROR', 'PROVIDER_ERROR')) { return $code }
+            return 'INVALID_RESULT'
+        }
+        if ($code -cin @('NO_FOCUS', 'FOREIGN_FOCUS', 'EXACT_ID_330', 'IN_FAMILY_OTHER_ID')) {
+            return $code
+        }
+        return 'INVALID_RESULT'
+    } catch {
+        return 'LAUNCH_ERROR'
+    } finally {
+        if (-not $child.HasExited) {
+            try { $child.Kill($true) } catch {}
+        }
+        $child.Dispose()
+    }
+}
+
 function Find-UiaRootWithElementForProcessFamily {
     param(
         [int[]]$ProcessIds,
@@ -1435,6 +1510,7 @@ $report = [ordered]@{
     last_observed_process_family_count = 0
     native_semantic_candidate_buckets = $null
     native_renderer_accessibility_message_status = 'NOT_ATTEMPTED'
+    isolated_mta_focus_diagnostic_status = 'NOT_RUN'
     semantic_desktop_worker_timeout = $false
     semantic_desktop_worker_last_stage = 'NOT_RUN'
     process_id = $null
@@ -1629,6 +1705,10 @@ try {
     } catch {
         # Foreground restrictions are not semantic evidence; retain fail-closed UIA.
     }
+    # Process-isolated MTA differential is NOT semantic acceptance. Even an
+    # exact focused ID here cannot replace the genuine in-process element,
+    # F2/F8, STOP, LiveRegion or runtime witness requirements.
+    $report.isolated_mta_focus_diagnostic_status = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$foregroundFamilyIds)
     $semanticReady = $null
     $nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)
     while ([DateTime]::UtcNow -lt $semanticDeadline) {

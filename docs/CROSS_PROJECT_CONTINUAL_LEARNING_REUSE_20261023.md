@@ -63,9 +63,37 @@ champion promotion, bookmaker execution or whole-product completion.
 The next integration slices are deliberately downstream rather than competing
 authorities:
 
-- durable cycle journal/checkpoint and crash-resume composition;
 - strict file/CLI request adapter for operator-started cycles;
 - canonical product-utility evidence before factory retest;
 - Strategy/Model Factory candidate publication and independent promotion gate;
 - Windows/WebView2 status and keyboard controls;
 - prospective multi-session PAPER/SHADOW campaign using lawful sports data.
+
+## 2026-10-24 durable AutoTrade control reuse
+
+The next slice reviewed `AutoTrade@12e9b272b1a2fedacf602294d55d80b4e0315468`,
+especially its SQLite-owned live-cycle state and research-job restart controls.
+Autosport now reuses the applicable control design, not its trading domain or
+models, in `src/autosport/continual_learning_journal.py`:
+
+1. the complete canonical cycle request is durably stored before work starts;
+2. an immutable request digest prevents a cycle identity from being rebound;
+3. every new/replay update commits an exact policy checkpoint and witness;
+4. checkpoint publication uses compare-and-swap revision fencing;
+5. restart replays the committed prefix from immutable inputs before trusting
+   the stored policy snapshot;
+6. an append-only hash chain records queued, checkpoint and terminal phases;
+7. finalization recomputes the existing canonical in-memory cycle and refuses
+   any disagreement with the durable checkpoint;
+8. exact redelivery is idempotent; and
+9. only a qualified cycle exposes a Factory candidate envelope, with explicit
+   `promotion_authorized=false` and `execution_authorized=false`.
+
+Focused qualification covers injected process failure after the first durable
+update, cross-instance resume, exact result equivalence, idempotent redelivery,
+cycle identity conflicts, rollback without handoff, candidate envelope identity,
+and fail-closed checkpoint/event tamper detection.
+
+This closes the durable journal/checkpoint/crash-resume slice. It does not yet
+provide a user-facing CLI, automatically publish into the Strategy/Model Factory,
+or start a long-running bookmaker/data campaign.

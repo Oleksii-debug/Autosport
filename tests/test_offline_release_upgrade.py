@@ -1084,6 +1084,107 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             )
 
 
+    def test_finalize_rejects_same_bytes_transaction_swap_before_disposal(self):
+        # A copied transaction has valid product bytes but is not the lease
+        # whose identity was bound at admission. Do not delete its contents.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                detached = work / "original-update-transaction"
+                replacement = work / "copied-update-transaction"
+                original_lineage = upgrade._require_forward_update_lineage
+                swapped = []
+
+                def replace_after_lineage(**kwargs):
+                    result = original_lineage(**kwargs)
+                    shutil.copytree(txn, replacement)
+                    txn.rename(detached)
+                    replacement.rename(txn)
+                    swapped.append(True)
+                    return result
+
+                with patch.object(upgrade, "_require_forward_update_lineage",
+                                  side_effect=replace_after_lineage):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError,
+                        "update transaction identity changed",
+                    ):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual(swapped, [True])
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertEqual((txn / "previous" / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertEqual((detached / "previous" / "Autosport.exe").read_bytes(), self.OLD.encode())
+
+    def test_finalize_rejects_same_bytes_obsolete_swap_during_inspection(self):
+        # The obsolete directory itself must be the inspected object even
+        # when the transaction directory inode remains unchanged.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                obsolete = upgrade._transaction_root(dest) / "previous"
+                detached = work / "original-obsolete"
+                original_inspect = upgrade.inspect_installed_release
+                swapped = []
+
+                def replace_after_obsolete_inspection(path, **kwargs):
+                    result = original_inspect(path, **kwargs)
+                    if Path(path) == obsolete and not swapped:
+                        obsolete.rename(detached)
+                        shutil.copytree(detached, obsolete)
+                        swapped.append(True)
+                    return result
+
+                with patch.object(upgrade, "inspect_installed_release",
+                                  side_effect=replace_after_obsolete_inspection):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError,
+                        "obsolete release identity changed",
+                    ):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual(swapped, [True])
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertEqual((obsolete / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertEqual((detached / "Autosport.exe").read_bytes(), self.OLD.encode())
+
+    def test_finalize_rejects_transaction_swap_after_disposal(self):
+        # Retiring an unverified replacement lease must not report success.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                detached = work / "original-empty-transaction"
+                original_uninstall = upgrade.uninstall_verified_release
+                swapped = []
+
+                def replace_empty_transaction(path, **kwargs):
+                    result = original_uninstall(path, **kwargs)
+                    txn.rename(detached)
+                    txn.mkdir(mode=0o700)
+                    swapped.append(True)
+                    return result
+
+                with patch.object(upgrade, "uninstall_verified_release",
+                                  side_effect=replace_empty_transaction):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError,
+                        "update transaction identity changed",
+                    ):
+                        upgrade.finalize_verified_paper_update(dest, **args)
+            self.assertEqual(swapped, [True])
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertTrue(txn.is_dir())
+            self.assertTrue(detached.is_dir())
+
     def test_finalize_rejects_active_executable_rewrite_during_obsolete_disposal(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

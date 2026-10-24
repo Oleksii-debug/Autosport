@@ -402,3 +402,68 @@ def test_focused_probe_precedes_known_blocking_point_without_bypassing_semantic_
     assert "New-BoundedUiaPair -Window $focusedRoot -Element $focusSemantic" in focus
     assert "status = 'PASS'" not in focus
     assert "SendKeys" not in focus
+
+
+def test_product_mta_differential_is_process_isolated_bounded_and_not_a_gate() -> None:
+    """Real product/UIA provider differential cannot be misreported as PASS."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    helper = source.split("function Get-IsolatedMtaFocusDiagnostic {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    assert "[System.Diagnostics.ProcessStartInfo]::new()" in helper
+    assert "$start.UseShellExecute = $false" in helper
+    assert "'-NoProfile', '-NonInteractive', '-Mta'" in helper
+    assert "'-EncodedCommand'" in helper
+    assert "[Text.Encoding]::Unicode.GetBytes($probe)" in helper
+    assert "$child.WaitForExit(6000)" in helper
+    assert "$child.Kill($true)" in helper
+    assert "$started = $false" in helper
+    assert "if ($started)" in helper
+    assert "Get-Command pwsh -ErrorAction SilentlyContinue" in helper
+    assert "return 'TIMEOUT'" in helper
+    assert "return 'UNAVAILABLE'" in helper
+    assert "$report.status = 'PASS'" not in helper
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'" not in helper
+
+
+def test_product_mta_differential_requires_real_pid_and_exact_id() -> None:
+    """Foreign/wrong-ID/failed COM reads are never a positive semantic claim."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    helper = source.split("function Get-IsolatedMtaFocusDiagnostic {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    assert "AUTOSPORT_UIA_DIAGNOSTIC_PIDS" in helper
+    assert "[System.Windows.Automation.AutomationElement]::FocusedElement" in helper
+    assert "$focused.Current.ProcessId" in helper
+    assert "$allowed -notcontains $actualPid" in helper
+    assert "Write-Output 'FOREIGN_FOCUS'" in helper
+    assert "$focused.Current.AutomationId -ceq '330'" in helper
+    assert "Write-Output 'IN_FAMILY_OTHER_ID'" in helper
+    assert "Write-Output 'EXACT_ID_330'" in helper
+    assert "Write-Output 'PROVIDER_ERROR'" in helper
+    assert "$child.ExitCode -ne 0" in helper
+    assert "return 'INVALID_RESULT'" in helper
+    assert "$code -cin @('NO_FOCUS', 'FOREIGN_FOCUS', 'EXACT_ID_330', 'IN_FAMILY_OTHER_ID')" in helper
+    assert "Write-Output $focused" not in helper
+    assert "Write-Output $actualPid" not in helper
+
+
+def test_product_mta_differential_never_short_circuits_packaged_gates() -> None:
+    """Even a real isolated ID is diagnostic; in-process and downstream gates remain."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    field = "isolated_mta_focus_diagnostic_status"
+    assert source.count(field) == 2
+    assert field + " = 'NOT_RUN'" in source
+    assign = "$report." + field + " = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$foregroundFamilyIds)"
+    assert assign in source
+    assert source.index(assign) < source.index("$semanticReady = $null")
+    assert source.index(assign) > source.index(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'"
+    )
+    assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in source
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'" in source
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+    assert "keyboard_shortcuts_status = 'NOT_RUN'" in source
+    assert "live_region_event_status = 'NOT_RUN'" in source
+    assert "emergency_stop_activation_status = 'NOT_RUN'" in source

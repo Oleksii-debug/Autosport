@@ -1436,7 +1436,7 @@ def test_actual_desktop_uia_provider_is_bounded_inside_real_mta_worker() -> None
     assert "ManualResetEventSlim]::new($false)" in helper
     assert "$state.Completion.Wait(0)" in helper
     assert "[Math]::Min(4, $remainingSeconds)" in helper
-    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS'))" in helper
+    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS', 'RENDERER'))" in helper
     assert "if ($unfinished.Count -gt 0)" in helper
     assert "$script:semanticWorkerTimedOut = $true" in helper
     assert "last_desktop_stage=$lastWorkerStage" in helper

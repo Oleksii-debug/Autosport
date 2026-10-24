@@ -167,6 +167,26 @@ class GateTests(unittest.TestCase):
         self._build()["run_id"] = 102
         with self.assertRaises(GateError): self.check()
 
+    def test_float_job_run_id_equal_to_integer_is_rejected(self):
+        # JSON 100.0 must not satisfy the REST integer run_id contract.
+        self.cj["jobs"][0]["run_id"] = float(self.ci["id"])
+        with self.assertRaisesRegex(GateError, "job run id mismatch"):
+            self.check()
+
+    def test_windows_float_job_run_id_equal_to_integer_is_rejected(self):
+        self._build()["run_id"] = float(self.win["id"])
+        with self.assertRaisesRegex(GateError, "job run id mismatch"):
+            self.check()
+
+    def test_boolean_job_run_id_equal_to_one_is_rejected(self):
+        # bool is a subclass of int, so equality alone is insufficient.
+        self.ci["id"] = 1
+        for job in self.cj["jobs"]:
+            job["run_id"] = 1
+        self.cj["jobs"][0]["run_id"] = True
+        with self.assertRaisesRegex(GateError, "job run id mismatch"):
+            self.check()
+
     def test_missing_job_run_id(self):
         self._build().pop("run_id")
         with self.assertRaises(GateError): self.check()

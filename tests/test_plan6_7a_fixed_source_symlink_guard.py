@@ -332,3 +332,85 @@ def test_ignored_pytest_ini_can_silently_deselect_a_failing_tracked_test() -> No
         assert "1 deselected" in execution.stdout
         with pytest.raises(ValueError, match="ignored pytest configuration"):
             qualifier._identity(root)
+
+
+def test_real_git_pythonpath_cannot_replace_pytest_with_external_false_pass() -> None:
+    """An external pytest module must never impersonate tracked test results."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "проєкт з пробілом"
+        source = _real_git_fixture(root)
+        source.write_text(
+            "def test_failure():\n    assert False\n", encoding="utf-8",
+        )
+        (root / ".gitignore").write_text(
+            ".pytest_cache/\n__pycache__/\n", encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "add", "tests/test_localization_catalog.py", ".gitignore"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        )
+        subprocess.run(
+            ["git", "commit", "-qm", "pin failing test and ignore caches"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        )
+        external = Path(temporary) / "outside" / "pytest"
+        external.mkdir(parents=True)
+        (external / "__init__.py").write_text("", encoding="utf-8")
+        (external / "__main__.py").write_text(
+            'print("1 passed in 0.01s")\n', encoding="utf-8",
+        )
+        clean_env = {
+            key: value for key, value in qualifier.os.environ.items()
+            if key not in ("PYTHONPATH", "PYTEST_ADDOPTS", "PYTEST_PLUGINS")
+        }
+        command = [
+            qualifier.sys.executable, "-m", "pytest", "-q",
+            "tests/test_localization_catalog.py",
+        ]
+        baseline = subprocess.run(
+            command, cwd=root, env=clean_env, capture_output=True,
+            text=True, timeout=30, check=False,
+        )
+        assert baseline.returncode != 0
+        injected = subprocess.run(
+            command, cwd=root, env={**clean_env, "PYTHONPATH": str(external.parent)},
+            capture_output=True, text=True, timeout=30, check=False,
+        )
+        assert injected.returncode == 0
+        assert "1 passed in 0.01s" in injected.stdout
+        assert not subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        assert qualifier._identity(root) == subprocess.run(
+            ["git", "rev-parse", "HEAD"], cwd=root, check=True,
+            capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        with patch.dict(qualifier.os.environ, {"PYTHONPATH": str(external.parent)}):
+            with patch.object(qualifier.subprocess, "run") as execute:
+                result = qualifier._test_group(
+                    root, "uk_localization",
+                    ("tests/test_localization_catalog.py",), timeout=30,
+                )
+                execute.assert_not_called()
+        assert result["status"] == "FAIL_UNTRUSTED_TEST_ENV"
+        assert result["passed"] == 0
+
+
+def test_empty_pythonpath_override_preserves_normal_execution() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        _test_path(root, "test_localization_catalog.py")
+        with patch.dict(qualifier.os.environ, {
+            "PYTHONPATH": "", "PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": "",
+        }):
+            with patch.object(qualifier.subprocess, "run") as execute:
+                execute.return_value.returncode = 0
+                execute.return_value.stdout = "1 passed in 0.01s"
+                execute.return_value.stderr = ""
+                result = qualifier._test_group(
+                    root, "uk_localization",
+                    ("tests/test_localization_catalog.py",), timeout=3,
+                )
+                execute.assert_called_once()
+        assert result["status"] == "PASS"

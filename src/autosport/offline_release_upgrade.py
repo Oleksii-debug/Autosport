@@ -369,7 +369,10 @@ def rollback_verified_paper_release(
     new_archive: str | Path, new_source_sha: str, new_package_sha256: str,
 ) -> dict[str, object]:
     """Rollback only verified product bytes; keep new release quarantined."""
-    txn = _transaction_root(Path(destination))
+    txn = _inspection_root(_transaction_root(Path(destination)))
+    # A trusted previous/ inode can be reparented into a different lease.
+    # Bind the transaction parent before any archive/installed-file reads.
+    txn_witness = _directory_witness(txn)
     root = _inspection_root(destination)
     previous = _inspection_root(txn / "previous")
     previous_witness = _directory_witness(previous)
@@ -396,6 +399,8 @@ def rollback_verified_paper_release(
             or (original.st_dev, original.st_ino) != incumbent_witness
             or _directory_witness(previous) != previous_witness):
         raise OfflineInstallError("release identity changed before rollback commit")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before rollback commit")
     # Do not allow a concurrent newly-created quarantine directory to be
     # replaced by the installed product on POSIX.
     _publish_directory_no_replace(root, rejected)
@@ -404,6 +409,8 @@ def rollback_verified_paper_release(
     ):
         raise OfflineInstallError("installed identity changed during rollback")
     try:
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during rollback")
         # The prior read occurred before the active product moved to its
         # quarantine location. Reverify actual previous files here: an in-place
         # executable mutation does not alter the directory's inode witness.
@@ -415,8 +422,15 @@ def rollback_verified_paper_release(
         )
         if _directory_witness(previous) != previous_witness:
             raise OfflineInstallError("previous release identity changed on final rollback inspection")
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed before rollback publication")
         _publish_directory_no_replace(previous, root)
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed after rollback publication")
     except Exception:
+        # A foreign replacement lease has no authority to restore a release.
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during rollback recovery")
         if not root.exists() and not root.is_symlink() and rejected.is_dir():
             # The failed rollback left the formerly active release quarantined.
             # Do not restore a replaced or corrupted copy: an in-place write
@@ -458,6 +472,8 @@ def rollback_verified_paper_release(
     )
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during rollback readback")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed during rollback readback")
     return {"status": "ROLLED_BACK_PAPER_ONLY", "source_sha": old_source_sha,
             "rejected_release_path": str(rejected), "real_money_execution": False}
 

@@ -152,11 +152,11 @@ def test_real_git_pytest_addopts_cannot_deselect_failing_tracked_test() -> None:
         root = Path(temporary) / "проєкт з пробілом"
         source = _real_git_fixture(root)
         source.write_text(
-            "def test_good(): assert True\\n"
-            "def test_bad(): assert False\\n", encoding="utf-8",
+            "def test_good(): assert True\n"
+            "def test_bad(): assert False\n", encoding="utf-8",
         )
         (root / ".gitignore").write_text(
-            ".pytest_cache/\\n__pycache__/\\n", encoding="utf-8",
+            ".pytest_cache/\n__pycache__/\n", encoding="utf-8",
         )
         subprocess.run(
             ["git", "add", "tests/test_localization_catalog.py", ".gitignore"],

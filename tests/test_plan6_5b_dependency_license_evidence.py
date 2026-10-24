@@ -167,6 +167,27 @@ def test_foreign_license_record_cannot_be_credited_to_distribution(
         subject.capture_dependency_license_evidence(_graph())
 
 
+def test_owner_namespaced_vendored_license_record_is_captured(
+    tmp_path: Path, monkeypatch,
+):
+    """A wheel may own vendored license text below its package namespace."""
+    path = PurePosixPath(
+        "example_dist/_vendor/vendor_pkg-4.5.6.dist-info/licenses/LICENSE"
+    )
+    (tmp_path / path).parent.mkdir(parents=True, exist_ok=True)
+    (tmp_path / path).write_bytes(b"Vendored dependency license terms\n")
+    dist = _distribution(tmp_path, with_license=False)
+    dist.files = [path]
+    monkeypatch.setattr(subject.metadata, "distribution", lambda _: dist)
+
+    manifest, members = subject.capture_dependency_license_evidence(_graph())
+
+    assert manifest["distributions"][0]["files"][0]["record_path"] == str(path)
+    assert members["licenses/example-dist/000.txt"] == (
+        b"Vendored dependency license terms\n"
+    )
+
+
 @pytest.mark.parametrize("origin", [
     "another_dist-1.2.3.dist-info/licenses/LICENSE.txt",
     "example_dist-9.9.9.dist-info/licenses/LICENSE.txt",

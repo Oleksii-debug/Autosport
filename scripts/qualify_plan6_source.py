@@ -109,6 +109,15 @@ def _identity(root: Path) -> str:
         raise ValueError("not a canonical full Git commit")
     if _git(root, "status", "--porcelain", "--untracked-files=all"):
         raise ValueError("source tree changed or contains untracked files")
+    # Git status intentionally trusts index assume-unchanged / skip-worktree
+    # flags. Those flags can hide modified tracked Python source from status.
+    # A source-execution receipt must reject any such hidden-index entries.
+    flags = _git(root, "ls-files", "-v", "-z")
+    if any(
+        entry and (entry[0].islower() or entry[0] == "S")
+        for entry in flags.split("\0")
+    ):
+        raise ValueError("source index masks tracked changes")
     return sha
 
 def _test_group(root: Path, name: str, paths: tuple[str, ...], *, timeout: int) -> dict:

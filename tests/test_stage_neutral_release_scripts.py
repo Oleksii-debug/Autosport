@@ -18,6 +18,14 @@ def test_materializer_wires_exact_stage_neutral_release_contract() -> None:
     assert "stage-neutral-release-verification.json" in script
     assert "src/autosport/stage_neutral_release.py" in script
     assert "src/autosport/release_package.py" in script
+    for imported_source in (
+        "src/autosport/release_sbom.py",
+        "src/autosport/release_dependency_graph.py",
+        "src/autosport/release_binary_attribution.py",
+        "src/autosport/windows_update_admission.py",
+        "src/autosport/windows_update_release_metadata.py",
+    ):
+        assert imported_source in script
     assert "Get-ExactGitBlobBytes" in script
     assert "ls-tree $SourceSha" in script
     assert "cat-file" in script

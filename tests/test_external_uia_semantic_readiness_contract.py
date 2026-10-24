@@ -380,3 +380,45 @@ def test_family_host_activation_only_on_observed_child_top_level_and_never_passe
     )
     assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
     assert "if ($report.status -ne 'PASS')" in source
+
+
+def test_renderer_accessibility_activation_is_bounded_and_owned_not_uia_proof() -> None:
+    """The actual WebView2 render HWND gets one finite Win32 request, not fake UIA."""
+    source = _audit_script_text()
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    request = native.split("public static string RequestRendererAccessibility(", 1)[1].split(
+        "// Privacy-bounded OS-only classification", 1
+    )[0]
+    assert "private const uint WM_GETOBJECT = 0x003D;" in native
+    assert "private const int OBJID_CLIENT = -4;" in native
+    assert "private const uint SMTO_ABORTIFHUNG = 0x0002;" in native
+    assert "private static extern IntPtr SendMessageTimeout(" in native
+    assert "Array.IndexOf(familyIds, owner) < 0" in request
+    assert 'DiagnosticClassBucket(window) != "RENDER_WIDGET_VISIBLE"' in request
+    assert "SMTO_ABORTIFHUNG, 500, out ignoredReply" in request
+    assert "ProcessIdForHandle(window) != owner" in request
+    assert 'return "STALE";' in request
+    assert 'return dispatched == IntPtr.Zero ? "NO_REPLY" : "DELIVERED";' in request
+    assert "AutomationElement" not in request
+    assert "SetForegroundWindow" not in request
+
+
+def test_renderer_accessibility_request_precedes_real_uia_and_cannot_pass_audit() -> None:
+    source = _audit_script_text()
+    start = source.index("function Find-UiaRootWithElementForProcessFamily")
+    end = source.index("function Wait-ForUiaElement", start)
+    helper = source[start:end]
+    request = "[AutosportNativeWindows]::RequestRendererAccessibility("
+    assert helper.count(request) == 1
+    assert "$script:nativeRendererAccessibilityMessageStatus -eq 'NOT_ATTEMPTED'" in helper
+    assert "if ($classBucket -eq 'RENDER_WIDGET_VISIBLE'" in helper
+    assert helper.index(request) < helper.index("SEMANTIC_NATIVE_HANDLES_READY")
+    assert helper.index(request) < helper.index("SEMANTIC_NATIVE_UIA_PROBE")
+    assert helper.index(request) < helper.index("SEMANTIC_DESKTOP_POINT_PROBE")
+    assert "if ($script:nativeRendererAccessibilityMessageStatus -eq 'DELIVERED')" not in source
+    assert "$report.status = 'PASS'" not in helper
+    assert "AutomationElement]::FromPoint(" in helper
+    assert "$report.native_renderer_accessibility_message_status = $script:nativeRendererAccessibilityMessageStatus" in source
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source

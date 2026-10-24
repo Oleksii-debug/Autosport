@@ -35,6 +35,7 @@ Write-ExternalUiaProgress -Stage 'START'
 # A timed-out UIA COM worker poisons this audit process for further provider
 # probes. Never retry another HWND or query the stalled provider in cleanup.
 $script:semanticWorkerTimedOut = $false
+$script:nativeRendererAccessibilityMessageStatus = 'NOT_ATTEMPTED'
 # Only fixed audit-owned stage codes are retained. Never persist a UIA provider
 # exception message, arbitrary COM property, user path, or window title.
 $script:lastDesktopWorkerStage = 'NOT_RUN'
@@ -154,6 +155,36 @@ public static class AutosportNativeWindows
         if (GetForegroundWindow() == window) return true;
         if (!SetForegroundWindow(window)) return false;
         return GetForegroundWindow() == window;
+    }
+    // WebView2 can defer renderer accessibility until a client requests it.
+    // Request the standard Win32 OBJID_CLIENT object once on a genuine, visible
+    // render widget, before entering a UIA COM provider known to stall on CI.
+    // SendMessageTimeout is bounded; the OS reply is NEVER a UIA/ARIA witness.
+    private const uint WM_GETOBJECT = 0x003D;
+    private const int OBJID_CLIENT = -4;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(
+        IntPtr window, uint message, IntPtr wParam, IntPtr lParam,
+        uint flags, uint timeoutMs, out IntPtr reply);
+    public static string RequestRendererAccessibility(IntPtr window, int[] familyIds)
+    {
+        if (window == IntPtr.Zero || familyIds == null || familyIds.Length == 0)
+            return "NOT_ATTEMPTED";
+        var owner = ProcessIdForHandle(window);
+        if (owner <= 0 || Array.IndexOf(familyIds, owner) < 0 ||
+            DiagnosticClassBucket(window) != "RENDER_WIDGET_VISIBLE")
+            return "NOT_ATTEMPTED";
+        IntPtr ignoredReply;
+        var dispatched = SendMessageTimeout(
+            window, WM_GETOBJECT, IntPtr.Zero, new IntPtr(OBJID_CLIENT),
+            SMTO_ABORTIFHUNG, 500, out ignoredReply);
+        // HWND ownership/class may change while the OS message is in flight.
+        // Never retain or expose the returned object token or HWND/PID.
+        if (ProcessIdForHandle(window) != owner ||
+            DiagnosticClassBucket(window) != "RENDER_WIDGET_VISIBLE")
+            return "STALE";
+        return dispatched == IntPtr.Zero ? "NO_REPLY" : "DELIVERED";
     }
     // Privacy-bounded OS-only classification BEFORE any UIA COM provider call.
     // Never persist HWND, PID, raw class/title, executable path or user data.
@@ -1011,6 +1042,13 @@ function Find-UiaRootWithElementForProcessFamily {
         $classBucket = [string][AutosportNativeWindows]::DiagnosticClassBucket($candidateHandle)
         if (-not $bucketCounts.Contains($classBucket)) { $classBucket = 'UNKNOWN' }
         $bucketCounts[$classBucket] = [int]$bucketCounts[$classBucket] + 1
+        if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and $script:nativeRendererAccessibilityMessageStatus -eq 'NOT_ATTEMPTED') {
+            # Bounded WM_GETOBJECT requests the actual renderer's accessibility
+            # provider; DELIVERED is diagnostic only, never semantic PASS.
+            $script:nativeRendererAccessibilityMessageStatus = [AutosportNativeWindows]::RequestRendererAccessibility(
+                $candidateHandle, [int[]]$ProcessIds
+            )
+        }
         if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and $pointCoordinates.Count -eq 0) {
             $pointCoordinates = [AutosportNativeWindows]::VisibleScreenCenterForHandle($candidateHandle)
         }
@@ -1393,6 +1431,7 @@ $report = [ordered]@{
     observed_window_class = 'NOT_OBSERVED'
     last_observed_process_family_count = 0
     native_semantic_candidate_buckets = $null
+    native_renderer_accessibility_message_status = 'NOT_ATTEMPTED'
     semantic_desktop_worker_timeout = $false
     semantic_desktop_worker_last_stage = 'NOT_RUN'
     process_id = $null
@@ -2143,6 +2182,7 @@ try {
     # Export neither descendant PIDs nor native window names in this diagnostic.
     $report.last_observed_process_family_count = [int]@($lastFamilyIds).Count
     $report.native_semantic_candidate_buckets = $script:nativeSemanticCandidateBuckets
+    $report.native_renderer_accessibility_message_status = $script:nativeRendererAccessibilityMessageStatus
     $report.semantic_desktop_worker_timeout = ($script:lastDesktopWorkerStage -ne 'NOT_RUN')
     $report.semantic_desktop_worker_last_stage = $script:lastDesktopWorkerStage
     # Record bounded process-lifetime evidence BEFORE cleanup can kill a live

@@ -403,9 +403,15 @@ def test_noncanonical_snapshot_rejected_before_installed_trust_io(tmp_path):
 def test_installed_metadata_is_canonical_and_immutable(tmp_path):
     path = tmp_path / "installed.json"
     authority = _load(path, _bytes())
-    assert authority._file_metadata == (
-        path.stat().st_size, path.stat().st_mtime_ns, path.stat().st_ctime_ns
-    )
+    # The pinned metadata is captured from os.fstat(fd). On Windows the
+    # descriptor and pathname stat views can report different ctime_ns even
+    # for the same unchanged file. The loader independently checks each view
+    # for drift and pins the native change-time witness.
+    observed = path.stat()
+    assert authority._file_identity == (observed.st_dev, observed.st_ino)
+    assert authority._file_metadata[:2] == (observed.st_size, observed.st_mtime_ns)
+    assert type(authority._file_metadata[2]) is int
+    assert authority._file_metadata[2] >= 0
     for invalid in ((0, 0, 0), (1, -1, 0), (1, 2), (1, True, 3)):
         with pytest.raises(InstalledWindowsTrustError, match="metadata is invalid"):
             replace(authority, _file_metadata=invalid)

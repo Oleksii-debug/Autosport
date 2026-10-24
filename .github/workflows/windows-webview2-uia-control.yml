@@ -52,8 +52,40 @@ jobs:
       - name: Probe minimal WebView2 with killable independent UIA client
         shell: pwsh
         run: |
-          & ./dist/Autosport-WebView2-UIA-Control.exe run ./webview2-uia-control.json
-          exit $LASTEXITCODE
+          $reportPath = Join-Path $PWD 'webview2-uia-control.json'
+          & ./dist/Autosport-WebView2-UIA-Control.exe run $reportPath
+          $launcherExit = $LASTEXITCODE
+          # PyInstaller windowed onefile can return from its bootloader before
+          # the GUI child has finished. A process exit 0 is NEVER a UIA PASS.
+          # Poll the atomically published fixed-code report, not process exit.
+          $deadline = [DateTime]::UtcNow.AddSeconds(120)
+          $observed = 'NO_REPORT'
+          $evidence = $null
+          while ([DateTime]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+              try {
+                $evidence = Get-Content -LiteralPath $reportPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $observed = [string]$evidence.status
+              } catch {
+                $observed = 'UNREADABLE_REPORT'
+              }
+              if ($observed -notin @('STARTED', 'PROBE_ENTERED', 'UNREADABLE_REPORT')) { break }
+            }
+            Start-Sleep -Milliseconds 250
+          }
+          if ($launcherExit -ne 0) { throw 'Minimal WebView2 UIA control launcher failed' }
+          if ($observed -cne 'SEMANTIC_BUTTON_RETURNED') {
+            throw "Minimal WebView2 UIA control did not return real semantic evidence; fixed_stage=$observed"
+          }
+          if (
+            $null -eq $evidence -or
+            $evidence.autosport_product_uia_pass -ne $false -or
+            $evidence.human_tested -ne $false -or
+            $evidence.nvda_verified -ne $false -or
+            $evidence.real_money_execution -ne $false
+          ) {
+            throw 'Minimal WebView2 UIA control violated diagnostic-only truth labels'
+          }
       - name: Preserve fixed diagnostic codes even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02

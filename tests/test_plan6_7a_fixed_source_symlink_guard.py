@@ -223,7 +223,9 @@ def test_ignored_pytest_ini_can_silently_deselect_a_failing_tracked_test() -> No
             "def test_good(): assert True\ndef test_bad(): assert False\n",
             encoding="utf-8",
         )
-        (root / ".gitignore").write_text("pytest.ini\n", encoding="utf-8")
+        (root / ".gitignore").write_text(
+            "pytest.ini\n.pytest_cache/\n__pycache__/\n", encoding="utf-8",
+        )
         subprocess.run(
             ["git", "add", "tests/test_localization_catalog.py", ".gitignore"],
             cwd=root, check=True, capture_output=True, text=True, timeout=20,

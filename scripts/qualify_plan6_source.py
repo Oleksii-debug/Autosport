@@ -57,6 +57,7 @@ GROUPS = (
         "tests/test_plan6_6a_official_update_identity_contract.py",
         "tests/test_plan6_6a_packaged_update_lifecycle_contract.py",
         "tests/test_derive_previous_release_fixture.py",
+        "tests/test_plan6_5b_windows_review_artifact_contract.py",
         "tests/test_data_tools_installed_release_entry.py",
         "tests/test_offline_release_deflate_errors.py",
         "tests/test_offline_release_install_windows_namespace.py",

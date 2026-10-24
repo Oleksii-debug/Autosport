@@ -38,6 +38,8 @@ def fixture():
                        _ADMISSION_STEPS | frozenset({_WINDOWS_ADMISSION})
                        if n == "superseded_run_admission" else _WINDOWS_REQUIRED_STEPS)
                    for i, n in enumerate(sorted(_WINDOWS))]}
+    cj["total_count"] = len(cj["jobs"])
+    wj["total_count"] = len(wj["jobs"])
     return ci, cj, win, wj
 
 
@@ -304,6 +306,31 @@ class GateTests(unittest.TestCase):
             path.write_bytes(b" " * 2_000_001)
             with self.assertRaisesRegex(GateError, "exceeds 2 MB"):
                 _load(str(path))
+
+    def test_jobs_total_count_missing_blocks(self):
+        self.cj.pop("total_count")
+        with self.assertRaisesRegex(GateError, "incomplete jobs page"):
+            self.check()
+
+    def test_jobs_total_count_hidden_extra_job_blocks(self):
+        # A partial REST page can contain every expected job while omitting
+        # an additional job. The full count must agree with visible jobs.
+        self.cj["total_count"] += 1
+        with self.assertRaisesRegex(GateError, "incomplete jobs page"):
+            self.check()
+
+    def test_jobs_total_count_underreported_blocks(self):
+        self.wj["total_count"] -= 1
+        with self.assertRaisesRegex(GateError, "incomplete jobs page"):
+            self.check()
+
+    def test_jobs_total_count_boolean_blocks(self):
+        self.wj["total_count"] = True
+        with self.assertRaisesRegex(GateError, "incomplete jobs page"):
+            self.check()
+
+    def test_jobs_total_count_consistent_passes(self):
+        self.assertEqual(self.check()["status"], "PASS")
 
     def _build(self):
         return next(j for j in self.wj["jobs"] if j["name"] == "build")

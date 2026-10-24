@@ -32,7 +32,12 @@ def test_minimal_uia_semantic_success_requires_exact_button_identity() -> None:
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     assert module.classify(7, {7}, "ControlType.Button", module.BUTTON_NAME, module.BUTTON_ID) == "SEMANTIC_BUTTON_RETURNED"
-    assert module.classify(7, {7}, "ControlType.Button", module.BUTTON_NAME, "wrong-id") == "SEMANTIC_MISMATCH"
+    assert module.classify(7, {7}, "ControlType.Button", module.BUTTON_NAME, "wrong-id") == "WRONG_AUTOMATION_ID"
+    assert module.classify(7, {7}, "ControlType.Text", module.BUTTON_NAME, module.BUTTON_ID) == "WRONG_BUTTON_SEMANTICS"
+    assert module.classify(7, {7}, "ControlType.Button", "wrong", module.BUTTON_ID) == "WRONG_BUTTON_SEMANTICS"
     source = source_path.read_text(encoding="utf-8")
     assert "if ($exactId -ne '1')" in source
+    assert "Write-Output 'WRONG_AUTOMATION_ID|0'" in source
+    assert "Write-Output ('WRONG_BUTTON_SEMANTICS|' + $exactId)" in source
+    assert "if code not in CODES:" in source
     assert 'code == "SEMANTIC_BUTTON_RETURNED" and exact == "1"' in source

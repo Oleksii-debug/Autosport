@@ -20,6 +20,7 @@ CODES = {"STARTED", "WINDOWS_REQUIRED", "HOST_NOT_READY", "HOST_EXITED",
          "PROBE_CLR_IMPORT_ERROR", "PROBE_UIA_LOAD_ERROR",
          "PROBE_UIA_CALL_ERROR", "PROBE_PROPERTY_ERROR",
          "NO_FOCUSED_ELEMENT", "FOREIGN_FOCUS", "SEMANTIC_MISMATCH",
+         "WRONG_BUTTON_SEMANTICS", "WRONG_AUTOMATION_ID",
          "SEMANTIC_BUTTON_RETURNED"}
 
 def emit(path: Path, code: str, *, exact_id: bool = False) -> None:
@@ -99,8 +100,10 @@ def foreground(hwnd: int) -> bool:
 def classify(pid: int, allowed: set[int], role: str, name: str, automation_id: str) -> str:
     if pid not in allowed:
         return "FOREIGN_FOCUS"
-    if role != "ControlType.Button" or name != BUTTON_NAME or automation_id != BUTTON_ID:
-        return "SEMANTIC_MISMATCH"
+    if role != "ControlType.Button" or name != BUTTON_NAME:
+        return "WRONG_BUTTON_SEMANTICS"
+    if automation_id != BUTTON_ID:
+        return "WRONG_AUTOMATION_ID"
     return "SEMANTIC_BUTTON_RETURNED"
 
 # PowerShell 7's separate MTA process is the known-good UIA client used by the
@@ -137,9 +140,9 @@ try {
         Write-Output ('FOREIGN_FOCUS|' + $exactId); exit 1
     }
     if ($role -cne 'ControlType.Button' -or $name -cne 'Autosport WebView2 calibration button') {
-        Write-Output ('SEMANTIC_MISMATCH|' + $exactId); exit 1
+        Write-Output ('WRONG_BUTTON_SEMANTICS|' + $exactId); exit 1
     }
-    if ($exactId -ne '1') { Write-Output 'SEMANTIC_MISMATCH|0'; exit 1 }
+    if ($exactId -ne '1') { Write-Output 'WRONG_AUTOMATION_ID|0'; exit 1 }
     Write-Output ('SEMANTIC_BUTTON_RETURNED|' + $exactId); exit 0
 } catch {
     Write-Output 'PROBE_PROPERTY_ERROR|0'; exit 1
@@ -255,9 +258,9 @@ def run(report: Path) -> int:
 def selftest() -> int:
     assert classify(7, {7, 8}, "ControlType.Button", BUTTON_NAME, BUTTON_ID) == "SEMANTIC_BUTTON_RETURNED"
     assert classify(9, {7, 8}, "ControlType.Button", BUTTON_NAME, BUTTON_ID) == "FOREIGN_FOCUS"
-    assert classify(7, {7}, "ControlType.Text", BUTTON_NAME, BUTTON_ID) == "SEMANTIC_MISMATCH"
-    assert classify(7, {7}, "ControlType.Button", "wrong", BUTTON_ID) == "SEMANTIC_MISMATCH"
-    assert classify(7, {7}, "ControlType.Button", BUTTON_NAME, "wrong-id") == "SEMANTIC_MISMATCH"
+    assert classify(7, {7}, "ControlType.Text", BUTTON_NAME, BUTTON_ID) == "WRONG_BUTTON_SEMANTICS"
+    assert classify(7, {7}, "ControlType.Button", "wrong", BUTTON_ID) == "WRONG_BUTTON_SEMANTICS"
+    assert classify(7, {7}, "ControlType.Button", BUTTON_NAME, "wrong-id") == "WRONG_AUTOMATION_ID"
     with tempfile.TemporaryDirectory() as root:
         path = Path(root) / "report.json"
         emit(path, "SEMANTIC_BUTTON_RETURNED", exact_id=True)

@@ -155,7 +155,7 @@ def probe(root_pid: int, report: Path) -> int:
     encoded = base64.b64encode(PS_PROBE.encode("utf-16le")).decode("ascii")
     try:
         child = subprocess.run(
-            ["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Mta", "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
             stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
             stderr=subprocess.DEVNULL, text=True, timeout=9, env=env,
             check=False,

@@ -1151,10 +1151,52 @@ function Find-UiaRootWithElementForProcessFamily {
             $ProcessIds = [int[]]@($ProcessIdsCsv.Split(',') | ForEach-Object {
                 [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
             })
-        # Exact-head Windows 39977206535 blocked on FocusedElement. Probe the
-        # real UIA provider from the OS-observed visible render HWND center
-        # first, within this same bounded MTA worker. Neither HWND nor point
-        # nor process ID alone is semantic evidence; require real ID=330.
+        # Exact-head Windows Candidate 40049683170 blocks in FromPoint even
+        # after native foreground CLAIMED and WM_GETOBJECT DELIVERED. Give the
+        # independent genuine FocusedElement/RawView path a chance first.
+        # A prior focus attempt blocked before renderer initialization; this
+        # attempt follows the verified bounded renderer accessibility request.
+        # Never infer success from OS focus or HWND; require genuine in-family ID.
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PROBE'
+        $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_READY'
+        if ($null -ne $focusedElement) {
+            $focusedPid = [int]$focusedElement.Current.ProcessId
+            if ($ProcessIds -contains $focusedPid) {
+                $ancestorWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+                $focusedRoot = $focusedElement
+                $ancestorHops = 0
+                while ($ancestorHops -lt 64 -and [DateTime]::UtcNow -lt $Deadline) {
+                    $ancestorHops += 1
+                    Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE'
+                    $ancestor = $ancestorWalker.GetParent($focusedRoot)
+                    if ($null -eq $ancestor) { break }
+                    if (-not ($ProcessIds -contains [int]$ancestor.Current.ProcessId)) { break }
+                    $focusedRoot = $ancestor
+                }
+                if ($ancestorHops -ge 64) {
+                    throw 'External UIA focused ancestor traversal exceeded its bound'
+                }
+                Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE'
+                $focusSemantic = Find-BoundedUiaSemanticViaChildren -Root $focusedRoot -AutomationId $AutomationId -Deadline $Deadline
+                if ($null -ne $focusSemantic) {
+                    # The child walker must have read the genuine AutomationId.
+                    # Reverify exact ID and OS-observed process-family ownership
+                    # before returning the same UIA root/element pair.
+                    if (
+                        [string]$focusSemantic.Current.AutomationId -cne $AutomationId -or
+                        -not ($ProcessIds -contains [int]$focusSemantic.Current.ProcessId)
+                    ) {
+                        throw 'External UIA focused candidate failed semantic identity'
+                    }
+                    $ResultQueue.Enqueue([object](New-BoundedUiaPair -Window $focusedRoot -Element $focusSemantic))
+                    return
+                }
+            }
+        }
+        # After an unsuccessful real focused-element probe, try the independent
+        # real UIA render-center path. This may still block in the provider;
+        # the isolated worker timeout must remain FAIL, never a synthetic ID.
         if ($PointX -ne [int]::MinValue -and $PointY -ne [int]::MinValue) {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_PROBE'
             $pointElement = [System.Windows.Automation.AutomationElement]::FromPoint(
@@ -1197,49 +1239,6 @@ function Find-UiaRootWithElementForProcessFamily {
                             return
                         }
                     }
-                }
-            }
-        }
-        # Desktop ProcessIdProperty FindAll (38861632532) and FindFirst
-        # (38874072815) both blocked on this real Windows provider. Before
-        # querying all desktop children, try a different *real UIA* entry point:
-        # the currently focused element of the packaged process and its bounded
-        # process-owned RawView ancestor. This never sends keys, probes a
-        # foreign-process subtree or treats OS HWNDs as semantic evidence.
-        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PROBE'
-        $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
-        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_READY'
-        if ($null -ne $focusedElement) {
-            $focusedPid = [int]$focusedElement.Current.ProcessId
-            if ($ProcessIds -contains $focusedPid) {
-                $ancestorWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
-                $focusedRoot = $focusedElement
-                $ancestorHops = 0
-                while ($ancestorHops -lt 64 -and [DateTime]::UtcNow -lt $Deadline) {
-                    $ancestorHops += 1
-                    Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE'
-                    $ancestor = $ancestorWalker.GetParent($focusedRoot)
-                    if ($null -eq $ancestor) { break }
-                    if (-not ($ProcessIds -contains [int]$ancestor.Current.ProcessId)) { break }
-                    $focusedRoot = $ancestor
-                }
-                if ($ancestorHops -ge 64) {
-                    throw 'External UIA focused ancestor traversal exceeded its bound'
-                }
-                Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE'
-                $focusSemantic = Find-BoundedUiaSemanticViaChildren -Root $focusedRoot -AutomationId $AutomationId -Deadline $Deadline
-                if ($null -ne $focusSemantic) {
-                    # The child walker must have read the genuine AutomationId.
-                    # Reverify exact ID and OS-observed process-family ownership
-                    # before returning the same UIA root/element pair.
-                    if (
-                        [string]$focusSemantic.Current.AutomationId -cne $AutomationId -or
-                        -not ($ProcessIds -contains [int]$focusSemantic.Current.ProcessId)
-                    ) {
-                        throw 'External UIA focused candidate failed semantic identity'
-                    }
-                    $ResultQueue.Enqueue([object](New-BoundedUiaPair -Window $focusedRoot -Element $focusSemantic))
-                    return
                 }
             }
         }

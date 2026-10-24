@@ -176,7 +176,7 @@ def test_semantic_failure_classes_are_fixed_and_redact_provider_exceptions() -> 
 
 
 def test_render_point_probe_is_bounded_real_uia_not_native_hwnd_acceptance() -> None:
-    """The stalled desktop FocusedElement path has a genuine, bounded alternative."""
+    """A stalled FromPoint must not prevent an independent genuine focused UIA probe."""
     source = SCRIPT.read_text(encoding="utf-8")
     desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
         "function Wait-ForUiaElement {", 1
@@ -187,7 +187,7 @@ def test_render_point_probe_is_bounded_real_uia_not_native_hwnd_acceptance() -> 
     assert worker.index("SEMANTIC_DESKTOP_POINT_PROBE") < worker.index(
         "[System.Windows.Automation.AutomationElement]::FromPoint("
     ) < worker.index("SEMANTIC_DESKTOP_POINT_READY")
-    assert worker.index("::FromPoint(") < worker.index("::FocusedElement")
+    assert worker.index("::FocusedElement") < worker.index("::FromPoint(")
     assert "$pointPid = [int]$pointElement.Current.ProcessId" in worker
     assert "if ($ProcessIds -contains $pointPid)" in worker
     assert "$pointRoot.Current.AutomationId -ceq $AutomationId" in worker
@@ -379,3 +379,20 @@ def test_foreground_retry_uses_top_level_hwnds_only_and_preserves_real_uia_gate(
     assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
     assert "if ($report.status -ne 'PASS')" in source
     assert "exit 1" in source
+
+
+def test_focused_probe_precedes_known_blocking_point_without_bypassing_semantic_identity() -> None:
+    """The focused fallback requires genuine process and AutomationId evidence."""
+    worker, _ = _blocks()
+    assert worker.index("SEMANTIC_DESKTOP_FOCUS_PROBE") < worker.index(
+        "SEMANTIC_DESKTOP_POINT_PROBE"
+    ) < worker.index("SEMANTIC_DESKTOP_ROOT_PROBE")
+    focus = worker.split("SEMANTIC_DESKTOP_FOCUS_PROBE", 1)[1].split(
+        "SEMANTIC_DESKTOP_POINT_PROBE", 1
+    )[0]
+    assert "$ProcessIds -contains $focusedPid" in focus
+    assert "$ProcessIds -contains [int]$focusSemantic.Current.ProcessId" in focus
+    assert "$focusSemantic.Current.AutomationId -cne $AutomationId" in focus
+    assert "New-BoundedUiaPair -Window $focusedRoot -Element $focusSemantic" in focus
+    assert "status = 'PASS'" not in focus
+    assert "SendKeys" not in focus

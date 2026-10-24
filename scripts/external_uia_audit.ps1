@@ -35,6 +35,9 @@ Write-ExternalUiaProgress -Stage 'START'
 # A timed-out UIA COM worker poisons this audit process for further provider
 # probes. Never retry another HWND or query the stalled provider in cleanup.
 $script:semanticWorkerTimedOut = $false
+# Only fixed audit-owned stage codes are retained. Never persist a UIA provider
+# exception message, arbitrary COM property, user path, or window title.
+$script:lastDesktopWorkerStage = 'NOT_RUN'
 # Fixed OS-only class-bucket counts reveal whether a provider-backed render
 # HWND was even available. These are diagnostic counts, never UIA proof.
 $script:nativeSemanticCandidateBuckets = [ordered]@{
@@ -1072,6 +1075,31 @@ function Find-UiaRootWithElementForProcessFamily {
             $lastWorkerStage = [string]$workerStage
         }
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE'
+        # Persist which bounded COM operation stalled so the real Windows
+        # runner can distinguish focus/root/enumeration/provider failures.
+        # Fail closed for anything not in the audit's exact fixed vocabulary.
+        $allowedDesktopWorkerStages = @(
+            'NOT_ENTERED',
+            'SEMANTIC_DESKTOP_FOCUS_PROBE',
+            'SEMANTIC_DESKTOP_FOCUS_READY',
+            'SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE',
+            'SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE',
+            'SEMANTIC_DESKTOP_ROOT_PROBE',
+            'SEMANTIC_DESKTOP_ROOT_READY',
+            'SEMANTIC_DESKTOP_ENUM_PROBE',
+            'SEMANTIC_DESKTOP_WINDOWS_READY',
+            'SEMANTIC_DESKTOP_COUNT_PROBE',
+            'SEMANTIC_DESKTOP_ITEM_PROBE',
+            'SEMANTIC_WINDOW_PROPERTY_PROBE',
+            'SEMANTIC_DESCENDANT_PROBE',
+            'SEMANTIC_PRIMARY_DESCENDANT_PROBE',
+            'SEMANTIC_CHILD_DESCENDANT_PROBE'
+        )
+        $script:lastDesktopWorkerStage = if ($allowedDesktopWorkerStages -ccontains $lastWorkerStage) {
+            $lastWorkerStage
+        } else {
+            'UNKNOWN_FIXED_STAGE'
+        }
         $script:semanticWorkerTimedOut = $true
         # Do not synchronously Stop-Job or reenter a stalled COM provider.
         # The enclosing audit process owns cleanup; timeout is always FAIL.
@@ -1156,6 +1184,8 @@ $report = [ordered]@{
     observed_window_class = 'NOT_OBSERVED'
     last_observed_process_family_count = 0
     native_semantic_candidate_buckets = $null
+    semantic_desktop_worker_timeout = $false
+    semantic_desktop_worker_last_stage = 'NOT_RUN'
     process_id = $null
     process_family_ids = @()
     root_name = $null
@@ -1806,13 +1836,19 @@ try {
         Write-ExternalUiaProgress -Stage 'AUDIT_COMPLETE'
     }
 } catch {
-    $report.failures += 'external UIA audit failed: unexpected automation error'
+    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {
+        $report.failures += 'external UIA audit failed: desktop semantic worker timeout'
+    } else {
+        $report.failures += 'external UIA audit failed: unexpected automation error'
+    }
 } finally {
     # Preserve a bounded count from the actual pre-cleanup UIA search. A vanished
     # launcher with child processes differs from a completely empty process family.
     # Export neither descendant PIDs nor native window names in this diagnostic.
     $report.last_observed_process_family_count = [int]@($lastFamilyIds).Count
     $report.native_semantic_candidate_buckets = $script:nativeSemanticCandidateBuckets
+    $report.semantic_desktop_worker_timeout = ($script:lastDesktopWorkerStage -ne 'NOT_RUN')
+    $report.semantic_desktop_worker_last_stage = $script:lastDesktopWorkerStage
     # Record bounded process-lifetime evidence BEFORE cleanup can kill a live
     # window. Do not disclose command lines, workspace paths, or environment.
     # A missing semantic automation id must remain a hard FAIL regardless.

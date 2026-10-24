@@ -241,6 +241,39 @@ class RecoverInterruptedUninstallTests(unittest.TestCase):
             self.assertEqual(result["restored_files"], 0)
             self.assertTrue((dest / ".autosport-installed-release.json").is_file())
 
+    def test_quarantine_census_scandir_failure_preserves_private_file(self):
+        # Simulate a directory that permits opening known file paths but
+        # refuses listing. Without os.walk(onerror), the unknown owner file
+        # can be omitted from BOTH the recovery census and final inspection.
+        with tempfile.TemporaryDirectory() as temp:
+            archive, digest, dest, quarantine, trust = self._quarantined(Path(temp))
+            examples = quarantine / "examples"
+            (examples / "demo.json").unlink()
+            private = examples / "private-owner.json"
+            private.write_bytes(b"owner data must remain private")
+            original_walk = recovery.os.walk
+            failures = []
+
+            def denied_child_enumeration(top, *args, **kwargs):
+                for parent, dirs, names in original_walk(top, *args, **kwargs):
+                    if (Path(top) in (quarantine, dest)
+                            and Path(parent) == Path(top) / "examples"):
+                        failures.append(Path(parent))
+                        callback = kwargs.get("onerror")
+                        if callback is not None:
+                            callback(PermissionError("synthetic scandir denial"))
+                        continue
+                    yield parent, dirs, names
+
+            with patch.object(recovery.os, "walk", side_effect=denied_child_enumeration):
+                with self.assertRaisesRegex(
+                    installer.OfflineInstallError, "quarantine enumeration failed"
+                ):
+                    self._recover(archive, digest, dest, quarantine, trust)
+            self.assertEqual(failures, [examples])
+            self.assertFalse(dest.exists())
+            self.assertEqual(private.read_bytes(), b"owner data must remain private")
+
     def test_private_extra_file_blocks_and_preserves_every_byte(self):
         with tempfile.TemporaryDirectory() as temp:
             archive, digest, dest, quarant, trusted = self._quarantined(Path(temp))

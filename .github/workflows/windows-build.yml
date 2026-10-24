@@ -171,6 +171,15 @@ jobs:
           name: Autosport-packaged-state-migration
           path: dist/packaged-state-migration-evidence.json
           if-no-files-found: error
+      - name: Execute exact packaged update rollback and interruption recovery
+        shell: pwsh
+        run: ./scripts/windows_packaged_update_lifecycle_smoke.ps1 -CurrentPackage (Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip') -PackagedDataExe $env:AUTOSPORT_PACKAGED_DATA_EXE -SourceSha $env:AUTOSPORT_SOURCE_SHA -CurrentPackageSha256 $env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256 -EvidencePath (Join-Path $PWD 'dist/packaged-update-lifecycle-evidence.json')
+      - name: Upload exact packaged update lifecycle evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-packaged-update-lifecycle
+          path: dist/packaged-update-lifecycle-evidence.json
+          if-no-files-found: error
       - name: Qualify fixture-only certificate-backed release/update signature
         shell: pwsh
         run: ./scripts/qualify_fixture_release_signature.ps1 -PackagePath (Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip') -SourceSha $env:AUTOSPORT_SOURCE_SHA -ExpectedPackageSha256 $env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256 -EvidencePath (Join-Path $PWD 'dist/fixture-release-signature-evidence.json')

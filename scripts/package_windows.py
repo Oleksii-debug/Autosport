@@ -881,6 +881,11 @@ def main() -> int:
             dependency_license_members=dependency_license_members,
             embedded_executable_inventory=embedded_inventory,
             binary_module_attribution=binary_attribution,
+            # The official package must be consumable by the already-shipped
+            # fail-closed updater. Keep the installed data schema explicit and
+            # independent from PACKAGE_MANIFEST.schema_version.
+            update_version="0.1.0",
+            update_schema=1,
         )
         binding = bind_portable_data_tool(
             output,

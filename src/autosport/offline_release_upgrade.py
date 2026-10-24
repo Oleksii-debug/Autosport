@@ -238,6 +238,10 @@ def recover_update_gap(
     txn = _transaction_root(root)
     if root.exists() or root.is_symlink():
         raise OfflineInstallError("recovery cannot replace an occupied update destination")
+    # Bind the transaction namespace, not only the previous-release child:
+    # the same verified previous inode can be moved into a replacement lease.
+    txn = _inspection_root(txn)
+    txn_witness = _directory_witness(txn)
     previous = _inspection_root(txn / "previous")
     # Recovery is also a destructive directory publication. Bind the exact
     # previously inspected filesystem object, not just reproducible bytes:
@@ -258,6 +262,8 @@ def recover_update_gap(
     )
     if _directory_witness(previous) != previous_witness:
         raise OfflineInstallError("previous release identity changed before recovery publication")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before recovery publication")
     _publish_directory_no_replace(previous, root)
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during recovery")
@@ -270,14 +276,20 @@ def recover_update_gap(
     )
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during readback")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed during recovery publication")
     # Moving the sole `previous` release back leaves an empty transaction
     # directory. Keeping that empty lease would reject every future upgrade
     # as "previous update transaction requires disposition", even though the
     # old release was successfully recovered. Only retire an empty directory;
     # retained candidate/unknown artifacts must remain for explicit review.
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before recovery lease retirement")
     try:
         txn.rmdir()
     except OSError:
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during recovery lease retirement")
         if not any(txn.iterdir()):
             raise OfflineInstallError("empty recovered transaction could not be retired")
     # Retiring the recovery lease is a filesystem mutation. An in-place
@@ -292,6 +304,9 @@ def recover_update_gap(
     )
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed after transaction retirement")
+    # A retained candidate is legitimate only in the original lease.
+    if (txn.exists() or txn.is_symlink()) and _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed after recovery lease retirement")
     return {"status": "OLD_RELEASE_RECOVERED", "source_sha": old_source_sha,
             "real_money_execution": False}
 

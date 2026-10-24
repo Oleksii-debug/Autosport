@@ -635,6 +635,88 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertFalse(txn.exists())
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
 
+    def test_recovery_rejects_replaced_transaction_with_same_previous_inode(self):
+        # Previous release remains the SAME filesystem object while its
+        # transaction parent is replaced with a different directory.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, _new, _nd = self._installed(work)
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            previous = txn / "previous"
+            dest.rename(previous)
+            original_txn = upgrade._directory_witness(txn)
+            detached = work / "detached-original-transaction"
+            original_inspect = upgrade.inspect_installed_release
+            swapped = False
+
+            def swap_parent_after_first_inspection(path, **kwargs):
+                nonlocal swapped
+                report = original_inspect(path, **kwargs)
+                if Path(path) == previous and not swapped:
+                    txn.rename(detached)
+                    txn.mkdir(mode=0o700)
+                    (detached / "previous").rename(previous)
+                    swapped = True
+                    self.assertNotEqual(upgrade._directory_witness(txn), original_txn)
+                return report
+
+            with self._trusted(), patch.object(
+                upgrade, "inspect_installed_release",
+                side_effect=swap_parent_after_first_inspection,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "update transaction identity changed",
+                ):
+                    upgrade.recover_update_gap(
+                        dest, old_archive=old, old_source_sha=self.OLD,
+                        old_package_sha256=od,
+                    )
+            self.assertTrue(swapped)
+            self.assertFalse(dest.exists())
+            self.assertEqual((previous / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertTrue(detached.is_dir())
+
+    def test_recovery_rejects_foreign_transaction_after_publication(self):
+        # A foreign lease with private data must not be silently treated as a
+        # legitimate retained candidate after the old product is restored.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, _new, _nd = self._installed(work)
+            txn = upgrade._transaction_root(dest)
+            txn.mkdir(mode=0o700)
+            previous = txn / "previous"
+            dest.rename(previous)
+            detached = work / "detached-original-transaction"
+            publish = upgrade._publish_directory_no_replace
+            injected = False
+
+            def replace_parent_after_publish(source, target):
+                nonlocal injected
+                result = publish(source, target)
+                if Path(source) == previous and Path(target) == dest:
+                    txn.rename(detached)
+                    txn.mkdir(mode=0o700)
+                    (txn / "private.txt").write_bytes(b"foreign-owner-bytes")
+                    injected = True
+                return result
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=replace_parent_after_publish,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "update transaction identity changed",
+                ):
+                    upgrade.recover_update_gap(
+                        dest, old_archive=old, old_source_sha=self.OLD,
+                        old_package_sha256=od,
+                    )
+            self.assertTrue(injected)
+            self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+            self.assertEqual((txn / "private.txt").read_bytes(), b"foreign-owner-bytes")
+            self.assertTrue(detached.is_dir())
+
     def test_crash_recovery_keeps_unverified_candidate_for_disposition(self):
         # Recovery must never remove leftover staged release/private debris
         # merely to obtain an empty transaction namespace.

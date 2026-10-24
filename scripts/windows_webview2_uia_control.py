@@ -55,6 +55,14 @@ FOCUS_JS = (
     "})()"
 )
 
+VERIFY_JS = (
+    "(function(){"
+    "const target=document.getElementById('autosport-webview2-uia-control');"
+    "return !!target && document.activeElement===target && "
+    "document.activeElement.id==='autosport-webview2-uia-control';"
+    "})()"
+)
+
 def focus_status(value: object) -> str:
     # JavaScript must return a real Boolean; truthy strings/integers are not proof.
     return "DOM_FOCUS_CONFIRMED" if value is True else "DOM_FOCUS_NOT_CONFIRMED"
@@ -76,30 +84,40 @@ def host(ready: Path, profile: Path, *, file_origin: bool = False) -> int:
     focus_result = ready.with_name("focus-result")
     loaded_once = threading.Event()
 
+    def publish_focus_status(code: str) -> None:
+        pending = focus_result.with_suffix(".pending")
+        pending.write_text(code + "\n", encoding="ascii")
+        os.replace(pending, focus_result)
+
     def focus_after_foreground() -> None:
-        # Wait for the controller to verify native foreground BEFORE asking
-        # WebView2 to focus the DOM. The old test focused first, then changed
-        # OS foreground, so its READY marker was not a retained-focus witness.
+        # The original inline control focused its button BEFORE native
+        # activation and passed real UIA. After activation, recheck retained
+        # DOM focus without a second focus() that could alter OS/UIA state.
         deadline = time.monotonic() + 15
         while not focus_request.is_file() and time.monotonic() < deadline:
             time.sleep(0.1)
         if not focus_request.is_file():
             return  # Controller emits bounded DOM_FOCUS_TIMEOUT.
         try:
-            result = focus_status(window.evaluate_js(FOCUS_JS))
+            result = focus_status(window.evaluate_js(VERIFY_JS))
         except Exception:
             result = "DOM_FOCUS_EXCEPTION"
-        focus_result.write_text(result + "\n", encoding="ascii")
+        publish_focus_status(result)
 
     def loaded() -> None:
         if loaded_once.is_set():
             return
         loaded_once.set()
         try:
-            threading.Thread(target=focus_after_foreground, daemon=True).start()
+            initial = focus_status(window.evaluate_js(FOCUS_JS))
+            if initial == "DOM_FOCUS_CONFIRMED":
+                threading.Thread(target=focus_after_foreground, daemon=True).start()
+            else:
+                publish_focus_status(initial)
             ready.write_text("LOADED\n", encoding="ascii")
         except Exception:
-            pass  # Missing readiness is failure, not a synthetic PASS.
+            publish_focus_status("DOM_FOCUS_EXCEPTION")
+            ready.write_text("LOADED\n", encoding="ascii")
     window.events.loaded += loaded
     webview.start(gui="edgechromium", storage_path=str(profile))
     return 0

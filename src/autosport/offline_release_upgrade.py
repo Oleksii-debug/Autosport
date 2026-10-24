@@ -201,10 +201,38 @@ def upgrade_verified_paper_release(
         )
         if _directory_witness(candidate) != candidate_witness:
             raise OfflineInstallError("staged release identity changed on final inspection")
+        # The previous directory's inode survives an in-place executable
+        # rewrite during quarantine. Never publish an update while its only
+        # rollback source has ceased to match the independently pinned ZIP.
+        if _directory_witness(previous) != incumbent_witness:
+            raise OfflineInstallError("previous release identity changed during update")
+        inspect_installed_release(
+            previous, archive=old_archive,
+            expected_source_sha=old_source_sha,
+            expected_package_sha256=old_package_sha256,
+        )
+        if _directory_witness(previous) != incumbent_witness:
+            raise OfflineInstallError("previous release identity changed during verification")
         _publish_directory_no_replace(candidate, root)
     except Exception:
         if not root.exists() and previous.is_dir():
-            _publish_directory_no_replace(previous, root)
+            # A failed update must not silently reinstall a corrupted or
+            # replaced rollback source. Leave the transaction quarantined
+            # for explicit operator recovery instead.
+            try:
+                if _directory_witness(previous) != incumbent_witness:
+                    raise OfflineInstallError("previous release identity changed before restoration")
+                inspect_installed_release(
+                    previous, archive=old_archive,
+                    expected_source_sha=old_source_sha,
+                    expected_package_sha256=old_package_sha256,
+                )
+                if _directory_witness(previous) != incumbent_witness:
+                    raise OfflineInstallError("previous release identity changed on restoration")
+            except (OfflineInstallError, OSError):
+                pass
+            else:
+                _publish_directory_no_replace(previous, root)
         raise
     if _directory_witness(root) != candidate_witness:
         # Never report success for bytes published from an unverified

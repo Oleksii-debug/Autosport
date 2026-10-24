@@ -127,6 +127,19 @@ def _identity(root: Path) -> str:
     )
     if any(path.endswith(".py") for path in ignored.split("\0") if path):
         raise ValueError("source tree contains ignored Python test hooks")
+    # Pytest also reads configuration and root conftest.py outside tests/.
+    # An ignored file can deselect failing tracked tests while Git reports
+    # a clean HEAD. Reject only ignored, untracked pytest control files.
+    pytest_controls = (
+        "pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml",
+        "pyproject.toml", "tox.ini", "setup.cfg", "conftest.py",
+    )
+    ignored_controls = _git(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard",
+        "-z", "--", *pytest_controls,
+    )
+    if ignored_controls:
+        raise ValueError("source tree contains ignored pytest configuration")
     return sha
 
 def _test_group(root: Path, name: str, paths: tuple[str, ...], *, timeout: int) -> dict:

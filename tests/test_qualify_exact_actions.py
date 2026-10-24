@@ -155,7 +155,7 @@ class GateTests(unittest.TestCase):
 
     def test_missing_job_attempt(self):
         self._build().pop("run_attempt")
-        with self.assertRaises(GateError): self.check()
+        with self.assertRaisesRegex(GateError, "rerun job attempt not proven"): self.check()
 
     def test_missing_job_sha(self):
         self._build().pop("head_sha")
@@ -228,6 +228,44 @@ class GateTests(unittest.TestCase):
                                capture_output=True, text=True, check=False)
             self.assertEqual(p.returncode, 1)
             self.assertEqual(json.loads(p.stdout)["status"], "BLOCKED")
+
+    def test_rest_first_attempt_without_job_attempt_passes(self):
+        # GitHub's documented REST workflow-job response omits run_attempt.
+        for run, jobs in ((self.ci, self.cj), (self.win, self.wj)):
+            run["run_attempt"] = 1
+            for job in jobs["jobs"]:
+                job.pop("run_attempt")
+        self.assertEqual(self.check()["status"], "PASS")
+
+    def test_rest_rerun_without_attempt_provenance_blocks(self):
+        for job in self.wj["jobs"]:
+            job.pop("run_attempt")
+        with self.assertRaisesRegex(GateError, "rerun job attempt not proven"):
+            self.check()
+
+    def test_attempt_scoped_response_rerun_passes(self):
+        # Caller supplies the attempt number of the /attempts/N/jobs URL.
+        for jobs in (self.cj, self.wj):
+            jobs["run_attempt"] = 2
+            for job in jobs["jobs"]:
+                job.pop("run_attempt")
+        self.assertEqual(self.check()["status"], "PASS")
+
+    def test_attempt_scoped_response_mismatch_blocks(self):
+        self.wj["run_attempt"] = 1
+        with self.assertRaisesRegex(GateError, "jobs response attempt mismatch"):
+            self.check()
+
+    def test_boolean_attempt_provenance_blocks(self):
+        self.wj["run_attempt"] = True
+        with self.assertRaisesRegex(GateError, "jobs response attempt mismatch"):
+            self.check()
+
+    def test_wrong_job_attempt_blocks_even_with_matching_envelope(self):
+        self.wj["run_attempt"] = 2
+        self._build()["run_attempt"] = 1
+        with self.assertRaisesRegex(GateError, "job attempt mismatch"):
+            self.check()
 
     def _build(self):
         return next(j for j in self.wj["jobs"] if j["name"] == "build")

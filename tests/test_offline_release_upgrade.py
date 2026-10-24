@@ -22,6 +22,105 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
     OLD = "a" * 40
     NEW = "b" * 40
 
+    def test_complete_release_and_private_workspace_lifecycle(self):
+        """Exercise one full install/update/rollback/uninstall/reinstall chain.
+
+        The private workspace is separately backed up and restored to a fresh
+        root; a product update must never convert its data into install files.
+        Synthetic ZIP trust is stubbed, but real file/receipt/backup checks run.
+        """
+        from autosport import workspace_backup
+
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            workspace = root / "Мій робочий стан"
+            workspace.mkdir()
+            private = workspace / "особисті налаштування.json"
+            payload = '{"режим":"PAPER","ліміт":"0"}\n'.encode("utf-8")
+            private.write_bytes(payload)
+            backup = root / "workspace-backup.zip"
+            snapshot = workspace_backup.backup_workspace(workspace, backup)
+            self.assertEqual(snapshot["file_count"], 1)
+
+            dest, old, old_digest, new, new_digest = self._installed(root)
+            args = self._args(old, old_digest, new, new_digest)
+            with self._trusted():
+                updated = upgrade.upgrade_verified_paper_release(dest, **args)
+                self.assertEqual(updated["status"], "UPDATED_PAPER_ONLY")
+                self.assertFalse(updated["schema_migrated"])
+                self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+
+                rolled_back = upgrade.rollback_verified_paper_release(dest, **args)
+                self.assertEqual(rolled_back["status"], "ROLLED_BACK_PAPER_ONLY")
+                self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+                retired = upgrade.finalize_verified_paper_update(dest, **args)
+                self.assertEqual(retired["status"], "PAPER_UPDATE_FINALIZED")
+                self.assertFalse(upgrade._transaction_root(dest).exists())
+
+                upgraded_again = upgrade.upgrade_verified_paper_release(dest, **args)
+                self.assertEqual(upgraded_again["status"], "UPDATED_PAPER_ONLY")
+                retired_again = upgrade.finalize_verified_paper_update(dest, **args)
+                self.assertEqual(retired_again["status"], "PAPER_UPDATE_FINALIZED")
+                self.assertFalse(upgrade._transaction_root(dest).exists())
+
+                removed = lifecycle.uninstall_verified_release(
+                    dest, archive=new, expected_source_sha=self.NEW,
+                    expected_package_sha256=new_digest,
+                )
+                self.assertEqual(removed["status"], "UNINSTALLED")
+                self.assertFalse(dest.exists())
+                reinstalled = install.install_verified_release(
+                    old, dest, expected_source_sha=self.OLD,
+                    expected_package_sha256=old_digest,
+                )
+                self.assertEqual(reinstalled["status"], "INSTALLED")
+                install.inspect_installed_release(
+                    dest, archive=old, expected_source_sha=self.OLD,
+                    expected_package_sha256=old_digest,
+                )
+
+            recovered_workspace = root / "Відновлений стан"
+            restored = workspace_backup.restore_workspace(backup, recovered_workspace)
+            self.assertEqual(restored["file_count"], 1)
+            self.assertEqual((recovered_workspace / private.name).read_bytes(), payload)
+            self.assertEqual(private.read_bytes(), payload)
+            self.assertFalse(snapshot.get("real_money_execution", False))
+            self.assertFalse(restored["real_money_execution"])
+
+    def test_crash_between_release_moves_recovers_and_retires_candidate(self):
+        """A simulated hard stop leaves previous+candidate; recovery is usable."""
+        with tempfile.TemporaryDirectory() as temp:
+            root = Path(temp)
+            dest, old, old_digest, new, new_digest = self._installed(root)
+            args = self._args(old, old_digest, new, new_digest)
+            actual_publish = upgrade._publish_directory_no_replace
+
+            def interrupted_publish(source, target):
+                if Path(source) == upgrade._transaction_root(dest) / "candidate" and Path(target) == dest:
+                    raise KeyboardInterrupt("simulated power loss")
+                return actual_publish(source, target)
+
+            with self._trusted():
+                with patch.object(upgrade, "_publish_directory_no_replace",
+                                  side_effect=interrupted_publish):
+                    with self.assertRaises(KeyboardInterrupt):
+                        upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                self.assertFalse(dest.exists())
+                self.assertTrue((txn / "previous").is_dir())
+                self.assertTrue((txn / "candidate").is_dir())
+
+                recovered = upgrade.recover_update_gap(
+                    dest, old_archive=old, old_source_sha=self.OLD,
+                    old_package_sha256=old_digest,
+                )
+                self.assertEqual(recovered["status"], "OLD_RELEASE_RECOVERED")
+                self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
+                retired = upgrade.finalize_verified_paper_update(dest, **args)
+                self.assertEqual(retired["status"], "PAPER_UPDATE_FINALIZED")
+                self.assertFalse(txn.exists())
+                self.assertFalse(retired["real_money_execution"])
+
     def test_directory_witness_rejects_windows_junction_reparse_flag(self):
         # Windows junctions can advertise directory mode and a stable inode.
         # Never let such an alias authorize the move/rollback of an install.

@@ -172,7 +172,7 @@ def test_dom_focus_acknowledgment_is_real_boolean_and_after_native_foreground() 
     source = source_path.read_text(encoding="utf-8")
     run_body = source.split("def run(", 1)[1].split("def selftest(", 1)[0]
     assert run_body.index("if not foreground(hwnd):") < run_body.index('focus_request.write_text("FOCUS')
-    assert run_body.index('focus_code != "DOM_FOCUS_CONFIRMED"') < run_body.index('probe_exit = probe(child.pid, report)')
+    assert run_body.index('focus_code != "DOM_FOCUS_CONFIRMED"') < run_body.index('probe_exit = probe(child.pid, report, hwnd=hwnd)')
     assert 'ready.write_text("LOADED' in source
     assert 'window.evaluate_js(FOCUS_JS)' in source
     assert 'window.evaluate_js(VERIFY_JS)' in source

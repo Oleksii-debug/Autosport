@@ -219,7 +219,8 @@ def test_render_point_is_win32_only_and_process_family_scoped() -> None:
     assert "if ($pointCoordinates.Count -eq 2)" in desktop
     assert "$pointX = [int]$pointCoordinates[0]" in desktop
     assert "$pointY = [int]$pointCoordinates[1]" in desktop
-    assert "$processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY, $Deadline" in desktop
+    assert "$workerMode, $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY," in desktop
+    assert "$nativeRendererHandle, $rendererProcessId, $Deadline," in desktop
     assert "$report.status = 'PASS'" not in desktop
 
 

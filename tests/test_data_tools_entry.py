@@ -19,6 +19,7 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertIn("observe-continuous", help_text)
         self.assertIn("run-product", help_text)
         self.assertIn("repair-workspace", help_text)
+        self.assertIn("migrate-market-store", help_text)
         self.assertIn("export-evidence", help_text)
         self.assertIn("verify-evidence", help_text)
         self.assertIn("metadata-only workspace evidence manifest", help_text)
@@ -116,6 +117,16 @@ class DataToolsEntryTests(unittest.TestCase):
         self.assertEqual(result, 4)
         target.assert_called_once_with(
             ["repair-workspace", "--workspace", r"C:\\Autosport\\state"]
+        )
+
+    def test_market_store_migration_uses_canonical_migration_wrapper(self):
+        with patch("autosport.market_store_migration.main", return_value=6) as target:
+            result = data_tools_entry.main(
+                ["migrate-market-store", "--database", r"C:\\Autosport\\state\\market.db"]
+            )
+        self.assertEqual(result, 6)
+        target.assert_called_once_with(
+            ["--database", r"C:\\Autosport\\state\\market.db"]
         )
 
     def test_export_evidence_uses_canonical_metadata_only_exporter(self):

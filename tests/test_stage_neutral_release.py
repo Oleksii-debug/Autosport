@@ -258,6 +258,46 @@ def test_legacy_optional_explicit_false_readiness_is_compatible() -> None:
     assert evidence["whole_product_complete"] is False
 
 
+def test_update_capable_release_preserves_canonical_identity_during_rebrand() -> None:
+    members = _legacy_members()
+    info = json.loads(members["BUILD_INFO.json"])
+    info.update(
+        version=stage_release.CURRENT_UPDATE_VERSION,
+        update_version=stage_release.CURRENT_UPDATE_VERSION,
+        update_schema=stage_release.CURRENT_UPDATE_SCHEMA,
+    )
+    members["BUILD_INFO.json"] = _canonical_json(info)
+    _reseal_legacy_metadata(members)
+
+    converted = stage_release._transform_members(
+        members, expected_source_sha=SOURCE_SHA,
+    )
+    build_info = json.loads(converted["BUILD_INFO.json"])
+    assert build_info["version"] == stage_release.CURRENT_UPDATE_VERSION
+    assert build_info["update_version"] == stage_release.CURRENT_UPDATE_VERSION
+    assert build_info["update_schema"] == stage_release.CURRENT_UPDATE_SCHEMA
+
+
+@pytest.mark.parametrize(
+    "changes",
+    [
+        {"version": "0.1.1", "update_version": "0.1.1", "update_schema": 1},
+        {"version": "0.1.0", "update_version": "0.1.0"},
+        {"version": "0.1.0", "update_schema": 1},
+        {"version": "0.1.0", "update_version": "0.1.0", "update_schema": True},
+    ],
+)
+def test_stage_neutral_rejects_noncanonical_official_update_identity(changes) -> None:
+    members = _legacy_members()
+    info = json.loads(members["BUILD_INFO.json"])
+    info.update(changes)
+    members["BUILD_INFO.json"] = _canonical_json(info)
+    _reseal_legacy_metadata(members)
+
+    with pytest.raises(ValueError, match="update identity is not canonical"):
+        stage_release._transform_members(members, expected_source_sha=SOURCE_SHA)
+
+
 def test_repackage_stage_neutral_release_rewrites_identity_and_evidence(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,

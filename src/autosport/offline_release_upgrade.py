@@ -417,8 +417,36 @@ def rollback_verified_paper_release(
             raise OfflineInstallError("previous release identity changed on final rollback inspection")
         _publish_directory_no_replace(previous, root)
     except Exception:
-        if not root.exists() and rejected.is_dir():
-            _publish_directory_no_replace(rejected, root)
+        if not root.exists() and not root.is_symlink() and rejected.is_dir():
+            # The failed rollback left the formerly active release quarantined.
+            # Do not restore a replaced or corrupted copy: an in-place write
+            # during the attempted previous-release publication preserves its
+            # directory identity but invalidates the original SHA-pinned bytes.
+            try:
+                if _directory_witness(rejected) != incumbent_witness:
+                    raise OfflineInstallError("rejected release identity changed before restoration")
+                inspect_installed_release(
+                    rejected, archive=new_archive,
+                    expected_source_sha=new_source_sha,
+                    expected_package_sha256=new_package_sha256,
+                )
+                if _directory_witness(rejected) != incumbent_witness:
+                    raise OfflineInstallError("rejected release identity changed during restoration inspection")
+            except (OfflineInstallError, OSError):
+                # Keep the suspect release in the transaction for explicit
+                # operator recovery rather than silently republishing it.
+                pass
+            else:
+                _publish_directory_no_replace(rejected, root)
+                if _directory_witness(root) != incumbent_witness:
+                    raise OfflineInstallError("reinstalled release identity changed during failed rollback recovery")
+                inspect_installed_release(
+                    root, archive=new_archive,
+                    expected_source_sha=new_source_sha,
+                    expected_package_sha256=new_package_sha256,
+                )
+                if _directory_witness(root) != incumbent_witness:
+                    raise OfflineInstallError("reinstalled release identity changed after failed rollback recovery")
         raise
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during rollback")

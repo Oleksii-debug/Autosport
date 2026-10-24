@@ -16,6 +16,8 @@ HTML = ("<!doctype html><html lang='en'><meta charset='utf-8'><body>"
 CODES = {"STARTED", "WINDOWS_REQUIRED", "HOST_NOT_READY", "HOST_EXITED",
          "NO_VISIBLE_HOST_WINDOW", "FOREGROUND_NOT_CLAIMED", "PROBE_ENTERED",
          "PROBE_TIMEOUT", "PROBE_NO_REPORT", "PROBE_EXCEPTION",
+         "PROBE_CLR_IMPORT_ERROR", "PROBE_UIA_LOAD_ERROR",
+         "PROBE_UIA_CALL_ERROR", "PROBE_PROPERTY_ERROR",
          "NO_FOCUSED_ELEMENT", "FOREIGN_FOCUS", "SEMANTIC_MISMATCH",
          "SEMANTIC_BUTTON_RETURNED"}
 
@@ -103,22 +105,33 @@ def classify(pid: int, allowed: set[int], role: str, name: str) -> str:
 def probe(root_pid: int, report: Path) -> int:
     try:
         import clr
+    except Exception:
+        emit(report, "PROBE_CLR_IMPORT_ERROR")
+        return 1
+    try:
         clr.AddReference("UIAutomationClient")
         clr.AddReference("UIAutomationTypes")
         from System.Windows.Automation import AutomationElement
-        # This may block. The parent kills this entire process on timeout;
-        # unlike ThreadJob it cannot poison the parent's UIA COM state.
+    except Exception:
+        emit(report, "PROBE_UIA_LOAD_ERROR")
+        return 1
+    try:
+        # This may block. Parent watchdog kills the entire probe process.
         element = AutomationElement.FocusedElement
-        if element is None:
-            emit(report, "NO_FOCUSED_ELEMENT")
-            return 1
+    except Exception:
+        emit(report, "PROBE_UIA_CALL_ERROR")
+        return 1
+    if element is None:
+        emit(report, "NO_FOCUSED_ELEMENT")
+        return 1
+    try:
         current = element.Current
         code = classify(int(current.ProcessId), family(root_pid),
                         str(current.ControlType.ProgrammaticName), str(current.Name))
         emit(report, code, exact_id=str(current.AutomationId) == BUTTON_ID)
         return 0 if code == "SEMANTIC_BUTTON_RETURNED" else 1
     except Exception:
-        emit(report, "PROBE_EXCEPTION")
+        emit(report, "PROBE_PROPERTY_ERROR")
         return 1
 
 def run(report: Path) -> int:
@@ -126,7 +139,9 @@ def run(report: Path) -> int:
         emit(report, "WINDOWS_REQUIRED")
         return 1
     emit(report, "STARTED")
-    with tempfile.TemporaryDirectory(prefix="autosport-webview2-uia-") as root:
+    with tempfile.TemporaryDirectory(
+        prefix="autosport-webview2-uia-", ignore_cleanup_errors=True
+    ) as root:
         directory = Path(root)
         ready = directory / "ready"
         child = subprocess.Popen(command("host", str(ready), str(directory / "profile")),
@@ -176,8 +191,13 @@ def run(report: Path) -> int:
         finally:
             try:
                 import psutil
-                for desc in reversed(psutil.Process(child.pid).children(recursive=True)):
-                    desc.kill()
+                descendants = psutil.Process(child.pid).children(recursive=True)
+                for desc in reversed(descendants):
+                    try:
+                        desc.kill()
+                    except (psutil.NoSuchProcess, psutil.AccessDenied):
+                        pass
+                psutil.wait_procs(descendants, timeout=5)
             except (psutil.NoSuchProcess, psutil.AccessDenied):
                 pass
             if child.poll() is None:
@@ -186,6 +206,9 @@ def run(report: Path) -> int:
                 child.wait(timeout=5)
             except subprocess.TimeoutExpired:
                 pass
+            # A WebView2 browser may retain a file handle briefly after the
+            # host exits. TemporaryDirectory ignores only cleanup errors on
+            # this disposable CI runner; it must not override probe evidence.
 
 def selftest() -> int:
     assert classify(7, {7, 8}, "ControlType.Button", BUTTON_NAME) == "SEMANTIC_BUTTON_RETURNED"

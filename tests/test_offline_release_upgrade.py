@@ -74,7 +74,7 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                     expected_package_sha256=old_digest,
                 )
                 self.assertEqual(reinstalled["status"], "INSTALLED")
-                install.inspect_installed_release(
+                lifecycle.inspect_installed_release(
                     dest, archive=old, expected_source_sha=self.OLD,
                     expected_package_sha256=old_digest,
                 )

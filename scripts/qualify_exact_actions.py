@@ -153,7 +153,9 @@ def check_workflow(run: Any, jobs_response: Any, *, expected_sha: str,
             raise GateError(f"run {run_id}: duplicate or unknown job")
         seen.add(name)
         ids.add(job_id)
-        if job.get("run_id") != run_id:
+        # JSON 100.0 compares equal to integer 100 in Python, and True == 1.
+        # GitHub REST run_id must be an integer, not merely numerically equal.
+        if type(job.get("run_id")) is not int or job["run_id"] != run_id:
             raise GateError(f"run {run_id}: job run id mismatch")
         job_attempt = job.get("run_attempt")
         if job_attempt is not None and (

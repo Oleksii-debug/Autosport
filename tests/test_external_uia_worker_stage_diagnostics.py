@@ -90,3 +90,380 @@ def test_desktop_worker_timeout_stage_is_allowlisted_and_persisted_fail_closed()
     # The output report must not derive its reason from provider exception text.
     serialized = source.split("$report.semantic_desktop_worker_last_stage =", 1)[1]
     assert "$_.Exception.Message" not in serialized
+
+
+def test_failure_cleanup_never_reenters_uia_provider() -> None:
+    """A blocked Windows provider must not suppress the fail-closed JSON receipt."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    final_cleanup = source.split(
+        "} catch {\n    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {", 1
+    )[1].split("} finally {", 1)[1]
+    # The initial main-window classification occurs BEFORE the semantic probes.
+    # Cleanup may only retain that bounded class; it must never query COM again.
+    assert "if ([string]::Equals($initialNativeName, 'Автоспорт'" in source
+    assert "observed_window_class = 'PRODUCT_MAIN_WINDOW'" in source
+    assert "Never reenter the UIA COM provider during failure cleanup" in final_cleanup
+    assert "$uiaRoot.Current.Name" not in final_cleanup.replace(
+        "# $uiaRoot.Current.Name", "# redacted cleanup comment"
+    )
+    assert "AutomationElement]::" not in final_cleanup
+    assert "Find-UiaRootWithElementForProcessFamily" not in final_cleanup
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in final_cleanup
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_cleanup_preserves_existing_fixed_window_classification() -> None:
+    """Do not overwrite a real pre-semantic native window classification."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    initial = source.split(
+        "Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'", 1
+    )[1].split("    $semanticReady = $null", 1)[0]
+    assert "observed_window_class = 'NATIVE_EMERGENCY_STOP'" in initial
+    assert "observed_window_class = 'NATIVE_STARTUP_ERROR'" in initial
+    assert "observed_window_class = 'PRODUCT_MAIN_WINDOW'" in initial
+    cleanup = source.split(
+        "} catch {\n    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {", 1
+    )[1].split("} finally {", 1)[1]
+    assert "$report.observed_window_class =" not in cleanup
+    assert "$report.semantic_desktop_worker_last_stage" in cleanup
+    assert "$report.native_semantic_candidate_buckets" in cleanup
+
+
+
+def test_semantic_budget_exhaustion_is_classified_without_fabricated_uia_pass() -> None:
+    """The real Windows deadline can expire before desktop fallback starts."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "$script:semanticFailureClass = 'NOT_OBSERVED'" in source
+    assert "$script:semanticFailureClass = 'NATIVE_WORKER_TIMEOUT'" in native
+    assert "$script:semanticFailureClass = 'DESKTOP_BUDGET_EXHAUSTED'" in desktop
+    assert "if ($remainingSeconds -le 0)" in desktop
+    assert "$script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'" in desktop
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert "$script:semanticFailureClass = 'SEMANTIC_NOT_OBSERVED'" in source
+    # Deadline exhaustion is not UIA evidence and cannot enter PASS state.
+    assert "$report.status = 'PASS'" not in desktop
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_semantic_failure_classes_are_fixed_and_redact_provider_exceptions() -> None:
+    """Failure receipts must distinguish native/desktop exhaustion safely."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    failure = source.split("} catch {\n    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {", 1)[1].split(
+        "} finally {", 1
+    )[0]
+    for category in (
+        "desktop semantic worker timeout",
+        "native semantic worker timeout",
+        "desktop semantic budget exhausted",
+        "semantic readiness not observed",
+        "unexpected automation error",
+    ):
+        assert f"external UIA audit failed: {category}" in failure
+    assert "$script:semanticFailureClass -eq 'NATIVE_WORKER_TIMEOUT'" in failure
+    assert "$script:semanticFailureClass -eq 'DESKTOP_BUDGET_EXHAUSTED'" in failure
+    assert "$script:semanticFailureClass -eq 'SEMANTIC_NOT_OBSERVED'" in failure
+    assert "$_.Exception" not in failure
+    assert "$report.status = 'PASS'" not in failure
+    assert "$report.failures +=" in failure
+
+
+def test_render_point_probe_is_bounded_real_uia_not_native_hwnd_acceptance() -> None:
+    """A stalled FromPoint must not prevent an independent genuine focused UIA probe."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
+        "} -ArgumentList @(", 1
+    )[0]
+    assert worker.index("SEMANTIC_DESKTOP_POINT_PROBE") < worker.index(
+        "[System.Windows.Automation.AutomationElement]::FromPoint("
+    ) < worker.index("SEMANTIC_DESKTOP_POINT_READY")
+    assert worker.index("::FocusedElement") < worker.index("::FromPoint(")
+    assert "$pointPid = [int]$pointElement.Current.ProcessId" in worker
+    assert "if ($ProcessIds -contains $pointPid)" in worker
+    assert "$pointRoot.Current.AutomationId -ceq $AutomationId" in worker
+    assert "$ProcessIds -contains [int]$pointParent.Current.ProcessId" in worker
+    assert "$pointHops -lt 64 -and [DateTime]::UtcNow -lt $Deadline" in worker
+    assert "$pointSemantic.Current.AutomationId -cne $AutomationId" in worker
+    assert "$ProcessIds -contains [int]$pointSemantic.Current.ProcessId" in worker
+    assert "New-BoundedUiaPair -Window $pointRoot -Element $pointSemantic" in worker
+    assert "$report.status = 'PASS'" not in worker
+    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in desktop
+    assert "$script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'" in desktop
+
+
+def test_render_point_is_win32_only_and_process_family_scoped() -> None:
+    """No screen location or native HWND may become a semantic PASS witness."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "VisibleScreenCenterForHandle(IntPtr window)" in native
+    assert "window == IntPtr.Zero || !IsWindowVisible(window)" in native
+    assert "GetWindowRect(window, out rectangle)" in native
+    assert "rectangle.Right <= rectangle.Left || rectangle.Bottom <= rectangle.Top" in native
+    assert "if ($classBucket -eq 'RENDER_WIDGET_VISIBLE'" in desktop
+    assert "[AutosportNativeWindows]::VisibleScreenCenterForHandle($candidateHandle)" in desktop
+    assert "if ($pointCoordinates.Count -eq 2)" in desktop
+    assert "$pointX = [int]$pointCoordinates[0]" in desktop
+    assert "$pointY = [int]$pointCoordinates[1]" in desktop
+    assert "$processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY, $Deadline" in desktop
+    assert "$report.status = 'PASS'" not in desktop
+
+
+def test_render_point_timeout_stages_are_fixed_and_not_provider_text() -> None:
+    """The new bounded worker cannot publish arbitrary COM data as evidence."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    stage_names = (
+        "SEMANTIC_DESKTOP_POINT_PROBE",
+        "SEMANTIC_DESKTOP_POINT_READY",
+        "SEMANTIC_DESKTOP_POINT_ID_PROBE",
+        "SEMANTIC_DESKTOP_POINT_PARENT_PROBE",
+        "SEMANTIC_DESKTOP_POINT_CHILD_PROBE",
+    )
+    allowed = desktop.split("$allowedDesktopWorkerStages = @(", 1)[1].split(")", 1)[0]
+    global_progress = source.split("function Write-ExternalUiaProgress {", 1)[1].split(
+        "Write-ExternalUiaProgress -Stage 'START'", 1
+    )[0]
+    progress_tokens = global_progress.split("[ValidateSet(", 1)[1].split(")]", 1)[0]
+    progress_stages = tuple(token.strip().strip("'") for token in progress_tokens.split(","))
+    for stage in stage_names:
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in desktop
+        assert f"'{stage}'" in allowed
+        # These are fixed audit-owned diagnostics and must be accepted by the
+        # public watchdog without treating a stage as semantic UIA PASS.
+        assert stage in progress_stages
+    assert "PASS" not in progress_stages
+    assert len(progress_stages) == len(set(progress_stages))
+    assert "$allowedDesktopWorkerStages -ccontains $lastWorkerStage" in desktop
+    assert "'UNKNOWN_FIXED_STAGE'" in desktop
+    assert "if (-not $workerTerminal)" in desktop
+    assert "Stop-Job -Job $desktopJob" not in desktop
+    assert "$report.status = 'PASS'" not in desktop
+
+
+def test_foreground_activation_only_targets_visible_exact_launch_process() -> None:
+    """Win32 activation cannot target a foreign HWND or count as UIA proof."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    helper = native.split("public static bool TryClaimForegroundForProcess(", 1)[1].split(
+        "public static", 1
+    )[0]
+    assert "window == IntPtr.Zero || expectedProcessId <= 0 || !IsWindowVisible(window)" in helper
+    assert "GetWindowThreadProcessId(window, out ownerPid) == 0" in helper
+    assert "ownerPid != (uint)expectedProcessId" in helper
+    assert "GetForegroundWindow() == window" in helper
+    assert "if (!SetForegroundWindow(window)) return false" in helper
+    assert "return GetForegroundWindow() == window" in helper
+    assert "AutomationElement" not in helper
+
+
+def test_foreground_attempt_precedes_semantic_probe_without_fabricating_pass() -> None:
+    """An OS focus claim is neither AutomationId=330 nor release acceptance."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    activation = source.split(
+        "# WinForms UIA calibration #40017780628 succeeded", 1
+    )[1].split("    $semanticReady = $null", 1)[0]
+    assert "$process.Refresh()" in activation
+    assert "[AutosportNativeWindows]::TryClaimForegroundForProcess(" in activation
+    assert "$process.MainWindowHandle, [int]$process.Id" in activation
+    assert "$report.native_foreground_activation_status = 'CLAIMED'" in activation
+    assert "$report.native_foreground_activation_status = 'NOT_CLAIMED'" in activation
+    assert "$report.status = 'PASS'" not in activation
+    assert "AutomationElement" not in activation
+    assert source.index("TryClaimForegroundForProcess(") < source.index(
+        "Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'"
+    )
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_foreground_retry_uses_only_exact_launcher_pid() -> None:
+    """Retry a missing MainWindowHandle without accepting child-process HWNDs."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    activation = source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+    assert activation.count("TryClaimForegroundForProcess(") == 2
+    assert "if ($report.native_foreground_activation_status -ne 'CLAIMED')" in activation
+    assert "[AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(" in activation
+    assert "[int]$process.Id" in activation
+    assert "[AutosportNativeWindows]::ForProcessFamily(" not in activation
+    assert "foreach ($candidateHandle in $exactLauncherWindows)" in activation
+    assert "$candidateHandle, [int]$process.Id" in activation
+    assert "$lastFamilyIds" not in activation
+    assert "status = 'PASS'" not in activation
+
+
+def test_foreground_retry_remains_os_only_and_uia_gate_is_required() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    activation = source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+    assert "AutomationElement" not in activation
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'" in source
+    assert "Find-UiaRootWithElementForProcessFamily" in source
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert 'throw "Timed out waiting for WebView2 semantic UIA readiness' in source
+
+
+def test_foreground_os_census_distinguishes_launcher_and_child_top_level_windows() -> None:
+    """Never confuse a renderer-owned top-level window with launcher foreground."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    census = native.split("public static int[] TopLevelProcessOwnershipCounts(", 1)[1].split(
+        "public static IntPtr[] VisibleTopLevelWindowsForProcess(", 1
+    )[0]
+    assert "EnumWindows(callback, IntPtr.Zero)" in census
+    assert "Array.IndexOf(familyIds, launcherId) < 0" in census
+    assert "Array.IndexOf(familyIds, (int)owner) < 0" in census
+    assert "owner == (uint)launcherId ? 0 : 2" in census
+    assert "IsWindowVisible(window) ? 0 : 1" in census
+    assert "if (++matched > 4096) return false" in census
+    assert "AutomationElement" not in census
+    assert "GetWindowText" not in census
+    for token in (
+        "LAUNCHER_VISIBLE", "LAUNCHER_HIDDEN",
+        "FAMILY_CHILD_VISIBLE", "FAMILY_CHILD_HIDDEN",
+        "FAMILY_CHILD_VISIBLE_ONLY", "NO_VISIBLE_FAMILY_TOP_LEVEL",
+        "UNAVAILABLE",
+    ):
+        assert token in source
+    assert "native_foreground_top_level_counts = $null" in source
+    assert "native_foreground_top_level_class = 'NOT_OBSERVED'" in source
+    assert "$report.status = 'PASS'" not in source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+
+
+def test_foreground_retry_uses_top_level_hwnds_only_and_preserves_real_uia_gate() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    helper = native.split("public static IntPtr[] VisibleTopLevelWindowsForProcess(", 1)[1].split(
+        "public static IntPtr[] ForProcessFamily(", 1
+    )[0]
+    assert "EnumWindows(callback, IntPtr.Zero)" in helper
+    assert "owner != (uint)launcherId || !IsWindowVisible(window)" in helper
+    assert "if (count >= windows.Length) return false" in helper
+    assert "GetWindow(" not in helper
+    assert "AutomationElement" not in helper
+    activation = source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+    assert "VisibleTopLevelWindowsForProcess(" in activation
+    assert "TryClaimForegroundForProcess(" in activation
+    assert "FAMILY_CHILD_VISIBLE_ONLY" in activation
+    assert "Find-UiaRootWithElementForProcessFamily" in source
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_focused_probe_precedes_known_blocking_point_without_bypassing_semantic_identity() -> None:
+    """The focused fallback requires genuine process and AutomationId evidence."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
+        "} -ArgumentList @(", 1
+    )[0]
+    assert worker.index("SEMANTIC_DESKTOP_FOCUS_PROBE") < worker.index(
+        "SEMANTIC_DESKTOP_POINT_PROBE"
+    ) < worker.index("SEMANTIC_DESKTOP_ROOT_PROBE")
+    focus = worker.split("SEMANTIC_DESKTOP_FOCUS_PROBE", 1)[1].split(
+        "SEMANTIC_DESKTOP_POINT_PROBE", 1
+    )[0]
+    assert "$ProcessIds -contains $focusedPid" in focus
+    assert "$ProcessIds -contains [int]$focusSemantic.Current.ProcessId" in focus
+    assert "$focusSemantic.Current.AutomationId -cne $AutomationId" in focus
+    assert "New-BoundedUiaPair -Window $focusedRoot -Element $focusSemantic" in focus
+    assert "status = 'PASS'" not in focus
+    assert "SendKeys" not in focus
+
+
+def test_product_mta_differential_is_process_isolated_bounded_and_not_a_gate() -> None:
+    """Real product/UIA provider differential cannot be misreported as PASS."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    helper = source.split("function Get-IsolatedMtaFocusDiagnostic {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    assert "[System.Diagnostics.ProcessStartInfo]::new()" in helper
+    assert "$start.UseShellExecute = $false" in helper
+    assert "'-NoProfile', '-NonInteractive', '-Mta'" in helper
+    assert "'-EncodedCommand'" in helper
+    assert "[Text.Encoding]::Unicode.GetBytes($probe)" in helper
+    assert "$child.WaitForExit(6000)" in helper
+    assert "$child.Kill($true)" in helper
+    assert "$started = $false" in helper
+    assert "if ($started)" in helper
+    assert "Get-Command pwsh -ErrorAction SilentlyContinue" in helper
+    assert "return 'TIMEOUT'" in helper
+    assert "return 'UNAVAILABLE'" in helper
+    assert "$report.status = 'PASS'" not in helper
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'" not in helper
+
+
+def test_product_mta_differential_requires_real_pid_and_exact_id() -> None:
+    """Foreign/wrong-ID/failed COM reads are never a positive semantic claim."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    helper = source.split("function Get-IsolatedMtaFocusDiagnostic {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    assert "AUTOSPORT_UIA_DIAGNOSTIC_PIDS" in helper
+    assert "[System.Windows.Automation.AutomationElement]::FocusedElement" in helper
+    assert "$focused.Current.ProcessId" in helper
+    assert "$allowed -notcontains $actualPid" in helper
+    assert "Write-Output 'FOREIGN_FOCUS'" in helper
+    assert "$focused.Current.AutomationId -ceq '330'" in helper
+    assert "Write-Output 'IN_FAMILY_OTHER_ID'" in helper
+    assert "Write-Output 'EXACT_ID_330'" in helper
+    assert "Write-Output 'PROVIDER_ERROR'" in helper
+    assert "$child.ExitCode -ne 0" in helper
+    assert "return 'INVALID_RESULT'" in helper
+    assert "$code -cin @('NO_FOCUS', 'FOREIGN_FOCUS', 'EXACT_ID_330', 'IN_FAMILY_OTHER_ID')" in helper
+    assert "Write-Output $focused" not in helper
+    assert "Write-Output $actualPid" not in helper
+
+
+def test_product_mta_differential_never_short_circuits_packaged_gates() -> None:
+    """Even a real isolated ID is diagnostic; in-process and downstream gates remain."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    field = "isolated_mta_focus_diagnostic_status"
+    assert source.count(field) == 2
+    assert field + " = 'NOT_RUN'" in source
+    assign = "$report." + field + " = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$foregroundFamilyIds)"
+    assert assign in source
+    assert source.index(assign) < source.index("$semanticReady = $null")
+    assert source.index(assign) > source.index(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'"
+    )
+    assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in source
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'" in source
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+    assert "keyboard_shortcuts_status = 'NOT_RUN'" in source
+    assert "live_region_event_status = 'NOT_RUN'" in source
+    assert "emergency_stop_activation_status = 'NOT_RUN'" in source

@@ -3305,6 +3305,58 @@ def launch_windows_shell(
         trusted_document_observed = True
         return None
 
+    # A minimal packaged WebView2 control can expose genuine UIA semantics
+    # after its loaded event focuses an HTML button.  The production shell
+    # previously never seeded first keyboard focus.  Do this at most once,
+    # only for the exact trusted local document, and never steal existing
+    # focus (including focus restored by the browser or the operator).
+    # This is NOT UIA acceptance: external AutomationId/keyboard/STOP/
+    # LiveRegion checks remain mandatory.
+    initial_accessibility_focus_attempted = False
+
+    def seed_initial_accessibility_focus() -> None:
+        nonlocal initial_accessibility_focus_attempted
+        if initial_accessibility_focus_attempted or not canonical_bridge:
+            return
+        if (
+            window is None
+            or not renderer_observed
+            or not trusted_document_observed
+            or trusted_document_violation
+            or runtime_identity_violation
+            or expected_real_url is None
+        ):
+            return
+        try:
+            if (
+                _require_packaged_launch_document(
+                    window, expected_original_url=expected_original_url
+                )
+                != expected_real_url
+            ):
+                return
+            # JSON-quote the trusted pywebview URL; no user-controlled JS.
+            expected_url_literal = json.dumps(expected_real_url, ensure_ascii=True)
+            script = (
+                "(function () {"
+                f"if (window.location.href !== {expected_url_literal}) return false;"
+                "if (document.activeElement !== document.body && "
+                "document.activeElement !== document.documentElement) return false;"
+                "const target = document.getElementById('303');"
+                "if (!target || target.tagName !== 'BUTTON' || "
+                "target.disabled || target.hidden) return false;"
+                "target.focus({preventScroll:true});"
+                "return document.activeElement === target;"
+                "})()"
+            )
+            window.evaluate_js(script)
+        except Exception:
+            # Failure to seed focus must not grant a fake accessibility PASS
+            # or replace the existing keyboard-accessible native STOP.
+            pass
+        finally:
+            initial_accessibility_focus_attempted = True
+
     close_teardown_lock = threading.Lock()
     close_teardown_thread: threading.Thread | None = None
     close_teardown_succeeded = False
@@ -3395,6 +3447,19 @@ def launch_windows_shell(
             # injects window.pywebview into each document. Re-check every load so
             # a navigated document cannot inherit the privileged Python API.
             window.events.before_load += bind_trusted_document
+            # Legacy fake pywebview windows used by existing launch/restart
+            # tests do not model the optional loaded event.  Never abort those
+            # established host paths before webview.start().  A real native
+            # pywebview Window must expose the event or fail closed.
+            if hasattr(window.events, "loaded"):
+                window.events.loaded += seed_initial_accessibility_focus
+            elif (
+                type(window).__module__ == "webview.window"
+                and type(window).__name__ == "Window"
+            ):
+                raise WindowsWebViewUnavailable(
+                    "The native WebView2 host has no loaded event for keyboard focus"
+                )
             # closing is blocking on WinForms. The first close is vetoed quickly;
             # canonical teardown runs off the UI thread and destroys the window
             # only after STOP/worker terminalization succeeds.

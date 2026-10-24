@@ -185,11 +185,29 @@ def qualify(ci_run: Any, ci_jobs: Any, windows_run: Any, windows_jobs: Any,
                             "Not independent review, postmerge readback, or human NVDA verification"]}
 
 
+def _unique_json_members(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
+    """Reject ambiguous evidence, including duplicate keys in nested objects."""
+    result: dict[str, Any] = {}
+    for key, value in pairs:
+        if key in result:
+            raise GateError("JSON contains duplicate object member")
+        result[key] = value
+    return result
+
+
+def _reject_nonfinite_json(value: str) -> None:
+    raise GateError("JSON contains non-finite number")
+
+
 def _load(path: str) -> Any:
-    data = Path(path).read_bytes()
+    # Limit bytes before JSON parsing, not after an unbounded read. Duplicate
+    # JSON members can otherwise hide failed runs/jobs/steps behind success.
+    with Path(path).open("rb") as stream:
+        data = stream.read(2_000_001)
     if len(data) > 2_000_000:
         raise GateError("JSON exceeds 2 MB")
-    return json.loads(data)
+    return json.loads(data, object_pairs_hook=_unique_json_members,
+                      parse_constant=_reject_nonfinite_json)
 
 
 def main(argv: list[str] | None = None) -> int:

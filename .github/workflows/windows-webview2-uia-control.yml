@@ -128,5 +128,7 @@ jobs:
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: independent-webview2-uia-control
-          path: |\n            webview2-uia-control.json\n            webview2-uia-control-file.json
+          path: |
+            webview2-uia-control.json
+            webview2-uia-control-file.json
           if-no-files-found: warn

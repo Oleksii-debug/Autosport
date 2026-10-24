@@ -215,14 +215,10 @@ def run(report: Path) -> int:
                 emit(report, "FOREGROUND_NOT_CLAIMED")
                 return 1
             emit(report, "PROBE_ENTERED")
-            try:
-                result = subprocess.run(command("probe", str(child.pid), str(report)),
-                                        cwd=root, stdin=subprocess.DEVNULL,
-                                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-                                        timeout=12, check=False)
-            except subprocess.TimeoutExpired:
-                emit(report, "PROBE_TIMEOUT")
-                return 1
+            # The genuine COM client already runs in its own bounded pwsh MTA
+            # process. Avoid a second windowed PyInstaller bootloader whose
+            # exit code can differ from the completed child probe's result.
+            probe_exit = probe(child.pid, report)
             try:
                 data = json.loads(report.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -231,7 +227,7 @@ def run(report: Path) -> int:
             if data.get("status") == "PROBE_ENTERED":
                 emit(report, "PROBE_NO_REPORT")
                 return 1
-            return 0 if (result.returncode == 0 and
+            return 0 if (probe_exit == 0 and
                          data.get("status") == "SEMANTIC_BUTTON_RETURNED") else 1
         finally:
             try:

@@ -151,3 +151,29 @@ def test_diagnostic_artifact_paths_are_real_yaml_block_lines() -> None:
     ) in workflow
     artifact_step = workflow.split("- name: Preserve fixed diagnostic codes even on failure", 1)[1]
     assert artifact_step.count("webview2-uia-control-file.json") == 1
+
+def test_dom_focus_acknowledgment_is_real_boolean_and_after_native_foreground() -> None:
+    """Neither loaded nor a truthy JS value is semantic/DOM focus evidence."""
+    import importlib.util
+
+    source_path = ROOT / "scripts/windows_webview2_uia_control.py"
+    spec = importlib.util.spec_from_file_location("autosport_uia_control_focus", source_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    assert module.focus_status(True) == "DOM_FOCUS_CONFIRMED"
+    for value in (False, None, 0, 1, "true", {}, []):
+        assert module.focus_status(value) == "DOM_FOCUS_NOT_CONFIRMED"
+    assert "document.activeElement===target" in module.FOCUS_JS
+    assert "document.activeElement.id==='autosport-webview2-uia-control'" in module.FOCUS_JS
+    assert "DOM_FOCUS_TIMEOUT" in module.CODES
+    assert "DOM_FOCUS_NOT_CONFIRMED" in module.CODES
+    assert "DOM_FOCUS_EXCEPTION" in module.CODES
+    source = source_path.read_text(encoding="utf-8")
+    run_body = source.split("def run(", 1)[1].split("def selftest(", 1)[0]
+    assert run_body.index("if not foreground(hwnd):") < run_body.index('focus_request.write_text("FOCUS')
+    assert run_body.index('focus_code != "DOM_FOCUS_CONFIRMED"') < run_body.index('probe_exit = probe(child.pid, report)')
+    assert 'ready.write_text("LOADED' in source
+    assert 'window.evaluate_js(FOCUS_JS)' in source
+    assert 'focus_result.write_text(result +' in source
+    assert 'window.evaluate_js("document.getElementById(' not in source

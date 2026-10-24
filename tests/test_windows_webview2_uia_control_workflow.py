@@ -149,4 +149,5 @@ def test_diagnostic_artifact_paths_are_real_yaml_block_lines() -> None:
         "            webview2-uia-control.json\n"
         "            webview2-uia-control-file.json\n"
     ) in workflow
-    assert workflow.count("webview2-uia-control-file.json") == 1
+    artifact_step = workflow.split("- name: Preserve fixed diagnostic codes even on failure", 1)[1]
+    assert artifact_step.count("webview2-uia-control-file.json") == 1

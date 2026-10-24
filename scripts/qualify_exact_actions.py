@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import math
 import re
 import sys
 from pathlib import Path
@@ -208,6 +209,15 @@ def _reject_nonfinite_json(value: str) -> None:
     raise GateError("JSON contains non-finite number")
 
 
+def _finite_json_float(value: str) -> float:
+    # parse_constant rejects literal NaN/Infinity, but Python's default
+    # float parser also converts valid JSON exponent overflow (1e999) to inf.
+    number = float(value)
+    if not math.isfinite(number):
+        raise GateError("JSON contains non-finite number")
+    return number
+
+
 def _load(path: str) -> Any:
     # Limit bytes before JSON parsing, not after an unbounded read. Duplicate
     # JSON members can otherwise hide failed runs/jobs/steps behind success.
@@ -216,7 +226,8 @@ def _load(path: str) -> Any:
     if len(data) > 2_000_000:
         raise GateError("JSON exceeds 2 MB")
     return json.loads(data, object_pairs_hook=_unique_json_members,
-                      parse_constant=_reject_nonfinite_json)
+                      parse_constant=_reject_nonfinite_json,
+                      parse_float=_finite_json_float)
 
 
 def main(argv: list[str] | None = None) -> int:

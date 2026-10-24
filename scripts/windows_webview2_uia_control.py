@@ -12,6 +12,7 @@ import time
 
 BUTTON_ID = "autosport-webview2-uia-control"
 BUTTON_NAME = "Autosport WebView2 calibration button"
+HOST_WINDOW_TITLE = "Independent WebView2 UIA control"
 HTML = ("<!doctype html><html lang='en'><meta charset='utf-8'><body>"
         "<button id='" + BUTTON_ID + "'>" + BUTTON_NAME + "</button></body></html>")
 CODES = {"STARTED", "WINDOWS_REQUIRED", "HOST_NOT_READY", "HOST_EXITED",
@@ -44,7 +45,7 @@ def command(mode: str, *args: str) -> list[str]:
 
 def host(ready: Path, profile: Path) -> int:
     import webview
-    window = webview.create_window("Independent WebView2 UIA control",
+    window = webview.create_window(HOST_WINDOW_TITLE,
                                    html=HTML, width=640, height=480)
     def loaded() -> None:
         try:
@@ -61,29 +62,51 @@ def family(root_pid: int) -> set[int]:
     try:
         proc = psutil.Process(root_pid)
         return {root_pid, *(p.pid for p in proc.children(recursive=True))}
-    except (psutil.NoSuchProcess, psutil.AccessDenied):
-        return set()
+    except (psutil.NoSuchProcess, psutildef visible_window(root_pid: int, pids: set[int]) -> int:
+    """Select the single exact host HWND, never an arbitrary family window.
 
-def visible_window(pids: set[int]) -> int:
-    if not pids:
+    A renderer/utility process may expose its own visible top-level window.
+    Its position in EnumWindows is not proof that it is the host to activate.
+    Ambiguity fails closed; the caller retries only while the host is starting.
+    """
+    if root_pid <= 0 or root_pid not in pids:
         return 0
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     callback_type = ctypes.WINFUNCTYPE(ctypes.c_bool, ctypes.c_void_p, ctypes.c_void_p)
     user32.EnumWindows.argtypes = [callback_type, ctypes.c_void_p]
-    user32.GetWindowThreadProcessId.argtypes = [ctypes.c_void_p,
-                                                 ctypes.POINTER(ctypes.c_ulong)]
+    user32.GetWindowThreadProcessId.argtypes = [
+        ctypes.c_void_p, ctypes.POINTER(ctypes.c_ulong)
+    ]
     user32.IsWindowVisible.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextLengthW.argtypes = [ctypes.c_void_p]
+    user32.GetWindowTextLengthW.restype = ctypes.c_int
+    user32.GetWindowTextW.argtypes = [
+        ctypes.c_void_p, ctypes.c_wchar_p, ctypes.c_int
+    ]
+    user32.GetWindowTextW.restype = ctypes.c_int
     handles: list[int] = []
+
     def inspect(hwnd: int, _unused: int) -> bool:
+        if not user32.IsWindowVisible(hwnd):
+            return True
         owner = ctypes.c_ulong()
-        if user32.IsWindowVisible(hwnd):
-            if user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)):
-                if int(owner.value) in pids:
-                    handles.append(int(hwnd))
-        return len(handles) < 256
+        if not user32.GetWindowThreadProcessId(hwnd, ctypes.byref(owner)):
+            return True
+        if int(owner.value) != root_pid:
+            return True
+        title_length = user32.GetWindowTextLengthW(hwnd)
+        if title_length != len(HOST_WINDOW_TITLE):
+            return True
+        title = ctypes.create_unicode_buffer(title_length + 1)
+        if user32.GetWindowTextW(hwnd, title, title_length + 1) != title_length:
+            return True
+        if title.value == HOST_WINDOW_TITLE:
+            handles.append(int(hwnd))
+        return len(handles) < 2
+
     callback = callback_type(inspect)
     user32.EnumWindows(callback, None)
-    return handles[0] if handles else 0
+    return handles[0] if len(handles) == 1 else 0
 
 def foreground(hwnd: int) -> bool:
     if not hwnd:
@@ -209,7 +232,7 @@ def run(report: Path) -> int:
             hwnd = 0
             deadline = time.monotonic() + 12
             while not hwnd and time.monotonic() < deadline:
-                hwnd = visible_window(family(child.pid))
+                hwnd = visible_window(child.pid, family(child.pid))
                 if not hwnd:
                     time.sleep(0.2)
             if not hwnd:

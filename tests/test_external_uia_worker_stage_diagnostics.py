@@ -481,7 +481,7 @@ def test_desktop_fallback_routes_are_independent_and_never_accept_native_only_ev
     worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
         "} -ArgumentList @(", 1
     )[0]
-    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS'))" in desktop
+    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS', 'RENDERER'))" in desktop
     assert "[string]$Mode, [string]$ProcessIdsCsv" in worker
     assert "if ($Mode -eq 'FOCUS')" in worker
     assert "if ($Mode -eq 'POINT')" in worker
@@ -514,7 +514,7 @@ def test_independent_desktop_uia_routes_publish_fixed_failure_stages() -> None:
         "$script:semanticWorkerTimedOut = $true", 1
     )[0]
     assert "$script:lastDesktopWorkerRouteStages = [ordered]@{" in source
-    assert all(f"{mode} = 'NOT_RUN'" in source for mode in ("ROOT", "POINT", "FOCUS"))
+    assert all(f"{mode} = 'NOT_RUN'" in source for mode in ("ROOT", "POINT", "FOCUS", "RENDERER"))
     assert "foreach ($state in $workerStates)" in timeout
     assert "$state.Progress.TryDequeue([ref]$workerStage)" in timeout
     assert "$state.Completion.Wait(0)" in timeout
@@ -601,5 +601,46 @@ def test_optional_focused_mta_diagnostic_cannot_preempt_product_semantic_probe()
     assert "Get-IsolatedMtaFocusDiagnostic" not in source[
         source.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'"):
     ]
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_renderer_hwnd_route_requires_real_in_family_semantic_descendant() -> None:
+    """An observed native renderer is a candidate, never accessibility PASS."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
+        "} -ArgumentList @(", 1
+    )[0]
+    assert "$nativeRendererHandle -ne [IntPtr]::Zero" in desktop
+    assert "$rendererProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeRendererHandle)" in desktop
+    assert "($ProcessIds -contains $rendererProcessId)" in desktop
+    assert "if ($workerMode -eq 'RENDERER' -and -not $rendererCandidateValid) { continue }" in desktop
+    assert "if ($Mode -eq 'RENDERER')" in worker
+    renderer = worker.split("if ($Mode -eq 'RENDERER')", 1)[1].split(
+        "if ($Mode -eq 'FOCUS')", 1
+    )[0]
+    assert "Find-BoundedUiaSemanticViaChildren" in renderer
+    assert "-NativeWindowHandle $RendererHandle -ExpectedProcessId $RendererProcessId" in renderer
+    assert "$rendererPair.Element.Current.AutomationId -cne $AutomationId" in renderer
+    assert "$ProcessIds -contains [int]$rendererPair.Element.Current.ProcessId" in renderer
+    assert "$rendererPair.Root.Current.ProcessId -ne $RendererProcessId" in renderer
+    assert "$ResultQueue.Enqueue([object]$rendererPair)" in renderer
+    assert "$report.status = 'PASS'" not in renderer
+    assert "isolated_renderer_handle_status" not in renderer
+    assert "'SEMANTIC_DESKTOP_RENDERER_PROBE'" in desktop
+    assert "'SEMANTIC_DESKTOP_RENDERER_READY'" in desktop
+
+
+def test_renderer_hwnd_route_cannot_bypass_downstream_packaged_acceptance() -> None:
+    """A real renderer descendant still needs runtime, keyboard and STOP gates."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'" in source
+    assert "keyboard_shortcuts_status = 'NOT_RUN'" in source
+    assert "live_region_event_status = 'NOT_RUN'" in source
+    assert "emergency_stop_activation_status = 'NOT_RUN'" in source
+    assert "runtime_witness_status = 'NOT_REQUESTED'" in source
     assert "if ($report.status -ne 'PASS')" in source
     assert "exit 1" in source

@@ -123,6 +123,62 @@ class RecoverInterruptedUninstallTests(unittest.TestCase):
             self.assertEqual((dest / "Autosport.exe").read_bytes(), b"product")
             self.assertEqual((moved / "Autosport.exe").read_bytes(), b"product")
 
+    def test_recovery_rejects_same_byte_swap_during_archive_inventory(self):
+        # The original quarantine must be bound before archive inventory.
+        # Replacing it with a byte-identical copy must not authorize restore.
+        with tempfile.TemporaryDirectory() as temp:
+            archive, digest, dest, quarantine, trust = self._quarantined(Path(temp))
+            saved = quarantine.parent / "original-before-inventory"
+            original_inventory = recovery._trusted_archive_inventory
+            replaced = []
+
+            def swap_after_inventory(*args, **kwargs):
+                result = original_inventory(*args, **kwargs)
+                quarantine.rename(saved)
+                shutil.copytree(saved, quarantine)
+                replaced.append(True)
+                return result
+
+            with patch.object(recovery, "_trusted_archive_inventory",
+                              side_effect=swap_after_inventory):
+                with self.assertRaisesRegex(
+                    installer.OfflineInstallError,
+                    "identity changed during archive inventory",
+                ):
+                    self._recover(archive, digest, dest, quarantine, trust)
+            self.assertEqual(replaced, [True])
+            self.assertFalse(dest.exists())
+            self.assertEqual((saved / "Autosport.exe").read_bytes(), b"product")
+
+    def test_recovery_rejects_census_swap_before_restoring_missing_file(self):
+        # A replacement during os.walk must be rejected before recovery
+        # writes missing archive members into the untrusted new directory.
+        with tempfile.TemporaryDirectory() as temp:
+            archive, digest, dest, quarantine, trust = self._quarantined(Path(temp))
+            (quarantine / "Autosport.exe").unlink()
+            saved = quarantine.parent / "original-during-census"
+            original_walk = recovery.os.walk
+            replaced = []
+
+            def swap_during_walk(*args, **kwargs):
+                for item in original_walk(*args, **kwargs):
+                    if not replaced:
+                        quarantine.rename(saved)
+                        shutil.copytree(saved, quarantine)
+                        replaced.append(True)
+                    yield item
+
+            with patch.object(recovery.os, "walk", side_effect=swap_during_walk):
+                with self.assertRaisesRegex(
+                    installer.OfflineInstallError,
+                    "identity changed during file census",
+                ):
+                    self._recover(archive, digest, dest, quarantine, trust)
+            self.assertEqual(replaced, [True])
+            self.assertFalse(dest.exists())
+            self.assertFalse((quarantine / "Autosport.exe").exists())
+            self.assertFalse((saved / "Autosport.exe").exists())
+
     def test_recovery_rejects_same_bytes_quarantine_swap_after_inspection(self):
         # A verified directory replaced by an identical copy is not the
         # directory that was actually inspected. Preserve the original and

@@ -383,7 +383,13 @@ def test_foreground_retry_uses_top_level_hwnds_only_and_preserves_real_uia_gate(
 
 def test_focused_probe_precedes_known_blocking_point_without_bypassing_semantic_identity() -> None:
     """The focused fallback requires genuine process and AutomationId evidence."""
-    worker, _ = _blocks()
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
+        "} -ArgumentList @(", 1
+    )[0]
     assert worker.index("SEMANTIC_DESKTOP_FOCUS_PROBE") < worker.index(
         "SEMANTIC_DESKTOP_POINT_PROBE"
     ) < worker.index("SEMANTIC_DESKTOP_ROOT_PROBE")

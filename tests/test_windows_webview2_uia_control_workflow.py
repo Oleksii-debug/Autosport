@@ -137,3 +137,16 @@ def test_file_origin_differential_preserves_strict_real_uia_and_truth_labels() -
         '$evidence.real_money_execution -ne $false',
     ):
         assert guard in file_probe
+
+
+
+def test_diagnostic_artifact_paths_are_real_yaml_block_lines() -> None:
+    """A literal backslash-n in a YAML block indicator prevented any Windows job."""
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert "path: |\\n" not in workflow
+    assert (
+        "          path: |\n"
+        "            webview2-uia-control.json\n"
+        "            webview2-uia-control-file.json\n"
+    ) in workflow
+    assert workflow.count("webview2-uia-control-file.json") == 1

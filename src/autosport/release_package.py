@@ -559,6 +559,7 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "src/autosport/storage.py",
     "src/autosport/workspace_lock.py",
     "src/autosport/monotonic_workspace_authority.py",
+    "src/autosport/market_store_migration.py",
     "src/autosport/release_dependency_graph.py",
     "src/autosport/windows_pe_integrity.py",
     "src/autosport/windows_update_admission.py",

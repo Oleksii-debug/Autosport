@@ -174,3 +174,75 @@ def test_real_git_masked_tracked_source_rejected(index_flag: str) -> None:
         ).stdout.strip()
         with pytest.raises(ValueError, match="source index masks tracked changes"):
             qualifier._identity(root)
+
+
+@pytest.mark.parametrize("ignore_location", ["gitignore", "info_exclude"])
+@pytest.mark.parametrize("config_name", ["pytest.ini", "conftest.py"])
+def test_real_git_ignored_root_pytest_control_rejected(
+    ignore_location: str, config_name: str,
+) -> None:
+    """Ignored root pytest controls are executable but absent from Git status."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "проєкт з пробілом"
+        _real_git_fixture(root)
+        rule = f"{config_name}\n"
+        if ignore_location == "gitignore":
+            (root / ".gitignore").write_text(rule, encoding="utf-8")
+            subprocess.run(
+                ["git", "add", ".gitignore"], cwd=root, check=True,
+                capture_output=True, text=True, timeout=20,
+            )
+            subprocess.run(
+                ["git", "commit", "-qm", "ignore pytest control"],
+                cwd=root, check=True, capture_output=True, text=True, timeout=20,
+            )
+        else:
+            (root / ".git" / "info" / "exclude").write_text(
+                rule, encoding="utf-8",
+            )
+        control = root / config_name
+        control.write_text(
+            "[pytest]\naddopts = -k good\n" if config_name == "pytest.ini"
+            else "def pytest_collection_modifyitems(items):\n    items.clear()\n",
+            encoding="utf-8",
+        )
+        assert not subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        with pytest.raises(ValueError, match="ignored pytest configuration"):
+            qualifier._identity(root)
+
+
+def test_ignored_pytest_ini_can_silently_deselect_a_failing_tracked_test() -> None:
+    """Reproduce the old false PASS with actual Git and actual pytest."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "проєкт з пробілом"
+        source = _real_git_fixture(root)
+        source.write_text(
+            "def test_good(): assert True\ndef test_bad(): assert False\n",
+            encoding="utf-8",
+        )
+        (root / ".gitignore").write_text("pytest.ini\n", encoding="utf-8")
+        subprocess.run(
+            ["git", "add", "tests/test_localization_catalog.py", ".gitignore"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        )
+        subprocess.run(
+            ["git", "commit", "-qm", "pin passing and failing tests"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        )
+        (root / "pytest.ini").write_text(
+            "[pytest]\naddopts = -k good\n", encoding="utf-8",
+        )
+        execution = subprocess.run(
+            [__import__("sys").executable, "-m", "pytest", "-q",
+             "tests/test_localization_catalog.py"],
+            cwd=root, capture_output=True, text=True, timeout=30,
+            check=False,
+        )
+        assert execution.returncode == 0
+        assert "1 passed" in execution.stdout
+        assert "1 deselected" in execution.stdout
+        with pytest.raises(ValueError, match="ignored pytest configuration"):
+            qualifier._identity(root)

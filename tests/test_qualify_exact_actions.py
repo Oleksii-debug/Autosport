@@ -10,7 +10,8 @@ from pathlib import Path
 
 from scripts.qualify_exact_actions import (
     _ADMISSION_STEPS, _CI, _CI_ADMISSION, _CI_REQUIRED_STEPS, _WINDOWS,
-    _WINDOWS_ADMISSION, _WINDOWS_REQUIRED_STEPS, GateError, qualify,
+    _WINDOWS_ADMISSION, _WINDOWS_REQUIRED_STEPS, _NON_PR_ADMISSION,
+    GateError, qualify,
 )
 
 SHA = "a" * 40
@@ -49,6 +50,64 @@ class GateTests(unittest.TestCase):
 
     def test_complete_matrix_and_steps_pass(self):
         self.assertEqual(self.check()["status"], "PASS")
+
+    def _non_pr_admission(self, jobs):
+        for job in jobs["jobs"]:
+            if job["name"] != "superseded_run_admission":
+                continue
+            for step in job["steps"]:
+                step["conclusion"] = "skipped"
+                step["status"] = "completed"
+            job["steps"].append({"name": _NON_PR_ADMISSION,
+                                 "status": "completed", "conclusion": "success"})
+            return job
+        raise AssertionError("admission job missing")
+
+    def test_push_main_uses_non_pr_admission(self):
+        self.ci["event"] = "push"
+        self.win["event"] = "push"
+        self._non_pr_admission(self.cj)
+        self._non_pr_admission(self.wj)
+        self.assertEqual(self.check()["status"], "PASS")
+
+    def test_dispatch_windows_uses_non_pr_admission(self):
+        self.win["event"] = "workflow_dispatch"
+        self._non_pr_admission(self.wj)
+        self.assertEqual(self.check()["status"], "PASS")
+
+    def test_non_pr_admission_must_execute(self):
+        self.ci["event"] = "push"
+        job = self._non_pr_admission(self.cj)
+        job["steps"][-1]["conclusion"] = "skipped"
+        with self.assertRaisesRegex(GateError, "Admit non-PR"):
+            self.check()
+
+    def test_non_pr_admission_cannot_be_missing(self):
+        self.win["event"] = "push"
+        job = self._non_pr_admission(self.wj)
+        job["steps"].pop()
+        with self.assertRaisesRegex(GateError, "missing required steps"):
+            self.check()
+
+    def test_non_pr_event_rejects_pr_admission_success(self):
+        self.win["event"] = "workflow_dispatch"
+        job = self._non_pr_admission(self.wj)
+        job["steps"][0]["conclusion"] = "success"
+        with self.assertRaisesRegex(GateError, "wrong event admission path"):
+            self.check()
+
+    def test_pr_event_rejects_non_pr_admission_success(self):
+        admission = next(j for j in self.cj["jobs"]
+                         if j["name"] == "superseded_run_admission")
+        admission["steps"].append({"name": _NON_PR_ADMISSION,
+                                    "status": "completed", "conclusion": "success"})
+        with self.assertRaisesRegex(GateError, "wrong event admission path"):
+            self.check()
+
+    def test_ci_workflow_dispatch_is_not_supported(self):
+        self.ci["event"] = "workflow_dispatch"
+        with self.assertRaisesRegex(GateError, "unsupported workflow event"):
+            self.check()
 
     def test_workflow_success_but_build_skipped(self):
         for job in self.wj["jobs"]:

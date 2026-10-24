@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_POINT_PROBE','SEMANTIC_DESKTOP_POINT_READY','SEMANTIC_DESKTOP_POINT_ID_PROBE','SEMANTIC_DESKTOP_POINT_PARENT_PROBE','SEMANTIC_DESKTOP_POINT_CHILD_PROBE','SEMANTIC_DESKTOP_RENDERER_PROBE','SEMANTIC_DESKTOP_RENDERER_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_POINT_PROBE','SEMANTIC_DESKTOP_POINT_READY','SEMANTIC_DESKTOP_POINT_ID_PROBE','SEMANTIC_DESKTOP_POINT_PARENT_PROBE','SEMANTIC_DESKTOP_POINT_CHILD_PROBE','SEMANTIC_DESKTOP_RENDERER_PROBE','SEMANTIC_DESKTOP_RENDERER_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','DUPLICATE_UIA_ROOT_PROBE','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -2104,7 +2104,46 @@ try {
         # state: require the same externally observed native dialog as before.
         if ([DateTime]::UtcNow -ge $nextDuplicateFamilyProbe) {
             $duplicateFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id)
-            $duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds
+            # The duplicate-launch dialog is a mandatory real UIA witness.
+            # Its provider can block synchronously in FromHandle/RootElement.
+            # Isolate that provider entry in a bounded thread with an independent
+            # completion event; never Stop-Job a blocked COM worker.
+            $duplicateResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+            $duplicateCompleted = [System.Threading.ManualResetEventSlim]::new($false)
+            $duplicateIdsCsv = (@($duplicateFamilyIds | Sort-Object -Unique) -join ',')
+            $duplicateFinder = ${function:Find-UiaRootForProcessFamily}
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'
+            $duplicateWorker = Start-ThreadJob -ScriptBlock {
+                param(
+                    [string]$IdsCsv, [scriptblock]$FindRoot,
+                    [object]$Results, [object]$Completion
+                )
+                try {
+                    Add-Type -AssemblyName UIAutomationClient
+                    Add-Type -AssemblyName UIAutomationTypes
+                    [int[]]$ids = @($IdsCsv.Split(',') | ForEach-Object {
+                        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+                    })
+                    $root = & $FindRoot -ProcessIds $ids
+                    if ($null -ne $root) { $Results.Enqueue($root) }
+                } catch {
+                    # No UIA provider exception or arbitrary window text is evidence.
+                } finally {
+                    $Completion.Set()
+                }
+            } -ArgumentList @(
+                $duplicateIdsCsv, $duplicateFinder, $duplicateResults, $duplicateCompleted
+            )
+            if (-not $duplicateCompleted.Wait(6000)) {
+                # The outer audit process owns a stalled provider thread.
+                # Neither timeout nor process existence qualifies the dialog.
+                throw 'Second packaged launch bounded duplicate UIA root probe timed out'
+            }
+            [object]$observedDuplicateRoot = $null
+            if ($duplicateResults.TryDequeue([ref]$observedDuplicateRoot)) {
+                $duplicateRoot = $observedDuplicateRoot
+            }
+            $duplicateCompleted.Dispose()
             if ($null -ne $duplicateRoot) { break }
             $nextDuplicateFamilyProbe = [DateTime]::UtcNow.AddMilliseconds(1000)
         }

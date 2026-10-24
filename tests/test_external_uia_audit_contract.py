@@ -358,6 +358,26 @@ def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening
     assert "$duplicateProcess.ExitCode -ne 2" in duplicate
 
 
+def test_duplicate_root_uia_lookup_is_bounded_without_skipping_dialog_evidence() -> None:
+    """A stalled provider cannot hold the duplicate dialog gate indefinitely."""
+    audit = _audit()
+    start = audit.index("$duplicateProcess = Start-Process")
+    end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
+    duplicate = audit[start:end]
+    assert "Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'" in duplicate
+    assert "$duplicateFinder = ${function:Find-UiaRootForProcessFamily}" in duplicate
+    assert "$duplicateWorker = Start-ThreadJob -ScriptBlock" in duplicate
+    assert "$duplicateCompleted = [System.Threading.ManualResetEventSlim]::new($false)" in duplicate
+    assert "$duplicateCompleted.Wait(6000)" in duplicate
+    assert "$duplicateResults.TryDequeue([ref]$observedDuplicateRoot)" in duplicate
+    assert "throw 'Second packaged launch bounded duplicate UIA root probe timed out'" in duplicate
+    assert "$duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds" not in duplicate
+    assert "Stop-Job -Job $duplicateWorker" not in duplicate
+    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "$duplicateProcess.ExitCode -ne 2" in duplicate
+    assert "Second packaged launch exposed a second semantic WebView operator surface" in duplicate
+
+
 def test_windows_candidate_requires_duplicate_launch_evidence() -> None:
     workflow = _windows_workflow()
     step_start = workflow.index("- name: External UIA fresh-extraction gate")

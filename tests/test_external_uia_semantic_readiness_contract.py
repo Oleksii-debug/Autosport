@@ -457,6 +457,7 @@ def _product_first_focus_callback(
         "runtime_identity_violation, expected_real_url):\\n"
         "    expected_original_url = 'canonical-index.html'\\n"
         "    initial_accessibility_focus_attempted = False\\n"
+        "    initial_accessibility_focus_attempts = 0\\n"
     )
     # Python strings above contain literal escaped newline sequences, so
     # normalize them to source newlines before compiling the isolated callback.
@@ -563,7 +564,8 @@ def test_webview2_focus_seed_failure_is_bounded_and_restart_is_fresh():
     callback = _product_first_focus_callback(broken)
     callback()
     callback()
-    assert len(broken.calls) == 1  # No unbounded retry after a JS failure.
+    callback()
+    assert len(broken.calls) == 2  # One bounded retry, never unbounded.
     restarted = _FocusSeedWindow()
     _product_first_focus_callback(restarted)()
     assert len(restarted.calls) == 1
@@ -573,3 +575,50 @@ def test_webview2_focus_seed_failure_is_bounded_and_restart_is_fresh():
     assert "AutomationId '330'" in audit or "-AutomationId '330'" in audit
     assert "$report.status = 'PASS'" in audit
     assert "nvda_verified = $false" in audit
+
+
+class _FocusSeedResultsWindow(_FocusSeedWindow):
+    """Deterministic pywebview evaluate_js result stream for negative tests."""
+
+    def __init__(self, results):
+        super().__init__()
+        self.results = iter(results)
+
+    def evaluate_js(self, script):
+        self.calls.append(script)
+        return next(self.results)
+
+
+def test_webview2_focus_seed_false_js_result_is_not_one_shot_success():
+    # A false/false-like result must not permanently consume the one-shot.
+    # A later trusted load can recover, but only after a strict Boolean True.
+    for false_result in (False, None, 1, "true", "", 0):
+        window = _FocusSeedResultsWindow((false_result, True))
+        callback = _product_first_focus_callback(window)
+        callback()
+        callback()
+        callback()
+        assert len(window.calls) == 2, false_result
+        assert all("document.activeElement" in script for script in window.calls)
+
+
+def test_webview2_focus_seed_false_js_result_is_bounded_without_success():
+    window = _FocusSeedResultsWindow((False, False))
+    callback = _product_first_focus_callback(window)
+    for _ in range(12):
+        callback()
+    assert len(window.calls) == 2
+    # Even if a new document loads, the two-attempt budget cannot spin.
+
+
+def test_webview2_focus_seed_rechecks_trust_before_bounded_retry():
+    window = _FocusSeedResultsWindow((False, True))
+    callback = _product_first_focus_callback(window)
+    callback()
+    window.original_url = "foreign.html"
+    callback()
+    assert len(window.calls) == 1
+    window.original_url = "canonical-index.html"
+    callback()
+    callback()
+    assert len(window.calls) == 2

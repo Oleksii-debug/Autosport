@@ -108,7 +108,17 @@ def recover_interrupted_uninstall(
             expected_dirs.add("/".join(parts[:i]))
     discovered: set[str] = set()
     count = 0
-    for parent, dirs, names in os.walk(quarantine, topdown=True, followlinks=False):
+    # os.walk silently ignores scandir failures unless onerror is supplied.
+    # An unreadable but expected subdirectory could conceal owner files from
+    # the quarantine census while a later path-based file check still passes.
+    # Never publish or retire a recovery tree after a partial enumeration.
+    def reject_walk_error(exc: OSError) -> None:
+        raise OfflineInstallError("quarantine enumeration failed") from exc
+
+    for parent, dirs, names in os.walk(
+        quarantine, topdown=True, followlinks=False,
+        onerror=reject_walk_error,
+    ):
         prefix_path = Path(parent).relative_to(quarantine)
         prefix = "" if prefix_path == Path(".") else prefix_path.as_posix()
         if prefix not in expected_dirs or _is_redirected_install_path(Path(parent)):

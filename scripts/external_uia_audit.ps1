@@ -1188,9 +1188,12 @@ function Find-UiaRootWithElementForProcessFamily {
         return $null
     }
     $budgetSeconds = [int][Math]::Min(4, $remainingSeconds)
+    # Run independent genuine UIA routes in separate bounded MTA workers.
+    # A blocked FocusedElement must not prevent FromPoint or process-scoped
+    # RootElement from producing their own real AutomationId/PID witness.
+    # No native HWND, OS focus or diagnostic marker can satisfy acceptance.
     $workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
-    $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
-    $workerProgress = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $workerStates = @()
     $pointX = [int]::MinValue
     $pointY = [int]::MinValue
     if ($pointCoordinates.Count -eq 2) {
@@ -1200,9 +1203,12 @@ function Find-UiaRootWithElementForProcessFamily {
     $processIdsCsv = (@($ProcessIds | Sort-Object -Unique) -join ',')
     $childSearchScript = ${function:Find-UiaSemanticViaChildren}
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_START_PROBE'
+    foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS')) {
+    $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
+    $workerProgress = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     $desktopJob = Start-ThreadJob -ScriptBlock {
         param(
-            [string]$ProcessIdsCsv, [string]$AutomationId, [int]$RootProcessId,
+            [string]$Mode, [string]$ProcessIdsCsv, [string]$AutomationId, [int]$RootProcessId,
             [int]$PointX, [int]$PointY, [DateTime]$Deadline,
             [object]$ResultQueue, [object]$CompletionSignal,
             [object]$ProgressQueue, [scriptblock]$ChildSearchScript
@@ -1236,6 +1242,7 @@ function Find-UiaRootWithElementForProcessFamily {
         # A prior focus attempt blocked before renderer initialization; this
         # attempt follows the verified bounded renderer accessibility request.
         # Never infer success from OS focus or HWND; require genuine in-family ID.
+        if ($Mode -eq 'FOCUS') {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PROBE'
         $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_READY'
@@ -1273,9 +1280,13 @@ function Find-UiaRootWithElementForProcessFamily {
                 }
             }
         }
+        }
+        # An independent MTA worker runs each alternative, so a stalled
+        # FocusedElement cannot starve the process-scoped or point route.
         # After an unsuccessful real focused-element probe, try the independent
         # real UIA render-center path. This may still block in the provider;
         # the isolated worker timeout must remain FAIL, never a synthetic ID.
+        if ($Mode -eq 'POINT') {
         if ($PointX -ne [int]::MinValue -and $PointY -ne [int]::MinValue) {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_PROBE'
             $pointElement = [System.Windows.Automation.AutomationElement]::FromPoint(
@@ -1321,6 +1332,8 @@ function Find-UiaRootWithElementForProcessFamily {
                 }
             }
         }
+        }
+        if ($Mode -eq 'ROOT') {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_PROBE'
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_READY'
@@ -1377,27 +1390,69 @@ function Find-UiaRootWithElementForProcessFamily {
                 }
             }
         }
+        }
         } catch [System.Windows.Automation.ElementNotAvailableException] {
             # Stale UIA provider data cannot confer semantic readiness.
         } finally {
             $CompletionSignal.Set()
         }
     } -ArgumentList @(
-        $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY, $Deadline,
+        $workerMode, $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY, $Deadline,
         $workerResults, $workerCompleted, $workerProgress, $childSearchScript
     )
+    $workerStates += [pscustomobject]@{
+        Mode = $workerMode
+        Completion = $workerCompleted
+        Progress = $workerProgress
+        Job = $desktopJob
+    }
+    }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_WAIT_PROBE'
-    $workerTerminal = $workerCompleted.Wait($budgetSeconds * 1000)
-    if (-not $workerTerminal) {
+    $workerDeadline = [DateTime]::UtcNow.AddSeconds($budgetSeconds)
+    if ($Deadline -lt $workerDeadline) { $workerDeadline = $Deadline }
+    $result = $null
+    # Never wait synchronously on one possibly blocked UIA worker. Poll only
+    # thread-safe result queues and completion events; the outer process is
+    # the final watchdog for hung COM providers.
+    while ([DateTime]::UtcNow -lt $workerDeadline) {
+        if ($workerResults.TryDequeue([ref]$result)) { break }
+        $allCompleted = $true
+        foreach ($state in $workerStates) {
+            if (-not $state.Completion.Wait(0)) {
+                $allCompleted = $false
+                break
+            }
+        }
+        if ($allCompleted) { break }
+        Start-Sleep -Milliseconds 25
+    }
+    if ($null -eq $result) {
+        [void]$workerResults.TryDequeue([ref]$result)
+    }
+    if ($null -ne $result) {
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_RESULT_PROBE'
+        if (
+            $result -isnot [pscustomobject] -or
+            $result.Root -isnot [System.Windows.Automation.AutomationElement] -or
+            $result.Element -isnot [System.Windows.Automation.AutomationElement]
+        ) {
+            throw 'External desktop UIA semantic worker returned invalid evidence'
+        }
+        return $result
+    }
+    $unfinished = @($workerStates | Where-Object { -not $_.Completion.Wait(0) })
+    if ($unfinished.Count -gt 0) {
         $lastWorkerStage = 'NOT_ENTERED'
-        $workerStage = $null
-        while ($workerProgress.TryDequeue([ref]$workerStage)) {
-            $lastWorkerStage = [string]$workerStage
+        foreach ($timedOutState in $unfinished) {
+            $workerStage = $null
+            while ($timedOutState.Progress.TryDequeue([ref]$workerStage)) {
+                $lastWorkerStage = [string]$workerStage
+            }
+            if ($lastWorkerStage -ne 'NOT_ENTERED') { break }
         }
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE'
-        # Persist which bounded COM operation stalled so the real Windows
-        # runner can distinguish focus/root/enumeration/provider failures.
-        # Fail closed for anything not in the audit's exact fixed vocabulary.
+        # Persist a fixed vocabulary only; never serialize COM exceptions,
+        # raw HWNDs, user data or provider-returned names.
         $allowedDesktopWorkerStages = @(
             'NOT_ENTERED',
             'SEMANTIC_DESKTOP_POINT_PROBE',
@@ -1427,23 +1482,12 @@ function Find-UiaRootWithElementForProcessFamily {
         }
         $script:semanticWorkerTimedOut = $true
         $script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'
-        # Do not synchronously Stop-Job or reenter a stalled COM provider.
-        # The enclosing audit process owns cleanup; timeout is always FAIL.
+        # Do not Stop-Job, Remove-Job or reenter a stalled provider. The outer
+        # Windows audit process owns termination. A timeout without an actual
+        # semantic witness is always FAIL.
         throw "External desktop UIA worker timed out without a real semantic witness; last_desktop_stage=$lastWorkerStage"
     }
-    Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_RESULT_PROBE'
-    $result = $null
-    $hasResult = $workerResults.TryDequeue([ref]$result)
-    $workerCompleted.Dispose()
-    if (-not $hasResult) { return $null }
-    if (
-        $result -isnot [pscustomobject] -or
-        $result.Root -isnot [System.Windows.Automation.AutomationElement] -or
-        $result.Element -isnot [System.Windows.Automation.AutomationElement]
-    ) {
-        throw 'External desktop UIA semantic worker returned invalid evidence'
-    }
-    return $result
+    foreach ($state in $workerStates) { $state.Completion.Dispose() }
     return $null
 }
 

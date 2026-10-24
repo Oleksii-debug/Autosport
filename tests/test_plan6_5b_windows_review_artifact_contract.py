@@ -14,11 +14,13 @@ def test_exact_windows_build_uploads_binary_and_license_review_inputs_before_uia
     for relative in (
         "DEPENDENCY_GRAPH_METADATA.json",
         "DEPENDENCY_LICENSE_EVIDENCE.json",
+        "RUNTIME_LICENSE_EVIDENCE.json",
         "EMBEDDED_EXECUTABLE_INVENTORY.json",
         "BINARY_MODULE_ATTRIBUTION.json",
         "DATA_EXECUTABLE_INVENTORY.json",
         "DATA_BINARY_MODULE_ATTRIBUTION.json",
         "licenses/**",
+        "runtime-licenses/**",
     ):
         assert f".build-fresh-extraction/Autosport-V1/{relative}" in source
     block = source[upload:uia]

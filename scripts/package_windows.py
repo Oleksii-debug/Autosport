@@ -14,10 +14,10 @@ from pathlib import Path, PurePosixPath
 from autosport.data_tool_package import bind_portable_data_tool, verify_portable_data_tool
 from autosport.release_sbom import (
     capture_direct_installed_dependencies, capture_embedded_executable_inventory,
-    capture_dependency_license_evidence,
+    capture_dependency_license_evidence, capture_runtime_license_evidence,
 )
 from autosport.release_dependency_graph import capture_build_host_dependency_graph
-from autosport.release_binary_attribution import capture_binary_module_attribution
+from autosport.release_binary_attribution import capture_complete_binary_sbom
 from autosport.windows_pe_integrity import validate_pe32plus_amd64
 from autosport.release_package import (
     _require_git_commit_sha,
@@ -794,6 +794,9 @@ def main() -> int:
     dependency_license_manifest, dependency_license_members = (
         capture_dependency_license_evidence(dependency_graph)
     )
+    runtime_license_manifest, runtime_license_members = (
+        capture_runtime_license_evidence(args.source_sha)
+    )
 
     with tempfile.TemporaryDirectory(prefix="autosport-package-inputs-") as snapshot_root:
         snapshot_dir = Path(snapshot_root)
@@ -831,12 +834,13 @@ def main() -> int:
         data_embedded_inventory = capture_embedded_executable_inventory(
             trusted_data_exe, args.source_sha, include_nested_pyz=True,
         )
-        data_binary_module_attribution = capture_binary_module_attribution(
+        data_binary_module_attribution = capture_complete_binary_sbom(
             dependency_graph, data_embedded_inventory,
         )
-        # Host ownership mappings are review-only hints for binary PYZ modules.
-        # They do not claim executable wheel provenance or legal license approval.
-        binary_attribution = capture_binary_module_attribution(
+        # Every sealed PYZ module must have exactly one distribution,
+        # first-party or CPython-stdlib owner.  Legal approval remains outside
+        # this technical SBOM; the package separately seals license evidence.
+        binary_attribution = capture_complete_binary_sbom(
             dependency_graph, embedded_inventory,
         )
         trusted_diagnostic = _capture_verified_evidence(
@@ -879,6 +883,8 @@ def main() -> int:
             dependency_graph=dependency_graph,
             dependency_license_manifest=dependency_license_manifest,
             dependency_license_members=dependency_license_members,
+            runtime_license_manifest=runtime_license_manifest,
+            runtime_license_members=runtime_license_members,
             embedded_executable_inventory=embedded_inventory,
             binary_module_attribution=binary_attribution,
             # The official package must be consumable by the already-shipped
@@ -902,13 +908,16 @@ def main() -> int:
         require_dependency_metadata=True,
         require_dependency_graph=True,
         require_dependency_license_evidence=True,
+        require_runtime_license_evidence=True,
         require_embedded_executable_inventory=True,
         require_binary_module_attribution=True,
+        require_complete_binary_sbom=True,
     )
     package_sha = _require_verified_package_digest(binding, release_verification)
     data_verification = verify_portable_data_tool(
         output, require_data_executable_inventory=True,
         require_data_binary_module_attribution=True,
+        require_complete_binary_sbom=True,
     )
     _require_verified_package_digest(binding, data_verification)
     verification = dict(release_verification)

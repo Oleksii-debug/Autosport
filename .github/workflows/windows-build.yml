@@ -153,11 +153,13 @@ jobs:
           path: |
             .build-fresh-extraction/Autosport-V1/DEPENDENCY_GRAPH_METADATA.json
             .build-fresh-extraction/Autosport-V1/DEPENDENCY_LICENSE_EVIDENCE.json
+            .build-fresh-extraction/Autosport-V1/RUNTIME_LICENSE_EVIDENCE.json
             .build-fresh-extraction/Autosport-V1/EMBEDDED_EXECUTABLE_INVENTORY.json
             .build-fresh-extraction/Autosport-V1/BINARY_MODULE_ATTRIBUTION.json
             .build-fresh-extraction/Autosport-V1/DATA_EXECUTABLE_INVENTORY.json
             .build-fresh-extraction/Autosport-V1/DATA_BINARY_MODULE_ATTRIBUTION.json
             .build-fresh-extraction/Autosport-V1/licenses/**
+            .build-fresh-extraction/Autosport-V1/runtime-licenses/**
           if-no-files-found: error
       - name: Execute exact packaged install/uninstall/reinstall lifecycle
         shell: pwsh

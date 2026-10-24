@@ -1434,8 +1434,10 @@ def test_actual_desktop_uia_provider_is_bounded_inside_real_mta_worker() -> None
     assert "Start-ThreadJob -ScriptBlock {" in helper
     assert "External desktop UIA semantic worker requires MTA" in helper
     assert "ManualResetEventSlim]::new($false)" in helper
-    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in helper
+    assert "$state.Completion.Wait(0)" in helper
     assert "[Math]::Min(4, $remainingSeconds)" in helper
+    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS'))" in helper
+    assert "if ($unfinished.Count -gt 0)" in helper
     assert "$script:semanticWorkerTimedOut = $true" in helper
     assert "last_desktop_stage=$lastWorkerStage" in helper
     assert "Stop-Job -Job $desktopJob" not in helper

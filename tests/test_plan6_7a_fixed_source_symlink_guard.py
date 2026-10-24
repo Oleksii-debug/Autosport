@@ -129,7 +129,7 @@ def test_real_git_masked_tracked_source_rejected(index_flag: str) -> None:
              "tests/test_localization_catalog.py"],
             cwd=root, check=True, capture_output=True, text=True, timeout=20,
         )
-        source.write_text("def test_safe(): assert False\\n", encoding="utf-8")
+        source.write_text("def test_safe(): assert False\n", encoding="utf-8")
         assert not subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=root, check=True, capture_output=True, text=True, timeout=20,

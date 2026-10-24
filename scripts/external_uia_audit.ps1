@@ -219,6 +219,46 @@ public static class AutosportNativeWindows
         Array.Copy(windows, result, count);
         return result;
     }
+    // A packaged WebView2 host can be owned by a launched family process,
+    // while the launcher has no visible top-level HWND. Activate only a
+    // *top-level* non-Chromium host of that exact family, never a renderer
+    // widget or a descendant HWND. Native foreground is NOT UIA evidence.
+    public static bool TryClaimForegroundForVisibleFamilyHost(int launcherId, int[] familyIds)
+    {
+        if (launcherId <= 0 || familyIds == null ||
+            Array.IndexOf(familyIds, launcherId) < 0)
+            return false;
+        var windows = new IntPtr[256];
+        var count = 0;
+        EnumWindowsCallback callback = (window, state) =>
+        {
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) == 0 ||
+                owner > (uint)int.MaxValue || owner == (uint)launcherId ||
+                Array.IndexOf(familyIds, (int)owner) < 0 || !IsWindowVisible(window))
+                return true;
+            // Exclude Chrome_WidgetWin_ and Chrome_RenderWidgetHostHWND,
+            // including any renderer-owned top-level window.
+            if (DiagnosticClassBucket(window) != "OTHER_VISIBLE") return true;
+            if (count >= windows.Length) return false;
+            windows[count++] = window;
+            return true;
+        };
+        if (!EnumWindows(callback, IntPtr.Zero)) return false;
+        for (var index = 0; index < count; index++)
+        {
+            // PID/visibility/class can change after enumeration. Recheck at
+            // use; a stale or foreign HWND must never be activated.
+            var owner = ProcessIdForHandle(windows[index]);
+            if (owner <= 0 || owner == launcherId ||
+                Array.IndexOf(familyIds, owner) < 0 ||
+                DiagnosticClassBucket(windows[index]) != "OTHER_VISIBLE")
+                continue;
+            if (TryClaimForegroundForProcess(windows[index], owner))
+                return true;
+        }
+        return false;
+    }
     public static IntPtr[] ForProcessFamily(int[] allowedIds)
     {
         if (allowedIds == null || allowedIds.Length == 0) return Array.Empty<IntPtr>();
@@ -1532,6 +1572,17 @@ try {
                     break
                 }
             }
+        }
+        if (
+            $report.native_foreground_activation_status -ne 'CLAIMED' -and
+            $report.native_foreground_top_level_class -eq 'FAMILY_CHILD_VISIBLE_ONLY' -and
+            [AutosportNativeWindows]::TryClaimForegroundForVisibleFamilyHost(
+                [int]$process.Id, [int[]]$foregroundFamilyIds
+            )
+        ) {
+            # Only OS foreground was claimed; AutomationId=330 and all other
+            # external accessibility witnesses below remain mandatory.
+            $report.native_foreground_activation_status = 'CLAIMED'
         }
     } catch {
         # Foreground restrictions are not semantic evidence; retain fail-closed UIA.

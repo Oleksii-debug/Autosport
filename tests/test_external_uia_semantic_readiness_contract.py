@@ -338,3 +338,45 @@ def test_focused_automation_id_requires_exact_launched_process_family() -> None:
     # F2, F8, emergency STOP, owner panel close, manual panel close.
     assert script.count(process_scoped_call) == 5
     assert "Wait-ForFocusedAutomationId -AutomationId" not in script
+
+
+def test_family_host_foreground_fallback_is_exact_family_top_level_and_non_chromium() -> None:
+    """The launcher may have no visible HWND; never activate renderer/foreign HWNDs."""
+    source = _audit_script_text()
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    helper = native.split(
+        "public static bool TryClaimForegroundForVisibleFamilyHost(", 1
+    )[1].split("public static IntPtr[] ForProcessFamily(", 1)[0]
+    assert "Array.IndexOf(familyIds, launcherId) < 0" in helper
+    assert "EnumWindows(callback, IntPtr.Zero)" in helper
+    assert "owner == (uint)launcherId" in helper
+    assert "Array.IndexOf(familyIds, (int)owner) < 0" in helper
+    assert "!IsWindowVisible(window)" in helper
+    assert 'DiagnosticClassBucket(window) != "OTHER_VISIBLE"' in helper
+    assert "if (count >= windows.Length) return false" in helper
+    assert "ProcessIdForHandle(windows[index])" in helper
+    assert "Array.IndexOf(familyIds, owner) < 0" in helper
+    assert 'DiagnosticClassBucket(windows[index]) != "OTHER_VISIBLE"' in helper
+    assert "TryClaimForegroundForProcess(windows[index], owner)" in helper
+    assert "GetWindow(" not in helper
+    assert "AutomationElement" not in helper
+
+
+def test_family_host_activation_only_on_observed_child_top_level_and_never_passes_uia() -> None:
+    source = _audit_script_text()
+    activation = source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+    assert "native_foreground_top_level_class -eq 'FAMILY_CHILD_VISIBLE_ONLY'" in activation
+    assert "[AutosportNativeWindows]::TryClaimForegroundForVisibleFamilyHost(" in activation
+    assert "[int]$process.Id, [int[]]$foregroundFamilyIds" in activation
+    assert "if (" in activation
+    assert "$report.status = 'PASS'" not in activation
+    assert "AutomationElement" not in activation
+    assert source.index("$semanticReady = $null") < source.index(
+        "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds"
+    )
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert "if ($report.status -ne 'PASS')" in source

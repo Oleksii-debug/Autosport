@@ -368,6 +368,72 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
                 self.OLD.encode(),
             )
 
+    def test_update_refuses_corrupted_previous_during_quarantine(self):
+        # The old directory inode survives an in-place rewrite immediately
+        # after its move to the transaction. Success would leave no valid
+        # rollback source, despite an otherwise verified new release.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            previous = txn / "previous"
+            original_publish = upgrade._publish_directory_no_replace
+            mutated = []
+
+            def corrupt_old_after_move(source, target):
+                result = original_publish(source, target)
+                if Path(source) == dest and Path(target) == previous:
+                    (previous / "Autosport.exe").write_bytes(b"corrupt-old-release")
+                    mutated.append(True)
+                return result
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=corrupt_old_after_move,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(mutated, [True])
+            self.assertFalse(dest.exists())
+            self.assertEqual(
+                (previous / "Autosport.exe").read_bytes(), b"corrupt-old-release",
+            )
+            self.assertTrue((txn / "candidate" / "Autosport.exe").is_file())
+
+    def test_update_does_not_restore_corrupt_previous_after_candidate_failure(self):
+        # A candidate integrity failure used to restore 'previous' without
+        # checking its bytes. A concurrent old-release rewrite must instead
+        # remain quarantined and must not be installed by the error handler.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            txn = upgrade._transaction_root(dest)
+            previous = txn / "previous"
+            candidate = txn / "candidate"
+            original_publish = upgrade._publish_directory_no_replace
+            mutated = []
+
+            def corrupt_both_after_move(source, target):
+                result = original_publish(source, target)
+                if Path(source) == dest and Path(target) == previous:
+                    (previous / "Autosport.exe").write_bytes(b"bad-old")
+                    (candidate / "Autosport.exe").write_bytes(b"bad-new")
+                    mutated.append(True)
+                return result
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=corrupt_both_after_move,
+            ):
+                with self.assertRaises(install.OfflineInstallError):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(mutated, [True])
+            self.assertFalse(dest.exists())
+            self.assertEqual((previous / "Autosport.exe").read_bytes(), b"bad-old")
+            self.assertEqual((candidate / "Autosport.exe").read_bytes(), b"bad-new")
+
     def test_update_preserves_previous_and_never_enables_money(self):
         with tempfile.TemporaryDirectory() as temp:
             dest, old, od, new, nd = self._installed(Path(temp))

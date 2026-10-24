@@ -146,6 +146,90 @@ def test_real_git_ignored_python_hook_rejected(
             qualifier._identity(root)
 
 
+def test_real_git_pytest_addopts_cannot_deselect_failing_tracked_test() -> None:
+    """A clean HEAD must not yield source PASS via an ambient -k selector."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "проєкт з пробілом"
+        source = _real_git_fixture(root)
+        source.write_text(
+            "def test_good(): assert True\\n"
+            "def test_bad(): assert False\\n", encoding="utf-8",
+        )
+        (root / ".gitignore").write_text(
+            ".pytest_cache/\\n__pycache__/\\n", encoding="utf-8",
+        )
+        subprocess.run(
+            ["git", "add", "tests/test_localization_catalog.py", ".gitignore"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        )
+        subprocess.run(
+            ["git", "commit", "-qm", "tracked failing test and cache ignore"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        )
+        clean_env = dict(qualifier.os.environ)
+        clean_env.pop("PYTEST_ADDOPTS", None)
+        clean_env.pop("PYTEST_PLUGINS", None)
+        baseline = subprocess.run(
+            [qualifier.sys.executable, "-m", "pytest", "-q",
+             "tests/test_localization_catalog.py"],
+            cwd=root, env=clean_env, capture_output=True, text=True, timeout=30,
+        )
+        assert baseline.returncode != 0
+        selected = subprocess.run(
+            [qualifier.sys.executable, "-m", "pytest", "-q",
+             "tests/test_localization_catalog.py"],
+            cwd=root, env={**clean_env, "PYTEST_ADDOPTS": "-k good"},
+            capture_output=True, text=True, timeout=30,
+        )
+        assert selected.returncode == 0
+        assert "1 deselected" in selected.stdout
+        assert not subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        with patch.dict(qualifier.os.environ, {"PYTEST_ADDOPTS": "-k good"}):
+            with patch.object(qualifier.subprocess, "run") as execute:
+                result = qualifier._test_group(
+                    root, "uk_localization",
+                    ("tests/test_localization_catalog.py",), timeout=30,
+                )
+                execute.assert_not_called()
+        assert result["status"] == "FAIL_UNTRUSTED_TEST_ENV"
+        assert result["passed"] == 0
+
+
+def test_ambient_pytest_plugins_cannot_load_external_test_hooks() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        _test_path(root, "test_localization_catalog.py")
+        with patch.dict(qualifier.os.environ, {"PYTEST_PLUGINS": "external_hook"}):
+            with patch.object(qualifier.subprocess, "run") as execute:
+                result = qualifier._test_group(
+                    root, "uk_localization",
+                    ("tests/test_localization_catalog.py",), timeout=3,
+                )
+                execute.assert_not_called()
+        assert result["status"] == "FAIL_UNTRUSTED_TEST_ENV"
+
+
+def test_empty_pytest_overrides_preserve_normal_source_execution() -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary)
+        _test_path(root, "test_localization_catalog.py")
+        with patch.dict(qualifier.os.environ,
+                        {"PYTEST_ADDOPTS": "", "PYTEST_PLUGINS": ""}):
+            with patch.object(qualifier.subprocess, "run") as execute:
+                execute.return_value.returncode = 0
+                execute.return_value.stdout = "1 passed in 0.01s"
+                execute.return_value.stderr = ""
+                result = qualifier._test_group(
+                    root, "uk_localization",
+                    ("tests/test_localization_catalog.py",), timeout=3,
+                )
+                execute.assert_called_once()
+        assert result["status"] == "PASS"
+
+
 def test_real_git_clean_head_remains_qualifiable() -> None:
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "проєкт з пробілом"

@@ -106,3 +106,34 @@ def test_control_host_hwnd_is_exact_and_ambiguous_windows_fail_closed(monkeypatc
     assert module.visible_window(70, {70, 71}) == 0  # ambiguous exact host
     user32.windows[103] = (70, module.HOST_WINDOW_TITLE, False)
     assert module.visible_window(70, {70, 71}) == 104
+
+
+def test_file_origin_differential_preserves_strict_real_uia_and_truth_labels() -> None:
+    """A local-file document must not silently inherit inline control success."""
+    source = (ROOT / "scripts/windows_webview2_uia_control.py").read_text(encoding="utf-8")
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+    assert 'html_file = profile.parent / "control.html"' in source
+    assert 'html_file.write_text(HTML, encoding="utf-8")' in source
+    assert 'document = {"url": str(html_file)}' in source
+    assert 'document = {"html": HTML}' in source
+    assert 'file_origin=sys.argv[1] == "host-file"' in source
+    assert 'file_origin=sys.argv[1] == "run-file"' in source
+    assert '"host-file" if file_origin else "host"' in source
+    assert 'child.returncode == 0 and code == "SEMANTIC_BUTTON_RETURNED"' in source
+    assert 'and exact == "1"' in source
+    assert '- name: Probe minimal WebView2 with killable independent UIA client' in workflow
+    assert '- name: Probe local-file WebView2 origin with independent UIA client' in workflow
+    assert '& ./dist/Autosport-WebView2-UIA-Control.exe run-file $reportPath' in workflow
+    assert 'webview2-uia-control-file.json' in workflow
+    file_probe = workflow.split(
+        '- name: Probe local-file WebView2 origin with independent UIA client', 1
+    )[1].split('- name: Preserve fixed diagnostic codes even on failure', 1)[0]
+    assert "if ($observed -cne 'SEMANTIC_BUTTON_RETURNED')" in file_probe
+    for guard in (
+        '$evidence.exact_automation_id -ne $true',
+        '$evidence.autosport_product_uia_pass -ne $false',
+        '$evidence.human_tested -ne $false',
+        '$evidence.nvda_verified -ne $false',
+        '$evidence.real_money_execution -ne $false',
+    ):
+        assert guard in file_probe

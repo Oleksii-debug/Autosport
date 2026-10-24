@@ -53,6 +53,7 @@ GROUPS = (
         "tests/test_offline_release_recovery.py",
         "tests/test_offline_release_upgrade.py",
         "tests/test_market_store_migration.py",
+        "tests/test_create_legacy_market_store_fixture.py",
         "tests/test_plan6_6a_packaged_state_migration_contract.py",
         "tests/test_plan6_6a_official_update_identity_contract.py",
         "tests/test_plan6_6a_packaged_update_lifecycle_contract.py",

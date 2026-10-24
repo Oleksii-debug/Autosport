@@ -30,7 +30,11 @@ def test_smoke_uses_real_packaged_lifecycle_commands_and_fail_closed_scope() -> 
     assert "fixture_only_same_candidate_bytes_with_prior_version_envelope" in source
     assert "historical_release_qualified = $false" in source
     assert "same_schema_update_qualified = $true" in source
-    assert "cross_package_schema_migration_qualified = $false" in source
+    assert "cross_package_schema_migration_qualified = $true" in source
+    assert "create_legacy_market_store_fixture.py" in source
+    assert "$installedCurrentDataExe migrate-market-store" in source
+    assert "$installedPreviousDataExe migrate-market-store" in source
+    assert "migrated_state_readable_after_rollback = $true" in source
 
 
 def test_smoke_never_claims_human_nvda_real_money_or_product_completion() -> None:

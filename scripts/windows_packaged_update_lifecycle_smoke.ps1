@@ -55,13 +55,51 @@ $oldUpdate = @('--old-archive', $previousPackage, '--old-source-sha', $SourceSha
 # Real packaged upgrade -> verify -> rollback -> verify -> finalize.
 $destination = Join-Path $root 'Оновлення з пробілами'
 [void](Invoke-ReleaseAction -Arguments (@('install-release', '--destination', $destination) + $oldCommon) -ExpectedStatus 'INSTALLED')
+$database = Join-Path $root 'Стан попередньої версії.db'
+$legacyText = (& python scripts/create_legacy_market_store_fixture.py `
+    --database $database --source-sha $SourceSha 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Previous-version state fixture creation failed' }
+$legacy = $legacyText | ConvertFrom-Json -ErrorAction Stop
+if (
+    $legacy.status -cne 'PASS' -or
+    $legacy.evidence_class -cne 'SOURCE_HARNESS_LEGACY_MARKET_STORE_FIXTURE' -or
+    $legacy.source_sha -cne $SourceSha -or
+    [string]$legacy.database_sha256 -cnotmatch '^[0-9a-f]{64}$'
+) { throw 'Previous-version state fixture evidence is invalid' }
 $updated = Invoke-ReleaseAction -Arguments (@('upgrade-release', '--destination', $destination) + $oldUpdate + $newCommon) -ExpectedStatus 'UPDATED_PAPER_ONLY'
 if ($updated.schema_migrated -ne $false -or $updated.package_sha256 -cne $CurrentPackageSha256) {
     throw 'Packaged same-schema update evidence drifted'
 }
 [void](Invoke-ReleaseAction -Arguments @('verify-installed-release', '--destination', $destination, '--archive', $CurrentPackage, '--source-sha', $SourceSha, '--package-sha256', $CurrentPackageSha256) -ExpectedStatus 'VERIFIED')
+$installedCurrentDataExe = Join-Path $destination 'Autosport-Data.exe'
+if (-not (Test-Path -LiteralPath $installedCurrentDataExe -PathType Leaf)) {
+    throw 'Updated installed release lacks its packaged data tool'
+}
+if (
+    (Get-FileHash -LiteralPath $installedCurrentDataExe -Algorithm SHA256).Hash.ToLowerInvariant() -cne
+    (Get-FileHash -LiteralPath $PackagedDataExe -Algorithm SHA256).Hash.ToLowerInvariant()
+) { throw 'Updated installed data tool differs from exact candidate' }
+$migrationText = (& $installedCurrentDataExe migrate-market-store --database $database 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Updated installed release failed legacy-state migration' }
+$migration = $migrationText | ConvertFrom-Json -ErrorAction Stop
+if (
+    $migration.status -cne 'PASS' -or
+    $migration.migration_applied -ne $true -or
+    $migration.history_count -ne 1 -or
+    $migration.current_count -ne 1 -or
+    [string]$migration.state_sha256 -cnotmatch '^[0-9a-f]{64}$'
+) { throw 'Updated installed release emitted invalid migration evidence' }
 [void](Invoke-ReleaseAction -Arguments (@('rollback-release', '--destination', $destination) + $oldUpdate + $newCommon) -ExpectedStatus 'ROLLED_BACK_PAPER_ONLY')
 [void](Invoke-ReleaseAction -Arguments (@('verify-installed-release', '--destination', $destination) + $oldCommon) -ExpectedStatus 'VERIFIED')
+$installedPreviousDataExe = Join-Path $destination 'Autosport-Data.exe'
+$rollbackReadbackText = (& $installedPreviousDataExe migrate-market-store --database $database 2>&1 | Out-String).Trim()
+if ($LASTEXITCODE -ne 0) { throw 'Rolled-back installed release failed migrated-state readback' }
+$rollbackReadback = $rollbackReadbackText | ConvertFrom-Json -ErrorAction Stop
+if (
+    $rollbackReadback.status -cne 'PASS' -or
+    $rollbackReadback.migration_applied -ne $false -or
+    [string]$rollbackReadback.state_sha256 -cne [string]$migration.state_sha256
+) { throw 'Rolled-back release did not preserve migrated logical state' }
 [void](Invoke-ReleaseAction -Arguments (@('finalize-update-release', '--destination', $destination) + $oldUpdate + $newCommon) -ExpectedStatus 'PAPER_UPDATE_FINALIZED')
 
 # Recreate the exact on-disk interruption window (old product moved, root gap),
@@ -84,7 +122,7 @@ if ($LASTEXITCODE -ne 0 -or (Test-Path -LiteralPath $recoveryDestination)) {
 [void](Invoke-ReleaseAction -Arguments (@('recover-update-release', '--destination', $recoveryDestination) + $oldUpdate) -ExpectedStatus 'OLD_RELEASE_RECOVERED')
 [void](Invoke-ReleaseAction -Arguments (@('verify-installed-release', '--destination', $recoveryDestination) + $oldCommon) -ExpectedStatus 'VERIFIED')
 
-foreach ($record in @($fixture, $updated)) {
+foreach ($record in @($fixture, $legacy, $updated, $migration, $rollbackReadback)) {
     foreach ($field in @('real_money_execution', 'human_tested', 'nvda_verified')) {
         if ($null -ne $record.$field -and $record.$field -ne $false) {
             throw "Update lifecycle evidence $field is not false"
@@ -104,7 +142,11 @@ foreach ($record in @($fixture, $updated)) {
     rollback_status = 'ROLLED_BACK_PAPER_ONLY'
     interrupted_update_recovery_status = 'OLD_RELEASE_RECOVERED'
     same_schema_update_qualified = $true
-    cross_package_schema_migration_qualified = $false
+    cross_package_schema_migration_qualified = $true
+    cross_package_schema_migration_scope = 'fixture_previous_envelope_to_exact_candidate_with_external_legacy_market_store'
+    migration_applied_by_installed_candidate = $true
+    migrated_state_readable_after_rollback = $true
+    migrated_state_sha256 = [string]$migration.state_sha256
     real_money_execution = $false
     human_tested = $false
     nvda_verified = $false

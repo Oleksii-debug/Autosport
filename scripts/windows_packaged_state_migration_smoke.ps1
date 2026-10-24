@@ -13,33 +13,17 @@ if (Test-Path -LiteralPath $root) { Remove-Item -LiteralPath $root -Recurse -For
 New-Item -ItemType Directory -Path $root | Out-Null
 $database = Join-Path $root 'стан з пробілами.db'
 
-$fixture = @'
-import json
-import sqlite3
-import sys
-from decimal import Decimal
-from pathlib import Path
-from autosport.domain import MarketEvent
-from autosport.storage import SQLiteMarketStore
-
-path = Path(sys.argv[1])
-event = MarketEvent(
-    event_id="event-1", market_id="winner", selection_id="home",
-    decimal_odds=Decimal("2.50"), observed_ts="2026-09-17T01:05:00Z",
-    ingest_ts="2026-09-17T01:05:00Z", source_id="provider-a", sequence=7,
-)
-store = SQLiteMarketStore(path)
-store.append(event)
-store.close()
-payload = json.dumps(event.to_dict(), ensure_ascii=False, sort_keys=True,
-                     separators=(",", ":"), allow_nan=False)
-with sqlite3.connect(path) as connection:
-    connection.execute("DROP TABLE current_quotes")
-    connection.execute("CREATE TABLE current_quotes (quote_key TEXT PRIMARY KEY, observed_ts TEXT NOT NULL, sequence INTEGER NOT NULL, payload_json TEXT NOT NULL)")
-    connection.execute("INSERT INTO current_quotes (quote_key,observed_ts,sequence,payload_json) VALUES (?,?,?,?)", (event.quote_key, event.observed_ts, event.sequence, payload))
-'@
-& python -c $fixture $database
+$fixtureText = (& python scripts/create_legacy_market_store_fixture.py `
+    --database $database --source-sha $SourceSha 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Legacy market-store fixture exited $LASTEXITCODE" }
+$fixture = $fixtureText | ConvertFrom-Json -ErrorAction Stop
+if (
+    $fixture.status -cne 'PASS' -or
+    $fixture.evidence_class -cne 'SOURCE_HARNESS_LEGACY_MARKET_STORE_FIXTURE' -or
+    $fixture.source_sha -cne $SourceSha -or
+    $fixture.history_count -ne 1 -or
+    $fixture.current_count -ne 1
+) { throw 'Legacy market-store fixture evidence is invalid' }
 
 $firstText = (& $PackagedDataExe migrate-market-store --database $database 2>&1 | Out-String).Trim()
 if ($LASTEXITCODE -ne 0) { throw "Packaged market-store migration exited $LASTEXITCODE" }

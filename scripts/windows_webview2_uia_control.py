@@ -1,5 +1,6 @@
 """Disposable packaged WebView2/UIA provider falsifier. Never Autosport acceptance."""
 from __future__ import annotations
+import base64
 import ctypes
 import json
 import os
@@ -102,37 +103,81 @@ def classify(pid: int, allowed: set[int], role: str, name: str) -> str:
         return "SEMANTIC_MISMATCH"
     return "SEMANTIC_BUTTON_RETURNED"
 
+# PowerShell 7's separate MTA process is the known-good UIA client used by the
+# existing WinForms calibration. Pythonnet's UIAutomationClient assembly lookup
+# is not reliable in a frozen PyInstaller probe (exact failure #40062303139).
+# Only fixed codes cross stdout; no UIA names, HWNDs, PIDs or raw exceptions.
+PS_PROBE = r"""
+$ErrorActionPreference = 'Stop'
+if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+    Write-Output 'PROBE_UIA_LOAD_ERROR|0'; exit 1
+}
+try {
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+} catch {
+    Write-Output 'PROBE_UIA_LOAD_ERROR|0'; exit 1
+}
+try {
+    $element = [System.Windows.Automation.AutomationElement]::FocusedElement
+} catch {
+    Write-Output 'PROBE_UIA_CALL_ERROR|0'; exit 1
+}
+if ($null -eq $element) { Write-Output 'NO_FOCUSED_ELEMENT|0'; exit 1 }
+try {
+    $current = $element.Current
+    $allowed = @($env:AUTOSPORT_UIA_ALLOWED_PIDS.Split(',') | ForEach-Object {
+        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+    })
+    $actualPid = [int]$current.ProcessId
+    $role = [string]$current.ControlType.ProgrammaticName
+    $name = [string]$current.Name
+    $exactId = if ([string]$current.AutomationId -ceq 'autosport-webview2-uia-control') { '1' } else { '0' }
+    if ($allowed -notcontains $actualPid) {
+        Write-Output ('FOREIGN_FOCUS|' + $exactId); exit 1
+    }
+    if ($role -cne 'ControlType.Button' -or $name -cne 'Autosport WebView2 calibration button') {
+        Write-Output ('SEMANTIC_MISMATCH|' + $exactId); exit 1
+    }
+    Write-Output ('SEMANTIC_BUTTON_RETURNED|' + $exactId); exit 0
+} catch {
+    Write-Output 'PROBE_PROPERTY_ERROR|0'; exit 1
+}
+"""
+
 def probe(root_pid: int, report: Path) -> int:
+    allowed = family(root_pid)
+    if not allowed:
+        emit(report, "FOREIGN_FOCUS")
+        return 1
+    env = os.environ.copy()
+    env["AUTOSPORT_UIA_ALLOWED_PIDS"] = ",".join(str(p) for p in sorted(allowed))
+    encoded = base64.b64encode(PS_PROBE.encode("utf-16le")).decode("ascii")
     try:
-        import clr
-    except Exception:
-        emit(report, "PROBE_CLR_IMPORT_ERROR")
+        child = subprocess.run(
+            ["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, timeout=9, env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        emit(report, "PROBE_TIMEOUT")
         return 1
-    try:
-        clr.AddReference("UIAutomationClient")
-        clr.AddReference("UIAutomationTypes")
-        from System.Windows.Automation import AutomationElement
-    except Exception:
-        emit(report, "PROBE_UIA_LOAD_ERROR")
+    except OSError:
+        emit(report, "PROBE_EXCEPTION")
         return 1
-    try:
-        # This may block. Parent watchdog kills the entire probe process.
-        element = AutomationElement.FocusedElement
-    except Exception:
-        emit(report, "PROBE_UIA_CALL_ERROR")
+    lines = child.stdout.strip().splitlines()
+    if len(lines) != 1 or "|" not in lines[0]:
+        emit(report, "PROBE_EXCEPTION")
         return 1
-    if element is None:
-        emit(report, "NO_FOCUSED_ELEMENT")
+    code, exact = lines[0].split("|", 1)
+    if code not in CODES or exact not in {"0", "1"}:
+        emit(report, "PROBE_EXCEPTION")
         return 1
-    try:
-        current = element.Current
-        code = classify(int(current.ProcessId), family(root_pid),
-                        str(current.ControlType.ProgrammaticName), str(current.Name))
-        emit(report, code, exact_id=str(current.AutomationId) == BUTTON_ID)
-        return 0 if code == "SEMANTIC_BUTTON_RETURNED" else 1
-    except Exception:
-        emit(report, "PROBE_PROPERTY_ERROR")
-        return 1
+    emit(report, code, exact_id=exact == "1")
+    return 0 if (
+        child.returncode == 0 and code == "SEMANTIC_BUTTON_RETURNED"
+    ) else 1
 
 def run(report: Path) -> int:
     if os.name != "nt":

@@ -133,9 +133,16 @@ def check_workflow(run: Any, jobs_response: Any, *, expected_sha: str,
     if response_attempt is not None:
         if type(response_attempt) is not int or response_attempt != attempt:
             raise GateError(f"run {run_id}: jobs response attempt mismatch")
+    # GitHub's REST list-jobs response includes total_count. A truncated
+    # page containing exactly the expected jobs is NOT proof that no extra
+    # (possibly failed) job exists. Reject missing/inconsistent pagination
+    # metadata rather than treating the visible page as the entire run.
     jobs = jobs_response.get("jobs")
-    if type(jobs) is not list or len(jobs) != len(required_jobs):
-        raise GateError(f"run {run_id}: missing/extra jobs")
+    total_count = jobs_response.get("total_count")
+    if type(jobs) is not list or type(total_count) is not int or (
+        total_count != len(jobs) or total_count != len(required_jobs)
+    ):
+        raise GateError(f"run {run_id}: missing/extra jobs or incomplete jobs page")
     seen: set[str] = set()
     ids: set[int] = set()
     for index, raw in enumerate(jobs):

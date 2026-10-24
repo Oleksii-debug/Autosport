@@ -1057,8 +1057,10 @@ try {
     $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@($ProcessIds | Sort-Object -Unique) -join ',')
     $child = [System.Diagnostics.Process]::new()
     $child.StartInfo = $start
+    $started = $false
     try {
-        if (-not $child.Start()) { return 'LAUNCH_ERROR' }
+        $started = $child.Start()
+        if (-not $started) { return 'LAUNCH_ERROR' }
         if (-not $child.WaitForExit(6000)) {
             try { $child.Kill($true) } catch {}
             return 'TIMEOUT'
@@ -1076,8 +1078,10 @@ try {
     } catch {
         return 'LAUNCH_ERROR'
     } finally {
-        if (-not $child.HasExited) {
-            try { $child.Kill($true) } catch {}
+        if ($started) {
+            try {
+                if (-not $child.HasExited) { $child.Kill($true) }
+            } catch {}
         }
         $child.Dispose()
     }

@@ -119,7 +119,7 @@ def test_real_git_ignored_python_hook_rejected(
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary) / "проєкт з пробілом"
         _real_git_fixture(root)
-        rule = f"tests/{hook_name}\\n"
+        rule = f"tests/{hook_name}\n"
         if ignore_location == "gitignore":
             (root / ".gitignore").write_text(rule, encoding="utf-8")
             subprocess.run(
@@ -135,7 +135,7 @@ def test_real_git_ignored_python_hook_rejected(
                 rule, encoding="utf-8",
             )
         hook = root / "tests" / hook_name
-        hook.write_text("def test_untrusted(): assert False\\n", encoding="utf-8")
+        hook.write_text("def test_untrusted(): assert False\n", encoding="utf-8")
         assert not subprocess.run(
             ["git", "status", "--porcelain", "--untracked-files=all"],
             cwd=root, check=True, capture_output=True, text=True, timeout=20,

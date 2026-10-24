@@ -41,3 +41,68 @@ def test_minimal_uia_semantic_success_requires_exact_button_identity() -> None:
     assert "Write-Output ('WRONG_BUTTON_SEMANTICS|' + $exactId)" in source
     assert "if code not in CODES:" in source
     assert 'code == "SEMANTIC_BUTTON_RETURNED" and exact == "1"' in source
+
+
+def test_control_host_hwnd_is_exact_and_ambiguous_windows_fail_closed(monkeypatch) -> None:
+    """Native window enumeration cannot silently select a child or wrong host."""
+    import ctypes
+    import importlib.util
+
+    source_path = ROOT / "scripts/windows_webview2_uia_control.py"
+    spec = importlib.util.spec_from_file_location("autosport_uia_control_hwnd", source_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class FakeFunction:
+        def __init__(self, fn):
+            self.fn = fn
+
+        def __call__(self, *args):
+            return self.fn(*args)
+
+    class FakeUser32:
+        def __init__(self, windows):
+            self.windows = windows
+            self.EnumWindows = FakeFunction(self.enum)
+            self.GetWindowThreadProcessId = FakeFunction(self.pid)
+            self.IsWindowVisible = FakeFunction(self.visible)
+            self.GetWindowTextLengthW = FakeFunction(self.title_length)
+            self.GetWindowTextW = FakeFunction(self.title)
+
+        def enum(self, callback, _context):
+            for hwnd in self.windows:
+                if not callback(hwnd, None):
+                    break
+            return True
+
+        def pid(self, hwnd, output):
+            output._obj.value = self.windows[hwnd][0]
+            return 1
+
+        def visible(self, hwnd):
+            return self.windows[hwnd][2]
+
+        def title_length(self, hwnd):
+            return len(self.windows[hwnd][1])
+
+        def title(self, hwnd, output, capacity):
+            value = self.windows[hwnd][1]
+            assert capacity > len(value)
+            output.value = value
+            return len(value)
+
+    monkeypatch.setattr(module.ctypes, "WINFUNCTYPE", lambda *_: lambda fn: fn, raising=False)
+    monkeypatch.setattr(module.ctypes, "WinDLL", lambda *_args, **_kw: user32, raising=False)
+    user32 = FakeUser32({
+        101: (71, module.HOST_WINDOW_TITLE, True),  # renderer/foreign child
+        102: (70, "Unrelated application", True),  # same PID, wrong title
+        103: (70, module.HOST_WINDOW_TITLE, True),  # sole genuine host
+    })
+    assert module.visible_window(70, {70, 71}) == 103
+    assert module.visible_window(70, {71}) == 0
+    assert module.visible_window(0, {0}) == 0
+    user32.windows[104] = (70, module.HOST_WINDOW_TITLE, True)
+    assert module.visible_window(70, {70, 71}) == 0  # ambiguous exact host
+    user32.windows[103] = (70, module.HOST_WINDOW_TITLE, False)
+    assert module.visible_window(70, {70, 71}) == 104

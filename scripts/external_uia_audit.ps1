@@ -49,6 +49,7 @@ $script:lastDesktopWorkerRouteStages = [ordered]@{
     ROOT = 'NOT_RUN'
     POINT = 'NOT_RUN'
     FOCUS = 'NOT_RUN'
+    RENDERER = 'NOT_RUN'
 }
 # Audit-owned fixed failure classification only; never serialize provider text.
 $script:semanticFailureClass = 'NOT_OBSERVED'
@@ -1370,16 +1371,30 @@ function Find-UiaRootWithElementForProcessFamily {
         $pointX = [int]$pointCoordinates[0]
         $pointY = [int]$pointCoordinates[1]
     }
+    # The exact-head Windows gate observed a real in-family renderer FromHandle
+    # result while host/desktop routes stalled. Try the renderer subtree as a
+    # fourth independent genuine UIA route; native identity alone never passes.
+    $rendererProcessId = 0
+    if ($nativeRendererHandle -ne [IntPtr]::Zero) {
+        $rendererProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeRendererHandle)
+    }
+    $rendererCandidateValid = (
+        $nativeRendererHandle -ne [IntPtr]::Zero -and
+        $rendererProcessId -gt 0 -and
+        ($ProcessIds -contains $rendererProcessId)
+    )
     $processIdsCsv = (@($ProcessIds | Sort-Object -Unique) -join ',')
     $childSearchScript = ${function:Find-UiaSemanticViaChildren}
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_START_PROBE'
-    foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS')) {
+    foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS', 'RENDERER')) {
+    if ($workerMode -eq 'RENDERER' -and -not $rendererCandidateValid) { continue }
     $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
     $workerProgress = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     $desktopJob = Start-ThreadJob -ScriptBlock {
         param(
             [string]$Mode, [string]$ProcessIdsCsv, [string]$AutomationId, [int]$RootProcessId,
-            [int]$PointX, [int]$PointY, [DateTime]$Deadline,
+            [int]$PointX, [int]$PointY, [IntPtr]$RendererHandle,
+            [int]$RendererProcessId, [DateTime]$Deadline,
             [object]$ResultQueue, [object]$CompletionSignal,
             [object]$ProgressQueue, [scriptblock]$ChildSearchScript
         )
@@ -1388,9 +1403,13 @@ function Find-UiaRootWithElementForProcessFamily {
             $ProgressQueue.Enqueue($Stage)
         }
         function Find-BoundedUiaSemanticViaChildren {
-            param($Root, [string]$AutomationId, [DateTime]$Deadline)
-            # Already in bounded MTA job, so reuse the genuine RawView walker.
-            & $ChildSearchScript -Root $Root -AutomationId $AutomationId -Deadline $Deadline
+            param(
+                $Root, [string]$AutomationId, [DateTime]$Deadline,
+                [IntPtr]$NativeWindowHandle = [IntPtr]::Zero,
+                [int]$ExpectedProcessId = 0
+            )
+            # The real RawView walker runs only inside this bounded MTA worker.
+            & $ChildSearchScript -Root $Root -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $NativeWindowHandle -ExpectedProcessId $ExpectedProcessId
         }
         function New-BoundedUiaPair {
             param($Window, $Element)
@@ -1412,6 +1431,31 @@ function Find-UiaRootWithElementForProcessFamily {
         # A prior focus attempt blocked before renderer initialization; this
         # attempt follows the verified bounded renderer accessibility request.
         # Never infer success from OS focus or HWND; require genuine in-family ID.
+        if ($Mode -eq 'RENDERER') {
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_RENDERER_PROBE'
+        if (
+            $RendererHandle -ne [IntPtr]::Zero -and
+            $RendererProcessId -gt 0 -and
+            ($ProcessIds -contains $RendererProcessId)
+        ) {
+            $rendererPair = Find-BoundedUiaSemanticViaChildren -Root $null -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $RendererHandle -ExpectedProcessId $RendererProcessId
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_RENDERER_READY'
+            if ($null -ne $rendererPair) {
+                if (
+                    $rendererPair -isnot [pscustomobject] -or
+                    $rendererPair.Root -isnot [System.Windows.Automation.AutomationElement] -or
+                    $rendererPair.Element -isnot [System.Windows.Automation.AutomationElement] -or
+                    [string]$rendererPair.Element.Current.AutomationId -cne $AutomationId -or
+                    -not ($ProcessIds -contains [int]$rendererPair.Element.Current.ProcessId) -or
+                    [int]$rendererPair.Root.Current.ProcessId -ne $RendererProcessId
+                ) {
+                    throw 'External UIA renderer candidate failed genuine semantic identity'
+                }
+                $ResultQueue.Enqueue([object]$rendererPair)
+                return
+            }
+        }
+        }
         if ($Mode -eq 'FOCUS') {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PROBE'
         $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
@@ -1567,7 +1611,8 @@ function Find-UiaRootWithElementForProcessFamily {
             $CompletionSignal.Set()
         }
     } -ArgumentList @(
-        $workerMode, $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY, $Deadline,
+        $workerMode, $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY,
+        $nativeRendererHandle, $rendererProcessId, $Deadline,
         $workerResults, $workerCompleted, $workerProgress, $childSearchScript
     )
     $workerStates += [pscustomobject]@{
@@ -1612,11 +1657,13 @@ function Find-UiaRootWithElementForProcessFamily {
     }
     $unfinished = @($workerStates | Where-Object { -not $_.Completion.Wait(0) })
     if ($unfinished.Count -gt 0) {
-        # Snapshot all three independent routes before any result is lost.
+        # Snapshot all independently launched routes before any result is lost.
         # The old single-stage report selected the first unfinished route,
         # concealing whether POINT and FOCUS also stalled on real UIA calls.
         $allowedDesktopWorkerStages = @(
             'NOT_ENTERED',
+            'SEMANTIC_DESKTOP_RENDERER_PROBE',
+            'SEMANTIC_DESKTOP_RENDERER_READY',
             'SEMANTIC_DESKTOP_POINT_PROBE',
             'SEMANTIC_DESKTOP_POINT_READY',
             'SEMANTIC_DESKTOP_POINT_ID_PROBE',

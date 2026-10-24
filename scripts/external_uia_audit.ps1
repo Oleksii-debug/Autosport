@@ -40,6 +40,12 @@ $script:nativeRendererAccessibilityRequestAttempted = $false
 # Only fixed audit-owned stage codes are retained. Never persist a UIA provider
 # exception message, arbitrary COM property, user path, or window title.
 $script:lastDesktopWorkerStage = 'NOT_RUN'
+# Fixed per-route diagnostics; never expose provider text, HWNDs, PIDs or paths.
+$script:lastDesktopWorkerRouteStages = [ordered]@{
+    ROOT = 'NOT_RUN'
+    POINT = 'NOT_RUN'
+    FOCUS = 'NOT_RUN'
+}
 # Audit-owned fixed failure classification only; never serialize provider text.
 $script:semanticFailureClass = 'NOT_OBSERVED'
 # Fixed OS-only class-bucket counts reveal whether a provider-backed render
@@ -1442,17 +1448,9 @@ function Find-UiaRootWithElementForProcessFamily {
     }
     $unfinished = @($workerStates | Where-Object { -not $_.Completion.Wait(0) })
     if ($unfinished.Count -gt 0) {
-        $lastWorkerStage = 'NOT_ENTERED'
-        foreach ($timedOutState in $unfinished) {
-            $workerStage = $null
-            while ($timedOutState.Progress.TryDequeue([ref]$workerStage)) {
-                $lastWorkerStage = [string]$workerStage
-            }
-            if ($lastWorkerStage -ne 'NOT_ENTERED') { break }
-        }
-        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE'
-        # Persist a fixed vocabulary only; never serialize COM exceptions,
-        # raw HWNDs, user data or provider-returned names.
+        # Snapshot all three independent routes before any result is lost.
+        # The old single-stage report selected the first unfinished route,
+        # concealing whether POINT and FOCUS also stalled on real UIA calls.
         $allowedDesktopWorkerStages = @(
             'NOT_ENTERED',
             'SEMANTIC_DESKTOP_POINT_PROBE',
@@ -1475,6 +1473,26 @@ function Find-UiaRootWithElementForProcessFamily {
             'SEMANTIC_PRIMARY_DESCENDANT_PROBE',
             'SEMANTIC_CHILD_DESCENDANT_PROBE'
         )
+        $lastWorkerStage = 'NOT_ENTERED'
+        foreach ($state in $workerStates) {
+            $routeStage = 'NOT_ENTERED'
+            $workerStage = $null
+            while ($state.Progress.TryDequeue([ref]$workerStage)) {
+                $routeStage = [string]$workerStage
+            }
+            if ($state.Completion.Wait(0)) {
+                $script:lastDesktopWorkerRouteStages[$state.Mode] = 'COMPLETED'
+            } else {
+                $safeStage = if ($allowedDesktopWorkerStages -ccontains $routeStage) {
+                    $routeStage
+                } else {
+                    'UNKNOWN_FIXED_STAGE'
+                }
+                $script:lastDesktopWorkerRouteStages[$state.Mode] = $safeStage
+                if ($lastWorkerStage -eq 'NOT_ENTERED') { $lastWorkerStage = $safeStage }
+            }
+        }
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE'
         $script:lastDesktopWorkerStage = if ($allowedDesktopWorkerStages -ccontains $lastWorkerStage) {
             $lastWorkerStage
         } else {
@@ -1561,6 +1579,7 @@ $report = [ordered]@{
     isolated_mta_focus_diagnostic_status = 'NOT_RUN'
     semantic_desktop_worker_timeout = $false
     semantic_desktop_worker_last_stage = 'NOT_RUN'
+    semantic_desktop_worker_route_stages = $null
     process_id = $null
     process_family_ids = @()
     root_name = $null
@@ -2316,6 +2335,7 @@ try {
     $report.native_renderer_accessibility_message_status = $script:nativeRendererAccessibilityMessageStatus
     $report.semantic_desktop_worker_timeout = ($script:lastDesktopWorkerStage -ne 'NOT_RUN')
     $report.semantic_desktop_worker_last_stage = $script:lastDesktopWorkerStage
+    $report.semantic_desktop_worker_route_stages = $script:lastDesktopWorkerRouteStages
     # Record bounded process-lifetime evidence BEFORE cleanup can kill a live
     # window. Do not disclose command lines, workspace paths, or environment.
     # A missing semantic automation id must remain a hard FAIL regardless.

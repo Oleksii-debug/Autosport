@@ -500,3 +500,27 @@ def test_desktop_fallback_routes_are_independent_and_never_accept_native_only_ev
     assert "[string]$focusSemantic.Current.AutomationId -cne $AutomationId" in worker
     assert "[string]$pointSemantic.Current.AutomationId -cne $AutomationId" in worker
     assert "$report.status = 'PASS'" not in desktop
+
+def test_independent_desktop_uia_routes_publish_fixed_failure_stages() -> None:
+    """One stalled ROOT route must not conceal POINT/FOCUS evidence or grant PASS."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    helper = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    timeout = helper.split("if ($unfinished.Count -gt 0) {", 1)[1].split(
+        "$script:semanticWorkerTimedOut = $true", 1
+    )[0]
+    assert "$script:lastDesktopWorkerRouteStages = [ordered]@{" in source
+    assert all(f"{mode} = 'NOT_RUN'" in source for mode in ("ROOT", "POINT", "FOCUS"))
+    assert "foreach ($state in $workerStates)" in timeout
+    assert "$state.Progress.TryDequeue([ref]$workerStage)" in timeout
+    assert "$state.Completion.Wait(0)" in timeout
+    assert "$script:lastDesktopWorkerRouteStages[$state.Mode] = 'COMPLETED'" in timeout
+    assert "$script:lastDesktopWorkerRouteStages[$state.Mode] = $safeStage" in timeout
+    assert "$allowedDesktopWorkerStages -ccontains $routeStage" in timeout
+    assert "'UNKNOWN_FIXED_STAGE'" in timeout
+    assert "semantic_desktop_worker_route_stages = $null" in source
+    assert "$report.semantic_desktop_worker_route_stages = $script:lastDesktopWorkerRouteStages" in source
+    assert "Stop-Job" not in timeout
+    assert "Receive-Job" not in timeout
+    assert "$report.status = 'PASS'" not in timeout

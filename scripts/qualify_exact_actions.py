@@ -225,9 +225,14 @@ def _load(path: str) -> Any:
         data = stream.read(2_000_001)
     if len(data) > 2_000_000:
         raise GateError("JSON exceeds 2 MB")
-    return json.loads(data, object_pairs_hook=_unique_json_members,
-                      parse_constant=_reject_nonfinite_json,
-                      parse_float=_finite_json_float)
+    try:
+        return json.loads(data, object_pairs_hook=_unique_json_members,
+                          parse_constant=_reject_nonfinite_json,
+                          parse_float=_finite_json_float)
+    except RecursionError:
+        # An untrusted, small JSON file can still contain thousands of nested
+        # arrays/objects. Report a stable fail-closed result, not a traceback.
+        raise GateError("JSON nesting exceeds supported depth") from None
 
 
 def main(argv: list[str] | None = None) -> int:

@@ -8,6 +8,7 @@ from pathlib import Path
 import subprocess
 import sys
 import tempfile
+import threading
 import time
 
 BUTTON_ID = "autosport-webview2-uia-control"
@@ -22,7 +23,8 @@ CODES = {"STARTED", "WINDOWS_REQUIRED", "HOST_NOT_READY", "HOST_EXITED",
          "PROBE_UIA_CALL_ERROR", "PROBE_PROPERTY_ERROR",
          "NO_FOCUSED_ELEMENT", "FOREIGN_FOCUS", "SEMANTIC_MISMATCH",
          "WRONG_BUTTON_SEMANTICS", "WRONG_AUTOMATION_ID",
-         "SEMANTIC_BUTTON_RETURNED"}
+         "SEMANTIC_BUTTON_RETURNED", "DOM_FOCUS_NOT_CONFIRMED",
+         "DOM_FOCUS_EXCEPTION", "DOM_FOCUS_TIMEOUT"}
 
 def emit(path: Path, code: str, *, exact_id: bool = False) -> None:
     if code not in CODES:
@@ -43,6 +45,20 @@ def command(mode: str, *args: str) -> list[str]:
         return [sys.executable, mode, *args]
     return [sys.executable, str(Path(__file__).resolve()), mode, *args]
 
+FOCUS_JS = (
+    "(function(){"
+    "const target=document.getElementById('autosport-webview2-uia-control');"
+    "if(!target||target.tagName!=='BUTTON'||target.disabled)return false;"
+    "target.focus({preventScroll:true});"
+    "return document.activeElement===target && "
+    "document.activeElement.id==='autosport-webview2-uia-control';"
+    "})()"
+)
+
+def focus_status(value: object) -> str:
+    # JavaScript must return a real Boolean; truthy strings/integers are not proof.
+    return "DOM_FOCUS_CONFIRMED" if value is True else "DOM_FOCUS_NOT_CONFIRMED"
+
 def host(ready: Path, profile: Path, *, file_origin: bool = False) -> int:
     import webview
     # The product loads a local packaged HTML file, while the original
@@ -56,10 +72,32 @@ def host(ready: Path, profile: Path, *, file_origin: bool = False) -> int:
         document = {"html": HTML}
     window = webview.create_window(HOST_WINDOW_TITLE,
                                    width=640, height=480, **document)
-    def loaded() -> None:
+    focus_request = ready.with_name("focus-request")
+    focus_result = ready.with_name("focus-result")
+    loaded_once = threading.Event()
+
+    def focus_after_foreground() -> None:
+        # Wait for the controller to verify native foreground BEFORE asking
+        # WebView2 to focus the DOM. The old test focused first, then changed
+        # OS foreground, so its READY marker was not a retained-focus witness.
+        deadline = time.monotonic() + 15
+        while not focus_request.is_file() and time.monotonic() < deadline:
+            time.sleep(0.1)
+        if not focus_request.is_file():
+            return  # Controller emits bounded DOM_FOCUS_TIMEOUT.
         try:
-            window.evaluate_js("document.getElementById('" + BUTTON_ID + "').focus()")
-            ready.write_text("READY\n", encoding="ascii")
+            result = focus_status(window.evaluate_js(FOCUS_JS))
+        except Exception:
+            result = "DOM_FOCUS_EXCEPTION"
+        focus_result.write_text(result + "\n", encoding="ascii")
+
+    def loaded() -> None:
+        if loaded_once.is_set():
+            return
+        loaded_once.set()
+        try:
+            threading.Thread(target=focus_after_foreground, daemon=True).start()
+            ready.write_text("LOADED\n", encoding="ascii")
         except Exception:
             pass  # Missing readiness is failure, not a synthetic PASS.
     window.events.loaded += loaded
@@ -228,6 +266,8 @@ def run(report: Path, *, file_origin: bool = False) -> int:
     ) as root:
         directory = Path(root)
         ready = directory / "ready"
+        focus_request = directory / "focus-request"
+        focus_result = directory / "focus-result"
         child = subprocess.Popen(command("host-file" if file_origin else "host", str(ready), str(directory / "profile")),
                                  cwd=root, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
@@ -252,6 +292,25 @@ def run(report: Path, *, file_origin: bool = False) -> int:
                 return 1
             if not foreground(hwnd):
                 emit(report, "FOREGROUND_NOT_CLAIMED")
+                return 1
+            focus_request.write_text("FOCUS\n", encoding="ascii")
+            focus_deadline = time.monotonic() + 18
+            while not focus_result.is_file() and time.monotonic() < focus_deadline:
+                if child.poll() is not None:
+                    emit(report, "HOST_EXITED")
+                    return 1
+                time.sleep(0.1)
+            if not focus_result.is_file():
+                emit(report, "DOM_FOCUS_TIMEOUT")
+                return 1
+            try:
+                focus_code = focus_result.read_text(encoding="ascii").strip()
+            except OSError:
+                focus_code = "DOM_FOCUS_NOT_CONFIRMED"
+            if focus_code != "DOM_FOCUS_CONFIRMED":
+                emit(report, focus_code if focus_code in {
+                    "DOM_FOCUS_NOT_CONFIRMED", "DOM_FOCUS_EXCEPTION"
+                } else "DOM_FOCUS_NOT_CONFIRMED")
                 return 1
             emit(report, "PROBE_ENTERED")
             # The genuine COM client already runs in its own bounded pwsh MTA
@@ -291,6 +350,8 @@ def run(report: Path, *, file_origin: bool = False) -> int:
             # this disposable CI runner; it must not override probe evidence.
 
 def selftest() -> int:
+    assert focus_status(True) == "DOM_FOCUS_CONFIRMED"
+    assert all(focus_status(v) == "DOM_FOCUS_NOT_CONFIRMED" for v in (False, None, 1, "true"))
     assert classify(7, {7, 8}, "ControlType.Button", BUTTON_NAME, BUTTON_ID) == "SEMANTIC_BUTTON_RETURNED"
     assert classify(9, {7, 8}, "ControlType.Button", BUTTON_NAME, BUTTON_ID) == "FOREIGN_FOCUS"
     assert classify(7, {7}, "ControlType.Text", BUTTON_NAME, BUTTON_ID) == "WRONG_BUTTON_SEMANTICS"

@@ -246,12 +246,22 @@ def test_parallel_writers_use_unique_temporary_files_and_complete_envelopes(
     original_replace = evidence_module.os.replace
     rendezvous = Barrier(2)
     seen: list[Path] = []
+    first_attempts: set[Path] = set()
     lock = Lock()
 
     def concurrent_replace(source, destination):
+        temporary = Path(source)
         with lock:
-            seen.append(Path(source))
-        rendezvous.wait(timeout=5)
+            first_attempt = temporary not in first_attempts
+            if first_attempt:
+                first_attempts.add(temporary)
+                seen.append(temporary)
+        # Synchronize the first publication attempt of each unique writer.
+        # A transient Windows sharing violation may retry os.replace with the
+        # SAME temporary path: waiting at a second barrier has no peer and
+        # spuriously fails despite a correct retry and unique-file isolation.
+        if first_attempt:
+            rendezvous.wait(timeout=30)
         return original_replace(source, destination)
 
     monkeypatch.setattr(evidence_module.os, "replace", concurrent_replace)

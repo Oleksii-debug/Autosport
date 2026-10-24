@@ -6,6 +6,8 @@ not proof that the wheel was embedded in PyInstaller's sealed executable.
 from __future__ import annotations
 
 from copy import deepcopy
+from importlib.metadata import FileHash, PackagePath
+import base64
 from pathlib import Path, PurePosixPath
 from types import SimpleNamespace
 import hashlib
@@ -34,12 +36,22 @@ def _graph():
 
 def _distribution(root: Path, *, with_license: bool = True):
     path = PurePosixPath("example_dist-1.2.3.dist-info/licenses/LICENSE.txt")
+    payload = b"Example copyright and license terms\n"
     (root / path).parent.mkdir(parents=True, exist_ok=True)
-    (root / path).write_bytes(b"Example copyright and license terms\n")
+    (root / path).write_bytes(payload)
+    # Mirror importlib.metadata's real RECORD objects. A bare PurePosixPath
+    # has no size/hash and cannot satisfy fail-closed wheel-byte binding.
+    record = PackagePath(str(path))
+    record.size = len(payload)
+    record.hash = FileHash(
+        "sha256=" + base64.urlsafe_b64encode(
+            hashlib.sha256(payload).digest()
+        ).rstrip(b"=").decode("ascii")
+    )
     return SimpleNamespace(
         metadata={"Name": "example-dist"},
         version="1.2.3",
-        files=[path] if with_license else [],
+        files=[record] if with_license else [],
         locate_file=lambda value: root.joinpath(*value.parts),
     )
 

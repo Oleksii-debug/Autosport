@@ -490,24 +490,50 @@ def _owned_distribution_license_record(record_path: str, name: str, version: str
     if len(parts) < 2 or any(not part or part in (".", "..") or ":" in part for part in parts):
         return False
     folder = parts[0]
-    if not folder.endswith(".dist-info") or "-" not in folder[:-10]:
-        return False
-    distribution_name, distribution_version = folder[:-10].rsplit("-", 1)
-    try:
-        if _normalize_name(distribution_name) != name or distribution_version != version:
+    if folder.endswith(".dist-info") and "-" in folder[:-10]:
+        distribution_name, distribution_version = folder[:-10].rsplit("-", 1)
+        try:
+            if _normalize_name(distribution_name) != name or distribution_version != version:
+                return False
+        except ValueError:
             return False
-    except ValueError:
+    elif (
+        # The setuptools wheel RECORD can own vendored license files.
+        # This proves wheel-byte origin, not separately installed vendors or legal clearance.
+        name == "setuptools" and parts[:2] == ["setuptools", "_vendor"]
+        and len(parts) in (4, 5)
+        and (len(parts) == 4 or parts[3] == "licenses")
+        and parts[2].endswith(".dist-info") and "-" in parts[2][:-10]
+    ):
+        vendor_name, vendor_version = parts[2][:-10].rsplit("-", 1)
+        try:
+            _normalize_name(vendor_name)
+        except ValueError:
+            return False
+        if not _VERSION.fullmatch(vendor_version):
+            return False
+    else:
         return False
     leaf = parts[-1]
     stem = leaf.split(".", 1)[0].upper()
     return (
         leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
         or (
+            leaf in {"LICENSE.APACHE", "LICENSE.BSD"}
+            and (
+                (name == "packaging" and len(parts) == 3 and parts[1] == "licenses")
+                or (
+                    name == "setuptools"
+                    and parts[:2] == ["setuptools", "_vendor"]
+                    and len(parts) == 5 and parts[3] == "licenses"
+                )
+            )
+        )
+        or (
             stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
             and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
         )
     )
-
 
 # This is a bounded copy of build-host distribution LICENSE/NOTICE text only.
 # Its evidence class deliberately does not claim that the distribution is
@@ -662,6 +688,7 @@ def capture_dependency_license_evidence(
     Source/binary attribution remains a separate Plan 6 §5Б acceptance gate.
     """
     import hashlib
+    import base64
     from pathlib import Path
 
     components = dependency_graph.get("components")
@@ -697,6 +724,17 @@ def capture_dependency_license_evidence(
             allowed_name = (
                 leaf.upper() in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
                 or (
+                    leaf in {"LICENSE.APACHE", "LICENSE.BSD"}
+                    and (
+                        (name == "packaging" and len(parts) == 3 and parts[1] == "licenses")
+                        or (
+                            name == "setuptools"
+                            and parts[:2] == ["setuptools", "_vendor"]
+                            and len(parts) == 5 and parts[3] == "licenses"
+                        )
+                    )
+                )
+                or (
                     stem in {"LICENSE", "LICENCE", "COPYING", "NOTICE"}
                     and leaf.lower().endswith((".txt", ".md", ".rst", ".license"))
                 )
@@ -709,7 +747,11 @@ def capture_dependency_license_evidence(
                 and allowed_name
             ):
                 if not _owned_distribution_license_record(source_name, name, version):
-                    raise ValueError("distribution license RECORD origin mismatches owner/version")
+                    raise ValueError(
+                        "distribution license RECORD origin mismatches owner/version: "
+                        f"component={name!a} version={version!a} "
+                        f"record={source_name!a}"
+                    )
                 candidates.append((source_name, entry))
         if len(candidates) > 16:
             raise ValueError("distribution has unbounded license-file candidates")
@@ -720,6 +762,21 @@ def capture_dependency_license_evidence(
                 payload = _read_sealed_license_text(path)
             except OSError as exc:
                 raise ValueError("distribution license source became unavailable") from exc
+            # License bytes must match the installed wheel RECORD, not merely
+            # the file currently readable on the build host.
+            record_size = getattr(record, "size", None)
+            record_hash = getattr(record, "hash", None)
+            if (
+                type(record_size) is not int
+                or record_size != len(payload)
+                or record_hash is None
+                or getattr(record_hash, "mode", None) != "sha256"
+                or type(getattr(record_hash, "value", None)) is not str
+                or record_hash.value != base64.urlsafe_b64encode(
+                    hashlib.sha256(payload).digest()
+                ).rstrip(b"=").decode("ascii")
+            ):
+                raise ValueError("distribution license RECORD digest/size mismatch")
             total_bytes += len(payload)
             if total_bytes > 8 * 1024 * 1024:
                 raise ValueError("distribution licenses exceed overall size budget")

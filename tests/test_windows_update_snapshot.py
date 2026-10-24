@@ -1,6 +1,7 @@
 """Negative, restart and tamper tests for update-package byte pinning."""
 
 import hashlib
+import os
 import struct
 from pathlib import Path
 
@@ -421,6 +422,7 @@ def test_source_path_replacement_during_copy_rejected_even_with_same_bytes(tmp_p
     replacement.write_bytes(source.read_bytes())
     original_fdopen = module.os.fdopen
     swapped = False
+    attempts, denied = [], []
 
     class SwappingRead:
         def __init__(self, raw):
@@ -440,7 +442,12 @@ def test_source_path_replacement_during_copy_rejected_even_with_same_bytes(tmp_p
             nonlocal swapped
             block = self.raw.read(amount)
             if block and not swapped:
-                replacement.replace(source)
+                attempts.append(True)
+                try:
+                    replacement.replace(source)
+                except PermissionError:
+                    denied.append(True)
+                    raise
                 swapped = True
             return block
 
@@ -450,13 +457,19 @@ def test_source_path_replacement_during_copy_rejected_even_with_same_bytes(tmp_p
 
     with monkeypatch.context() as context:
         context.setattr(module.os, "fdopen", wrap_source)
-        with pytest.raises(
-            WindowsUpdateSnapshotError,
-            match="source changed while being copied|package snapshot I/O failure",
-        ):
+        expected = "source changed while being copied"
+        if os.name == "nt":
+            expected += "|package snapshot I/O failure"
+        with pytest.raises(WindowsUpdateSnapshotError, match=expected):
             with pinned_windows_update_package(source, expected_sha256=digest(source.read_bytes())):
                 pytest.fail("source replacement must be rejected")
-    assert swapped
+    assert attempts, "the source replacement must actually be attempted"
+    if denied:
+        assert os.name == "nt", "unexpected platform-level sharing denial"
+        assert source.read_bytes() == b"same bytes across a source path replacement"
+        assert replacement.exists()
+    else:
+        assert swapped
 
 
 def test_source_metadata_mutation_during_copy_rejected(tmp_path, monkeypatch):

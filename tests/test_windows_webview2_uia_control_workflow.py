@@ -175,5 +175,9 @@ def test_dom_focus_acknowledgment_is_real_boolean_and_after_native_foreground() 
     assert run_body.index('focus_code != "DOM_FOCUS_CONFIRMED"') < run_body.index('probe_exit = probe(child.pid, report)')
     assert 'ready.write_text("LOADED' in source
     assert 'window.evaluate_js(FOCUS_JS)' in source
-    assert 'focus_result.write_text(result +' in source
+    assert 'window.evaluate_js(VERIFY_JS)' in source
+    assert 'publish_focus_status(result)' in source
+    assert 'os.replace(pending, focus_result)' in source
+    assert source.index('initial = focus_status(window.evaluate_js(FOCUS_JS))') < source.index('def run(')
+    assert 'focus_status(window.evaluate_js(VERIFY_JS))' in source
     assert 'window.evaluate_js("document.getElementById(' not in source

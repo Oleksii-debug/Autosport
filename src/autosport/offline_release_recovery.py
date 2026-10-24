@@ -22,6 +22,7 @@ from .offline_release_install import (
 from .offline_release_lifecycle import (
     _inspection_root, _trusted_archive_inventory, inspect_installed_release,
 )
+from .offline_release_upgrade import _directory_witness
 
 _QUARANTINE_NAME = re.compile(r"\.autosport-uninstall-[A-Za-z0-9_-]{6,32}\Z")
 _MAX_ENTRIES = 4096
@@ -52,6 +53,10 @@ def recover_interrupted_uninstall(
     ):
         raise OfflineInstallError("uninstall recovery quarantine is not canonical")
     _inspection_root(quarantine)
+    # Bind the original quarantine *before* archive validation or the file
+    # census. A same-byte replacement during either read must not become a
+    # newly trusted object and receive restored files or publication rights.
+    quarantine_identity = _directory_witness(quarantine)
     if type(expected_source_sha) is not str or not re.fullmatch(
         r"[a-f0-9]{40}", expected_source_sha
     ):
@@ -66,6 +71,8 @@ def recover_interrupted_uninstall(
         expected_source_sha=expected_source_sha,
         expected_package_sha256=expected_package_sha256,
     )
+    if _directory_witness(quarantine) != quarantine_identity:
+        raise OfflineInstallError("quarantine identity changed during archive inventory")
     expected_receipt = {
         "schema_version": 1,
         "product": "Autosport",
@@ -101,7 +108,17 @@ def recover_interrupted_uninstall(
             expected_dirs.add("/".join(parts[:i]))
     discovered: set[str] = set()
     count = 0
-    for parent, dirs, names in os.walk(quarantine, topdown=True, followlinks=False):
+    # os.walk silently ignores scandir failures unless onerror is supplied.
+    # An unreadable but expected subdirectory could conceal owner files from
+    # the quarantine census while a later path-based file check still passes.
+    # Never publish or retire a recovery tree after a partial enumeration.
+    def reject_walk_error(exc: OSError) -> None:
+        raise OfflineInstallError("quarantine enumeration failed") from exc
+
+    for parent, dirs, names in os.walk(
+        quarantine, topdown=True, followlinks=False,
+        onerror=reject_walk_error,
+    ):
         prefix_path = Path(parent).relative_to(quarantine)
         prefix = "" if prefix_path == Path(".") else prefix_path.as_posix()
         if prefix not in expected_dirs or _is_redirected_install_path(Path(parent)):
@@ -131,10 +148,16 @@ def recover_interrupted_uninstall(
                 if digest != trusted[rel]:
                     raise OfflineInstallError("mutated quarantine file")
 
+    # The census must describe the same filesystem object as the entry
+    # witness, before any missing file or receipt is written.
+    if _directory_witness(quarantine) != quarantine_identity:
+        raise OfflineInstallError("quarantine identity changed during file census")
     # Verify the entire quarantine census before writing even one byte.
     missing = set(trusted) - discovered
     with zipfile.ZipFile(archive) as original:
         for name in sorted(missing):
+            if _directory_witness(quarantine) != quarantine_identity:
+                raise OfflineInstallError("quarantine identity changed during file restoration")
             member = quarantine.joinpath(*name.split("/"))
             member.parent.mkdir(parents=True, exist_ok=True)
             ancestor = member.parent
@@ -159,21 +182,44 @@ def recover_interrupted_uninstall(
                 os.fsync(writer.fileno())
             if digest.hexdigest() != trusted[name]:
                 raise OfflineInstallError("original recovery member hash changed")
+            if _directory_witness(quarantine) != quarantine_identity:
+                raise OfflineInstallError("quarantine identity changed during file restoration")
+    if _directory_witness(quarantine) != quarantine_identity:
+        raise OfflineInstallError("quarantine identity changed before receipt restoration")
     if _RECEIPT not in discovered:
         with receipt_path.open("x", encoding="utf-8") as writer:
             json.dump(expected_receipt, writer, ensure_ascii=False, sort_keys=True, separators=(",", ":"))
             writer.write("\n")
             writer.flush()
             os.fsync(writer.fileno())
+    # The quarantine is the exact previously inspected filesystem object.
+    # Same-byte replacement after inspection must not be published as that
+    # object: a copied directory is not a valid continuation of the recovery.
+    if _directory_witness(quarantine) != quarantine_identity:
+        raise OfflineInstallError("quarantine identity changed before trusted inspection")
     proof = inspect_installed_release(
         quarantine,
         archive=archive,
         expected_source_sha=expected_source_sha,
         expected_package_sha256=expected_package_sha256,
     )
+    if _directory_witness(quarantine) != quarantine_identity:
+        raise OfflineInstallError("quarantine identity changed during recovery inspection")
     if destination.exists() or destination.is_symlink():
         raise OfflineInstallError("uninstall recovery destination was concurrently created")
+    # An in-place rewrite after the previous inspection preserves directory
+    # identity. Recheck both the exact files and their directory witness
+    # immediately before the no-replace publication.
+    inspect_installed_release(
+        quarantine, archive=archive,
+        expected_source_sha=expected_source_sha,
+        expected_package_sha256=expected_package_sha256,
+    )
+    if _directory_witness(quarantine) != quarantine_identity:
+        raise OfflineInstallError("quarantine identity changed before recovery publication")
     _publish_directory_no_replace(quarantine, destination)
+    if _directory_witness(destination) != quarantine_identity:
+        raise OfflineInstallError("published quarantine identity changed during recovery")
     # The payload is inspected before its atomic move; an in-place rewrite
     # during publication keeps the directory inode unchanged. Verify the
     # *published* installed bytes before reporting recovered success or
@@ -184,11 +230,25 @@ def recover_interrupted_uninstall(
         expected_source_sha=expected_source_sha,
         expected_package_sha256=expected_package_sha256,
     )
+    if _directory_witness(destination) != quarantine_identity:
+        raise OfflineInstallError("published quarantine identity changed during readback")
     try:
         quarantine.parent.rmdir()
     except OSError:
         # Never recursively clean another actor's unrelated data.
         pass
+    # Retiring the quarantine is a final filesystem mutation. An in-place
+    # executable rewrite leaves its directory inode unchanged, while a copied
+    # replacement can preserve all bytes but change the directory identity.
+    if _directory_witness(destination) != quarantine_identity:
+        raise OfflineInstallError("recovered release identity changed during cleanup")
+    proof = inspect_installed_release(
+        destination, archive=archive,
+        expected_source_sha=expected_source_sha,
+        expected_package_sha256=expected_package_sha256,
+    )
+    if _directory_witness(destination) != quarantine_identity:
+        raise OfflineInstallError("recovered release identity changed after cleanup")
     return {**proof, "status": "UNINSTALL_RECOVERED", "restored_files": len(missing)}
 
 

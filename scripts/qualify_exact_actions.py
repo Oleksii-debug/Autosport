@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Fail-closed, offline exact-SHA GitHub Actions qualification for Autosport.
 
-Inputs are independently fetched GitHub REST run/job JSON; this tool cannot
-authenticate their origin. A successful job is insufficient: mandatory steps
+Inputs are GitHub REST run/job JSON; this tool cannot authenticate their
+origin. The jobs API omits per-job run_attempt in its documented response.
+For reruns, provide jobs_response.run_attempt from the attempt-scoped jobs URL
+(/runs/{id}/attempts/{N}/jobs), or a matching per-job run_attempt field. A successful job is insufficient: mandatory steps
 must actually have executed and succeeded. Does not establish NVDA acceptance.
 """
 from __future__ import annotations
@@ -123,6 +125,14 @@ def check_workflow(run: Any, jobs_response: Any, *, expected_sha: str,
         raise GateError(f"run {run_id}: unsupported workflow event")
     if run.get("status") != "completed" or run.get("conclusion") != "success":
         raise GateError(f"run {run_id}: workflow not successful")
+    # GitHub REST's documented workflow-job schema has run_id/head_sha but
+    # no run_attempt. For attempt 1, absence is unambiguous. On a rerun,
+    # require explicit attempt provenance from the attempt-scoped jobs API;
+    # otherwise stale jobs from an earlier attempt could be accepted.
+    response_attempt = jobs_response.get("run_attempt")
+    if response_attempt is not None:
+        if type(response_attempt) is not int or response_attempt != attempt:
+            raise GateError(f"run {run_id}: jobs response attempt mismatch")
     jobs = jobs_response.get("jobs")
     if type(jobs) is not list or len(jobs) != len(required_jobs):
         raise GateError(f"run {run_id}: missing/extra jobs")
@@ -136,8 +146,15 @@ def check_workflow(run: Any, jobs_response: Any, *, expected_sha: str,
             raise GateError(f"run {run_id}: duplicate or unknown job")
         seen.add(name)
         ids.add(job_id)
-        if job.get("run_id") != run_id or job.get("run_attempt") != attempt:
-            raise GateError(f"run {run_id}: job run/attempt mismatch")
+        if job.get("run_id") != run_id:
+            raise GateError(f"run {run_id}: job run id mismatch")
+        job_attempt = job.get("run_attempt")
+        if job_attempt is not None and (
+            type(job_attempt) is not int or job_attempt != attempt
+        ):
+            raise GateError(f"run {run_id}: job attempt mismatch")
+        if attempt > 1 and response_attempt is None and job_attempt is None:
+            raise GateError(f"run {run_id}: rerun job attempt not proven")
         if job.get("head_sha") != expected_sha:
             raise GateError(f"run {run_id}: job SHA mismatch")
         if job.get("status") != "completed" or job.get("conclusion") != "success":

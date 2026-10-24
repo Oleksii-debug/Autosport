@@ -88,10 +88,45 @@ jobs:
           ) {
             throw 'Minimal WebView2 UIA control violated diagnostic-only truth labels'
           }
+      - name: Probe local-file WebView2 origin with independent UIA client
+        shell: pwsh
+        run: |
+          # Autosport loads a local HTML file; the original control used
+          # inline HTML. This second falsifier changes only document origin.
+          $reportPath = Join-Path $PWD 'webview2-uia-control-file.json'
+          & ./dist/Autosport-WebView2-UIA-Control.exe run-file $reportPath
+          $deadline = [DateTime]::UtcNow.AddSeconds(120)
+          $observed = 'NO_REPORT'
+          $evidence = $null
+          while ([DateTime]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+              try {
+                $evidence = Get-Content -LiteralPath $reportPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $observed = [string]$evidence.status
+              } catch {
+                $observed = 'UNREADABLE_REPORT'
+              }
+              if ($observed -notin @('STARTED', 'PROBE_ENTERED', 'UNREADABLE_REPORT')) { break }
+            }
+            Start-Sleep -Milliseconds 250
+          }
+          if ($observed -cne 'SEMANTIC_BUTTON_RETURNED') {
+            throw "File-origin WebView2 UIA control did not return real semantic evidence; fixed_stage=$observed"
+          }
+          if (
+            $null -eq $evidence -or
+            $evidence.exact_automation_id -ne $true -or
+            $evidence.autosport_product_uia_pass -ne $false -or
+            $evidence.human_tested -ne $false -or
+            $evidence.nvda_verified -ne $false -or
+            $evidence.real_money_execution -ne $false
+          ) {
+            throw 'File-origin WebView2 UIA control violated diagnostic-only truth labels'
+          }
       - name: Preserve fixed diagnostic codes even on failure
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: independent-webview2-uia-control
-          path: webview2-uia-control.json
+          path: |\n            webview2-uia-control.json\n            webview2-uia-control-file.json
           if-no-files-found: warn

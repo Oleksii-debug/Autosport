@@ -267,6 +267,44 @@ class GateTests(unittest.TestCase):
         with self.assertRaisesRegex(GateError, "job attempt mismatch"):
             self.check()
 
+    def test_duplicate_run_conclusion_cannot_override_failure(self):
+        from scripts.qualify_exact_actions import _load
+        raw = json.dumps(self.ci).replace(
+            '"conclusion": "success"',
+            '"conclusion": "failure", "conclusion": "success"', 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ambiguous.json"
+            path.write_text(raw, encoding="utf-8")
+            with self.assertRaisesRegex(GateError, "duplicate object member"):
+                _load(str(path))
+
+    def test_duplicate_nested_job_step_cannot_override_failure(self):
+        from scripts.qualify_exact_actions import _load
+        raw = json.dumps(self.wj).replace(
+            '"conclusion": "success"',
+            '"conclusion": "failure", "conclusion": "success"', 1)
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "ambiguous-jobs.json"
+            path.write_text(raw, encoding="utf-8")
+            with self.assertRaisesRegex(GateError, "duplicate object member"):
+                _load(str(path))
+
+    def test_nonfinite_json_evidence_is_rejected(self):
+        from scripts.qualify_exact_actions import _load
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "nan.json"
+            path.write_text('{"unused": NaN}', encoding="utf-8")
+            with self.assertRaisesRegex(GateError, "non-finite number"):
+                _load(str(path))
+
+    def test_oversized_json_evidence_is_rejected(self):
+        from scripts.qualify_exact_actions import _load
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "huge.json"
+            path.write_bytes(b" " * 2_000_001)
+            with self.assertRaisesRegex(GateError, "exceeds 2 MB"):
+                _load(str(path))
+
     def _build(self):
         return next(j for j in self.wj["jobs"] if j["name"] == "build")
 

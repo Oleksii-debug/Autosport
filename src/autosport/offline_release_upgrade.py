@@ -141,6 +141,8 @@ def upgrade_verified_paper_release(
     if txn.exists() or txn.is_symlink():
         raise OfflineInstallError("previous update transaction requires disposition")
     txn.mkdir(mode=0o700)
+    # Bind the exact transaction lease before staging or publishing releases.
+    txn_witness = _directory_witness(txn)
     candidate = txn / "candidate"
     previous = txn / "previous"
     try:
@@ -178,6 +180,8 @@ def upgrade_verified_paper_release(
         raise OfflineInstallError("installed directory identity changed before update commit")
     if _directory_witness(candidate) != candidate_witness:
         raise OfflineInstallError("staged release identity changed before update commit")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before update commit")
     # Atomic no-replace is required here too: on POSIX rename() can silently
     # replace an empty quarantine directory created by a concurrent worker.
     _publish_directory_no_replace(root, previous)
@@ -186,6 +190,9 @@ def upgrade_verified_paper_release(
     ):
         raise OfflineInstallError("installed identity changed during update")
     try:
+        # A parent swap during the first move can preserve both child inodes.
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed after previous release move")
         # The old release has moved, so re-check the exact vetted candidate
         # before publication; restore previous on a witnessed replacement.
         if _directory_witness(candidate) != candidate_witness:
@@ -214,7 +221,12 @@ def upgrade_verified_paper_release(
         if _directory_witness(previous) != incumbent_witness:
             raise OfflineInstallError("previous release identity changed during verification")
         _publish_directory_no_replace(candidate, root)
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during candidate publication")
     except Exception:
+        # Never restore a release from a foreign replacement lease.
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during failed publication")
         if not root.exists() and previous.is_dir():
             # A failed update must not silently reinstall a corrupted or
             # replaced rollback source. Leave the transaction quarantined
@@ -249,6 +261,8 @@ def upgrade_verified_paper_release(
     )
     if _directory_witness(root) != candidate_witness:
         raise OfflineInstallError("published release identity changed during readback")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before success")
     return {
         "status": "UPDATED_PAPER_ONLY", "old_source_sha": old_source_sha,
         "source_sha": new_source_sha, "package_sha256": new_package_sha256,

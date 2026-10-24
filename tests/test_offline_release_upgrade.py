@@ -154,6 +154,80 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             z.writestr("Autosport-V1/examples/demo.txt", "paper-only")
         return path, hashlib.sha256(path.read_bytes()).hexdigest()
 
+
+    def test_upgrade_rejects_transaction_parent_swap_during_previous_move(self):
+        # A stable candidate inode cannot authenticate a replacement lease.
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            dest, old, od, new, nd = self._installed(base)
+            txn = upgrade._transaction_root(dest)
+            displaced = base / "displaced-update-lease"
+            publish = upgrade._publish_directory_no_replace
+            moved = []
+
+            def replace_lease_before_previous_move(source, target):
+                if Path(source) == dest and Path(target) == txn / "previous":
+                    txn.rename(displaced)
+                    txn.mkdir()
+                    (displaced / "candidate").rename(txn / "candidate")
+                    moved.append(True)
+                return publish(source, target)
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=replace_lease_before_previous_move,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "transaction identity changed",
+                ):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(moved, [True])
+            self.assertFalse(dest.exists())
+            self.assertEqual(
+                (txn / "previous" / "Autosport.exe").read_bytes(),
+                self.OLD.encode(),
+            )
+
+    def test_upgrade_rejects_transaction_parent_swap_after_candidate_publication(self):
+        # A substituted lease cannot authorize success after new publication.
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            dest, old, od, new, nd = self._installed(base)
+            txn = upgrade._transaction_root(dest)
+            displaced = base / "displaced-update-lease"
+            publish = upgrade._publish_directory_no_replace
+            moved = []
+
+            def replace_lease_after_new_move(source, target):
+                result = publish(source, target)
+                if Path(source) == txn / "candidate" and Path(target) == dest:
+                    txn.rename(displaced)
+                    txn.mkdir()
+                    (displaced / "previous").rename(txn / "previous")
+                    moved.append(True)
+                return result
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=replace_lease_after_new_move,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "transaction identity changed",
+                ):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(moved, [True])
+            self.assertEqual(
+                (dest / "Autosport.exe").read_bytes(), self.NEW.encode(),
+            )
+            self.assertEqual(
+                (txn / "previous" / "Autosport.exe").read_bytes(),
+                self.OLD.encode(),
+            )
+
     def _installed(self, root, old_version="1.0.0", new_version="1.1.0", old_schema=1, new_schema=1):
         old, od = self._archive(root, "old.zip", self.OLD, old_version, old_schema)
         new, nd = self._archive(root, "new.zip", self.NEW, new_version, new_schema)

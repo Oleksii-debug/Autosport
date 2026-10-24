@@ -1940,10 +1940,10 @@ try {
     } catch {
         # Foreground restrictions are not semantic evidence; retain fail-closed UIA.
     }
-    # Process-isolated MTA differential is NOT semantic acceptance. Even an
-    # exact focused ID here cannot replace the genuine in-process element,
-    # F2/F8, STOP, LiveRegion or runtime witness requirements.
-    $report.isolated_mta_focus_diagnostic_status = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$foregroundFamilyIds)
+    # Optional MTA FocusedElement diagnostics must not precede the mandatory
+    # semantic probe: a timed-out external COM request can poison the WebView2
+    # provider before the real AutomationId/keyboard/STOP/LiveRegion gate.
+    # Run this differential only after semantic readiness has already FAILED.
     $semanticReady = $null
     $nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)
     while ([DateTime]::UtcNow -lt $semanticDeadline) {
@@ -1978,6 +1978,10 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($null -eq $semanticReady -or $null -eq $uiaRoot) {
+        # Failure-only, killable MTA differential. A returned ID is diagnostic,
+        # NEVER acceptance, and cannot affect an otherwise passing UIA gate.
+        # Use the latest bounded family snapshot, not a stale startup PID set.
+        $report.isolated_mta_focus_diagnostic_status = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$lastFamilyIds)
         if ($script:semanticFailureClass -eq 'NOT_OBSERVED') {
             $script:semanticFailureClass = 'SEMANTIC_NOT_OBSERVED'
         }

@@ -454,12 +454,15 @@ def test_product_mta_differential_never_short_circuits_packaged_gates() -> None:
     field = "isolated_mta_focus_diagnostic_status"
     assert source.count(field) == 2
     assert field + " = 'NOT_RUN'" in source
-    assign = "$report." + field + " = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$foregroundFamilyIds)"
+    assign = "$report." + field + " = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$lastFamilyIds)"
     assert assign in source
-    assert source.index(assign) < source.index("$semanticReady = $null")
-    assert source.index(assign) > source.index(
-        "$report.native_foreground_activation_status = 'NOT_CLAIMED'"
+    failure_guard = "if ($null -eq $semanticReady -or $null -eq $uiaRoot)"
+    assert source.index(assign) > source.index(failure_guard)
+    assert source.index(assign) > source.index("$semanticReady = $null")
+    assert source.index(assign) < source.index(
+        'throw "Timed out waiting for WebView2 semantic UIA readiness'
     )
+    assert assign not in source.split("$semanticReady = $null", 1)[0]
     assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in source
     assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'" in source
     assert "if ($report.status -ne 'PASS')" in source
@@ -575,3 +578,28 @@ def test_process_isolated_from_handle_is_bounded_and_fail_closed() -> None:
     assert "$report.isolated_renderer_handle_status = $script:isolatedRendererHandleStatus" in source
     assert "$report.status = 'PASS'" not in worker
     assert "Receive-Job" not in worker
+
+
+def test_optional_focused_mta_diagnostic_cannot_preempt_product_semantic_probe() -> None:
+    """A diagnostic COM timeout must not poison a potentially healthy product gate."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("$semanticReady = $null")
+    real_gate = source.index(
+        "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'",
+        start,
+    )
+    failure = source.index("if ($null -eq $semanticReady -or $null -eq $uiaRoot)", real_gate)
+    diagnostic = source.index(
+        "$report.isolated_mta_focus_diagnostic_status = Get-IsolatedMtaFocusDiagnostic",
+        failure,
+    )
+    assert start < real_gate < failure < diagnostic
+    assert "Get-IsolatedMtaFocusDiagnostic" not in source[start:failure]
+    assert source.count(
+        "$report.isolated_mta_focus_diagnostic_status = Get-IsolatedMtaFocusDiagnostic"
+    ) == 1
+    assert "Get-IsolatedMtaFocusDiagnostic" not in source[
+        source.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'"):
+    ]
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source

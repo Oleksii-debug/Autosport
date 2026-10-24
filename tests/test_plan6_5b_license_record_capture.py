@@ -137,3 +137,16 @@ def test_repeat_capture_is_deterministic(tmp_path, monkeypatch):
     first = capture(monkeypatch, {"packaging": dist})
     second = capture(monkeypatch, {"packaging": dist})
     assert first == second
+
+
+def test_owner_mismatch_diagnostic_is_bounded_to_relative_record(tmp_path, monkeypatch):
+    """Expose the failing wheel RECORD origin without leaking host paths."""
+    origin = "other-25.0.dist-info/licenses/LICENSE"
+    dist = FakeDistribution("packaging", "25.0", [(origin, b"license\n")], tmp_path)
+    with pytest.raises(ValueError, match="RECORD origin mismatches") as error:
+        capture(monkeypatch, {"packaging": dist})
+    detail = str(error.value)
+    assert "component='packaging'" in detail
+    assert "version='25.0'" in detail
+    assert f"record='{origin}'" in detail
+    assert str(tmp_path) not in detail

@@ -44,6 +44,7 @@ _WINDOWS_REQUIRED_STEPS = frozenset({
 _ADMISSION_STEPS = frozenset({
     "Checkout exact PR head for read-only admission helper",
 })
+_NON_PR_ADMISSION = "Admit non-PR events without PR checkout"
 _CI_ADMISSION = "Reject stale PR head before heavy matrix allocation"
 _WINDOWS_ADMISSION = "Reject stale PR rerun before Windows runner allocation"
 
@@ -85,6 +86,26 @@ def _required_steps(job: dict[str, Any], required: frozenset[str], label: str) -
         raise GateError(f"{label}: missing required steps: {', '.join(sorted(missing))}")
 
 
+def _admission_steps(job: dict[str, Any], event: str, workflow: str) -> None:
+    """Require the actual admission path selected by the workflow event.
+
+    The CI and Windows workflows skip PR-only admission for push/dispatch.
+    Treating those skipped steps as mandatory would reject a valid main build.
+    """
+    pr_only = _ADMISSION_STEPS | frozenset({
+        _CI_ADMISSION if workflow == "CI" else _WINDOWS_ADMISSION})
+    if event == "pull_request":
+        required = pr_only
+        forbidden = frozenset({_NON_PR_ADMISSION})
+    else:
+        required = frozenset({_NON_PR_ADMISSION})
+        forbidden = pr_only
+    _required_steps(job, required, "superseded_run_admission")
+    for step in job["steps"]:
+        if step["name"] in forbidden and step.get("conclusion") != "skipped":
+            raise GateError("superseded_run_admission: wrong event admission path")
+
+
 def check_workflow(run: Any, jobs_response: Any, *, expected_sha: str,
                    expected_name: str, required_jobs: frozenset[str]) -> dict[str, Any]:
     if type(expected_sha) is not str or not _SHA.fullmatch(expected_sha):
@@ -95,7 +116,10 @@ def check_workflow(run: Any, jobs_response: Any, *, expected_sha: str,
     attempt = _positive_id(run.get("run_attempt"), "run attempt")
     if run.get("name") != expected_name or run.get("head_sha") != expected_sha:
         raise GateError(f"run {run_id}: workflow name/SHA mismatch")
-    if run.get("event") not in ("pull_request", "push"):
+    event = run.get("event")
+    allowed_events = ("pull_request", "push") if expected_name == "CI" else (
+        "pull_request", "push", "workflow_dispatch")
+    if event not in allowed_events:
         raise GateError(f"run {run_id}: unsupported workflow event")
     if run.get("status") != "completed" or run.get("conclusion") != "success":
         raise GateError(f"run {run_id}: workflow not successful")
@@ -119,8 +143,7 @@ def check_workflow(run: Any, jobs_response: Any, *, expected_sha: str,
         if job.get("status") != "completed" or job.get("conclusion") != "success":
             raise GateError(f"run {run_id}: job not successful: {name}")
         if name == "superseded_run_admission":
-            _required_steps(job, _ADMISSION_STEPS | frozenset({
-                _CI_ADMISSION if expected_name == "CI" else _WINDOWS_ADMISSION}), name)
+            _admission_steps(job, event, expected_name)
         elif name == "build":
             _required_steps(job, _WINDOWS_REQUIRED_STEPS, name)
         else:

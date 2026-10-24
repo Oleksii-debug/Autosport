@@ -80,6 +80,7 @@ jobs:
           }
           if (
             $null -eq $evidence -or
+            $evidence.exact_automation_id -ne $true -or
             $evidence.autosport_product_uia_pass -ne $false -or
             $evidence.human_tested -ne $false -or
             $evidence.nvda_verified -ne $false -or

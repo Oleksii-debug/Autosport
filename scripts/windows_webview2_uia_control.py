@@ -96,10 +96,10 @@ def foreground(hwnd: int) -> bool:
     time.sleep(0.3)
     return user32.GetForegroundWindow() == hwnd
 
-def classify(pid: int, allowed: set[int], role: str, name: str) -> str:
+def classify(pid: int, allowed: set[int], role: str, name: str, automation_id: str) -> str:
     if pid not in allowed:
         return "FOREIGN_FOCUS"
-    if role != "ControlType.Button" or name != BUTTON_NAME:
+    if role != "ControlType.Button" or name != BUTTON_NAME or automation_id != BUTTON_ID:
         return "SEMANTIC_MISMATCH"
     return "SEMANTIC_BUTTON_RETURNED"
 
@@ -139,6 +139,7 @@ try {
     if ($role -cne 'ControlType.Button' -or $name -cne 'Autosport WebView2 calibration button') {
         Write-Output ('SEMANTIC_MISMATCH|' + $exactId); exit 1
     }
+    if ($exactId -ne '1') { Write-Output 'SEMANTIC_MISMATCH|0'; exit 1 }
     Write-Output ('SEMANTIC_BUTTON_RETURNED|' + $exactId); exit 0
 } catch {
     Write-Output 'PROBE_PROPERTY_ERROR|0'; exit 1
@@ -176,7 +177,7 @@ def probe(root_pid: int, report: Path) -> int:
         return 1
     emit(report, code, exact_id=exact == "1")
     return 0 if (
-        child.returncode == 0 and code == "SEMANTIC_BUTTON_RETURNED"
+        child.returncode == 0 and code == "SEMANTIC_BUTTON_RETURNED" and exact == "1"
     ) else 1
 
 def run(report: Path) -> int:
@@ -252,10 +253,11 @@ def run(report: Path) -> int:
             # this disposable CI runner; it must not override probe evidence.
 
 def selftest() -> int:
-    assert classify(7, {7, 8}, "ControlType.Button", BUTTON_NAME) == "SEMANTIC_BUTTON_RETURNED"
-    assert classify(9, {7, 8}, "ControlType.Button", BUTTON_NAME) == "FOREIGN_FOCUS"
-    assert classify(7, {7}, "ControlType.Text", BUTTON_NAME) == "SEMANTIC_MISMATCH"
-    assert classify(7, {7}, "ControlType.Button", "wrong") == "SEMANTIC_MISMATCH"
+    assert classify(7, {7, 8}, "ControlType.Button", BUTTON_NAME, BUTTON_ID) == "SEMANTIC_BUTTON_RETURNED"
+    assert classify(9, {7, 8}, "ControlType.Button", BUTTON_NAME, BUTTON_ID) == "FOREIGN_FOCUS"
+    assert classify(7, {7}, "ControlType.Text", BUTTON_NAME, BUTTON_ID) == "SEMANTIC_MISMATCH"
+    assert classify(7, {7}, "ControlType.Button", "wrong", BUTTON_ID) == "SEMANTIC_MISMATCH"
+    assert classify(7, {7}, "ControlType.Button", BUTTON_NAME, "wrong-id") == "SEMANTIC_MISMATCH"
     with tempfile.TemporaryDirectory() as root:
         path = Path(root) / "report.json"
         emit(path, "SEMANTIC_BUTTON_RETURNED", exact_id=True)

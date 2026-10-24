@@ -43,10 +43,19 @@ def command(mode: str, *args: str) -> list[str]:
         return [sys.executable, mode, *args]
     return [sys.executable, str(Path(__file__).resolve()), mode, *args]
 
-def host(ready: Path, profile: Path) -> int:
+def host(ready: Path, profile: Path, *, file_origin: bool = False) -> int:
     import webview
+    # The product loads a local packaged HTML file, while the original
+    # independent control used inline HTML. Qualify both origin modes without
+    # changing any UIA identity/acceptance predicate.
+    if file_origin:
+        html_file = profile.parent / "control.html"
+        html_file.write_text(HTML, encoding="utf-8")
+        document = {"url": str(html_file)}
+    else:
+        document = {"html": HTML}
     window = webview.create_window(HOST_WINDOW_TITLE,
-                                   html=HTML, width=640, height=480)
+                                   width=640, height=480, **document)
     def loaded() -> None:
         try:
             window.evaluate_js("document.getElementById('" + BUTTON_ID + "').focus()")
@@ -209,7 +218,7 @@ def probe(root_pid: int, report: Path) -> int:
         child.returncode == 0 and code == "SEMANTIC_BUTTON_RETURNED" and exact == "1"
     ) else 1
 
-def run(report: Path) -> int:
+def run(report: Path, *, file_origin: bool = False) -> int:
     if os.name != "nt":
         emit(report, "WINDOWS_REQUIRED")
         return 1
@@ -219,7 +228,7 @@ def run(report: Path) -> int:
     ) as root:
         directory = Path(root)
         ready = directory / "ready"
-        child = subprocess.Popen(command("host", str(ready), str(directory / "profile")),
+        child = subprocess.Popen(command("host-file" if file_origin else "host", str(ready), str(directory / "profile")),
                                  cwd=root, stdin=subprocess.DEVNULL,
                                  stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         try:
@@ -298,12 +307,14 @@ def selftest() -> int:
 def main() -> int:
     if len(sys.argv) == 2 and sys.argv[1] == "selftest":
         return selftest()
-    if len(sys.argv) == 4 and sys.argv[1] == "host":
-        return host(Path(sys.argv[2]), Path(sys.argv[3]))
+    if len(sys.argv) == 4 and sys.argv[1] in {"host", "host-file"}:
+        return host(Path(sys.argv[2]), Path(sys.argv[3]),
+                    file_origin=sys.argv[1] == "host-file")
     if len(sys.argv) == 4 and sys.argv[1] == "probe":
         return probe(int(sys.argv[2]), Path(sys.argv[3]))
-    if len(sys.argv) == 3 and sys.argv[1] == "run":
-        return run(Path(sys.argv[2]).resolve())
+    if len(sys.argv) == 3 and sys.argv[1] in {"run", "run-file"}:
+        return run(Path(sys.argv[2]).resolve(),
+                   file_origin=sys.argv[1] == "run-file")
     return 2
 
 if __name__ == "__main__":

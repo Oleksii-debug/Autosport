@@ -62,7 +62,10 @@ def family(root_pid: int) -> set[int]:
     try:
         proc = psutil.Process(root_pid)
         return {root_pid, *(p.pid for p in proc.children(recursive=True))}
-    except (psutil.NoSuchProcess, psutildef visible_window(root_pid: int, pids: set[int]) -> int:
+    except (psutil.NoSuchProcess, psutil.AccessDenied):
+        return set()
+
+def visible_window(root_pid: int, pids: set[int]) -> int:
     """Select the single exact host HWND, never an arbitrary family window.
 
     A renderer/utility process may expose its own visible top-level window.

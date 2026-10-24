@@ -249,9 +249,16 @@ def test_parallel_writers_use_unique_temporary_files_and_complete_envelopes(
     lock = Lock()
 
     def concurrent_replace(source, destination):
+        source_path = Path(source)
         with lock:
-            seen.append(Path(source))
-        rendezvous.wait(timeout=5)
+            first_attempt_for_writer = source_path not in seen
+            if first_attempt_for_writer:
+                seen.append(source_path)
+        # Synchronize the two writers once.  A Windows sharing violation may
+        # legitimately make one writer retry; that retry must not wait at a
+        # barrier whose peer has already completed.
+        if first_attempt_for_writer:
+            rendezvous.wait(timeout=5)
         return original_replace(source, destination)
 
     monkeypatch.setattr(evidence_module.os, "replace", concurrent_replace)

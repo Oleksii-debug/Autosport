@@ -490,13 +490,30 @@ def _owned_distribution_license_record(record_path: str, name: str, version: str
     if len(parts) < 2 or any(not part or part in (".", "..") or ":" in part for part in parts):
         return False
     folder = parts[0]
-    if not folder.endswith(".dist-info") or "-" not in folder[:-10]:
-        return False
-    distribution_name, distribution_version = folder[:-10].rsplit("-", 1)
-    try:
-        if _normalize_name(distribution_name) != name or distribution_version != version:
-            return False
-    except ValueError:
+    direct_owner = False
+    if folder.endswith(".dist-info") and "-" in folder[:-10]:
+        distribution_name, distribution_version = folder[:-10].rsplit("-", 1)
+        try:
+            direct_owner = (
+                _normalize_name(distribution_name) == name
+                and distribution_version == version
+            )
+        except ValueError:
+            direct_owner = False
+
+    # Some current wheels (notably setuptools) include vendored license files
+    # in their own RECORD under ``<owner>/_vendor/<vendor>.dist-info``.  Those
+    # bytes are owned by the outer distribution even though the first
+    # ``.dist-info`` component names the vendored project.  Admit that layout
+    # only beneath the canonical outer package namespace; an arbitrary nested
+    # or sibling distribution directory remains foreign and fails closed.
+    vendored_owner = False
+    if not direct_owner and any(part.endswith(".dist-info") for part in parts[1:-1]):
+        try:
+            vendored_owner = _normalize_name(parts[0]) == name
+        except ValueError:
+            vendored_owner = False
+    if not (direct_owner or vendored_owner):
         return False
     leaf = parts[-1]
     stem = leaf.split(".", 1)[0].upper()

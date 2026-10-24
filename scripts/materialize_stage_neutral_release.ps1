@@ -151,6 +151,15 @@ try {
     $trustedSources = [ordered]@{
         'src/autosport/stage_neutral_release.py' = 'stage_neutral_release.py'
         'src/autosport/release_package.py' = 'release_package.py'
+        # release_package imports these validators at module import time.  The
+        # isolated launcher uses ``-I -S`` deliberately, so every transitive
+        # source dependency must come from the exact requested Git tree rather
+        # than the mutable checkout or an installed autosport package.
+        'src/autosport/release_sbom.py' = 'release_sbom.py'
+        'src/autosport/release_dependency_graph.py' = 'release_dependency_graph.py'
+        'src/autosport/release_binary_attribution.py' = 'release_binary_attribution.py'
+        'src/autosport/windows_update_admission.py' = 'windows_update_admission.py'
+        'src/autosport/windows_update_release_metadata.py' = 'windows_update_release_metadata.py'
     }
     foreach ($entry in $trustedSources.GetEnumerator()) {
         [byte[]]$payload = Get-ExactGitBlobBytes -RepoPath ([string]$entry.Key)

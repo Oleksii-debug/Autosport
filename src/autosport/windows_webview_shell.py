@@ -3313,10 +3313,18 @@ def launch_windows_shell(
     # This is NOT UIA acceptance: external AutomationId/keyboard/STOP/
     # LiveRegion checks remain mandatory.
     initial_accessibility_focus_attempted = False
+    initial_accessibility_focus_attempts = 0
 
     def seed_initial_accessibility_focus() -> None:
-        nonlocal initial_accessibility_focus_attempted
-        if initial_accessibility_focus_attempted or not canonical_bridge:
+        nonlocal initial_accessibility_focus_attempted, initial_accessibility_focus_attempts
+        # A failed/false JS focus must not be recorded as success. A later
+        # trusted loaded event may retry once; never spin or steal existing
+        # keyboard focus. The JS predicate below guards the active element.
+        if (
+            initial_accessibility_focus_attempted
+            or initial_accessibility_focus_attempts >= 2
+            or not canonical_bridge
+        ):
             return
         if (
             window is None
@@ -3349,13 +3357,16 @@ def launch_windows_shell(
                 "return document.activeElement === target;"
                 "})()"
             )
-            window.evaluate_js(script)
+            initial_accessibility_focus_attempts += 1
+            # Only the exact Boolean True is a confirmed DOM focus. A false
+            # result (or exception) is not a semantic UIA success; a later
+            # trusted load may retry within the two-attempt budget.
+            if window.evaluate_js(script) is True:
+                initial_accessibility_focus_attempted = True
         except Exception:
             # Failure to seed focus must not grant a fake accessibility PASS
             # or replace the existing keyboard-accessible native STOP.
             pass
-        finally:
-            initial_accessibility_focus_attempted = True
 
     close_teardown_lock = threading.Lock()
     close_teardown_thread: threading.Thread | None = None

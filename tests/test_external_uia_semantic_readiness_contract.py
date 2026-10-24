@@ -424,3 +424,152 @@ def test_renderer_accessibility_request_precedes_real_uia_and_cannot_pass_audit(
     assert "AutomationElement]::FromPoint(" in helper
     assert "$report.native_renderer_accessibility_message_status = $script:nativeRendererAccessibilityMessageStatus" in source
     assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+
+
+# Plan 6 §7А: genuine packaged WebView2 provider timed out even from a
+# separate pwsh -Mta process; minimal WebView2 control focuses its first
+# semantic button after loaded.  Exercise the actual extracted product callback
+# with fake window events, not a replacement function or synthetic UIA PASS.
+def _product_first_focus_callback(
+    window,
+    *,
+    canonical_bridge=True,
+    renderer_observed=True,
+    trusted_document_observed=True,
+    trusted_document_violation=False,
+    runtime_identity_violation=False,
+    expected_real_url="http://127.0.0.1:8999/index.html",
+):
+    import json
+
+    shell = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "autosport"
+        / "windows_webview_shell.py"
+    ).read_text(encoding="utf-8")
+    start = shell.index("    def seed_initial_accessibility_focus() -> None:")
+    end = shell.index("    close_teardown_lock = threading.Lock()", start)
+    callback_source = shell[start:end]
+    factory = (
+        "def factory(window, *, canonical_bridge, renderer_observed, "
+        "trusted_document_observed, trusted_document_violation, "
+        "runtime_identity_violation, expected_real_url):\\n"
+        "    expected_original_url = 'canonical-index.html'\\n"
+        "    initial_accessibility_focus_attempted = False\\n"
+    )
+    # Python strings above contain literal escaped newline sequences, so
+    # normalize them to source newlines before compiling the isolated callback.
+    factory = factory.replace("\\n", "\n")
+    factory += callback_source + "    return seed_initial_accessibility_focus\\n".replace("\\n", "\n")
+
+    def require_document(candidate, *, expected_original_url):
+        if candidate.original_url != expected_original_url:
+            raise ValueError("foreign document")
+        return candidate.real_url
+
+    namespace = {
+        "json": json,
+        "_require_packaged_launch_document": require_document,
+    }
+    exec(compile(factory, "<product-loaded-callback>", "exec"), namespace)
+    return namespace["factory"](
+        window,
+        canonical_bridge=canonical_bridge,
+        renderer_observed=renderer_observed,
+        trusted_document_observed=trusted_document_observed,
+        trusted_document_violation=trusted_document_violation,
+        runtime_identity_violation=runtime_identity_violation,
+        expected_real_url=expected_real_url,
+    )
+
+
+class _FocusSeedWindow:
+    original_url = "canonical-index.html"
+    real_url = "http://127.0.0.1:8999/index.html"
+
+    def __init__(self, *, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def evaluate_js(self, script):
+        self.calls.append(script)
+        if self.fail:
+            raise RuntimeError("WebView2 not ready")
+        return True
+
+
+def test_webview2_focus_seed_is_loaded_only_after_trusted_before_load_hook():
+    shell = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "autosport"
+        / "windows_webview_shell.py"
+    ).read_text(encoding="utf-8")
+    before = "window.events.before_load += bind_trusted_document"
+    loaded = "window.events.loaded += seed_initial_accessibility_focus"
+    assert shell.count(before) == 1
+    assert shell.count(loaded) == 1
+    assert shell.index(before) < shell.index(loaded)
+    assert "window.events.loaded += seed_initial_accessibility_focus" in shell.split(
+        "if canonical_bridge:", 1
+    )[-1]
+    assert "window.events.closing += close_trusted_window_safely" in shell
+
+
+def test_webview2_focus_seed_uses_only_trusted_first_load_and_never_steals_focus():
+    window = _FocusSeedWindow()
+    callback = _product_first_focus_callback(window)
+    callback()
+    callback()
+    assert len(window.calls) == 1
+    script = window.calls[0]
+    assert 'window.location.href !== "http://127.0.0.1:8999/index.html"' in script
+    assert "document.activeElement !== document.body" in script
+    assert "document.activeElement !== document.documentElement" in script
+    assert "getElementById('303')" in script
+    assert "target.focus({preventScroll:true})" in script
+    assert "target.disabled || target.hidden" in script
+    assert "getElementById('330')" not in script
+
+
+def test_webview2_focus_seed_rejects_untrusted_or_not_ready_document():
+    for settings in (
+        {"canonical_bridge": False},
+        {"renderer_observed": False},
+        {"trusted_document_observed": False},
+        {"trusted_document_violation": True},
+        {"runtime_identity_violation": True},
+        {"expected_real_url": None},
+    ):
+        window = _FocusSeedWindow()
+        callback = _product_first_focus_callback(window, **settings)
+        callback()
+        assert window.calls == [], settings
+
+    foreign = _FocusSeedWindow()
+    foreign.original_url = "foreign.html"
+    _product_first_focus_callback(foreign)()
+    assert foreign.calls == []
+
+    drifted = _FocusSeedWindow()
+    drifted.real_url = "http://127.0.0.1:8999/foreign.html"
+    _product_first_focus_callback(drifted)()
+    assert drifted.calls == []
+
+
+def test_webview2_focus_seed_failure_is_bounded_and_restart_is_fresh():
+    broken = _FocusSeedWindow(fail=True)
+    callback = _product_first_focus_callback(broken)
+    callback()
+    callback()
+    assert len(broken.calls) == 1  # No unbounded retry after a JS failure.
+    restarted = _FocusSeedWindow()
+    _product_first_focus_callback(restarted)()
+    assert len(restarted.calls) == 1
+    assert "target.focus(" in restarted.calls[0]
+    # Focus seeding alone is never a semantic, keyboard, STOP or NVDA PASS.
+    audit = _audit_script_text()
+    assert "AutomationId '330'" in audit or "-AutomationId '330'" in audit
+    assert "$report.status = 'PASS'" in audit
+    assert "nvda_verified = $false" in audit

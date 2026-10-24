@@ -12,6 +12,7 @@ from autosport.forward_campaign_authority_adapter import (
     ForwardCampaignAuthorityAdapterError,
     admit_negative_sample,
     admit_settled_action_sample,
+    admit_settled_evaluation_sample,
 )
 from autosport.forward_campaign_population import (
     PopulationRole,
@@ -347,6 +348,34 @@ def test_settled_action_materializes_exact_sample_and_learning_experience(tmp_pa
     assert experience.transition is witness.transition
 
 
+def test_evaluation_roles_never_export_a_learning_experience(tmp_path) -> None:
+    common = {
+        "evidence": _campaign(),
+        "candidate_sequence": 1,
+        "session_id": "session-1",
+        "regime_id": "table-tennis:pre-match",
+        "feature_evidence": _feature(),
+        "source_rights": _rights(tmp_path),
+        "witness": _witness(),
+    }
+    with pytest.raises(ForwardCampaignAuthorityAdapterError, match="NEW or REPLAY"):
+        admit_settled_action_sample(**common, role=PopulationRole.HOLDOUT)
+
+    sample = admit_settled_evaluation_sample(
+        **common,
+        role=PopulationRole.HOLDOUT,
+    )
+    assert type(sample).__name__ == "ForwardPopulationSample"
+    assert sample.role is PopulationRole.HOLDOUT
+    assert sample.observed_reward == Decimal("1.25")
+
+    with pytest.raises(
+        ForwardCampaignAuthorityAdapterError,
+        match="RETENTION or HOLDOUT",
+    ):
+        admit_settled_evaluation_sample(**common, role=PopulationRole.NEW)
+
+
 def test_finalized_no_bet_stays_negative_without_synthetic_reward(tmp_path) -> None:
     evidence = _campaign(DecisionState.NO_BET)
     graph = _terminal_graph(action_type="NO_BET", reward_value="-0.25")
@@ -483,7 +512,33 @@ def test_simulated_or_pre_boundary_action_outcome_is_rejected(tmp_path) -> None:
     with pytest.raises(ForwardCampaignAuthorityAdapterError, match="predates frozen reveal"):
         admit_settled_action_sample(
             **common,
-            witness=_witness(revealed_second=40),
+            witness=_witness(revealed_second=60),
+        )
+
+
+def test_transition_decision_time_must_equal_exact_action_time(tmp_path) -> None:
+    witness = _witness()
+    transition = replace(witness.transition, decision_at=_iso(21))
+    checkpoint = replace(
+        witness.next_checkpoint,
+        last_transition_id=transition.transition_id,
+    )
+    altered = replace(
+        witness,
+        transition=transition,
+        next_checkpoint=checkpoint,
+    )
+
+    with pytest.raises(ForwardCampaignAuthorityAdapterError, match="decision time"):
+        admit_settled_action_sample(
+            _campaign(),
+            candidate_sequence=1,
+            session_id="session-1",
+            role=PopulationRole.NEW,
+            regime_id="table-tennis:pre-match",
+            feature_evidence=_feature(),
+            source_rights=_rights(tmp_path),
+            witness=altered,
         )
 
 

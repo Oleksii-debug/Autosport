@@ -41,10 +41,16 @@ and reveal-boundary receipt. It then requires:
   no later than the feature cutoff;
 - an ACTION to bind its exact economic decision through a canonical
   `PAPER_PROPOSAL`, or a non-action to bind exact WAIT/NO_BET semantics;
-- observed, never simulated, outcome and reward identities after the frozen
-  reveal boundary;
+- exact equality between the action and transition decision timestamp;
+- observed, never simulated, outcome and reward identities no earlier than the
+  upper edge of the frozen reveal-boundary uncertainty interval;
 - exact terminal action/outcome/reward/transition and settlement/finalization
   identities.
+
+Only `NEW` and `REPLAY` admission can emit a `VerifiedLearningExperience`.
+`RETENTION` and `HOLDOUT` use a separate evaluation admission that emits only the
+population sample, so an evaluation member cannot be exported as a trainable
+object through this API.
 
 ## Outcome-leakage control
 
@@ -70,7 +76,7 @@ Focused:
 ```text
 PYTHONPATH=src python -m pytest -q \
   tests/test_forward_campaign_authority_adapter.py
-12 passed in 0.40s
+14 passed in 0.43s
 ```
 
 Cross-authority regression:
@@ -86,7 +92,7 @@ PYTHONPATH=src python -m pytest -q \
   tests/test_paper_abstention_learning.py \
   tests/test_point_in_time_evidence.py \
   tests/test_source_rights_manifest.py
-165 passed in 17.41s
+167 passed in 17.05s
 ```
 
 The focused suite includes 250 repeated pure-adapter materializations and proves

@@ -48,6 +48,10 @@ from .source_rights_manifest import SourceRightsAuthorization
 
 _DECISION_PARAMETER: Final = "economic_decision_id"
 _NEGATIVE_ACTIONS: Final = frozenset({"NO_BET", "WAIT"})
+_LEARNING_ROLES: Final = frozenset({PopulationRole.NEW, PopulationRole.REPLAY})
+_EVALUATION_ROLES: Final = frozenset(
+    {PopulationRole.RETENTION, PopulationRole.HOLDOUT}
+)
 _HEX: Final = frozenset("0123456789abcdef")
 
 
@@ -295,6 +299,10 @@ def _terminal_common(
     )
     settled = _instant(transition.resolved_at, "transition.resolved_at")
     decision = _instant(action.decided_at, "action.decided_at")
+    if _instant(transition.decision_at, "transition.decision_at") != decision:
+        raise ForwardCampaignAuthorityAdapterError(
+            "terminal transition decision time differs from exact action"
+        )
     if outcome_available <= decision:
         raise ForwardCampaignAuthorityAdapterError(
             "terminal outcome must become available strictly after decision"
@@ -309,7 +317,7 @@ def _terminal_common(
     )
 
 
-def admit_settled_action_sample(
+def _materialize_settled_action_sample(
     evidence: CampaignEvidence,
     *,
     candidate_sequence: int,
@@ -319,8 +327,7 @@ def admit_settled_action_sample(
     feature_evidence: FeatureAvailabilityEvidence,
     source_rights: SourceRightsAuthorization,
     witness: PaperSettlementLearningWitness,
-) -> tuple[ForwardPopulationSample, VerifiedLearningExperience]:
-    """Bind one settled PAPER action to a population sample and learning input."""
+) -> ForwardPopulationSample:
 
     if type(role) is not PopulationRole:
         raise TypeError("role must be exact PopulationRole")
@@ -361,7 +368,7 @@ def admit_settled_action_sample(
         reward=witness.reward,
         transition=witness.transition,
     )
-    if _instant(witness.outcome.revealed_at, "outcome.revealed_at") < boundary.boundary_lower:
+    if _instant(witness.outcome.revealed_at, "outcome.revealed_at") < boundary.boundary_upper:
         raise ForwardCampaignAuthorityAdapterError(
             "settled outcome predates frozen reveal boundary"
         )
@@ -380,7 +387,7 @@ def admit_settled_action_sample(
             "next_checkpoint_id": witness.next_checkpoint.checkpoint_id,
         }
     )
-    sample = ForwardPopulationSample(
+    return ForwardPopulationSample(
         sample_id=opportunity.opportunity_id,
         session_id=session_id,
         role=role,
@@ -400,6 +407,37 @@ def admit_settled_action_sample(
         terminal_evidence_sha256=terminal_sha,
         observed_reward=witness.reward.reward,
     )
+
+
+def admit_settled_action_sample(
+    evidence: CampaignEvidence,
+    *,
+    candidate_sequence: int,
+    session_id: str,
+    role: PopulationRole,
+    regime_id: str,
+    feature_evidence: FeatureAvailabilityEvidence,
+    source_rights: SourceRightsAuthorization,
+    witness: PaperSettlementLearningWitness,
+) -> tuple[ForwardPopulationSample, VerifiedLearningExperience]:
+    """Admit NEW/REPLAY PAPER evidence and expose its learning input."""
+
+    if type(role) is not PopulationRole:
+        raise TypeError("role must be exact PopulationRole")
+    if role not in _LEARNING_ROLES:
+        raise ForwardCampaignAuthorityAdapterError(
+            "learning admission is restricted to NEW or REPLAY population"
+        )
+    sample = _materialize_settled_action_sample(
+        evidence,
+        candidate_sequence=candidate_sequence,
+        session_id=session_id,
+        role=role,
+        regime_id=regime_id,
+        feature_evidence=feature_evidence,
+        source_rights=source_rights,
+        witness=witness,
+    )
     experience = VerifiedLearningExperience(
         sample_id=sample.sample_id,
         source_evidence_sha256=sample.source_evidence_sha256,
@@ -408,6 +446,37 @@ def admit_settled_action_sample(
         transition=witness.transition,
     )
     return sample, experience
+
+
+def admit_settled_evaluation_sample(
+    evidence: CampaignEvidence,
+    *,
+    candidate_sequence: int,
+    session_id: str,
+    role: PopulationRole,
+    regime_id: str,
+    feature_evidence: FeatureAvailabilityEvidence,
+    source_rights: SourceRightsAuthorization,
+    witness: PaperSettlementLearningWitness,
+) -> ForwardPopulationSample:
+    """Admit RETENTION/HOLDOUT evidence without exporting a training object."""
+
+    if type(role) is not PopulationRole:
+        raise TypeError("role must be exact PopulationRole")
+    if role not in _EVALUATION_ROLES:
+        raise ForwardCampaignAuthorityAdapterError(
+            "evaluation admission is restricted to RETENTION or HOLDOUT population"
+        )
+    return _materialize_settled_action_sample(
+        evidence,
+        candidate_sequence=candidate_sequence,
+        session_id=session_id,
+        role=role,
+        regime_id=regime_id,
+        feature_evidence=feature_evidence,
+        source_rights=source_rights,
+        witness=witness,
+    )
 
 
 def admit_negative_sample(
@@ -487,7 +556,7 @@ def admit_negative_sample(
         )
     for name in ("attribution_id", "postmortem_id", "checkpoint_id"):
         _sha256(getattr(finalization, name), f"finalization.{name}")
-    if _instant(outcome.revealed_at, "outcome.revealed_at") < boundary.boundary_lower:
+    if _instant(outcome.revealed_at, "outcome.revealed_at") < boundary.boundary_upper:
         raise ForwardCampaignAuthorityAdapterError(
             "negative outcome predates frozen reveal boundary"
         )
@@ -532,4 +601,5 @@ __all__ = [
     "ForwardCampaignAuthorityAdapterError",
     "admit_negative_sample",
     "admit_settled_action_sample",
+    "admit_settled_evaluation_sample",
 ]

@@ -66,8 +66,8 @@ def test_desktop_worker_timeout_stage_is_allowlisted_and_persisted_fail_closed()
     helper = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
         "function Wait-ForUiaElement {", 1
     )[0]
-    timeout = helper.split("if (-not $workerTerminal) {", 1)[1].split(
-        "Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_RESULT_PROBE'", 1
+    timeout = helper.split("if ($unfinished.Count -gt 0) {", 1)[1].split(
+        "foreach ($state in $workerStates) { $state.Completion.Dispose() }", 1
     )[0]
     assert "$script:lastDesktopWorkerStage = 'NOT_RUN'" in source
     assert "$allowedDesktopWorkerStages = @(" in timeout
@@ -197,7 +197,7 @@ def test_render_point_probe_is_bounded_real_uia_not_native_hwnd_acceptance() -> 
     assert "$ProcessIds -contains [int]$pointSemantic.Current.ProcessId" in worker
     assert "New-BoundedUiaPair -Window $pointRoot -Element $pointSemantic" in worker
     assert "$report.status = 'PASS'" not in worker
-    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in desktop
+    assert "$state.Completion.Wait(0)" in desktop
     assert "$script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'" in desktop
 
 
@@ -252,7 +252,7 @@ def test_render_point_timeout_stages_are_fixed_and_not_provider_text() -> None:
     assert len(progress_stages) == len(set(progress_stages))
     assert "$allowedDesktopWorkerStages -ccontains $lastWorkerStage" in desktop
     assert "'UNKNOWN_FIXED_STAGE'" in desktop
-    assert "if (-not $workerTerminal)" in desktop
+    assert "if ($unfinished.Count -gt 0)" in desktop
     assert "Stop-Job -Job $desktopJob" not in desktop
     assert "$report.status = 'PASS'" not in desktop
 
@@ -467,3 +467,36 @@ def test_product_mta_differential_never_short_circuits_packaged_gates() -> None:
     assert "keyboard_shortcuts_status = 'NOT_RUN'" in source
     assert "live_region_event_status = 'NOT_RUN'" in source
     assert "emergency_stop_activation_status = 'NOT_RUN'" in source
+
+
+def test_desktop_fallback_routes_are_independent_and_never_accept_native_only_evidence() -> None:
+    """A stalled FocusedElement must not starve process-root or point UIA probes."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
+        "} -ArgumentList @(", 1
+    )[0]
+    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS'))" in desktop
+    assert "[string]$Mode, [string]$ProcessIdsCsv" in worker
+    assert "if ($Mode -eq 'FOCUS')" in worker
+    assert "if ($Mode -eq 'POINT')" in worker
+    assert "if ($Mode -eq 'ROOT')" in worker
+    assert worker.index("if ($Mode -eq 'FOCUS')") < worker.index(
+        "if ($Mode -eq 'POINT')"
+    ) < worker.index("if ($Mode -eq 'ROOT')")
+    assert "$workerMode, $processIdsCsv, $AutomationId" in desktop
+    assert "$workerStates += [pscustomobject]@{" in desktop
+    assert "$workerResults.TryDequeue([ref]$result)" in desktop
+    assert "$state.Completion.Wait(0)" in desktop
+    assert "if ($unfinished.Count -gt 0)" in desktop
+    assert "$script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'" in desktop
+    assert "Stop-Job -Job $desktopJob" not in desktop
+    assert "Remove-Job -Job $desktopJob" not in desktop
+    assert "$ProcessIds -contains $focusedPid" in worker
+    assert "$ProcessIds -contains $pointPid" in worker
+    assert "ProcessIdProperty" in worker
+    assert "[string]$focusSemantic.Current.AutomationId -cne $AutomationId" in worker
+    assert "[string]$pointSemantic.Current.AutomationId -cne $AutomationId" in worker
+    assert "$report.status = 'PASS'" not in desktop

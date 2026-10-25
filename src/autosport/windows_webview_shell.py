@@ -3349,7 +3349,35 @@ def launch_windows_shell(
                 "return document.activeElement === target;"
                 "})()"
             )
-            window.evaluate_js(script)
+            dom_focused = window.evaluate_js(script)
+            if dom_focused is not True:
+                return
+
+            # pywebview's WinForms host focuses the WebView2 control when the
+            # native form is first shown, before a URL-backed document has
+            # finished loading.  After the trusted DOM target is focused,
+            # transfer native focus into WebView2 again so its controller maps
+            # that DOM focus into the renderer/UIA provider.  Focus() may
+            # return False after focus is immediately delegated to the hosted
+            # renderer child, so ContainsFocus is the native containment
+            # witness.  Neither value is accessibility acceptance; the
+            # independent external UIA gate remains authoritative.
+            native = getattr(window, "native")
+            control = getattr(getattr(native, "browser"), "webview")
+            native_focused = [False]
+
+            def focus_control() -> None:
+                focus_returned = bool(control.Focus())
+                native_focused[0] = focus_returned or bool(control.ContainsFocus)
+
+            if bool(getattr(native, "InvokeRequired")):
+                from System import Func, Type
+
+                native.Invoke(Func[Type](focus_control))
+            else:
+                focus_control()
+            if not native_focused[0]:
+                return
         except Exception:
             # Failure to seed focus must not grant a fake accessibility PASS
             # or replace the existing keyboard-accessible native STOP.

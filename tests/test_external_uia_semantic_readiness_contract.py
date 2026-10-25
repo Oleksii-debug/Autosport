@@ -488,15 +488,37 @@ class _FocusSeedWindow:
     original_url = "canonical-index.html"
     real_url = "http://127.0.0.1:8999/index.html"
 
-    def __init__(self, *, fail=False):
+    class _Control:
+        def __init__(self, *, contains_focus=True):
+            self.ContainsFocus = contains_focus
+            self.calls = 0
+
+        def Focus(self):
+            self.calls += 1
+            return False
+
+    class _Browser:
+        def __init__(self, control):
+            self.webview = control
+
+    class _Native:
+        InvokeRequired = False
+
+        def __init__(self, control):
+            self.browser = _FocusSeedWindow._Browser(control)
+
+    def __init__(self, *, fail=False, dom_focused=True, contains_focus=True):
         self.calls = []
         self.fail = fail
+        self.dom_focused = dom_focused
+        self.control = self._Control(contains_focus=contains_focus)
+        self.native = self._Native(self.control)
 
     def evaluate_js(self, script):
         self.calls.append(script)
         if self.fail:
             raise RuntimeError("WebView2 not ready")
-        return True
+        return self.dom_focused
 
 
 def test_webview2_focus_seed_is_loaded_only_after_trusted_before_load_hook():
@@ -523,6 +545,7 @@ def test_webview2_focus_seed_uses_only_trusted_first_load_and_never_steals_focus
     callback()
     callback()
     assert len(window.calls) == 1
+    assert window.control.calls == 1
     script = window.calls[0]
     assert 'window.location.href !== "http://127.0.0.1:8999/index.html"' in script
     assert "document.activeElement !== document.body" in script
@@ -564,9 +587,19 @@ def test_webview2_focus_seed_failure_is_bounded_and_restart_is_fresh():
     callback()
     callback()
     assert len(broken.calls) == 1  # No unbounded retry after a JS failure.
+    assert broken.control.calls == 0
+    rejected = _FocusSeedWindow(dom_focused=False)
+    _product_first_focus_callback(rejected)()
+    assert rejected.control.calls == 0
+    native_rejected = _FocusSeedWindow(contains_focus=False)
+    native_rejected_callback = _product_first_focus_callback(native_rejected)
+    native_rejected_callback()
+    native_rejected_callback()
+    assert native_rejected.control.calls == 1
     restarted = _FocusSeedWindow()
     _product_first_focus_callback(restarted)()
     assert len(restarted.calls) == 1
+    assert restarted.control.calls == 1
     assert "target.focus(" in restarted.calls[0]
     # Focus seeding alone is never a semantic, keyboard, STOP or NVDA PASS.
     audit = _audit_script_text()

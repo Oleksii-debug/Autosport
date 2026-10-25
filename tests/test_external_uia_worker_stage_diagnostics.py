@@ -679,3 +679,51 @@ def test_duplicate_process_creation_timeout_and_empty_result_fail_closed() -> No
     assert "$duplicateTitle = [string]$duplicateRoot.Current.Name" in source[ready:]
     assert "Second packaged launch exposed a second semantic WebView operator surface" in source[ready:]
     assert "$duplicateProcess.ExitCode -ne 2" in source[ready:]
+
+def test_duplicate_threadjob_argument_identity_and_fixed_outcomes() -> None:
+    """An empty enumerable queue must not shift the completion event argument."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "$duplicateStartArguments = [object[]]::new(5)" in launch
+    for slot, value in enumerate((
+        "$exePath", "$launchWorkingDirectory", "$duplicateStartResults",
+        "$duplicateStartOutcomes", "$duplicateStartCompleted",
+    )):
+        assert f"$duplicateStartArguments[{slot}] = {value}" in launch
+    assert "} -ArgumentList $duplicateStartArguments" in launch
+    assert "} -ArgumentList @(" not in launch
+    assert "$duplicateStartOutcomes.TryDequeue([ref]$duplicateStartOutcome)" in launch
+    assert "$duplicateStartResults.TryDequeue([ref]$duplicateStarted)" in launch
+    assert "$duplicateProcess = [System.Diagnostics.Process]$duplicateStarted" in launch
+    assert "if ($null -eq $duplicateProcess -or [int]$duplicateProcess.Id -le 0)" in launch
+    assert "$report.duplicate_start_diagnostic = 'RETURNED'" in launch
+    assert source.index("$report.duplicate_start_diagnostic = 'RETURNED'") < ready
+
+
+def test_duplicate_threadjob_failures_never_promote_lock_or_leak_details() -> None:
+    """Timeout, missing receipt, bad PID and launch exceptions are fail-closed."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "duplicate_start_diagnostic = 'NOT_RUN'" in source
+    for code in ("TIMED_OUT", "LAUNCH_FAILED", "EMPTY_RESULT", "INVALID_PROCESS", "RETURNED"):
+        assert f"$report.duplicate_start_diagnostic = '{code}'" in launch
+    assert "Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru -ErrorAction Stop" in launch
+    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "throw 'Second packaged launch bounded process creation timed out'" in launch
+    assert "throw 'Second packaged launch did not return a valid process'" in launch
+    assert "throw 'Second packaged launch returned invalid process receipt'" in launch
+    assert "$Outcomes.Enqueue('LAUNCH_FAILED')" in launch
+    assert "$Outcomes.Enqueue('INVALID_PROCESS')" in launch
+    assert "$Outcomes.Enqueue('RETURNED')" in launch
+    assert "$Completion.Set()" in launch
+    assert "Stop-Job -Job $duplicateStartWorker" not in launch
+    assert "duplicate_launch_status = 'PASS'" not in launch
+    remainder = source[ready:]
+    assert "$duplicateRoot.Current.Name" in remainder
+    assert "$duplicateProcess.ExitCode -ne 2" in remainder
+    assert "keyboard_shortcuts_status" in remainder
+    assert "live_region_event_status" in remainder

@@ -1562,7 +1562,7 @@ def test_duplicate_process_census_is_independently_bounded_and_fail_closed() -> 
     start = audit.index("function Get-BoundedDuplicateProcessFamilyIds {")
     end = audit.index("# Traverse one UIA children level per provider call.", start)
     helper = audit[start:end]
-    duplicate_start = audit.index("$duplicateProcess = Start-Process")
+    duplicate_start = audit.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
     duplicate_end = audit.index("$report.duplicate_launch_status = 'PASS'", duplicate_start)
     duplicate = audit[duplicate_start:duplicate_end]
 
@@ -1584,7 +1584,8 @@ def test_duplicate_process_census_is_independently_bounded_and_fail_closed() -> 
     ):
         assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
         assert f"'{stage}'" in workflow
-    assert audit.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'", duplicate_start - 200) < duplicate_start
+    assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'") < duplicate.index("$duplicateProcess = Start-Process")
+    assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'") < duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE")
     assert duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE") < duplicate.index("Get-BoundedDuplicateProcessFamilyIds")
     assert duplicate.index("DUPLICATE_PROCESS_FAMILY_READY") < duplicate.index("DUPLICATE_UIA_ROOT_PROBE")
     assert "$duplicateRoot.Current.Name" in duplicate

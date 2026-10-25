@@ -1284,6 +1284,153 @@ try {
     }
 }
 
+
+# The duplicate-instance dialog is mandatory real UIA evidence, but its provider
+# blocked an in-process ThreadJob on Windows Candidate 40172891373.  Probe and
+# dismiss that exact native dialog in a separately killable MTA PowerShell
+# process.  Only fixed audit-owned codes cross the boundary; process existence,
+# HWND discovery, timeout, or any provider exception can never produce PASS.
+function Invoke-IsolatedDuplicateDialogProbe {
+    param([int[]]$ProcessIds)
+
+    if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) {
+        return 'NO_PROCESS_FAMILY'
+    }
+    $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -eq $pwshCommand) { return 'UNAVAILABLE' }
+    $probe = @'
+$ErrorActionPreference = 'Stop'
+try {
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+        Write-Output 'APARTMENT_ERROR'; exit 1
+    }
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    Add-Type -AssemblyName System.Windows.Forms
+    $allowed = [int[]]@($env:AUTOSPORT_UIA_DUPLICATE_PIDS.Split(',') | ForEach-Object {
+        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+    })
+    if ($allowed.Count -eq 0) {
+        Write-Output 'NO_PROCESS_FAMILY'; exit 1
+    }
+    $automationIdCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        '330'
+    )
+    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
+    $windows = $desktop.FindAll(
+        [System.Windows.Automation.TreeScope]::Children,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    $dialog = $null
+    foreach ($window in $windows) {
+        if ($allowed -notcontains [int]$window.Current.ProcessId) { continue }
+        if ([string]$window.Current.AutomationId -ceq '330') {
+            Write-Output 'SECOND_SEMANTIC_SURFACE'; exit 1
+        }
+        $semanticDescendant = $window.FindFirst(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            $automationIdCondition
+        )
+        if ($null -ne $semanticDescendant) {
+            Write-Output 'SECOND_SEMANTIC_SURFACE'; exit 1
+        }
+        if (
+            [string]$window.Current.Name -ceq
+            'Автоспорт — помилка запуску'
+        ) {
+            if ($null -ne $dialog) {
+                Write-Output 'AMBIGUOUS_DIALOG'; exit 1
+            }
+            $dialog = $window
+        }
+    }
+    if ($null -eq $dialog) {
+        Write-Output 'NO_DIALOG'; exit 0
+    }
+    $names = @()
+    $descendants = $dialog.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    foreach ($item in $descendants) {
+        $name = [string]$item.Current.Name
+        if (-not [string]::IsNullOrWhiteSpace($name)) { $names += $name }
+    }
+    $copy = $names -join ' '
+    if (
+        $copy -notmatch 'уже відкритий' -or
+        $copy -notmatch 'Economic і live state не змінено'
+    ) {
+        Write-Output 'COPY_MISMATCH'; exit 1
+    }
+    $windowPattern = $null
+    if (
+        $dialog.TryGetCurrentPattern(
+            [System.Windows.Automation.WindowPattern]::Pattern,
+            [ref]$windowPattern
+        ) -and $null -ne $windowPattern
+    ) {
+        ([System.Windows.Automation.WindowPattern]$windowPattern).Close()
+    } else {
+        $dialog.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
+    }
+    Write-Output 'DIALOG_CLOSED'; exit 0
+} catch {
+    Write-Output 'PROVIDER_ERROR'; exit 1
+}
+'@
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = [string]$pwshCommand.Source
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta',
+        '-EncodedCommand',
+        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+    )) {
+        [void]$start.ArgumentList.Add($argument)
+    }
+    $start.Environment['AUTOSPORT_UIA_DUPLICATE_PIDS'] = (
+        @($ProcessIds | Sort-Object -Unique) -join ','
+    )
+    $child = [System.Diagnostics.Process]::new()
+    $child.StartInfo = $start
+    $started = $false
+    try {
+        $started = $child.Start()
+        if (-not $started) { return 'LAUNCH_ERROR' }
+        if (-not $child.WaitForExit(6000)) {
+            try { $child.Kill($true) } catch {}
+            return 'TIMEOUT'
+        }
+        $code = [string]$child.StandardOutput.ReadToEnd().Trim()
+        $known = @(
+            'DIALOG_CLOSED', 'NO_DIALOG', 'SECOND_SEMANTIC_SURFACE',
+            'AMBIGUOUS_DIALOG', 'COPY_MISMATCH', 'APARTMENT_ERROR',
+            'NO_PROCESS_FAMILY', 'PROVIDER_ERROR'
+        )
+        if ($known -cnotcontains $code) { return 'INVALID_RESULT' }
+        if ($child.ExitCode -ne 0 -and $code -cin @('DIALOG_CLOSED', 'NO_DIALOG')) {
+            return 'INVALID_RESULT'
+        }
+        if ($child.ExitCode -eq 0 -and $code -cnotin @('DIALOG_CLOSED', 'NO_DIALOG')) {
+            return 'INVALID_RESULT'
+        }
+        return $code
+    } catch {
+        return 'LAUNCH_ERROR'
+    } finally {
+        if ($started) {
+            try { if (-not $child.HasExited) { $child.Kill($true) } } catch {}
+        }
+        $child.Dispose()
+    }
+}
+
 function Find-UiaRootWithElementForProcessFamily {
     param(
         [int[]]$ProcessIds,
@@ -1850,6 +1997,7 @@ $report = [ordered]@{
     duplicate_launch_status = 'NOT_RUN'
     duplicate_start_diagnostic = 'NOT_RUN'
     duplicate_start_worker_stage = 'NOT_RUN'
+    duplicate_dialog_probe_diagnostic = 'NOT_RUN'
     duplicate_launch_exit_code = $null
     duplicate_launch_dialog_title = $null
     normal_close_status = 'NOT_RUN'
@@ -2250,66 +2398,37 @@ try {
     # startup allowance. Ten seconds proved insufficient on the Windows candidate
     # while the launcher was still running; the UIA gate remains fail-closed.
     $duplicateDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $duplicateRoot = $null
+    $report.duplicate_dialog_probe_diagnostic = 'NOT_RUN'
+    $duplicateDialogObserved = $false
     $duplicateFamilyIds = @([int]$duplicateProcess.Id)
     $nextDuplicateFamilyProbe = [DateTime]::MinValue
     while ([DateTime]::UtcNow -lt $duplicateDeadline) {
-        # Avoid repeating expensive CIM process-tree and desktop UIA scans every
-        # 100ms on a busy Windows runner. Never infer lock success from process
-        # state: require the same externally observed native dialog as before.
         if ([DateTime]::UtcNow -ge $nextDuplicateFamilyProbe) {
             Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_PROBE'
-            $duplicateFamilyIds = @(Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id)
+            $duplicateFamilyIds = @(
+                Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id
+            )
             Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_READY'
-            # The duplicate-launch dialog is a mandatory real UIA witness.
-            # Its provider can block synchronously in FromHandle/RootElement.
-            # Isolate that provider entry in a bounded thread with an independent
-            # completion event; never Stop-Job a blocked COM worker.
-            $duplicateResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
-            $duplicateCompleted = [System.Threading.ManualResetEventSlim]::new($false)
-            $duplicateIdsCsv = (@($duplicateFamilyIds | Sort-Object -Unique) -join ',')
-            $duplicateFinder = ${function:Find-UiaRootForProcessFamily}
             Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'
-            $duplicateWorker = Start-ThreadJob -ScriptBlock {
-                param(
-                    [string]$IdsCsv, [scriptblock]$FindRoot,
-                    [object]$Results, [object]$Completion
-                )
-                try {
-                    Add-Type -AssemblyName UIAutomationClient
-                    Add-Type -AssemblyName UIAutomationTypes
-                    [int[]]$ids = @($IdsCsv.Split(',') | ForEach-Object {
-                        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
-                    })
-                    $root = & $FindRoot -ProcessIds $ids
-                    if ($null -ne $root) { $Results.Enqueue($root) }
-                } catch {
-                    # No UIA provider exception or arbitrary window text is evidence.
-                } finally {
-                    $Completion.Set()
-                }
-            } -ArgumentList @(
-                $duplicateIdsCsv, $duplicateFinder, $duplicateResults, $duplicateCompleted
-            ) -ThrottleLimit 16
-            if (-not $duplicateCompleted.Wait(6000)) {
-                # The outer audit process owns a stalled provider thread.
-                # Neither timeout nor process existence qualifies the dialog.
-                throw 'Second packaged launch bounded duplicate UIA root probe timed out'
+            $duplicateProbe = Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds
+            $report.duplicate_dialog_probe_diagnostic = [string]$duplicateProbe
+            if ($duplicateProbe -ceq 'DIALOG_CLOSED') {
+                $duplicateDialogObserved = $true
+                $report.duplicate_launch_dialog_title = 'Автоспорт — помилка запуску'
+                break
             }
-            [object]$observedDuplicateRoot = $null
-            if ($duplicateResults.TryDequeue([ref]$observedDuplicateRoot)) {
-                $duplicateRoot = $observedDuplicateRoot
+            if ($duplicateProbe -cin @(
+                'SECOND_SEMANTIC_SURFACE', 'AMBIGUOUS_DIALOG', 'COPY_MISMATCH',
+                'APARTMENT_ERROR', 'NO_PROCESS_FAMILY', 'PROVIDER_ERROR',
+                'INVALID_RESULT', 'LAUNCH_ERROR', 'UNAVAILABLE'
+            )) {
+                throw "Second packaged launch duplicate-dialog probe failed closed; fixed_code=$duplicateProbe"
             }
-            $duplicateCompleted.Dispose()
-            if ($null -ne $duplicateRoot) { break }
             $nextDuplicateFamilyProbe = [DateTime]::UtcNow.AddMilliseconds(1000)
         }
         Start-Sleep -Milliseconds 250
     }
-    if ($null -eq $duplicateRoot) {
-        # Preserve FAIL: a missing externally observed dialog is never evidence
-        # that the interactive lock or native keyboard fallback worked. Record
-        # only bounded process metadata, not workspace paths or exception text.
+    if (-not $duplicateDialogObserved) {
         $duplicateExitState = 'unavailable'
         try {
             $duplicateProcess.Refresh()
@@ -2322,46 +2441,9 @@ try {
             $duplicateExitState = 'unavailable'
         }
         $duplicateObservedFamilyCount = @($duplicateFamilyIds).Count
-        throw "Second packaged launch did not expose the bounded duplicate-instance dialog (process=$duplicateExitState; family_count=$duplicateObservedFamilyCount)"
+        throw "Second packaged launch did not expose the bounded duplicate-instance dialog (process=$duplicateExitState; family_count=$duplicateObservedFamilyCount; fixed_code=$($report.duplicate_dialog_probe_diagnostic))"
     }
 
-    $duplicateTitle = [string]$duplicateRoot.Current.Name
-    $report.duplicate_launch_dialog_title = $duplicateTitle
-    if ($duplicateTitle -ne 'Автоспорт — помилка запуску') {
-        throw "Second packaged launch exposed an unexpected top-level window"
-    }
-    if ($null -ne (Find-UiaElementForProcessFamily -ProcessIds $duplicateFamilyIds -AutomationId '330')) {
-        throw "Second packaged launch exposed a second semantic WebView operator surface"
-    }
-
-    $duplicateNames = @()
-    try {
-        $duplicateDescendants = $duplicateRoot.FindAll(
-            [System.Windows.Automation.TreeScope]::Descendants,
-            [System.Windows.Automation.Condition]::TrueCondition
-        )
-        foreach ($item in $duplicateDescendants) {
-            $name = [string]$item.Current.Name
-            if (-not [string]::IsNullOrWhiteSpace($name)) { $duplicateNames += $name }
-        }
-    } catch {
-        throw "Second packaged launch duplicate-instance dialog could not be inspected"
-    }
-    $duplicateText = $duplicateNames -join ' '
-    if ($duplicateText -notmatch 'уже відкритий' -or $duplicateText -notmatch 'Economic і live state не змінено') {
-        throw "Second packaged launch did not expose the bounded duplicate-instance recovery copy"
-    }
-
-    $duplicateWindowPattern = $null
-    if ($duplicateRoot.TryGetCurrentPattern(
-        [System.Windows.Automation.WindowPattern]::Pattern,
-        [ref]$duplicateWindowPattern
-    ) -and $null -ne $duplicateWindowPattern) {
-        ([System.Windows.Automation.WindowPattern]$duplicateWindowPattern).Close()
-    } else {
-        $duplicateRoot.SetFocus()
-        [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
-    }
     if (-not $duplicateProcess.WaitForExit(5000)) {
         throw "Second packaged launch did not terminate after duplicate-instance dialog dismissal"
     }

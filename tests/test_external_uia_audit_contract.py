@@ -96,6 +96,37 @@ def test_external_uia_core_compilation_includes_facades_without_skipping_gate() 
     assert "throw 'Required .NET reference facade for external UIA audit is unavailable'" in audit
 
 
+def test_duplicate_dialog_probe_runs_real_uia_in_killable_mta_process() -> None:
+    audit = _audit()
+    helper_start = audit.index("function Invoke-IsolatedDuplicateDialogProbe {")
+    helper_end = audit.index("function Find-UiaRootWithElementForProcessFamily {", helper_start)
+    helper = audit[helper_start:helper_end]
+
+    assert "'-NoLogo', '-NoProfile', '-NonInteractive', '-Mta'" in helper
+    assert "$child.WaitForExit(6000)" in helper
+    assert "$child.Kill($true)" in helper
+    assert "[System.Windows.Automation.AutomationElement]::RootElement" in helper
+    assert "[System.Windows.Automation.AutomationElement]::AutomationIdProperty" in helper
+    assert "'Автоспорт — помилка запуску'" in helper
+    assert "'уже відкритий'" in helper
+    assert "'Economic і live state не змінено'" in helper
+    assert "'SECOND_SEMANTIC_SURFACE'" in helper
+    assert "'DIALOG_CLOSED'" in helper
+
+    duplicate_start = audit.index(
+        "$duplicateDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)"
+    )
+    duplicate_end = audit.index(
+        "if (-not $duplicateProcess.WaitForExit(5000))", duplicate_start
+    )
+    duplicate = audit[duplicate_start:duplicate_end]
+    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in duplicate
+    assert "$duplicateProbe -ceq 'DIALOG_CLOSED'" in duplicate
+    assert "$report.duplicate_launch_dialog_title = 'Автоспорт — помилка запуску'" in duplicate
+    assert "$duplicateWorker = Start-ThreadJob" not in duplicate
+    assert "$duplicateRoot.Current.Name" not in duplicate
+
+
 def test_external_uia_audit_uses_runner_safe_legacy_action_pattern_lookup() -> None:
     audit = _audit()
 

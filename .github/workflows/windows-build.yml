@@ -441,13 +441,13 @@ jobs:
           }
 
           if ($null -eq $external -or $external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
-          if (-not [string]::Equals([string]$external.launch_working_directory, $hostileCwd, [System.StringComparison]::OrdinalIgnoreCase)) {
+          if ($external.launch_working_directory_verified -isnot [bool] -or $external.launch_working_directory_verified -ne $true) {
             throw 'External UIA evidence did not preserve the hostile child working directory'
           }
           if ($external.duplicate_launch_status -ne 'PASS' -or [int]$external.duplicate_launch_exit_code -ne 2) {
             throw 'External UIA evidence did not prove packaged duplicate-launch rejection'
           }
-          if ([string]$external.duplicate_launch_dialog_title -ne 'Автоспорт — помилка запуску') {
+          if ($external.duplicate_dialog_title_verified -isnot [bool] -or $external.duplicate_dialog_title_verified -ne $true) {
             throw 'External UIA duplicate-launch dialog title mismatch'
           }
           if ($external.normal_close_status -ne 'PASS' -or [int]$external.normal_close_exit_code -ne 0) {
@@ -455,12 +455,10 @@ jobs:
           }
           if (
             $external.emergency_stop_activation_status -ne 'PASS' -or
-            [string]::IsNullOrWhiteSpace([string]$external.emergency_stop_status_text) -or
-            -not [string]::Equals(
-              [string]$external.emergency_stop_journal_path,
-              (Join-Path $expectedWorkspace 'execution-stop.jsonl'),
-              [System.StringComparison]::OrdinalIgnoreCase
-            ) -or
+            $external.emergency_stop_status_text_present -isnot [bool] -or
+            $external.emergency_stop_status_text_present -ne $true -or
+            $external.emergency_stop_journal_matches_workspace -isnot [bool] -or
+            $external.emergency_stop_journal_matches_workspace -ne $true -or
             -not (Test-Path -LiteralPath (Join-Path $expectedWorkspace 'execution-stop.jsonl') -PathType Leaf)
           ) {
             throw 'External UIA evidence did not prove packaged durable emergency STOP activation'
@@ -469,7 +467,8 @@ jobs:
             $external.live_region_event_status -ne 'PASS' -or
             [int]$external.live_region_event_count -lt 1 -or
             [string]$external.live_region_event_automation_id -ne 'emergency-stop-status' -or
-            [string]::IsNullOrWhiteSpace([string]$external.live_region_event_text)
+            $external.live_region_event_text_present -isnot [bool] -or
+            $external.live_region_event_text_present -ne $true
           ) {
             throw 'External UIA evidence did not prove packaged LiveRegionChanged observation'
           }
@@ -482,12 +481,11 @@ jobs:
           }
           if (
             $external.runtime_witness_status -ne 'PASS' -or
-            [string]::IsNullOrWhiteSpace([string]$external.runtime_browser_version) -or
-            -not [string]::Equals(
-              [string]$external.runtime_witness_path,
-              (Join-Path $expectedWorkspace 'webview2-runtime-witness.json'),
-              [System.StringComparison]::OrdinalIgnoreCase
-            )
+            $external.runtime_browser_version_present -isnot [bool] -or
+            $external.runtime_browser_version_present -ne $true -or
+            $external.runtime_witness_matches_workspace -isnot [bool] -or
+            $external.runtime_witness_matches_workspace -ne $true -or
+            -not (Test-Path -LiteralPath (Join-Path $expectedWorkspace 'webview2-runtime-witness.json') -PathType Leaf)
           ) {
             throw 'External UIA evidence did not bind the packaged session to the actual WebView2 runtime witness'
           }

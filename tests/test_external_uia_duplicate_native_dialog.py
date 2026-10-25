@@ -61,6 +61,21 @@ def _visible_handle(process: subprocess.Popen) -> int:
     pytest.fail("Native dialog fixture did not expose a visible top-level HWND")
 
 
+def _run_probe(owner: int, handle: int) -> str:
+    command = (
+        "$ErrorActionPreference='Stop'\n" + _probe_source()
+        + f"\nInvoke-IsolatedDuplicateDialogProbe -ProcessIds @({owner}) "
+        + f"-WindowHandles @([IntPtr]::new({handle}))\n"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=60, check=False,
+    )
+    assert result.returncode == 0, result.stderr
+    return result.stdout.strip()
+
+
 @pytest.mark.parametrize(
     ("copy", "foreign_family", "expected"),
     [(COPY, False, "DIALOG_CLOSED"), (COPY, True, "NO_DIALOG"),
@@ -76,18 +91,7 @@ def test_real_native_dialog_probe(copy: str, foreign_family: bool, expected: str
     try:
         handle = _visible_handle(child)
         owner = os.getpid() if foreign_family else child.pid
-        command = (
-            "$ErrorActionPreference='Stop'\n" + _probe_source()
-            + f"\nInvoke-IsolatedDuplicateDialogProbe -ProcessIds @({owner}) "
-            + f"-WindowHandles @([IntPtr]::new({handle}))\n"
-        )
-        encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
-        result = subprocess.run(
-            ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
-            capture_output=True, text=True, timeout=60, check=False,
-        )
-        assert result.returncode == 0, result.stderr
-        assert result.stdout.strip() == expected
+        assert _run_probe(owner, handle) == expected
         if expected == "DIALOG_CLOSED":
             assert child.wait(timeout=10) == 2
         else:
@@ -96,3 +100,29 @@ def test_real_native_dialog_probe(copy: str, foreign_family: bool, expected: str
         if child.poll() is None:
             child.kill()
         child.wait(timeout=10)
+
+
+def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path) -> None:
+    """Do not substitute a synthetic MessageBox for the actual startup path."""
+    from autosport.workspace_lock import WorkspaceInteractiveLock
+
+    workspace = tmp_path / "workspace-пробіл"
+    local_app_data = tmp_path / "localappdata-пробіл"
+    workspace.mkdir()
+    local_app_data.mkdir()
+    env = dict(os.environ, AUTOSPORT_WORKSPACE=str(workspace), LOCALAPPDATA=str(local_app_data))
+    # Diagnostic workflow imports the exact checkout, not another installed tree.
+    env["PYTHONPATH"] = str(SCRIPT.parents[1] / "src")
+    with WorkspaceInteractiveLock(workspace):
+        child = subprocess.Popen(
+            [sys.executable, "-c", "from autosport.windows_entry import main; raise SystemExit(main([]))"],
+            env=env,
+        )
+        try:
+            handle = _visible_handle(child)
+            assert _run_probe(child.pid, handle) == "DIALOG_CLOSED"
+            assert child.wait(timeout=10) == 2
+        finally:
+            if child.poll() is None:
+                child.kill()
+            child.wait(timeout=10)

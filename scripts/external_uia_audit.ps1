@@ -2038,6 +2038,12 @@ $report = [ordered]@{
     duplicate_dialog_probe_diagnostic = 'NOT_RUN'
     duplicate_launch_exit_code = $null
     duplicate_launch_dialog_title = $null
+    duplicate_process_state = 'NOT_OBSERVED'
+    duplicate_process_exit_code = $null
+    duplicate_process_family_count = 0
+    duplicate_visible_window_count = 0
+    automation_error_line = 0
+    automation_error_category = 0
     normal_close_status = 'NOT_RUN'
     normal_close_exit_code = $null
     runtime_witness_status = 'NOT_REQUESTED'
@@ -2453,6 +2459,7 @@ try {
             $duplicateFamilyIds = @(
                 Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id
             )
+            $report.duplicate_process_family_count = [int]$duplicateFamilyIds.Count
             Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_READY'
             Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'
             # Process.MainWindowHandle can select a hidden bootloader owner
@@ -2469,6 +2476,7 @@ try {
             if ($duplicateNativeHandles.Count -gt 4096) {
                 throw 'Second packaged launch native dialog census exceeded limit'
             }
+            $report.duplicate_visible_window_count = [int]$duplicateNativeHandles.Count
             $duplicateProbe = Invoke-IsolatedDuplicateDialogProbe `
                 -ProcessIds $duplicateFamilyIds `
                 -WindowHandles ([IntPtr[]]$duplicateNativeHandles)
@@ -2884,6 +2892,10 @@ try {
     } else {
         $report.failures += 'external UIA audit failed: unexpected automation error'
     }
+    # ErrorRecord-owned numeric location/category only. Never persist exception
+    # text, provider properties, source excerpts, paths or arbitrary type names.
+    $report.automation_error_line = [int]$_.InvocationInfo.ScriptLineNumber
+    $report.automation_error_category = [int]$_.CategoryInfo.Category
 } finally {
     # Preserve a bounded count from the actual pre-cleanup UIA search. A vanished
     # launcher with child processes differs from a completely empty process family.
@@ -2931,6 +2943,17 @@ try {
     }
     if ($null -ne $duplicateProcess) {
         try {
+            $duplicateProcess.Refresh()
+            if ($duplicateProcess.HasExited) {
+                $report.duplicate_process_state = 'EXITED'
+                $report.duplicate_process_exit_code = [int]$duplicateProcess.ExitCode
+            } else {
+                $report.duplicate_process_state = 'RUNNING'
+            }
+        } catch {
+            $report.duplicate_process_state = 'UNAVAILABLE'
+        }
+        try {
             $duplicateCleanupIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id | Sort-Object -Unique -Descending)
         } catch {
             $duplicateCleanupIds = @($duplicateProcess.Id)
@@ -2964,6 +2987,41 @@ try {
                 }
             } catch {}
         }
+    }
+    # Project equality/presence from original in-memory observations BEFORE
+    # privacy scrubbing. A nonempty '[redacted]' sentinel is never proof that
+    # a path, title, or status matched the real request/product observation.
+    $report.launch_working_directory_verified = (
+        -not [string]::IsNullOrWhiteSpace($launchWorkingDirectory) -and
+        [string]::Equals([string]$report.launch_working_directory,
+            $launchWorkingDirectory, [System.StringComparison]::OrdinalIgnoreCase)
+    )
+    $report.duplicate_dialog_title_verified = (
+        [string]$report.duplicate_launch_dialog_title -ceq 'Автоспорт — помилка запуску'
+    )
+    $report.emergency_stop_status_text_present = (
+        -not [string]::IsNullOrWhiteSpace([string]$report.emergency_stop_status_text)
+    )
+    $report.live_region_event_text_present = (
+        -not [string]::IsNullOrWhiteSpace([string]$report.live_region_event_text)
+    )
+    $report.runtime_browser_version_present = (
+        -not [string]::IsNullOrWhiteSpace([string]$report.runtime_browser_version)
+    )
+    $report.runtime_witness_matches_workspace = $false
+    $report.emergency_stop_journal_matches_workspace = $false
+    if (-not [string]::IsNullOrWhiteSpace($Workspace)) {
+        $bindingWorkspace = [System.IO.Path]::GetFullPath($Workspace)
+        $report.runtime_witness_matches_workspace = [string]::Equals(
+            [string]$report.runtime_witness_path,
+            (Join-Path $bindingWorkspace 'webview2-runtime-witness.json'),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+        $report.emergency_stop_journal_matches_workspace = [string]::Equals(
+            [string]$report.emergency_stop_journal_path,
+            (Join-Path $bindingWorkspace 'execution-stop.jsonl'),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
     }
     # Keep UIA validation in memory; scrub provider-controlled names and
     # workspace paths before either PASS or FAIL is serialized to JSON/stdout.

@@ -146,6 +146,70 @@ def test_real_git_ignored_python_hook_rejected(
             qualifier._identity(root)
 
 
+@pytest.mark.parametrize("ignore_location", ["gitignore", "info_exclude"])
+@pytest.mark.parametrize("module_path", ["pytest.py", "pytest/__main__.py"])
+def test_real_git_ignored_root_pytest_module_cannot_forge_success(
+    ignore_location: str, module_path: str,
+) -> None:
+    """Real ignored module can forge a pytest PASS for a failing tracked test."""
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "проєкт з пробілом"
+        source = _real_git_fixture(root)
+        source.write_text("def test_fail():\n    assert False\n", encoding="utf-8")
+        rule = "pytest.py\n" if module_path == "pytest.py" else "pytest/\n"
+        if ignore_location == "gitignore":
+            (root / ".gitignore").write_text(rule, encoding="utf-8")
+            add_paths = ["tests/test_localization_catalog.py", ".gitignore"]
+        else:
+            (root / ".git" / "info" / "exclude").write_text(rule, encoding="utf-8")
+            add_paths = ["tests/test_localization_catalog.py"]
+        subprocess.run(["git", "add", *add_paths], cwd=root, check=True,
+                       capture_output=True, text=True, timeout=20)
+        subprocess.run(["git", "commit", "-qm", "pin failing test and ignore fake pytest"],
+                       cwd=root, check=True, capture_output=True, text=True, timeout=20)
+        module = root / module_path
+        module.parent.mkdir(parents=True, exist_ok=True)
+        if module_path.startswith("pytest/"):
+            (module.parent / "__init__.py").write_text("", encoding="utf-8")
+        module.write_text("print('1 passed in 0.01s')\n", encoding="utf-8")
+        assert not subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        observed = subprocess.run(
+            [qualifier.sys.executable, "-m", "pytest", "-q",
+             "tests/test_localization_catalog.py"],
+            cwd=root, capture_output=True, text=True, timeout=30,
+        )
+        assert observed.returncode == 0
+        assert "1 passed" in observed.stdout
+        with pytest.raises(ValueError, match="ignored Python import hooks"):
+            qualifier._identity(root)
+
+
+@pytest.mark.parametrize("module_path", [
+    "sitecustomize.py", "usercustomize.py", "pluggy.py",
+    "pluggy/__init__.py", "_pytest/__init__.py",
+])
+def test_real_git_ignored_root_import_hook_rejected(module_path: str) -> None:
+    with tempfile.TemporaryDirectory() as temporary:
+        root = Path(temporary) / "проєкт з пробілом"
+        _real_git_fixture(root)
+        rule = module_path.split("/")[0]
+        if "/" in module_path:
+            rule += "/"
+        (root / ".git" / "info" / "exclude").write_text(rule + "\n", encoding="utf-8")
+        module = root / module_path
+        module.parent.mkdir(parents=True, exist_ok=True)
+        module.write_text("raise RuntimeError('untrusted import')\n", encoding="utf-8")
+        assert not subprocess.run(
+            ["git", "status", "--porcelain", "--untracked-files=all"],
+            cwd=root, check=True, capture_output=True, text=True, timeout=20,
+        ).stdout.strip()
+        with pytest.raises(ValueError, match="ignored Python import hooks"):
+            qualifier._identity(root)
+
+
 def test_real_git_pytest_addopts_cannot_deselect_failing_tracked_test() -> None:
     """A clean HEAD must not yield source PASS via an ambient -k selector."""
     with tempfile.TemporaryDirectory() as temporary:

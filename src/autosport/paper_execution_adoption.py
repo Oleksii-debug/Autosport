@@ -173,6 +173,9 @@ class PaperExecutionAdoptionRuntime:
         # copied, reconstructed, or caller-authored PreparedPaperExecution values do
         # not carry execution authority. Restart re-mints from canonical inputs.
         self._prepared_authorities: dict[int, PreparedPaperExecution] = {}
+        # Scope publication authority is intentionally NOT stored on the runtime.
+        # The package-composed exposure-scope provenance guard owns issuance outside
+        # caller-writable instance state and binds it to this runtime's origin ledger.
         self.paper_book_path = Path(paper_book_path)
         if self.paper_book_path.exists():
             durable_book = PaperBook.load(self.paper_book_path)
@@ -221,6 +224,21 @@ class PaperExecutionAdoptionRuntime:
             raise PaperExecutionAdoptionError(
                 "prepared execution was not minted by this runtime from canonical authority"
             )
+
+    def _require_exposure_scope_authority(
+        self,
+        prepared: PreparedPaperExecution,
+    ) -> None:
+        """Fail closed outside the package-composed provenance authority.
+
+        Generic execution minting is deliberately insufficient for reserved
+        PAPER exposure-scope publication. The installed provenance guard owns the
+        positive issuance registry and verifies exact runtime/prepared/ledger origin.
+        """
+        self._require_minted(prepared)
+        raise PaperExecutionAdoptionError(
+            "prepared execution lacks canonical PAPER exposure-scope authority"
+        )
 
     def prepare(
         self,
@@ -368,13 +386,14 @@ class PaperExecutionAdoptionRuntime:
             created_at=plan.decision_ts,
             actions=tuple(actions),
         )
-        return self._mint_prepared(
+        prepared = self._mint_prepared(
             PreparedPaperExecution(
                 execution_plan=execution_plan,
                 exposure_bindings=tuple(bindings),
                 intent_evidence_json=intent_evidence_json,
             )
         )
+        return prepared
 
     @staticmethod
     def _require_back_compatible_exchange_side(exchange_side: str | None) -> None:
@@ -535,6 +554,7 @@ class PaperExecutionAdoptionRuntime:
         self,
         *,
         prepared: PreparedPaperExecution,
+        trigger_id: str,
         run_id: str,
     ) -> None:
         """Persist the already-minted #646 scope into the canonical #623 ledger.
@@ -713,6 +733,7 @@ class PaperExecutionAdoptionRuntime:
         expected_run_id = self.expected_run_id(prepared, trigger_id)
         self._publish_exposure_scope(
             prepared=prepared,
+            trigger_id=trigger_id,
             run_id=expected_run_id,
         )
         run = execute_paper_plan(

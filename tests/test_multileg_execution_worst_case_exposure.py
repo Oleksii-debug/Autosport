@@ -76,7 +76,7 @@ def _prepared(
     runtime: PaperExecutionAdoptionRuntime,
     *actions: ExecutionAction,
 ) -> PreparedPaperExecution:
-    return runtime._mint_prepared(
+    prepared = runtime._mint_prepared(
         PreparedPaperExecution(
             execution_plan=ExecutionPlan(
                 plan_id="wp-e03-plan",
@@ -98,7 +98,23 @@ def _prepared(
             intent_evidence_json='{"schema":"wp-e03-test-intent"}',
         )
     )
-
+    # White-box lower-layer fixture: these tests bypass PortfolioPlan preparation
+    # intentionally, so mirror the canonical adoption tests by granting only this
+    # exact runtime/prepared/ledger tuple inside the immutable scope registry.
+    publisher = PaperExecutionAdoptionRuntime._publish_exposure_scope
+    cells = dict(
+        zip(
+            publisher.__code__.co_freevars,
+            publisher.__closure__ or (),
+            strict=True,
+        )
+    )
+    scope_cell = cells["scope_authorities"]
+    current = scope_cell.cell_contents
+    if type(current) is not tuple:
+        raise AssertionError("canonical scope authority registry is not immutable")
+    scope_cell.cell_contents = (*current, (runtime, prepared, runtime.ledger))
+    return prepared
 
 def _evidence(
     action: ExecutionAction,

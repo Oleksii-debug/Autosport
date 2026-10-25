@@ -1843,6 +1843,7 @@ $report = [ordered]@{
     descendant_count = 0
     duplicate_launch_status = 'NOT_RUN'
     duplicate_start_diagnostic = 'NOT_RUN'
+    duplicate_start_worker_stage = 'NOT_RUN'
     duplicate_launch_exit_code = $null
     duplicate_launch_dialog_title = $null
     normal_close_status = 'NOT_RUN'
@@ -2140,44 +2141,72 @@ try {
     # not for the duplicate app to exit or for its UIA dialog to appear.
     $duplicateStartResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
     $duplicateStartOutcomes = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $duplicateStartStages = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     $duplicateStartCompleted = [System.Threading.ManualResetEventSlim]::new($false)
-    # PowerShell @() enumerates empty ConcurrentQueue arguments, shifting the
-    # completion event into the wrong parameter. Assign explicit object[] slots.
-    $duplicateStartArguments = [object[]]::new(5)
+    # PowerShell enumerates empty queues in @(); preserve six exact object slots.
+    $duplicateStartArguments = [object[]]::new(6)
     $duplicateStartArguments[0] = $exePath
     $duplicateStartArguments[1] = $launchWorkingDirectory
     $duplicateStartArguments[2] = $duplicateStartResults
     $duplicateStartArguments[3] = $duplicateStartOutcomes
     $duplicateStartArguments[4] = $duplicateStartCompleted
+    $duplicateStartArguments[5] = $duplicateStartStages
     try {
         $duplicateStartWorker = Start-ThreadJob -ScriptBlock {
             param(
                 [string]$exePath, [string]$launchWorkingDirectory,
-                [object]$Results, [object]$Outcomes, [object]$Completion
+                [object]$Results, [object]$Outcomes, [object]$Completion,
+                [object]$Stages
             )
             try {
-                $duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru -ErrorAction Stop
-                if ($null -ne $duplicateProcess -and [int]$duplicateProcess.Id -gt 0) {
+                $Stages.Enqueue('WORKER_ENTER')
+                # Bypass Start-Process/ShellExecute's synchronous Windows
+                # invocation path after a UIA provider has been queried.
+                # The worker is bounded by the independent completion event.
+                $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+                $startInfo.FileName = $exePath
+                $startInfo.WorkingDirectory = $launchWorkingDirectory
+                $startInfo.UseShellExecute = $false
+                $startInfo.CreateNoWindow = $false
+                $duplicateProcess = [System.Diagnostics.Process]::new()
+                $duplicateProcess.StartInfo = $startInfo
+                $Stages.Enqueue('PROCESS_START_PROBE')
+                if (-not $duplicateProcess.Start()) {
+                    $Outcomes.Enqueue('INVALID_PROCESS')
+                    $Stages.Enqueue('INVALID_PROCESS')
+                    $duplicateProcess.Dispose()
+                } elseif ([int]$duplicateProcess.Id -gt 0) {
                     $Results.Enqueue($duplicateProcess)
                     $Outcomes.Enqueue('RETURNED')
+                    $Stages.Enqueue('PROCESS_RETURNED')
                 } else {
                     $Outcomes.Enqueue('INVALID_PROCESS')
+                    $Stages.Enqueue('INVALID_PROCESS')
+                    $duplicateProcess.Dispose()
                 }
             } catch {
-                # Fixed classification only; never serialize exception text or paths.
+                # Never publish exception text, executable path, PID or command line.
                 $Outcomes.Enqueue('LAUNCH_FAILED')
+                $Stages.Enqueue('PROCESS_EXCEPTION')
             } finally {
                 $Completion.Set()
             }
         } -ArgumentList $duplicateStartArguments -ThrottleLimit 16
     } catch {
         $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
+        $report.duplicate_start_worker_stage = 'WORKER_LAUNCH_FAILED'
         throw 'Second packaged launch worker could not start'
     }
-    if (-not $duplicateStartCompleted.Wait(6000)) {
+    # Read only fixed, non-sensitive worker stages; no ThreadJob State/Receive-Job
+    # or Stop-Job call may reenter a blocked UIA/PowerShell provider.
+    $duplicateStartTerminal = $duplicateStartCompleted.Wait(6000)
+    $report.duplicate_start_worker_stage = 'NOT_ENTERED'
+    [string]$duplicateWorkerStage = $null
+    while ($duplicateStartStages.TryDequeue([ref]$duplicateWorkerStage)) {
+        $report.duplicate_start_worker_stage = [string]$duplicateWorkerStage
+    }
+    if (-not $duplicateStartTerminal) {
         $report.duplicate_start_diagnostic = 'TIMED_OUT'
-        # A late or hung launch is a failure, never duplicate-lock proof.
-        # Do not synchronously stop a blocked worker/runspace.
         throw 'Second packaged launch bounded process creation timed out'
     }
     [string]$duplicateStartOutcome = $null

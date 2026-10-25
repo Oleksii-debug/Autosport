@@ -303,10 +303,9 @@ def test_external_uia_audit_rejects_second_real_packaged_launch() -> None:
         "$process = Start-Process -FilePath $exePath "
         "-WorkingDirectory $launchWorkingDirectory -PassThru"
     )
-    second_launch = (
-        "$duplicateProcess = Start-Process -FilePath $exePath "
-        "-WorkingDirectory $launchWorkingDirectory -PassThru"
-    )
+    second_launch = "$duplicateProcess.Start()"
+    assert "$startInfo.UseShellExecute = $false" in audit
+    assert "$startInfo.WorkingDirectory = $launchWorkingDirectory" in audit
     assert first_launch in audit
     assert second_launch in audit
     assert audit.index(first_launch) < audit.index(second_launch)
@@ -339,7 +338,7 @@ def test_missing_duplicate_dialog_exposes_bounded_process_state_without_qualifyi
 
 def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening_gate() -> None:
     audit = _audit()
-    start = audit.index("$duplicateProcess = Start-Process")
+    start = audit.index("$duplicateProcess = [System.Diagnostics.Process]::new()")
     end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
     duplicate = audit[start:end]
     # A slow frozen application on the runner must not be incorrectly qualified.
@@ -361,7 +360,7 @@ def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening
 def test_duplicate_root_uia_lookup_is_bounded_without_skipping_dialog_evidence() -> None:
     """A stalled provider cannot hold the duplicate dialog gate indefinitely."""
     audit = _audit()
-    start = audit.index("$duplicateProcess = Start-Process")
+    start = audit.index("$duplicateProcess = [System.Diagnostics.Process]::new()")
     end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
     duplicate = audit[start:end]
     assert "Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'" in duplicate
@@ -1584,7 +1583,7 @@ def test_duplicate_process_census_is_independently_bounded_and_fail_closed() -> 
     ):
         assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
         assert f"'{stage}'" in workflow
-    assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'") < duplicate.index("$duplicateProcess = Start-Process")
+    assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'") < duplicate.index("$duplicateProcess = [System.Diagnostics.Process]::new()")
     assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'") < duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE")
     assert duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE") < duplicate.index("Get-BoundedDuplicateProcessFamilyIds")
     assert duplicate.index("DUPLICATE_PROCESS_FAMILY_READY") < duplicate.index("DUPLICATE_UIA_ROOT_PROBE")

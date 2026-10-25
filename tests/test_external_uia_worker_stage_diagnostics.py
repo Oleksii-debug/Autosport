@@ -655,8 +655,8 @@ def test_duplicate_process_creation_is_bounded_after_real_semantic_witness() -> 
     launch = source[start:ready]
     assert source.index("Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'") < start
     assert "$duplicateStartWorker = Start-ThreadJob -ScriptBlock" in launch
-    assert "$duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru" in launch
-    assert launch.index("Start-Process -FilePath") < launch.index("$duplicateStartCompleted.Wait(6000)")
+    assert "$duplicateProcess = [System.Diagnostics.Process]::new()" in launch
+    assert launch.index("$duplicateProcess.Start()") < launch.index("$duplicateStartCompleted.Wait(6000)")
     assert launch.index("$duplicateStartCompleted.Wait(6000)") < launch.index("$duplicateStartResults.TryDequeue")
     assert launch.index("$duplicateStartResults.TryDequeue") < launch.index("$duplicateProcess = [System.Diagnostics.Process]$duplicateStarted")
     assert "Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru" not in source[ready:]
@@ -668,7 +668,7 @@ def test_duplicate_process_creation_timeout_and_empty_result_fail_closed() -> No
     start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
     ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
     launch = source[start:ready]
-    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "if (-not $duplicateStartTerminal) {" in launch
     assert "throw 'Second packaged launch bounded process creation timed out'" in launch
     assert "if (-not $duplicateStartResults.TryDequeue([ref]$duplicateStarted) -or" in launch
     assert "throw 'Second packaged launch did not return a valid process'" in launch
@@ -686,10 +686,10 @@ def test_duplicate_threadjob_argument_identity_and_fixed_outcomes() -> None:
     start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
     ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
     launch = source[start:ready]
-    assert "$duplicateStartArguments = [object[]]::new(5)" in launch
+    assert "$duplicateStartArguments = [object[]]::new(6)" in launch
     for slot, value in enumerate((
         "$exePath", "$launchWorkingDirectory", "$duplicateStartResults",
-        "$duplicateStartOutcomes", "$duplicateStartCompleted",
+        "$duplicateStartOutcomes", "$duplicateStartCompleted", "$duplicateStartStages",
     )):
         assert f"$duplicateStartArguments[{slot}] = {value}" in launch
     assert "} -ArgumentList $duplicateStartArguments" in launch
@@ -711,8 +711,10 @@ def test_duplicate_threadjob_failures_never_promote_lock_or_leak_details() -> No
     assert "duplicate_start_diagnostic = 'NOT_RUN'" in source
     for code in ("TIMED_OUT", "LAUNCH_FAILED", "EMPTY_RESULT", "INVALID_PROCESS", "RETURNED"):
         assert f"$report.duplicate_start_diagnostic = '{code}'" in launch
-    assert "Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru -ErrorAction Stop" in launch
-    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "$startInfo.UseShellExecute = $false" in launch
+    assert "$startInfo.WorkingDirectory = $launchWorkingDirectory" in launch
+    assert "if (-not $duplicateProcess.Start()) {" in launch
+    assert "if (-not $duplicateStartTerminal) {" in launch
     assert "throw 'Second packaged launch bounded process creation timed out'" in launch
     assert "throw 'Second packaged launch did not return a valid process'" in launch
     assert "throw 'Second packaged launch returned invalid process receipt'" in launch
@@ -741,7 +743,30 @@ def test_external_uia_threadjob_pool_cannot_starve_duplicate_launch() -> None:
     ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
     launch = source[start:ready]
     assert "} -ArgumentList $duplicateStartArguments -ThrottleLimit 16" in launch
-    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "if (-not $duplicateStartTerminal) {" in launch
     assert "$report.duplicate_start_diagnostic = 'TIMED_OUT'" in launch
     assert "$report.duplicate_start_diagnostic = 'RETURNED'" in launch
     assert "duplicate_launch_status = 'PASS'" not in launch
+
+def test_duplicate_launch_native_process_stage_evidence_is_bounded_and_redacted() -> None:
+    """A timed-out worker is never PASS; distinguish queueing from Process.Start."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "duplicate_start_worker_stage = 'NOT_RUN'" in source
+    assert "$report.duplicate_start_worker_stage = 'NOT_ENTERED'" in launch
+    for stage in ("WORKER_ENTER", "PROCESS_START_PROBE", "PROCESS_RETURNED",
+                  "PROCESS_EXCEPTION", "INVALID_PROCESS", "WORKER_LAUNCH_FAILED"):
+        assert f"'{stage}'" in launch
+    assert "$duplicateStartCompleted.Wait(6000)" in launch
+    assert "$duplicateStartStages.TryDequeue([ref]$duplicateWorkerStage)" in launch
+    assert "$report.duplicate_start_diagnostic = 'TIMED_OUT'" in launch
+    assert "$startInfo.UseShellExecute = $false" in launch
+    assert "$startInfo.FileName = $exePath" in launch
+    assert "$startInfo.WorkingDirectory = $launchWorkingDirectory" in launch
+    assert "$duplicateProcess.Start()" in launch
+    assert "Start-Process -FilePath $exePath" not in launch
+    assert "$Outcomes.Enqueue('RETURNED')" in launch
+    assert "Stop-Job -Job $duplicateStartWorker" not in launch
+    assert "$report.duplicate_launch_status = 'PASS'" not in launch

@@ -83,7 +83,12 @@ def focus_native_webview(window: object) -> str:
         accepted = [False]
 
         def apply_focus() -> None:
-            accepted[0] = bool(control.Focus())
+            focus_returned = bool(control.Focus())
+            # WinForms WebView2 immediately moves input focus to its hosted
+            # renderer child.  Control.Focus() can consequently return False
+            # even though the control now ContainsFocus.  Read both on the UI
+            # thread; neither value is semantic UIA evidence.
+            accepted[0] = focus_returned or bool(control.ContainsFocus)
 
         if bool(getattr(native, "InvokeRequired")):
             from System import Func, Type

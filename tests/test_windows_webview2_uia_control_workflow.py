@@ -194,8 +194,9 @@ def test_native_webview_focus_transfer_is_explicit_and_fail_closed() -> None:
     spec.loader.exec_module(module)
 
     class Control:
-        def __init__(self, result: object) -> None:
+        def __init__(self, result: object, *, contains_focus: object = False) -> None:
             self.result = result
+            self.ContainsFocus = contains_focus
             self.calls = 0
 
         def Focus(self) -> object:
@@ -217,9 +218,12 @@ def test_native_webview_focus_transfer_is_explicit_and_fail_closed() -> None:
             self.native = Native(control)
 
     accepted = Control(True)
+    child_accepted = Control(False, contains_focus=True)
     rejected = Control(False)
     assert module.focus_native_webview(Window(accepted)) == "NATIVE_WEBVIEW_FOCUS_CONFIRMED"
     assert accepted.calls == 1
+    assert module.focus_native_webview(Window(child_accepted)) == "NATIVE_WEBVIEW_FOCUS_CONFIRMED"
+    assert child_accepted.calls == 1
     assert module.focus_native_webview(Window(rejected)) == "NATIVE_WEBVIEW_FOCUS_REJECTED"
     assert rejected.calls == 1
     assert module.focus_native_webview(object()) == "NATIVE_WEBVIEW_FOCUS_EXCEPTION"

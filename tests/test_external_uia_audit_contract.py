@@ -303,13 +303,13 @@ def test_external_uia_audit_rejects_second_real_packaged_launch() -> None:
         "$process = Start-Process -FilePath $exePath "
         "-WorkingDirectory $launchWorkingDirectory -PassThru"
     )
-    second_launch = (
-        "$duplicateProcess = Start-Process -FilePath $exePath "
-        "-WorkingDirectory $launchWorkingDirectory -PassThru"
-    )
     assert first_launch in audit
-    assert second_launch in audit
-    assert audit.index(first_launch) < audit.index(second_launch)
+    launch_start = audit.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    launch_ready = audit.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", launch_start)
+    duplicate_launcher = audit[launch_start:launch_ready]
+    assert "$candidateStart = [System.Diagnostics.ProcessStartInfo]::new()" in duplicate_launcher
+    assert "$candidate.Start()" in duplicate_launcher
+    assert audit.index(first_launch) < launch_start
     assert "duplicate_launch_status = 'NOT_RUN'" in audit
     assert "$report.duplicate_launch_status = 'PASS'" in audit
     assert "$report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode" in audit
@@ -339,7 +339,7 @@ def test_missing_duplicate_dialog_exposes_bounded_process_state_without_qualifyi
 
 def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening_gate() -> None:
     audit = _audit()
-    start = audit.index("$duplicateProcess = Start-Process")
+    start = audit.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
     end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
     duplicate = audit[start:end]
     # A slow frozen application on the runner must not be incorrectly qualified.
@@ -356,6 +356,26 @@ def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening
     assert "$duplicateRoot.Current.Name" in duplicate
     assert "Автоспорт — помилка запуску" in duplicate
     assert "$duplicateProcess.ExitCode -ne 2" in duplicate
+
+
+def test_duplicate_root_uia_lookup_is_bounded_without_skipping_dialog_evidence() -> None:
+    """A stalled provider cannot hold the duplicate dialog gate indefinitely."""
+    audit = _audit()
+    start = audit.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
+    duplicate = audit[start:end]
+    assert "Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'" in duplicate
+    assert "$duplicateFinder = ${function:Find-UiaRootForProcessFamily}" in duplicate
+    assert "$duplicateWorker = Start-ThreadJob -ScriptBlock" in duplicate
+    assert "$duplicateCompleted = [System.Threading.ManualResetEventSlim]::new($false)" in duplicate
+    assert "$duplicateCompleted.Wait(6000)" in duplicate
+    assert "$duplicateResults.TryDequeue([ref]$observedDuplicateRoot)" in duplicate
+    assert "throw 'Second packaged launch bounded duplicate UIA root probe timed out'" in duplicate
+    assert "$duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds" not in duplicate
+    assert "Stop-Job -Job $duplicateWorker" not in duplicate
+    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "$duplicateProcess.ExitCode -ne 2" in duplicate
+    assert "Second packaged launch exposed a second semantic WebView operator surface" in duplicate
 
 
 def test_windows_candidate_requires_duplicate_launch_evidence() -> None:
@@ -514,22 +534,29 @@ def test_external_uia_runtime_witness_wait_is_bounded_and_never_fabricates_evide
 
 
 def test_external_uia_failure_classifies_only_known_windows_before_cleanup() -> None:
+    """Classify native windows once; never reenter a stalled COM provider in cleanup."""
     audit = _audit()
     assert "observed_window_class = 'NOT_OBSERVED'" in audit
-    finalizer = audit[audit.index("} finally {"):]
-    classification = finalizer[: finalizer.index("if ($null -ne $liveRegionProbe)")]
-    assert "[string]$uiaRoot.Current.Name" in classification
-    assert "[System.StringComparison]::Ordinal" in classification
-    assert "NATIVE_EMERGENCY_STOP" in classification
-    assert "NATIVE_STARTUP_ERROR" in classification
-    assert "PRODUCT_MAIN_WINDOW" in classification
-    assert "OTHER_OR_UNAVAILABLE" in classification
-    assert "Never export an" in classification
-    assert classification.index("observed_window_class") < finalizer.index(
-        "$report | ConvertTo-Json -Depth 8"
+    native = audit.split(
+        "Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'", 1
+    )[1].split("    $semanticReady = $null", 1)[0]
+    assert "[string]$uiaRoot.Current.Name" in native
+    assert "[System.StringComparison]::Ordinal" in native
+    assert "observed_window_class = 'NATIVE_EMERGENCY_STOP'" in native
+    assert "observed_window_class = 'NATIVE_STARTUP_ERROR'" in native
+    assert "observed_window_class = 'PRODUCT_MAIN_WINDOW'" in native
+    cleanup = audit.split(
+        "} catch {\n    if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {", 1
+    )[1].split("} finally {", 1)[1]
+    assert "Never reenter the UIA COM provider during failure cleanup" in cleanup
+    assert "$report.observed_window_class =" not in cleanup
+    assert not any(
+        "$uiaRoot.Current.Name" in line
+        for line in cleanup.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
     )
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in cleanup
     assert "if ($report.status -ne 'PASS')" in audit
-
 
 def test_windows_candidate_requires_packaged_runtime_witness_binding() -> None:
     workflow = _windows_workflow()
@@ -752,7 +779,27 @@ def test_external_uia_progress_is_fixed_stage_only_not_a_pass_or_user_data() -> 
     audit = _audit()
     assert "[string]$ProgressOutput = ''" in audit
     assert "function Write-ExternalUiaProgress" in audit
-    assert "[ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]" in audit
+    # Compare the actual fixed public stage contract with the watchdog; a
+    # new bounded worker probe must be accepted by both or CI fails closed.
+    public_contract = audit.split("function Write-ExternalUiaProgress {", 1)[1].split(
+        "Write-ExternalUiaProgress -Stage 'START'", 1
+    )[0]
+    progress_tokens = public_contract.split("[ValidateSet(", 1)[1].split(")]", 1)[0]
+    watchdog_tokens = _windows_workflow().split("$allowedStages = @(", 1)[1].split(")", 1)[0]
+    progress_stages = tuple(token.strip().strip("'") for token in progress_tokens.split(","))
+    watchdog_stages = tuple(token.strip().strip("'") for token in watchdog_tokens.split(","))
+    assert progress_stages == watchdog_stages
+    assert len(progress_stages) == len(set(progress_stages))
+    assert progress_stages[0] == "START"
+    assert progress_stages[-1] == "AUDIT_COMPLETE"
+    for stage in (
+        "SEMANTIC_DESKTOP_POINT_PROBE",
+        "SEMANTIC_DESKTOP_POINT_READY",
+        "SEMANTIC_DESKTOP_POINT_ID_PROBE",
+        "SEMANTIC_DESKTOP_POINT_PARENT_PROBE",
+        "SEMANTIC_DESKTOP_POINT_CHILD_PROBE",
+    ):
+        assert stage in progress_stages
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in audit
     assert "'SEMANTIC_DESCENDANT_PROBE''SEMANTIC_UIA_OBSERVED'" not in audit
     assert "'SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED'" in _windows_workflow()
@@ -1331,8 +1378,7 @@ def test_external_uia_monotonic_worker_wait_fails_closed() -> None:
 
 
 def test_stalled_uia_worker_aborts_provider_reentry_and_cleanup_probe() -> None:
-    """A real COM timeout must not trigger another HWND/desktop probe or
-    an unbounded cleanup UIA Name read. This does not constitute UIA PASS."""
+    """A COM timeout must fail closed and serialize evidence without provider reentry."""
     audit = _audit()
     wrapper = audit.split("function Find-BoundedUiaSemanticViaChildren {", 1)[1].split(
         "function Find-UiaRootWithElementForProcessFamily {", 1
@@ -1351,11 +1397,17 @@ def test_stalled_uia_worker_aborts_provider_reentry_and_cleanup_probe() -> None:
         "# The existing UIA desktop search", 1
     )[0]
     cleanup = audit.split("} finally {\n    # Preserve a bounded count", 1)[1]
-    assert "if ($null -ne $uiaRoot -and -not $script:semanticWorkerTimedOut)" in cleanup
-    assert "observed_window_class = 'OTHER_OR_UNAVAILABLE'" in cleanup
+    assert "Never reenter the UIA COM provider during failure cleanup" in cleanup
+    assert "$report.observed_window_class =" not in cleanup
+    assert not any(
+        "$uiaRoot.Current.Name" in line or "AutomationElement]::" in line
+        for line in cleanup.splitlines()
+        if line.strip() and not line.lstrip().startswith("#")
+    )
+    assert "$report.semantic_desktop_worker_last_stage" in cleanup
+    assert "$report | ConvertTo-Json -Depth 8 | Set-Content" in cleanup
     assert "if ($report.status -ne 'PASS')" in audit
     assert "exit 1" in audit
-
 
 def test_external_uia_watchdog_distinguishes_native_enumeration_from_desktop_com() -> None:
     """The 120s failure must identify the exact boundary, not grant UIA PASS.
@@ -1402,8 +1454,10 @@ def test_actual_desktop_uia_provider_is_bounded_inside_real_mta_worker() -> None
     assert "Start-ThreadJob -ScriptBlock {" in helper
     assert "External desktop UIA semantic worker requires MTA" in helper
     assert "ManualResetEventSlim]::new($false)" in helper
-    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in helper
+    assert "$state.Completion.Wait(0)" in helper
     assert "[Math]::Min(4, $remainingSeconds)" in helper
+    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS', 'RENDERER'))" in helper
+    assert "if ($unfinished.Count -gt 0)" in helper
     assert "$script:semanticWorkerTimedOut = $true" in helper
     assert "last_desktop_stage=$lastWorkerStage" in helper
     assert "Stop-Job -Job $desktopJob" not in helper
@@ -1500,3 +1554,41 @@ def test_external_uia_critical_identity_scan_is_bounded_and_rejects_duplicates()
     assert "$report.failures += 'external UIA critical identity scan exceeded bounded collection limit'" in probe
     # No second full-desktop tree walk to defeat the WebView2 COM watchdog.
     assert probe.count("FindAll(") == 0
+
+def test_duplicate_process_census_is_independently_bounded_and_fail_closed() -> None:
+    """A stuck CIM census must not block the real duplicate-dialog UIA gate."""
+    audit = _audit()
+    workflow = _windows_workflow()
+    start = audit.index("function Get-BoundedDuplicateProcessFamilyIds {")
+    end = audit.index("# Traverse one UIA children level per provider call.", start)
+    helper = audit[start:end]
+    duplicate_start = audit.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    duplicate_end = audit.index("$report.duplicate_launch_status = 'PASS'", duplicate_start)
+    duplicate = audit[duplicate_start:duplicate_end]
+
+    assert "$familyFinder = ${function:Get-ProcessFamilyIds}" in helper
+    assert "$worker = Start-ThreadJob -ScriptBlock" in helper
+    assert "$completed = [System.Threading.ManualResetEventSlim]::new($false)" in helper
+    assert "$completed.Wait(6000)" in helper
+    assert "$results.TryDequeue([ref]$observedFamily)" in helper
+    assert "$familyIds -contains $RootProcessId" in helper
+    assert "throw 'Second packaged launch bounded process-family probe timed out'" in helper
+    assert "Stop-Job" in helper and "Stop-Job -Job" not in helper
+    assert "Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id" in duplicate
+    assert "Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id" not in duplicate
+    for stage in (
+        "DUPLICATE_START_PROCESS_PROBE",
+        "DUPLICATE_START_PROCESS_READY",
+        "DUPLICATE_PROCESS_FAMILY_PROBE",
+        "DUPLICATE_PROCESS_FAMILY_READY",
+    ):
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
+        assert f"'{stage}'" in workflow
+    assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'") < duplicate.index("$candidate.Start()")
+    assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'") < duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE")
+    assert duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE") < duplicate.index("Get-BoundedDuplicateProcessFamilyIds")
+    assert duplicate.index("DUPLICATE_PROCESS_FAMILY_READY") < duplicate.index("DUPLICATE_UIA_ROOT_PROBE")
+    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "$duplicateProcess.ExitCode -ne 2" in duplicate
+    assert "Second packaged launch exposed a second semantic WebView operator surface" in duplicate
+

@@ -254,6 +254,8 @@ $evidenceBindingFields = @(
     'human_tested',
     'nvda_verified',
     'whole_product_complete'
+    'update_version'
+    'update_schema'
 )
 foreach ($field in $evidenceBindingFields) {
     if ([string]$evidence.$field -ne [string]$trustedEvidence.$field) {
@@ -273,8 +275,11 @@ if ([string]$evidence.archive_name -ne 'Autosport-windows-x64.zip') {
 if ([string]$evidence.package_prefix -ne 'Autosport/') {
     throw 'Stage-neutral release evidence package prefix drifted.'
 }
-if ([string]$evidence.build_version -ne '0.1.0-prehuman') {
+if ([string]$evidence.build_version -ne '0.1.0') {
     throw 'Stage-neutral release evidence build version drifted.'
+}
+if ([string]$evidence.update_version -ne '0.1.0' -or [int]$evidence.update_schema -ne 1) {
+    throw 'Stage-neutral release evidence update identity drifted.'
 }
 if (
     $evidence.real_money_execution -ne $false -or

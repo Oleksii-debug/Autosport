@@ -52,11 +52,19 @@ GROUPS = (
         "tests/test_offline_release_lifecycle.py",
         "tests/test_offline_release_recovery.py",
         "tests/test_offline_release_upgrade.py",
+        "tests/test_market_store_migration.py",
+        "tests/test_create_legacy_market_store_fixture.py",
+        "tests/test_plan6_6a_packaged_state_migration_contract.py",
+        "tests/test_plan6_6a_official_update_identity_contract.py",
+        "tests/test_plan6_6a_packaged_update_lifecycle_contract.py",
+        "tests/test_derive_previous_release_fixture.py",
+        "tests/test_plan6_5b_windows_review_artifact_contract.py",
         "tests/test_data_tools_installed_release_entry.py",
         "tests/test_offline_release_deflate_errors.py",
         "tests/test_offline_release_install_windows_namespace.py",
         "tests/test_plan6_6a_data_tool_zip_preflight.py",
         "tests/test_plan6_6a_uninstall_atomic_quarantine.py",
+        "tests/test_plan6_6a_packaged_lifecycle_smoke_contract.py",
         "tests/test_plan6_6a_windows_stat_view_boundary.py",
         "tests/test_plan6_update_alias_preinspection.py",
         "tests/test_plan6_nested_release_reparse_boundary.py",
@@ -109,11 +117,66 @@ def _identity(root: Path) -> str:
         raise ValueError("not a canonical full Git commit")
     if _git(root, "status", "--porcelain", "--untracked-files=all"):
         raise ValueError("source tree changed or contains untracked files")
+    # Git status intentionally trusts index assume-unchanged / skip-worktree
+    # flags. Those flags can hide modified tracked Python source from status.
+    # A source-execution receipt must reject any such hidden-index entries.
+    flags = _git(root, "ls-files", "-v", "-z")
+    if any(
+        entry and (entry[0].islower() or entry[0] == "S")
+        for entry in flags.split("\0")
+    ):
+        raise ValueError("source index masks tracked changes")
+    # Ignored Python files do not appear in git status, yet pytest can
+    # import tests/conftest.py and dynamic 5B discovery can execute ignored
+    # test_plan6_5b_*.py files. Neither belongs to the pinned Git HEAD.
+    ignored = _git(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard",
+        "-z", "--", "tests",
+    )
+    if any(path.endswith(".py") for path in ignored.split("\0") if path):
+        raise ValueError("source tree contains ignored Python test hooks")
+    # Pytest also reads configuration and root conftest.py outside tests/.
+    # An ignored file can deselect failing tracked tests while Git reports
+    # a clean HEAD. Reject only ignored, untracked pytest control files.
+    pytest_controls = (
+        "pytest.ini", ".pytest.ini", "pytest.toml", ".pytest.toml",
+        "pyproject.toml", "tox.ini", "setup.cfg", "conftest.py",
+    )
+    ignored_controls = _git(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard",
+        "-z", "--", *pytest_controls,
+    )
+    if ignored_controls:
+        raise ValueError("source tree contains ignored pytest configuration")
+    # Ignored root modules can shadow python -m pytest (or its imports).
+    # A fake pytest.py can print a forged passed summary and exit zero while
+    # pinned tracked tests fail, despite Git reporting a clean HEAD.
+    ignored_imports = _git(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard",
+        "-z", "--", "pytest.py", "pytest", "_pytest", "pluggy.py",
+        "pluggy", "sitecustomize.py", "usercustomize.py",
+    )
+    if ignored_imports:
+        raise ValueError("source tree contains ignored Python import hooks")
     return sha
 
 def _test_group(root: Path, name: str, paths: tuple[str, ...], *, timeout: int) -> dict:
-    if not paths or not all((root / path).is_file() for path in paths):
+    # A clean Git HEAD can contain a tracked symlink. Never let pytest execute
+    # a fixed-group test through a link to bytes outside the pinned source.
+    # Dynamic Plan-6 5B discovery is separately guarded in _source_groups().
+    if not paths or not all(
+        (root / path).is_file() and not (root / path).is_symlink()
+        for path in paths
+    ):
         return {"group": name, "status": "FAIL_MISSING_TEST_SOURCE",
+                "passed": 0, "exit_code": None}
+    # Ambient pytest selectors/plugins are not part of the pinned Git HEAD.
+    # PYTEST_ADDOPTS=-k can deselect a failing tracked test and return zero;
+    # PYTEST_PLUGINS can load an untracked/external pytest plugin, while
+    # PYTHONPATH can replace `python -m pytest` with an external fake module.
+    # Reject all three caller-controlled overrides before source execution.
+    if any(os.environ.get(key) for key in ("PYTEST_ADDOPTS", "PYTEST_PLUGINS", "PYTHONPATH")):
+        return {"group": name, "status": "FAIL_UNTRUSTED_TEST_ENV",
                 "passed": 0, "exit_code": None}
     try:
         result = subprocess.run(

@@ -843,7 +843,7 @@ function Get-BoundedDuplicateProcessFamilyIds {
         } finally {
             $Completion.Set()
         }
-    } -ArgumentList @($RootProcessId, $familyFinder, $results, $completed)
+    } -ArgumentList @($RootProcessId, $familyFinder, $results, $completed) -ThrottleLimit 16
     if (-not $completed.Wait(6000)) {
         # Stop-Job can block on a stuck provider. The enclosing audit process
         # is independently killed by the real Windows gate watchdog.
@@ -1069,7 +1069,7 @@ function Find-BoundedUiaSemanticViaChildren {
     $job = Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren} -ErrorAction Stop -ArgumentList @(
         $workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId,
         $workerResults, $workerCompleted, $workerProgress
-    )
+    ) -ThrottleLimit 16
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_WAIT_PROBE'
     # The kernel completion event never queries the ThreadJob state or
     # synchronously cancels a possibly blocked COM provider. A timed-out worker
@@ -1656,7 +1656,7 @@ function Find-UiaRootWithElementForProcessFamily {
         $workerMode, $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY,
         $nativeRendererHandle, $rendererProcessId, $Deadline,
         $workerResults, $workerCompleted, $workerProgress, $childSearchScript
-    )
+    ) -ThrottleLimit 16
     $workerStates += [pscustomobject]@{
         Mode = $workerMode
         Completion = $workerCompleted
@@ -2169,7 +2169,7 @@ try {
             } finally {
                 $Completion.Set()
             }
-        } -ArgumentList $duplicateStartArguments
+        } -ArgumentList $duplicateStartArguments -ThrottleLimit 16
     } catch {
         $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
         throw 'Second packaged launch worker could not start'
@@ -2255,7 +2255,7 @@ try {
                 }
             } -ArgumentList @(
                 $duplicateIdsCsv, $duplicateFinder, $duplicateResults, $duplicateCompleted
-            )
+            ) -ThrottleLimit 16
             if (-not $duplicateCompleted.Wait(6000)) {
                 # The outer audit process owns a stalled provider thread.
                 # Neither timeout nor process existence qualifies the dialog.

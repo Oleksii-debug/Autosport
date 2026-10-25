@@ -727,3 +727,21 @@ def test_duplicate_threadjob_failures_never_promote_lock_or_leak_details() -> No
     assert "$duplicateProcess.ExitCode -ne 2" in remainder
     assert "keyboard_shortcuts_status" in remainder
     assert "live_region_event_status" in remainder
+
+def test_external_uia_threadjob_pool_cannot_starve_duplicate_launch() -> None:
+    """Blocked UIA providers must not exhaust the five-thread default pool."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    # The pool limit is session-global and is set by the first Start-ThreadJob.
+    # Each call explicitly reserves enough capacity for four concurrent desktop
+    # routes, independent handle/focus probes, and later duplicate-lock checks.
+    assert source.count("Start-ThreadJob -ScriptBlock") == 5
+    assert source.count("-ThrottleLimit 16") == 5
+    assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in source
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "} -ArgumentList $duplicateStartArguments -ThrottleLimit 16" in launch
+    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "$report.duplicate_start_diagnostic = 'TIMED_OUT'" in launch
+    assert "$report.duplicate_start_diagnostic = 'RETURNED'" in launch
+    assert "duplicate_launch_status = 'PASS'" not in launch

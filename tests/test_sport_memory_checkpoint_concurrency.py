@@ -8,6 +8,7 @@ from autosport.sport_memory_checkpoint import (
     initialize_or_open_bound_sport_memory_runtime,
 )
 
+from test_sport_memory_checkpoint import _canonical_stores, _paths
 from test_sport_memory_matchup_decision import (
     T2,
     T2_CONSUMED,
@@ -139,3 +140,65 @@ def test_stale_bound_reader_reloads_newer_runtime_checkpoint_before_matchup(tmp_
     assert later.subject_memory_id != earlier.subject_memory_id
     assert later.opponent_memory_id != earlier.opponent_memory_id
     assert later.causal_cutoff == T3
+
+
+def test_two_concurrent_first_openers_converge_on_one_committed_bootstrap(tmp_path):
+    first_identity, first_opponent = _canonical_stores(tmp_path)
+    second_identity = ParticipantIdentityRegistry(first_identity.path)
+    second_opponent = OpponentIntelligenceStore(
+        first_opponent.path,
+        second_identity,
+    )
+    checkpoint_path, runtime_path = _paths(tmp_path)
+
+    barrier = threading.Barrier(3)
+    errors: list[BaseException] = []
+    generations: list[str] = []
+
+    def open_first_time(identity, opponent) -> None:
+        try:
+            barrier.wait(timeout=5)
+            runtime = initialize_or_open_bound_sport_memory_runtime(
+                runtime_path,
+                checkpoint_path,
+                identity,
+                opponent,
+            )
+            generations.append(runtime.authority_generation_sha256)
+        except BaseException as exc:  # pragma: no cover - surfaced below
+            errors.append(exc)
+
+    left = threading.Thread(
+        target=open_first_time,
+        args=(first_identity, first_opponent),
+    )
+    right = threading.Thread(
+        target=open_first_time,
+        args=(second_identity, second_opponent),
+    )
+    left.start()
+    right.start()
+    barrier.wait(timeout=5)
+    left.join(timeout=10)
+    right.join(timeout=10)
+
+    assert not left.is_alive()
+    assert not right.is_alive()
+    assert not errors
+    assert len(generations) == 2
+    assert len(set(generations)) == 1
+    assert checkpoint_path.is_file()
+    assert runtime_path.is_file()
+
+    reopened_identity = ParticipantIdentityRegistry(first_identity.path)
+    reopened_opponent = OpponentIntelligenceStore(
+        first_opponent.path,
+        reopened_identity,
+    )
+    reopened = initialize_or_open_bound_sport_memory_runtime(
+        runtime_path,
+        checkpoint_path,
+        reopened_identity,
+        reopened_opponent,
+    )
+    assert reopened.authority_generation_sha256 == generations[0]

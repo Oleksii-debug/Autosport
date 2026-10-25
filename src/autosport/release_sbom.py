@@ -137,7 +137,7 @@ terms specified in this license.
     },
 }
 
-# Python 3.12 Windows toolcache images have used both 8.6.13 and 8.6.14.
+# Python 3.12 Windows toolcache images have used 8.6.13 through 8.6.15.
 # The license blobs are byte-identical, while the release tags and commits are
 # distinct and remain separately bound here.
 _PINNED_RUNTIME_LICENSES.update({
@@ -152,6 +152,18 @@ _PINNED_RUNTIME_LICENSES.update({
         "source_url": "https://github.com/tcltk/tk/blob/core-8-6-13/license.terms",
         "source_tag": "core-8-6-13",
         "source_commit_sha": "0540bb61e34516730b6e0f8d44b39589d6c71f20",
+    },
+    ("tcl", "8.6.15"): {
+        **_PINNED_RUNTIME_LICENSES[("tcl", "8.6.14")],
+        "source_url": "https://github.com/tcltk/tcl/blob/core-8-6-15/license.terms",
+        "source_tag": "core-8-6-15",
+        "source_commit_sha": "1a98213e55128c8a2136379fedfaef0c8e15320b",
+    },
+    ("tk", "8.6.15"): {
+        **_PINNED_RUNTIME_LICENSES[("tk", "8.6.14")],
+        "source_url": "https://github.com/tcltk/tk/blob/core-8-6-15/license.terms",
+        "source_tag": "core-8-6-15",
+        "source_commit_sha": "3c4a7176319e29a790ff82c80e3c3ff74f523ffb",
     },
 })
 

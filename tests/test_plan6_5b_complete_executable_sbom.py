@@ -238,7 +238,7 @@ def _install_fake_tcl_tk_runtime(
     )
 
 
-@pytest.mark.parametrize("runtime_version", ["8.6.13", "8.6.14"])
+@pytest.mark.parametrize("runtime_version", ["8.6.13", "8.6.14", "8.6.15"])
 def test_runtime_license_capture_uses_exact_pinned_tcl_tk_release_when_files_absent(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime_version: str,
 ) -> None:
@@ -295,7 +295,7 @@ def test_runtime_license_capture_rejects_unpinned_missing_patch_release(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _install_fake_tcl_tk_runtime(
-        tmp_path, monkeypatch, tcl_version="8.6.15", tk_version="8.6.15",
+        tmp_path, monkeypatch, tcl_version="8.6.16", tk_version="8.6.16",
     )
 
     with pytest.raises(ValueError, match="tcl runtime license text is unavailable"):

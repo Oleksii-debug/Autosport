@@ -1291,7 +1291,7 @@ try {
 # process.  Only fixed audit-owned codes cross the boundary; process existence,
 # HWND discovery, timeout, or any provider exception can never produce PASS.
 function Invoke-IsolatedDuplicateDialogProbe {
-    param([int[]]$ProcessIds)
+    param([int[]]$ProcessIds, [IntPtr[]]$WindowHandles = @())
 
     if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) {
         return 'NO_PROCESS_FAMILY'
@@ -1317,29 +1317,45 @@ try {
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
         '330'
     )
-    # The duplicate process family was already captured by the parent through
-    # the bounded OS/CIM census. Reacquire each real top-level window directly
-    # from its native MainWindowHandle. A desktop-wide RootElement.FindAll call
-    # blocked beyond this probe's six-second fail-closed budget on hosted
-    # Windows, even though the dialog HWND already existed.
-    $windows = New-Object 'System.Collections.Generic.List[object]'
+    # The duplicate process family and its top-level HWNDs were already captured
+    # by the parent through bounded OS/CIM census. Reacquire those real windows
+    # directly and retain Process.MainWindowHandle as a racing-window fallback.
+    # A desktop-wide RootElement.FindAll call blocked beyond this probe's
+    # six-second fail-closed budget on hosted Windows even though an HWND existed.
+    $nativeHandles = [System.Collections.Generic.HashSet[long]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($env:AUTOSPORT_UIA_DUPLICATE_HANDLES)) {
+        foreach ($rawHandle in $env:AUTOSPORT_UIA_DUPLICATE_HANDLES.Split(',')) {
+            [void]$nativeHandles.Add([long]::Parse(
+                $rawHandle, [System.Globalization.CultureInfo]::InvariantCulture
+            ))
+        }
+    }
     foreach ($candidateId in $allowed) {
         try {
             $candidateProcess = Get-Process -Id $candidateId -ErrorAction Stop
             $candidateProcess.Refresh()
             $handle = [IntPtr]$candidateProcess.MainWindowHandle
-            if ($handle -eq [IntPtr]::Zero) { continue }
-            $window = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+            if ($handle -ne [IntPtr]::Zero) {
+                [void]$nativeHandles.Add($handle.ToInt64())
+            }
+        } catch {
+            # A racing/stale family member is not dialog evidence. The caller
+            # retries until the existing outer duplicate deadline expires.
+        }
+    }
+    $windows = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($handleValue in $nativeHandles) {
+        try {
+            $window = [System.Windows.Automation.AutomationElement]::FromHandle(
+                [IntPtr]::new($handleValue)
+            )
             if (
                 $null -ne $window -and
                 $allowed -contains [int]$window.Current.ProcessId
             ) {
                 [void]$windows.Add($window)
             }
-        } catch {
-            # A racing/stale family member is not dialog evidence. The caller
-            # retries until the existing outer duplicate deadline expires.
-        }
+        } catch {}
     }
     $dialog = $null
     foreach ($window in $windows) {
@@ -1415,6 +1431,9 @@ try {
     }
     $start.Environment['AUTOSPORT_UIA_DUPLICATE_PIDS'] = (
         @($ProcessIds | Sort-Object -Unique) -join ','
+    )
+    $start.Environment['AUTOSPORT_UIA_DUPLICATE_HANDLES'] = (
+        @($WindowHandles | ForEach-Object { $_.ToInt64() } | Sort-Object -Unique) -join ','
     )
     $child = [System.Diagnostics.Process]::new()
     $child.StartInfo = $start
@@ -2416,7 +2435,14 @@ try {
     # The packaged second process must be given the caller's actual bounded
     # startup allowance. Ten seconds proved insufficient on the Windows candidate
     # while the launcher was still running; the UIA gate remains fail-closed.
-    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    # A PyInstaller one-file duplicate must unpack before Python can acquire the
+    # existing workspace lock and display the native refusal dialog. Hosted
+    # Windows under load exceeded the ordinary 20-second UIA phase budget.
+    # Keep this phase bounded inside the independent 120-second workflow
+    # watchdog without weakening any semantic dialog/exit requirement.
+    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds(
+        [Math]::Max(40, $TimeoutSeconds)
+    )
     $report.duplicate_dialog_probe_diagnostic = 'NOT_RUN'
     $duplicateDialogObserved = $false
     $duplicateFamilyIds = @([int]$duplicateProcess.Id)
@@ -2429,7 +2455,23 @@ try {
             )
             Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_READY'
             Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'
-            $duplicateProbe = Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds
+            # Process.MainWindowHandle can select a hidden bootloader owner
+            # instead of the ownerless MessageBox. Reuse the bounded Win32
+            # visible top-level census; never query desktop-wide UIA or child
+            # HWNDs whose provider can alias the same dialog multiple times.
+            $duplicateNativeHandles = @(
+                foreach ($duplicateFamilyId in $duplicateFamilyIds) {
+                    [AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(
+                        [int]$duplicateFamilyId
+                    )
+                }
+            )
+            if ($duplicateNativeHandles.Count -gt 4096) {
+                throw 'Second packaged launch native dialog census exceeded limit'
+            }
+            $duplicateProbe = Invoke-IsolatedDuplicateDialogProbe `
+                -ProcessIds $duplicateFamilyIds `
+                -WindowHandles ([IntPtr[]]$duplicateNativeHandles)
             $report.duplicate_dialog_probe_diagnostic = [string]$duplicateProbe
             if ($duplicateProbe -ceq 'DIALOG_CLOSED') {
                 $duplicateDialogObserved = $true

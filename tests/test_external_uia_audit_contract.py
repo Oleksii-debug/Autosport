@@ -106,7 +106,9 @@ def test_duplicate_dialog_probe_runs_real_uia_in_killable_mta_process() -> None:
     assert "$child.WaitForExit(6000)" in helper
     assert "$child.Kill($true)" in helper
     assert "Get-Process -Id $candidateId -ErrorAction Stop" in helper
-    assert "[System.Windows.Automation.AutomationElement]::FromHandle($handle)" in helper
+    assert "AUTOSPORT_UIA_DUPLICATE_HANDLES" in helper
+    assert "[System.Windows.Automation.AutomationElement]::FromHandle(" in helper
+    assert "[IntPtr]::new($handleValue)" in helper
     assert "[System.Windows.Automation.AutomationElement]::RootElement" not in helper
     assert "[System.Windows.Automation.AutomationElement]::AutomationIdProperty" in helper
     assert "'Автоспорт — помилка запуску'" in helper
@@ -116,17 +118,28 @@ def test_duplicate_dialog_probe_runs_real_uia_in_killable_mta_process() -> None:
     assert "'DIALOG_CLOSED'" in helper
 
     duplicate_start = audit.index(
-        "$duplicateDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)"
+        "$duplicateDeadline = [DateTime]::UtcNow.AddSeconds("
     )
     duplicate_end = audit.index(
         "if (-not $duplicateProcess.WaitForExit(5000))", duplicate_start
     )
     duplicate = audit[duplicate_start:duplicate_end]
-    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in duplicate
+    assert "[AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(" in duplicate
+    assert "$duplicateNativeHandles.Count -gt 4096" in duplicate
+    assert "-ProcessIds $duplicateFamilyIds" in duplicate
+    assert "-WindowHandles ([IntPtr[]]$duplicateNativeHandles)" in duplicate
     assert "$duplicateProbe -ceq 'DIALOG_CLOSED'" in duplicate
     assert "$report.duplicate_launch_dialog_title = 'Автоспорт — помилка запуску'" in duplicate
     assert "$duplicateWorker = Start-ThreadJob" not in duplicate
     assert "$duplicateRoot.Current.Name" not in duplicate
+
+
+def test_real_duplicate_dialog_helper_regressions_run_in_early_windows_control() -> None:
+    workflow = (_ROOT / ".github/workflows/windows-uia-environment-control.yml").read_text(
+        encoding="utf-8"
+    )
+    assert "python -m pytest -q --noconftest tests/test_external_uia_duplicate_native_dialog.py" in workflow
+    assert "'tests/test_external_uia_duplicate_native_dialog.py'" in workflow
 
 
 def test_external_uia_audit_uses_runner_safe_legacy_action_pattern_lookup() -> None:
@@ -385,7 +398,8 @@ def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening
     end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
     duplicate = audit[start:end]
     # A slow frozen application on the runner must not be incorrectly qualified.
-    assert "$duplicateDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)" in duplicate
+    assert "$duplicateDeadline = [DateTime]::UtcNow.AddSeconds(" in duplicate
+    assert "[Math]::Max(40, $TimeoutSeconds)" in duplicate
     assert "[Math]::Min(10, $TimeoutSeconds)" not in duplicate
     # Expensive cross-process enumeration is rate limited, and polling is bounded.
     assert "$nextDuplicateFamilyProbe = [DateTime]::MinValue" in duplicate
@@ -395,7 +409,8 @@ def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening
     # Neither a running process nor a missing dialog may be mistaken for PASS.
     assert "if (-not $duplicateDialogObserved) {" in duplicate
     assert "throw \"Second packaged launch did not expose" in duplicate
-    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in duplicate
+    assert "-ProcessIds $duplicateFamilyIds" in duplicate
+    assert "-WindowHandles ([IntPtr[]]$duplicateNativeHandles)" in duplicate
     assert "$duplicateProbe -ceq 'DIALOG_CLOSED'" in duplicate
     assert "$report.duplicate_launch_dialog_title = 'Автоспорт — помилка запуску'" in duplicate
     assert "Автоспорт — помилка запуску" in duplicate
@@ -409,7 +424,8 @@ def test_duplicate_root_uia_lookup_is_bounded_without_skipping_dialog_evidence()
     end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
     duplicate = audit[start:end]
     assert "Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'" in duplicate
-    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in duplicate
+    assert "-ProcessIds $duplicateFamilyIds" in duplicate
+    assert "-WindowHandles ([IntPtr[]]$duplicateNativeHandles)" in duplicate
     assert "$report.duplicate_dialog_probe_diagnostic = [string]$duplicateProbe" in duplicate
     assert "$duplicateProbe -ceq 'DIALOG_CLOSED'" in duplicate
     assert "'TIMEOUT'" in audit
@@ -1631,7 +1647,8 @@ def test_duplicate_process_census_is_independently_bounded_and_fail_closed() -> 
     assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'") < duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE")
     assert duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE") < duplicate.index("Get-BoundedDuplicateProcessFamilyIds")
     assert duplicate.index("DUPLICATE_PROCESS_FAMILY_READY") < duplicate.index("DUPLICATE_UIA_ROOT_PROBE")
-    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in duplicate
+    assert "-ProcessIds $duplicateFamilyIds" in duplicate
+    assert "-WindowHandles ([IntPtr[]]$duplicateNativeHandles)" in duplicate
     assert "$duplicateProbe -ceq 'DIALOG_CLOSED'" in duplicate
     assert "$duplicateProcess.ExitCode -ne 2" in duplicate
     assert "'SECOND_SEMANTIC_SURFACE'" in audit

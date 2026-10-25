@@ -676,7 +676,8 @@ def test_duplicate_process_creation_timeout_and_empty_result_fail_closed() -> No
     assert "Stop-Job -Job $duplicateStartWorker" not in launch
     assert "duplicate_launch_status = 'PASS'" not in launch
     # Subsequent UIA dialog, absence-of-second-operator and exit-code gates remain.
-    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in source[ready:]
+    assert "-ProcessIds $duplicateFamilyIds" in source[ready:]
+    assert "-WindowHandles ([IntPtr[]]$duplicateNativeHandles)" in source[ready:]
     assert "'SECOND_SEMANTIC_SURFACE'" in source
     assert "$duplicateProcess.ExitCode -ne 2" in source[ready:]
 
@@ -725,7 +726,8 @@ def test_duplicate_threadjob_failures_never_promote_lock_or_leak_details() -> No
     assert "Stop-Job -Job $duplicateStartWorker" not in launch
     assert "duplicate_launch_status = 'PASS'" not in launch
     remainder = source[ready:]
-    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in remainder
+    assert "-ProcessIds $duplicateFamilyIds" in remainder
+    assert "-WindowHandles ([IntPtr[]]$duplicateNativeHandles)" in remainder
     assert "duplicate-dialog probe failed closed; fixed_code=$duplicateProbe" in remainder
     assert "$duplicateProcess.ExitCode -ne 2" in remainder
     assert "keyboard_shortcuts_status" in remainder

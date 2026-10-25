@@ -9,6 +9,7 @@ on:
       - 'scripts/external_uia_audit.ps1'
       - 'scripts/windows_uia_environment_control.ps1'
       - 'tests/test_windows_uia_environment_control_contract.py'
+      - 'tests/test_external_uia_duplicate_native_dialog.py'
       - 'tests/test_as05_focused_uia_control_contract.py'
       - 'tests/test_as05_inconsistent_machine_evidence.py'
       - 'scripts/verify_as05_focus_evidence.py'
@@ -56,6 +57,11 @@ jobs:
           & ./scripts/windows_uia_environment_control.ps1 -ProbeMode FocusedElement -ReportPath ./uia-focus-control.json
           $focusedElementExit = $LASTEXITCODE
           if ($fromHandleExit -ne 0 -or $focusedElementExit -ne 0) { exit 1 }
+      - name: Exercise shipped duplicate-dialog probe against real native dialogs
+        shell: pwsh
+        run: |
+          python -m pytest -q --noconftest tests/test_external_uia_duplicate_native_dialog.py
+          exit $LASTEXITCODE
       - name: Validate the two fixed-class diagnostic reports (never product UIA)
         if: ${{ !cancelled() }}
         shell: pwsh

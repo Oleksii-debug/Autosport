@@ -71,12 +71,14 @@ def test_failed_builder_emits_existing_report_and_never_repacks(tmp_path: Path) 
         "$candidateText = 'synthetic'\n"
         + section
     )
+    # A shared runner may take longer than 15s to start pwsh; keep the real
+    # failure-path assertion and a bounded subprocess watchdog.
     result = subprocess.run(
         ["pwsh", "-NoProfile", "-NonInteractive", "-Command", script],
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=60,
         check=False,
     )
     assert result.returncode != 0

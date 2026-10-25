@@ -1843,6 +1843,7 @@ $report = [ordered]@{
     descendant_count = 0
     duplicate_launch_status = 'NOT_RUN'
     duplicate_start_diagnostic = 'NOT_RUN'
+    duplicate_start_worker_stage = 'NOT_RUN'
     duplicate_launch_exit_code = $null
     duplicate_launch_dialog_title = $null
     normal_close_status = 'NOT_RUN'
@@ -2134,112 +2135,110 @@ try {
     # fail at the product-owned interactive lock boundary rather than opening a
     # second WebView2/operator instance against either shared mutable root.
     Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'
-    # The primary UIA provider has already been queried. Both synchronous
-    # Start-Process and an in-process ThreadJob launcher have stalled on hosted
-    # Windows runners after those COM calls. Start the candidate from a separate,
-    # killable pwsh process and accept only a fixed PID receipt. This keeps the
-    # existing duplicate-instance product gate while removing runspace coupling.
-    $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
-    if ($null -eq $pwshCommand) {
-        $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
-        throw 'Second packaged launch helper is unavailable'
-    }
-    $duplicateLauncherScript = @'
-$ErrorActionPreference = 'Stop'
-try {
-    $candidateStart = [System.Diagnostics.ProcessStartInfo]::new()
-    $candidateStart.FileName = [string]$env:AUTOSPORT_DUPLICATE_EXE
-    $candidateStart.WorkingDirectory = [string]$env:AUTOSPORT_DUPLICATE_WORKDIR
-    $candidateStart.UseShellExecute = $false
-    $candidate = [System.Diagnostics.Process]::new()
-    $candidate.StartInfo = $candidateStart
-    if (-not $candidate.Start() -or [int]$candidate.Id -le 0) {
-        Write-Output 'INVALID_PROCESS'; exit 2
-    }
-    Write-Output ("RETURNED|{0}" -f [int]$candidate.Id)
-    exit 0
-} catch {
-    # Fixed classification only; never serialize exception text or paths.
-    Write-Output 'LAUNCH_FAILED'; exit 1
-}
-'@
-    $duplicateLauncherStart = [System.Diagnostics.ProcessStartInfo]::new()
-    $duplicateLauncherStart.FileName = [string]$pwshCommand.Source
-    $duplicateLauncherStart.UseShellExecute = $false
-    $duplicateLauncherStart.CreateNoWindow = $true
-    $duplicateLauncherStart.RedirectStandardOutput = $true
-    $duplicateLauncherStart.RedirectStandardError = $true
-    foreach ($argument in @(
-        '-NoLogo', '-NoProfile', '-NonInteractive',
-        '-EncodedCommand', [Convert]::ToBase64String(
-            [Text.Encoding]::Unicode.GetBytes($duplicateLauncherScript)
-        )
-    )) { [void]$duplicateLauncherStart.ArgumentList.Add($argument) }
-    $duplicateLauncherStart.Environment['AUTOSPORT_DUPLICATE_EXE'] = $exePath
-    $duplicateLauncherStart.Environment['AUTOSPORT_DUPLICATE_WORKDIR'] = $launchWorkingDirectory
-    $duplicateLauncher = [System.Diagnostics.Process]::new()
-    $duplicateLauncher.StartInfo = $duplicateLauncherStart
-    $duplicateLauncherStarted = $false
-    $duplicateProcess = $null
+    # The primary UIA provider has already been queried. A synchronous second
+    # Start-Process on this audit runspace stalled for the full 120s watchdog.
+    # Launch from an independent runspace and wait only for process creation,
+    # not for the duplicate app to exit or for its UIA dialog to appear.
+    $duplicateStartResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $duplicateStartOutcomes = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $duplicateStartStages = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $duplicateStartCompleted = [System.Threading.ManualResetEventSlim]::new($false)
+    # PowerShell enumerates empty queues in @(); preserve six exact object slots.
+    $duplicateStartArguments = [object[]]::new(6)
+    $duplicateStartArguments[0] = $exePath
+    $duplicateStartArguments[1] = $launchWorkingDirectory
+    $duplicateStartArguments[2] = $duplicateStartResults
+    $duplicateStartArguments[3] = $duplicateStartOutcomes
+    $duplicateStartArguments[4] = $duplicateStartCompleted
+    $duplicateStartArguments[5] = $duplicateStartStages
     try {
-        try {
-            $duplicateLauncherStarted = $duplicateLauncher.Start()
-        } catch {
-            $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
-            throw 'Second packaged launch helper could not start'
-        }
-        if (-not $duplicateLauncherStarted) {
-            $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
-            throw 'Second packaged launch helper could not start'
-        }
-        if (-not $duplicateLauncher.WaitForExit(6000)) {
-            $report.duplicate_start_diagnostic = 'TIMED_OUT'
-            try { $duplicateLauncher.Kill($true) } catch {}
-            throw 'Second packaged launch bounded process creation timed out'
-        }
-        $duplicateStartReceipt = [string]$duplicateLauncher.StandardOutput.ReadToEnd().Trim()
-        if ([string]::IsNullOrWhiteSpace($duplicateStartReceipt)) {
-            $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
-            throw 'Second packaged launch helper returned no outcome'
-        }
-        if ($duplicateLauncher.ExitCode -ne 0) {
-            if ($duplicateStartReceipt -ceq 'INVALID_PROCESS') {
-                $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
-            } else {
-                $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
+        $duplicateStartWorker = Start-ThreadJob -ScriptBlock {
+            param(
+                [string]$exePath, [string]$launchWorkingDirectory,
+                [object]$Results, [object]$Outcomes, [object]$Completion,
+                [object]$Stages
+            )
+            try {
+                $Stages.Enqueue('WORKER_ENTER')
+                # Bypass Start-Process/ShellExecute's synchronous Windows
+                # invocation path after a UIA provider has been queried.
+                # The worker is bounded by the independent completion event.
+                $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+                $startInfo.FileName = $exePath
+                $startInfo.WorkingDirectory = $launchWorkingDirectory
+                $startInfo.UseShellExecute = $false
+                $startInfo.CreateNoWindow = $false
+                $duplicateProcess = [System.Diagnostics.Process]::new()
+                $duplicateProcess.StartInfo = $startInfo
+                $Stages.Enqueue('PROCESS_START_PROBE')
+                if (-not $duplicateProcess.Start()) {
+                    $Outcomes.Enqueue('INVALID_PROCESS')
+                    $Stages.Enqueue('INVALID_PROCESS')
+                    $duplicateProcess.Dispose()
+                } elseif ([int]$duplicateProcess.Id -gt 0) {
+                    $Results.Enqueue($duplicateProcess)
+                    $Outcomes.Enqueue('RETURNED')
+                    $Stages.Enqueue('PROCESS_RETURNED')
+                } else {
+                    $Outcomes.Enqueue('INVALID_PROCESS')
+                    $Stages.Enqueue('INVALID_PROCESS')
+                    $duplicateProcess.Dispose()
+                }
+            } catch {
+                # Never publish exception text, executable path, PID or command line.
+                $Outcomes.Enqueue('LAUNCH_FAILED')
+                $Stages.Enqueue('PROCESS_EXCEPTION')
+            } finally {
+                $Completion.Set()
             }
-            throw 'Second packaged launch did not return a valid process'
-        }
-        if ($duplicateStartReceipt -notmatch '\ARETURNED\|([1-9][0-9]*)\z') {
-            $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
-            throw 'Second packaged launch returned invalid process receipt'
-        }
-        [int]$duplicateProcessId = 0
-        if (-not [int]::TryParse(
-            $Matches[1],
-            [System.Globalization.NumberStyles]::None,
-            [System.Globalization.CultureInfo]::InvariantCulture,
-            [ref]$duplicateProcessId
-        ) -or $duplicateProcessId -le 0) {
-            $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
-            throw 'Second packaged launch returned invalid process receipt'
-        }
-        try {
-            $duplicateProcess = Get-Process -Id $duplicateProcessId -ErrorAction Stop
-            if ($null -eq $duplicateProcess -or [int]$duplicateProcess.Id -ne $duplicateProcessId) {
-                throw 'Invalid process receipt'
-            }
-        } catch {
-            $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
-            throw 'Second packaged launch returned invalid process receipt'
-        }
-        $report.duplicate_start_diagnostic = 'RETURNED'
-    } finally {
-        if ($duplicateLauncherStarted) {
-            try { if (-not $duplicateLauncher.HasExited) { $duplicateLauncher.Kill($true) } } catch {}
-        }
-        $duplicateLauncher.Dispose()
+        } -ArgumentList $duplicateStartArguments -ThrottleLimit 16
+    } catch {
+        $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
+        $report.duplicate_start_worker_stage = 'WORKER_LAUNCH_FAILED'
+        throw 'Second packaged launch worker could not start'
     }
+    # Read only fixed, non-sensitive worker stages; no ThreadJob State/Receive-Job
+    # or Stop-Job call may reenter a blocked UIA/PowerShell provider.
+    $duplicateStartTerminal = $duplicateStartCompleted.Wait(6000)
+    $report.duplicate_start_worker_stage = 'NOT_ENTERED'
+    [string]$duplicateWorkerStage = $null
+    while ($duplicateStartStages.TryDequeue([ref]$duplicateWorkerStage)) {
+        $report.duplicate_start_worker_stage = [string]$duplicateWorkerStage
+    }
+    if (-not $duplicateStartTerminal) {
+        $report.duplicate_start_diagnostic = 'TIMED_OUT'
+        throw 'Second packaged launch bounded process creation timed out'
+    }
+    [string]$duplicateStartOutcome = $null
+    if (-not $duplicateStartOutcomes.TryDequeue([ref]$duplicateStartOutcome)) {
+        $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
+        throw 'Second packaged launch worker returned no outcome'
+    }
+    if ($duplicateStartOutcome -ne 'RETURNED') {
+        if ($duplicateStartOutcome -eq 'INVALID_PROCESS') {
+            $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
+        } else {
+            $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
+        }
+        throw 'Second packaged launch did not return a valid process'
+    }
+    [object]$duplicateStarted = $null
+    if (-not $duplicateStartResults.TryDequeue([ref]$duplicateStarted) -or
+        $null -eq $duplicateStarted) {
+        $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
+        throw 'Second packaged launch did not return a valid process'
+    }
+    try {
+        $duplicateProcess = [System.Diagnostics.Process]$duplicateStarted
+        if ($null -eq $duplicateProcess -or [int]$duplicateProcess.Id -le 0) {
+            throw 'Invalid process receipt'
+        }
+    } catch {
+        $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
+        throw 'Second packaged launch returned invalid process receipt'
+    }
+    $report.duplicate_start_diagnostic = 'RETURNED'
+    $duplicateStartCompleted.Dispose()
     Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'
     # The packaged second process must be given the caller's actual bounded
     # startup allowance. Ten seconds proved insufficient on the Windows candidate

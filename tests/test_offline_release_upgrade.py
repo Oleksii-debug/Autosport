@@ -154,6 +154,80 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             z.writestr("Autosport-V1/examples/demo.txt", "paper-only")
         return path, hashlib.sha256(path.read_bytes()).hexdigest()
 
+
+    def test_upgrade_rejects_transaction_parent_swap_during_previous_move(self):
+        # A stable candidate inode cannot authenticate a replacement lease.
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            dest, old, od, new, nd = self._installed(base)
+            txn = upgrade._transaction_root(dest)
+            displaced = base / "displaced-update-lease"
+            publish = upgrade._publish_directory_no_replace
+            moved = []
+
+            def replace_lease_before_previous_move(source, target):
+                if Path(source) == dest and Path(target) == txn / "previous":
+                    txn.rename(displaced)
+                    txn.mkdir()
+                    (displaced / "candidate").rename(txn / "candidate")
+                    moved.append(True)
+                return publish(source, target)
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=replace_lease_before_previous_move,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "transaction identity changed",
+                ):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(moved, [True])
+            self.assertFalse(dest.exists())
+            self.assertEqual(
+                (txn / "previous" / "Autosport.exe").read_bytes(),
+                self.OLD.encode(),
+            )
+
+    def test_upgrade_rejects_transaction_parent_swap_after_candidate_publication(self):
+        # A substituted lease cannot authorize success after new publication.
+        with tempfile.TemporaryDirectory() as temp:
+            base = Path(temp)
+            dest, old, od, new, nd = self._installed(base)
+            txn = upgrade._transaction_root(dest)
+            displaced = base / "displaced-update-lease"
+            publish = upgrade._publish_directory_no_replace
+            moved = []
+
+            def replace_lease_after_new_move(source, target):
+                result = publish(source, target)
+                if Path(source) == txn / "candidate" and Path(target) == dest:
+                    txn.rename(displaced)
+                    txn.mkdir()
+                    (displaced / "previous").rename(txn / "previous")
+                    moved.append(True)
+                return result
+
+            with self._trusted(), patch.object(
+                upgrade, "_publish_directory_no_replace",
+                side_effect=replace_lease_after_new_move,
+            ):
+                with self.assertRaisesRegex(
+                    install.OfflineInstallError, "transaction identity changed",
+                ):
+                    upgrade.upgrade_verified_paper_release(
+                        dest, **self._args(old, od, new, nd),
+                    )
+            self.assertEqual(moved, [True])
+            self.assertEqual(
+                (dest / "Autosport.exe").read_bytes(), self.NEW.encode(),
+            )
+            self.assertEqual(
+                (txn / "previous" / "Autosport.exe").read_bytes(),
+                self.OLD.encode(),
+            )
+
     def _installed(self, root, old_version="1.0.0", new_version="1.1.0", old_schema=1, new_schema=1):
         old, od = self._archive(root, "old.zip", self.OLD, old_version, old_schema)
         new, nd = self._archive(root, "new.zip", self.NEW, new_version, new_schema)
@@ -560,6 +634,127 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual(result["status"], "ROLLED_BACK_PAPER_ONLY")
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
             self.assertEqual((Path(result["rejected_release_path"]) / "Autosport.exe").read_bytes(), self.NEW.encode())
+
+    def test_rollback_failed_publication_restores_verified_active_release(self):
+        # A failed previous-release publication may restore the original
+        # installed bytes, but must still propagate the rollback failure.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                publish = upgrade._publish_directory_no_replace
+
+                def fail_previous(source, target):
+                    if Path(source) == txn / "previous" and Path(target) == dest:
+                        raise OSError("simulated rollback publication failure")
+                    return publish(source, target)
+
+                with patch.object(
+                    upgrade, "_publish_directory_no_replace", side_effect=fail_previous,
+                ):
+                    with self.assertRaisesRegex(
+                        OSError, "simulated rollback publication failure",
+                    ):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+                self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+                self.assertFalse((txn / "rejected-current").exists())
+                self.assertEqual(
+                    (txn / "previous" / "Autosport.exe").read_bytes(),
+                    self.OLD.encode(),
+                )
+
+    def test_rollback_failed_publication_quarantines_corrupt_active_release(self):
+        # The active release can be rewritten in place while rollback tries
+        # to publish the previous version. It must not be restored unverified.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                rejected = txn / "rejected-current"
+                publish = upgrade._publish_directory_no_replace
+
+                def corrupt_then_fail(source, target):
+                    if Path(source) == txn / "previous" and Path(target) == dest:
+                        (rejected / "Autosport.exe").write_bytes(b"corrupt-active")
+                        raise OSError("simulated rollback publication failure")
+                    return publish(source, target)
+
+                with patch.object(
+                    upgrade, "_publish_directory_no_replace", side_effect=corrupt_then_fail,
+                ):
+                    with self.assertRaisesRegex(
+                        OSError, "simulated rollback publication failure",
+                    ):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+            self.assertFalse(dest.exists())
+            self.assertEqual((rejected / "Autosport.exe").read_bytes(), b"corrupt-active")
+            self.assertEqual((txn / "previous" / "Autosport.exe").read_bytes(), self.OLD.encode())
+
+    def test_rollback_failed_publication_quarantines_same_byte_directory_swap(self):
+        # A copied replacement with identical bytes is not the originally
+        # inspected active release; preserve both objects for investigation.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                rejected = txn / "rejected-current"
+                detached = work / "detached-active"
+                publish = upgrade._publish_directory_no_replace
+
+                def swap_then_fail(source, target):
+                    if Path(source) == txn / "previous" and Path(target) == dest:
+                        rejected.rename(detached)
+                        shutil.copytree(detached, rejected)
+                        raise OSError("simulated rollback publication failure")
+                    return publish(source, target)
+
+                with patch.object(
+                    upgrade, "_publish_directory_no_replace", side_effect=swap_then_fail,
+                ):
+                    with self.assertRaisesRegex(
+                        OSError, "simulated rollback publication failure",
+                    ):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+            self.assertFalse(dest.exists())
+            self.assertEqual((rejected / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertEqual((detached / "Autosport.exe").read_bytes(), self.NEW.encode())
+            self.assertEqual((txn / "previous" / "Autosport.exe").read_bytes(), self.OLD.encode())
+
+    def test_rollback_failed_publication_checks_restored_bytes_after_move(self):
+        # A post-publication rewrite preserves the original directory inode;
+        # the rollback error handler must detect it before leaving the call.
+        with tempfile.TemporaryDirectory() as temp:
+            dest, old, od, new, nd = self._installed(Path(temp))
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                publish = upgrade._publish_directory_no_replace
+
+                def fail_then_rewrite(source, target):
+                    if Path(source) == txn / "previous" and Path(target) == dest:
+                        raise OSError("simulated rollback publication failure")
+                    result = publish(source, target)
+                    if Path(source) == txn / "rejected-current" and Path(target) == dest:
+                        (dest / "Autosport.exe").write_bytes(b"corrupt-after-restoration")
+                    return result
+
+                with patch.object(
+                    upgrade, "_publish_directory_no_replace", side_effect=fail_then_rewrite,
+                ):
+                    with self.assertRaises(install.OfflineInstallError):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+            self.assertEqual(
+                (dest / "Autosport.exe").read_bytes(), b"corrupt-after-restoration",
+            )
+            self.assertEqual((txn / "previous" / "Autosport.exe").read_bytes(), self.OLD.encode())
 
     def test_rejects_schema_change_same_version_and_downgrade(self):
         for oldv, newv, a, b in [
@@ -1135,6 +1330,84 @@ class OfflineReleaseUpgradeTests(unittest.TestCase):
             self.assertEqual((dest / "Autosport.exe").read_bytes(), self.OLD.encode())
             self.assertEqual((detached / "Autosport.exe").read_bytes(), self.OLD.encode())
             self.assertFalse((upgrade._transaction_root(dest) / "previous").exists())
+
+    def test_rollback_rejects_replaced_transaction_with_same_previous_inode(self):
+        # Same trusted previous inode under a substituted parent is not
+        # the originally inspected transaction lease.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                original_txn = upgrade._directory_witness(txn)
+                previous_inode = upgrade._directory_witness(txn / "previous")
+                detached = work / "detached-rollback-transaction"
+                original_lineage = upgrade._require_forward_update_lineage
+                swaps = []
+
+                def swap_after_lineage(**kwargs):
+                    result = original_lineage(**kwargs)
+                    txn.rename(detached)
+                    txn.mkdir(mode=0o700)
+                    (detached / "previous").rename(txn / "previous")
+                    swaps.append(True)
+                    self.assertNotEqual(upgrade._directory_witness(txn), original_txn)
+                    self.assertEqual(upgrade._directory_witness(txn / "previous"), previous_inode)
+                    return result
+
+                with patch.object(
+                    upgrade, "_require_forward_update_lineage",
+                    side_effect=swap_after_lineage,
+                ):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "update transaction identity changed",
+                    ):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+                self.assertEqual(swaps, [True])
+                self.assertEqual((dest / "Autosport.exe").read_bytes(), self.NEW.encode())
+                self.assertEqual((txn / "previous" / "Autosport.exe").read_bytes(), self.OLD.encode())
+                self.assertFalse((txn / "rejected-current").exists())
+
+    def test_rollback_rejects_transaction_swap_after_active_quarantine(self):
+        # Even when previous/rejected retain their original inodes, replacing
+        # their parent after the active move must fail closed.
+        with tempfile.TemporaryDirectory() as temp:
+            work = Path(temp)
+            dest, old, od, new, nd = self._installed(work)
+            args = self._args(old, od, new, nd)
+            with self._trusted():
+                upgrade.upgrade_verified_paper_release(dest, **args)
+                txn = upgrade._transaction_root(dest)
+                original_txn = upgrade._directory_witness(txn)
+                detached = work / "detached-rollback-transaction"
+                publish = upgrade._publish_directory_no_replace
+                swaps = []
+
+                def swap_after_quarantine(source, target):
+                    result = publish(source, target)
+                    if Path(source) == dest and Path(target) == txn / "rejected-current":
+                        txn.rename(detached)
+                        txn.mkdir(mode=0o700)
+                        for name in ("previous", "rejected-current"):
+                            (detached / name).rename(txn / name)
+                        swaps.append(True)
+                        self.assertNotEqual(upgrade._directory_witness(txn), original_txn)
+                    return result
+
+                with patch.object(
+                    upgrade, "_publish_directory_no_replace",
+                    side_effect=swap_after_quarantine,
+                ):
+                    with self.assertRaisesRegex(
+                        install.OfflineInstallError, "update transaction identity changed",
+                    ):
+                        upgrade.rollback_verified_paper_release(dest, **args)
+                self.assertEqual(swaps, [True])
+                self.assertFalse(dest.exists())
+                self.assertEqual((txn / "previous" / "Autosport.exe").read_bytes(), self.OLD.encode())
+                self.assertEqual((txn / "rejected-current" / "Autosport.exe").read_bytes(), self.NEW.encode())
 
     def test_rollback_rejects_same_bytes_replaced_after_verified_read(self):
         with tempfile.TemporaryDirectory() as temp:

@@ -168,17 +168,33 @@ def test_partial_gui_instance_without_export_worker_is_not_routed_to_tk_getattr(
     assert app._dataset_selection_blocker() is None
 
 
-def test_export_evidence_uses_active_workspace_without_tk_getattr_fallback(
+def test_export_evidence_uses_current_selected_strategy_workspace(
     monkeypatch, tmp_path: Path
 ) -> None:
     app = _partial_app()
-    active_workspace = tmp_path / "active"
+    base_workspace = tmp_path / "workspace"
+    stale_workspace = tmp_path / "workspace-baseline"
+    current_workspace = tmp_path / "workspace-research"
+    plan = object()
     chooser_kwargs: dict[str, object] = {}
     app.__dict__.update(
         _closing=False,
-        _active_workspace=active_workspace,
+        workspace=base_workspace,
+        _active_workspace=stale_workspace,
     )
-    assert "workspace" not in app.__dict__
+    monkeypatch.setattr(
+        app,
+        "_selected_replay_configuration",
+        lambda: ("research-replay-v1", plan),
+    )
+
+    def resolve_workspace(root, strategy_id, research_plan):
+        assert Path(root) == base_workspace
+        assert strategy_id == "research-replay-v1"
+        assert research_plan is plan
+        return current_workspace
+
+    monkeypatch.setattr(gui, "workspace_for_strategy", resolve_workspace)
 
     def fake_chooser(**kwargs):
         chooser_kwargs.update(kwargs)
@@ -188,7 +204,99 @@ def test_export_evidence_uses_active_workspace_without_tk_getattr_fallback(
 
     app.export_evidence()
 
-    assert chooser_kwargs["initialdir"] == str(active_workspace.parent)
+    assert chooser_kwargs["initialdir"] == str(current_workspace.parent)
+
+
+def test_export_evidence_fails_closed_when_current_configuration_cannot_resolve(
+    monkeypatch, tmp_path: Path
+) -> None:
+    app = _partial_app()
+    status_values: list[str] = []
+    log_values: list[str] = []
+    app.__dict__.update(
+        _closing=False,
+        workspace=tmp_path / "workspace",
+        _active_workspace=tmp_path / "stale-workspace",
+        status=SimpleNamespace(set=status_values.append),
+        _append_log=log_values.append,
+    )
+
+    def invalid_configuration():
+        raise ValueError("invalid current strategy configuration")
+
+    monkeypatch.setattr(app, "_selected_replay_configuration", invalid_configuration)
+    monkeypatch.setattr(
+        gui.filedialog,
+        "asksaveasfilename",
+        lambda **_kwargs: (_ for _ in ()).throw(
+            AssertionError("chooser opened for invalid current configuration")
+        ),
+    )
+
+    app.export_evidence()
+
+    expected = text("ui.status.evidence_export.start_failed")
+    assert status_values == [expected]
+    assert log_values == [expected]
+
+
+def test_export_evidence_rechecks_current_strategy_after_nested_save_dialog(
+    monkeypatch, tmp_path: Path
+) -> None:
+    app = _partial_app()
+    base_workspace = tmp_path / "workspace"
+    first_workspace = tmp_path / "workspace-baseline"
+    second_workspace = tmp_path / "workspace-observe"
+    output = tmp_path / "evidence.json"
+    status_values: list[str] = []
+    log_values: list[str] = []
+    start_calls: list[tuple[Path, Path]] = []
+    selections = iter(
+        [
+            ("baseline-v1", None),
+            ("observe-only-v1", None),
+        ]
+    )
+    app.__dict__.update(
+        _closing=False,
+        workspace=base_workspace,
+        _active_workspace=tmp_path / "stale-workspace",
+        status=SimpleNamespace(set=status_values.append),
+        _append_log=log_values.append,
+    )
+    app.evidence_export_worker.start = lambda workspace, destination: start_calls.append(
+        (Path(workspace), Path(destination))
+    ) or True
+    monkeypatch.setattr(app, "_selected_replay_configuration", lambda: next(selections))
+
+    def resolve_workspace(root, strategy_id, research_plan):
+        assert Path(root) == base_workspace
+        assert research_plan is None
+        return {
+            "baseline-v1": first_workspace,
+            "observe-only-v1": second_workspace,
+        }[strategy_id]
+
+    monkeypatch.setattr(gui, "workspace_for_strategy", resolve_workspace)
+    monkeypatch.setattr(
+        gui.filedialog,
+        "asksaveasfilename",
+        lambda **_kwargs: str(output),
+    )
+    monkeypatch.setattr(
+        gui,
+        "resolve_evidence_output_destination",
+        lambda *_args, **_kwargs: (_ for _ in ()).throw(
+            AssertionError("destination preflight ran after strategy workspace changed")
+        ),
+    )
+
+    app.export_evidence()
+
+    expected = text("ui.status.evidence_export.workspace_changed")
+    assert status_values == [expected]
+    assert log_values == [expected]
+    assert start_calls == []
 
 
 def test_control_e_path_is_blocked_while_recovery_worker_is_busy(
@@ -236,6 +344,7 @@ def test_unsupported_destination_is_rejected_before_worker_start(
     app.evidence_export_worker.start = lambda workspace, output: start_calls.append(
         (Path(workspace), Path(output))
     ) or True
+    app._evidence_export_workspace = lambda: workspace
 
     monkeypatch.setattr(
         gui.filedialog,

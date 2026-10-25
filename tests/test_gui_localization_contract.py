@@ -56,6 +56,10 @@ _CRITICAL_GUI_KEYS = {
     "ui.error.evidence_export.failed",
     "ui.status.evidence_export.complete",
     "ui.status.close.evidence_export_busy",
+    "ui.status.close.recovery_busy",
+    "ui.status.close.teardown_ticket",
+    "ui.status.close.teardown_blocked",
+    "ui.error.close.teardown",
     "ui.accessibility.strategy.name",
     "ui.accessibility.strategy.description",
     "ui.accessibility.research_plan.name",
@@ -95,6 +99,10 @@ def test_critical_gui_catalog_is_complete_and_ukrainian_first() -> None:
     assert text("ui.button.run_replay") == "Запустити паперовий повтор"
     assert text("ui.button.repair_workspace") == "Відновити робочу область"
     assert text("ui.button.export_evidence") == "Експортувати докази…"
+    assert "Відновлення робочої області ще виконується" in text("ui.status.close.recovery_busy")
+    assert "Економічний стан приховано" in text("ui.status.close.teardown_ticket")
+    assert "Закриття програми заблоковано" in text("ui.status.close.teardown_blocked")
+    assert "Відновити робочу область" in text("ui.error.close.teardown")
     assert text("ui.accessibility.strategy.name") == "Стратегія повтору"
     assert text("ui.accessibility.export_evidence.name") == "Експортувати канонічні докази"
     assert text("ui.accessibility.bankroll.name") == "Віртуальний банк"

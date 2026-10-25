@@ -14,7 +14,7 @@ $ErrorActionPreference = 'Stop'
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_POINT_PROBE','SEMANTIC_DESKTOP_POINT_READY','SEMANTIC_DESKTOP_POINT_ID_PROBE','SEMANTIC_DESKTOP_POINT_PARENT_PROBE','SEMANTIC_DESKTOP_POINT_CHILD_PROBE','SEMANTIC_DESKTOP_RENDERER_PROBE','SEMANTIC_DESKTOP_RENDERER_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','DUPLICATE_UIA_ROOT_PROBE','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_POINT_PROBE','SEMANTIC_DESKTOP_POINT_READY','SEMANTIC_DESKTOP_POINT_ID_PROBE','SEMANTIC_DESKTOP_POINT_PARENT_PROBE','SEMANTIC_DESKTOP_POINT_CHILD_PROBE','SEMANTIC_DESKTOP_RENDERER_PROBE','SEMANTIC_DESKTOP_RENDERER_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','DUPLICATE_START_PROCESS_PROBE','DUPLICATE_START_PROCESS_READY','DUPLICATE_PROCESS_FAMILY_PROBE','DUPLICATE_PROCESS_FAMILY_READY','DUPLICATE_UIA_ROOT_PROBE','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -818,6 +818,48 @@ function Get-ProcessFamilyIds {
         }
     }
     return @($seen | ForEach-Object { [int]$_ })
+}
+
+# The duplicate-instance process census is a separate OS/CIM provider call.
+# A CIM connection may outlive OperationTimeoutSec, so the real census runs
+# in an independently bounded ThreadJob. A timeout or missing family fails
+# closed: it can never count as the required native duplicate-dialog witness.
+function Get-BoundedDuplicateProcessFamilyIds {
+    param([int]$RootProcessId)
+
+    if ($RootProcessId -le 0) {
+        throw 'Invalid duplicate-instance process identifier'
+    }
+    $results = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $completed = [System.Threading.ManualResetEventSlim]::new($false)
+    $familyFinder = ${function:Get-ProcessFamilyIds}
+    $worker = Start-ThreadJob -ScriptBlock {
+        param([int]$ProcessIdValue, [scriptblock]$FindFamily, [object]$Results, [object]$Completion)
+        try {
+            [int[]]$ids = @(& $FindFamily -RootProcessId $ProcessIdValue)
+            $Results.Enqueue([object]$ids)
+        } catch {
+            # Do not publish CIM/provider errors or partial process inventories.
+        } finally {
+            $Completion.Set()
+        }
+    } -ArgumentList @($RootProcessId, $familyFinder, $results, $completed)
+    if (-not $completed.Wait(6000)) {
+        # Stop-Job can block on a stuck provider. The enclosing audit process
+        # is independently killed by the real Windows gate watchdog.
+        throw 'Second packaged launch bounded process-family probe timed out'
+    }
+    [object]$observedFamily = $null
+    if (-not $results.TryDequeue([ref]$observedFamily)) {
+        $completed.Dispose()
+        throw 'Second packaged launch process-family probe returned no trusted inventory'
+    }
+    $completed.Dispose()
+    [int[]]$familyIds = [int[]]$observedFamily
+    if ($familyIds.Count -eq 0 -or -not ($familyIds -contains $RootProcessId)) {
+        throw 'Second packaged launch process-family identity is incomplete'
+    }
+    return $familyIds
 }
 
 # Traverse one UIA children level per provider call. A single recursive Descendants
@@ -2090,7 +2132,9 @@ try {
     # While the real packaged semantic shell is alive, a second normal launch must
     # fail at the product-owned interactive lock boundary rather than opening a
     # second WebView2/operator instance against either shared mutable root.
+    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'
     $duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru
+    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'
     # The packaged second process must be given the caller's actual bounded
     # startup allowance. Ten seconds proved insufficient on the Windows candidate
     # while the launcher was still running; the UIA gate remains fail-closed.
@@ -2103,7 +2147,9 @@ try {
         # 100ms on a busy Windows runner. Never infer lock success from process
         # state: require the same externally observed native dialog as before.
         if ([DateTime]::UtcNow -ge $nextDuplicateFamilyProbe) {
-            $duplicateFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id)
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_PROBE'
+            $duplicateFamilyIds = @(Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id)
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_READY'
             # The duplicate-launch dialog is a mandatory real UIA witness.
             # Its provider can block synchronously in FromHandle/RootElement.
             # Isolate that provider entry in a bounded thread with an independent

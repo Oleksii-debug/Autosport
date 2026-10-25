@@ -37,10 +37,31 @@ def test_minimal_uia_semantic_success_requires_exact_button_identity() -> None:
     assert module.classify(7, {7}, "ControlType.Button", "wrong", module.BUTTON_ID) == "WRONG_BUTTON_SEMANTICS"
     source = source_path.read_text(encoding="utf-8")
     assert "if ($exactId -ne '1')" in source
-    assert "Write-Output 'WRONG_AUTOMATION_ID|0'" in source
-    assert "Write-Output ('WRONG_BUTTON_SEMANTICS|' + $exactId)" in source
+    assert "$lastCode = 'WRONG_AUTOMATION_ID'" in source
+    assert "$lastCode = 'WRONG_BUTTON_SEMANTICS'" in source
+    assert "Write-Output ($lastCode + '|' + $lastExactId); exit 1" in source
     assert "if code not in CODES:" in source
     assert 'code == "SEMANTIC_BUTTON_RETURNED" and exact == "1"' in source
+
+
+def test_focused_uia_probe_retries_boundedly_without_weakening_identity() -> None:
+    """Transient focus propagation may retry; only the exact button can pass."""
+    source = (ROOT / "scripts/windows_webview2_uia_control.py").read_text(
+        encoding="utf-8"
+    )
+    probe = source.split('PS_PROBE = r"""', 1)[1].split('"""', 1)[0]
+    assert "$focusDeadline = [DateTime]::UtcNow.AddSeconds(4)" in probe
+    assert "while ([DateTime]::UtcNow -lt $focusDeadline)" in probe
+    assert "Start-Sleep -Milliseconds 100" in probe
+    assert "$lastCode = 'WRONG_BUTTON_SEMANTICS'" in probe
+    assert "$lastCode = 'WRONG_AUTOMATION_ID'" in probe
+    assert "$lastCode = 'FOREIGN_FOCUS'" in probe
+    assert "Write-Output ($lastCode + '|' + $lastExactId); exit 1" in probe
+    success = "Write-Output ('SEMANTIC_BUTTON_RETURNED|' + $exactId); exit 0"
+    assert probe.count(success) == 1
+    assert probe.index("$allowed -notcontains $actualPid") < probe.index(success)
+    assert probe.index("$role -cne 'ControlType.Button'") < probe.index(success)
+    assert probe.index("$exactId -ne '1'") < probe.index(success)
 
 
 def test_control_host_hwnd_is_exact_and_ambiguous_windows_fail_closed(monkeypatch) -> None:

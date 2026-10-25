@@ -261,32 +261,53 @@ try {
 } catch {
     Write-Output 'PROBE_UIA_LOAD_ERROR|0'; exit 1
 }
-try {
-    $element = [System.Windows.Automation.AutomationElement]::FocusedElement
-} catch {
-    Write-Output 'PROBE_UIA_CALL_ERROR|0'; exit 1
-}
-if ($null -eq $element) { Write-Output 'NO_FOCUSED_ELEMENT|0'; exit 1 }
-try {
-    $current = $element.Current
-    $allowed = @($env:AUTOSPORT_UIA_ALLOWED_PIDS.Split(',') | ForEach-Object {
-        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
-    })
-    $actualPid = [int]$current.ProcessId
-    $role = [string]$current.ControlType.ProgrammaticName
-    $name = [string]$current.Name
-    $exactId = if ([string]$current.AutomationId -ceq 'autosport-webview2-uia-control') { '1' } else { '0' }
-    if ($allowed -notcontains $actualPid) {
-        Write-Output ('FOREIGN_FOCUS|' + $exactId); exit 1
+$allowed = @($env:AUTOSPORT_UIA_ALLOWED_PIDS.Split(',') | ForEach-Object {
+    [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+})
+# WebView2 can expose the exact button in its UIA tree before Windows updates
+# FocusedElement after native/DOM focus transfer. Retry only the authoritative
+# exact focused identity inside this already-killable client. A tree result can
+# still never qualify success, and the outer Python timeout remains authoritative.
+$focusDeadline = [DateTime]::UtcNow.AddSeconds(4)
+$lastCode = 'NO_FOCUSED_ELEMENT'
+$lastExactId = '0'
+while ([DateTime]::UtcNow -lt $focusDeadline) {
+    try {
+        $element = [System.Windows.Automation.AutomationElement]::FocusedElement
+    } catch {
+        $lastCode = 'PROBE_UIA_CALL_ERROR'
+        Start-Sleep -Milliseconds 100
+        continue
     }
-    if ($role -cne 'ControlType.Button' -or $name -cne 'Autosport WebView2 calibration button') {
-        Write-Output ('WRONG_BUTTON_SEMANTICS|' + $exactId); exit 1
+    if ($null -eq $element) {
+        $lastCode = 'NO_FOCUSED_ELEMENT'
+        $lastExactId = '0'
+        Start-Sleep -Milliseconds 100
+        continue
     }
-    if ($exactId -ne '1') { Write-Output 'WRONG_AUTOMATION_ID|0'; exit 1 }
-    Write-Output ('SEMANTIC_BUTTON_RETURNED|' + $exactId); exit 0
-} catch {
-    Write-Output 'PROBE_PROPERTY_ERROR|0'; exit 1
+    try {
+        $current = $element.Current
+        $actualPid = [int]$current.ProcessId
+        $role = [string]$current.ControlType.ProgrammaticName
+        $name = [string]$current.Name
+        $exactId = if ([string]$current.AutomationId -ceq 'autosport-webview2-uia-control') { '1' } else { '0' }
+        $lastExactId = $exactId
+        if ($allowed -notcontains $actualPid) {
+            $lastCode = 'FOREIGN_FOCUS'
+        } elseif ($role -cne 'ControlType.Button' -or $name -cne 'Autosport WebView2 calibration button') {
+            $lastCode = 'WRONG_BUTTON_SEMANTICS'
+        } elseif ($exactId -ne '1') {
+            $lastCode = 'WRONG_AUTOMATION_ID'
+        } else {
+            Write-Output ('SEMANTIC_BUTTON_RETURNED|' + $exactId); exit 0
+        }
+    } catch {
+        $lastCode = 'PROBE_PROPERTY_ERROR'
+        $lastExactId = '0'
+    }
+    Start-Sleep -Milliseconds 100
 }
+Write-Output ($lastCode + '|' + $lastExactId); exit 1
 """
 
 # An independent, bounded, real UIA tree check runs only AFTER the mandatory

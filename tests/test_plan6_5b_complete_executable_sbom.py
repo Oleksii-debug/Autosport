@@ -4,6 +4,7 @@ from __future__ import annotations
 from copy import deepcopy
 from hashlib import sha256
 from pathlib import Path
+import sys
 from types import SimpleNamespace
 
 import pytest
@@ -198,4 +199,148 @@ def test_runtime_license_evidence_is_complete_and_source_bound():
             release_sbom.validate_runtime_license_evidence(
                 forged, payloads, source_sha=source,
             )
+
+
+def _install_fake_tcl_tk_runtime(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    tcl_version: str = "8.6.14",
+    tk_version: str = "8.6.14",
+    installed_license_names: tuple[str, ...] = (),
+) -> None:
+    base = tmp_path / "python"
+    tcl_library = base / "tcl" / "tcl8.6"
+    tk_library = base / "tcl" / "tk8.6"
+    tcl_library.mkdir(parents=True)
+    tk_library.mkdir(parents=True)
+    (base / "LICENSE.txt").write_bytes(b"CPython installed license\n")
+    (tk_library / "tk.tcl").write_bytes(
+        f"# exact installed script binding\npackage require -exact Tk  {tk_version}\n".encode()
+    )
+    if "tcl" in installed_license_names:
+        (tcl_library / "license.terms").write_bytes(b"Installed Tcl license\n")
+    if "tk" in installed_license_names:
+        (tk_library / "license.terms").write_bytes(b"Installed Tk license\n")
+
+    class FakeTcl:
+        def eval(self, expression: str) -> str:
+            return {
+                "info library": str(tcl_library),
+                "info patchlevel": tcl_version,
+            }[expression]
+
+    monkeypatch.setattr(release_sbom.sys, "base_prefix", str(base))
+    monkeypatch.setitem(
+        sys.modules,
+        "tkinter",
+        SimpleNamespace(Tcl=FakeTcl, TkVersion=8.6),
+    )
+
+
+def test_runtime_license_capture_uses_exact_pinned_tcl_tk_release_when_files_absent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tcl_tk_runtime(tmp_path, monkeypatch)
+
+    manifest, members = release_sbom.capture_runtime_license_evidence(SHA)
+
+    assert manifest["schema_version"] == 2
+    assert manifest["evidence_class"] == (
+        "SEALED_BUILD_AND_PINNED_UPSTREAM_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE"
+    )
+    assert [item["version"] for item in manifest["runtimes"]] == [
+        release_sbom.platform.python_version(), "8.6.14", "8.6.14",
+    ]
+    assert manifest["runtimes"][0]["file"]["origin"] == {
+        "kind": "INSTALLED_RUNTIME_FILE",
+        "path": "PYTHON_INSTALL_ROOT/LICENSE.txt",
+    }
+    for name, item in zip(("tcl", "tk"), manifest["runtimes"][1:]):
+        pinned = release_sbom._PINNED_RUNTIME_LICENSES[(name, "8.6.14")]
+        origin = item["file"]["origin"]
+        assert origin["kind"] == "PINNED_UPSTREAM_SOURCE"
+        assert origin["source_commit_sha"] == pinned["source_commit_sha"]
+        assert origin["source_blob_sha"] == pinned["source_blob_sha"]
+        assert origin["source_byte_length"] == len(pinned["payload"])
+    release_sbom.validate_runtime_license_evidence(
+        manifest, members, source_sha=SHA,
+    )
+
+
+def test_runtime_license_capture_prefers_sealed_installed_files(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tcl_tk_runtime(
+        tmp_path, monkeypatch, installed_license_names=("tcl", "tk"),
+    )
+
+    manifest, members = release_sbom.capture_runtime_license_evidence(SHA)
+
+    assert manifest["schema_version"] == 1
+    assert [item["file"]["origin"] for item in manifest["runtimes"]] == [
+        "PYTHON_INSTALL_ROOT/LICENSE.txt",
+        "PYTHON_TCL_LIBRARY/license.terms",
+        "PYTHON_TK_LIBRARY/license.terms",
+    ]
+    assert members["runtime-licenses/001-tcl.txt"] == b"Installed Tcl license\n"
+    assert members["runtime-licenses/002-tk.txt"] == b"Installed Tk license\n"
+
+
+def test_runtime_license_capture_rejects_unpinned_missing_patch_release(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tcl_tk_runtime(
+        tmp_path, monkeypatch, tcl_version="8.6.15", tk_version="8.6.15",
+    )
+
+    with pytest.raises(ValueError, match="tcl runtime license text is unavailable"):
+        release_sbom.capture_runtime_license_evidence(SHA)
+
+
+def test_runtime_license_validator_rejects_pinned_origin_or_payload_tamper(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tcl_tk_runtime(tmp_path, monkeypatch)
+    manifest, members = release_sbom.capture_runtime_license_evidence(SHA)
+    forged = deepcopy(manifest)
+    forged["runtimes"][1]["file"]["origin"]["source_blob_sha"] = "0" * 40
+    with pytest.raises(ValueError, match="pinned runtime license origin is invalid"):
+        release_sbom.validate_runtime_license_evidence(forged, members, source_sha=SHA)
+    changed = dict(members)
+    changed["runtime-licenses/002-tk.txt"] += b"tamper"
+    with pytest.raises(ValueError, match="runtime license payload is missing or invalid"):
+        release_sbom.validate_runtime_license_evidence(manifest, changed, source_sha=SHA)
+
+
+def test_runtime_license_schema_two_requires_a_real_pinned_origin() -> None:
+    manifest, members = _runtime_license_evidence()
+    manifest["schema_version"] = 2
+    manifest["evidence_class"] = (
+        "SEALED_BUILD_AND_PINNED_UPSTREAM_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE"
+    )
+    for item in manifest["runtimes"]:
+        item["file"]["origin"] = {
+            "kind": "INSTALLED_RUNTIME_FILE",
+            "path": item["file"]["origin"],
+        }
+
+    with pytest.raises(ValueError, match="has no pinned source"):
+        release_sbom.validate_runtime_license_evidence(
+            manifest, members, source_sha=SHA,
+        )
+
+
+def test_runtime_license_capture_rejects_ambiguous_tk_patchlevel_binding(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _install_fake_tcl_tk_runtime(tmp_path, monkeypatch)
+    tk_script = tmp_path / "python" / "tcl" / "tk8.6" / "tk.tcl"
+    tk_script.write_bytes(
+        b"package require -exact Tk  8.6.14\n"
+        b"package require -exact Tk  8.6.14\n"
+    )
+
+    with pytest.raises(ValueError, match="patchlevel binding is unavailable or ambiguous"):
+        release_sbom.capture_runtime_license_evidence(SHA)
 

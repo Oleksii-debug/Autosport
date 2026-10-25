@@ -36,6 +36,108 @@ _SUPPLEMENTAL_LICENSES = {
 }
 
 
+# GitHub's Windows Python toolcache can contain the exact Tcl/Tk runtime while
+# omitting the upstream ``license.terms`` files.  Admit only immutable upstream
+# bytes for an exactly identified installed patch release; this is technical
+# review evidence and never a legal-clearance claim.
+_PINNED_RUNTIME_LICENSES = {
+    ("tcl", "8.6.14"): {
+        "source_url": "https://github.com/tcltk/tcl/blob/core-8-6-14/license.terms",
+        "source_tag": "core-8-6-14",
+        "source_commit_sha": "16b5e6486a8e0e1746e35a0a88125ed72e286cd9",
+        "source_blob_sha": "d8049cd9e7ca055f7e584a76f88861a294b30c9c",
+        "payload": b"""This software is copyrighted by the Regents of the University of
+California, Sun Microsystems, Inc., Scriptics Corporation, ActiveState
+Corporation and other parties.  The following terms apply to all files
+associated with the software unless explicitly disclaimed in
+individual files.
+
+The authors hereby grant permission to use, copy, modify, distribute,
+and license this software and its documentation for any purpose, provided
+that existing copyright notices are retained in all copies and that this
+notice is included verbatim in any distributions. No written agreement,
+license, or royalty fee is required for any of the authorized uses.
+Modifications to this software may be copyrighted by their authors
+and need not follow the licensing terms described here, provided that
+the new terms are clearly indicated on the first page of each file where
+they apply.
+
+IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY
+FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
+ARISING OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY
+DERIVATIVES THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR
+MODIFICATIONS.
+
+GOVERNMENT USE: If you are acquiring this software on behalf of the
+U.S. government, the Government shall have only "Restricted Rights"
+in the software and related documentation as defined in the Federal
+Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+are acquiring the software on behalf of the Department of Defense, the
+software shall be classified as "Commercial Computer Software" and the
+Government shall have only "Restricted Rights" as defined in Clause
+252.227-7014 (b) (3) of DFARs.  Notwithstanding the foregoing, the
+authors grant the U.S. Government and others acting in its behalf
+permission to use and distribute the software in accordance with the
+terms specified in this license.
+""",
+    },
+    ("tk", "8.6.14"): {
+        "source_url": "https://github.com/tcltk/tk/blob/core-8-6-14/license.terms",
+        "source_tag": "core-8-6-14",
+        "source_commit_sha": "c9b4c90b7689ae17081a798f698cecf8aa404f85",
+        "source_blob_sha": "01264352c87ca7e34771bd1ee18bed5201ef139f",
+        "payload": b"""This software is copyrighted by the Regents of the University of
+California, Sun Microsystems, Inc., Scriptics Corporation, ActiveState
+Corporation, Apple Inc. and other parties.  The following terms apply to
+all files associated with the software unless explicitly disclaimed in
+individual files.
+
+The authors hereby grant permission to use, copy, modify, distribute,
+and license this software and its documentation for any purpose, provided
+that existing copyright notices are retained in all copies and that this
+notice is included verbatim in any distributions. No written agreement,
+license, or royalty fee is required for any of the authorized uses.
+Modifications to this software may be copyrighted by their authors
+and need not follow the licensing terms described here, provided that
+the new terms are clearly indicated on the first page of each file where
+they apply.
+
+IN NO EVENT SHALL THE AUTHORS OR DISTRIBUTORS BE LIABLE TO ANY PARTY
+FOR DIRECT, INDIRECT, SPECIAL, INCIDENTAL, OR CONSEQUENTIAL DAMAGES
+ARISING OUT OF THE USE OF THIS SOFTWARE, ITS DOCUMENTATION, OR ANY
+DERIVATIVES THEREOF, EVEN IF THE AUTHORS HAVE BEEN ADVISED OF THE
+POSSIBILITY OF SUCH DAMAGE.
+
+THE AUTHORS AND DISTRIBUTORS SPECIFICALLY DISCLAIM ANY WARRANTIES,
+INCLUDING, BUT NOT LIMITED TO, THE IMPLIED WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE, AND NON-INFRINGEMENT.  THIS SOFTWARE
+IS PROVIDED ON AN "AS IS" BASIS, AND THE AUTHORS AND DISTRIBUTORS HAVE
+NO OBLIGATION TO PROVIDE MAINTENANCE, SUPPORT, UPDATES, ENHANCEMENTS, OR
+MODIFICATIONS.
+
+GOVERNMENT USE: If you are acquiring this software on behalf of the
+U.S. government, the Government shall have only "Restricted Rights"
+in the software and related documentation as defined in the Federal
+Acquisition Regulations (FARs) in Clause 52.227.19 (c) (2).  If you
+are acquiring the software on behalf of the Department of Defense, the
+software shall be classified as "Commercial Computer Software" and the
+Government shall have only "Restricted Rights" as defined in Clause
+252.227-7013 (b) (3) of DFARs.  Notwithstanding the foregoing, the
+authors grant the U.S. Government and others acting in its behalf
+permission to use and distribute the software in accordance with the
+terms specified in this license.
+""",
+    },
+}
+
+
 def _normalize_name(name: str) -> str:
     if not isinstance(name, str) or not _NAME.fullmatch(name):
         raise ValueError("invalid direct dependency distribution name")
@@ -759,11 +861,15 @@ def validate_runtime_license_evidence(
         or set(manifest) != {
             "schema_version", "source_sha", "evidence_class", "runtimes",
         }
-        or manifest["schema_version"] != 1
+        or manifest["schema_version"] not in {1, 2}
         or manifest["source_sha"] != source_sha
         or type(source_sha) is not str
         or re.fullmatch(r"[0-9a-f]{40}", source_sha) is None
-        or manifest["evidence_class"] != "SEALED_BUILD_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE"
+        or manifest["evidence_class"] != (
+            "SEALED_BUILD_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE"
+            if manifest["schema_version"] == 1
+            else "SEALED_BUILD_AND_PINNED_UPSTREAM_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE"
+        )
         or type(runtime_members) is not dict
     ):
         raise ValueError("runtime license evidence schema/source mismatch")
@@ -773,6 +879,7 @@ def validate_runtime_license_evidence(
                                       for item in runtimes] != expected_names:
         raise ValueError("runtime license evidence is incomplete")
     claimed = set()
+    pinned_origins = 0
     for index, item in enumerate(runtimes):
         if type(item) is not dict or set(item) != {
             "name", "version", "license_review", "file",
@@ -790,13 +897,44 @@ def validate_runtime_license_evidence(
         expected_path = f"runtime-licenses/{index:03d}-{item['name']}.txt"
         if record["path"] != expected_path or expected_path in claimed:
             raise ValueError("runtime license file path is ambiguous")
-        expected_origin = {
+        expected_installed_origin = {
             "cpython": "PYTHON_INSTALL_ROOT/LICENSE.txt",
             "tcl": "PYTHON_TCL_LIBRARY/license.terms",
             "tk": "PYTHON_TK_LIBRARY/license.terms",
         }[item["name"]]
-        if record["origin"] != expected_origin:
+        origin = record["origin"]
+        pinned = _PINNED_RUNTIME_LICENSES.get((item["name"], item["version"]))
+        if manifest["schema_version"] == 1:
+            if origin != expected_installed_origin:
+                raise ValueError("runtime license origin is invalid")
+        elif type(origin) is not dict or type(origin.get("kind")) is not str:
             raise ValueError("runtime license origin is invalid")
+        elif origin["kind"] == "INSTALLED_RUNTIME_FILE":
+            if origin != {
+                "kind": "INSTALLED_RUNTIME_FILE", "path": expected_installed_origin,
+            }:
+                raise ValueError("installed runtime license origin is invalid")
+        elif origin["kind"] == "PINNED_UPSTREAM_SOURCE":
+            if (
+                set(origin) != {
+                    "kind", "source_url", "source_tag", "source_commit_sha",
+                    "source_blob_sha", "source_byte_length",
+                }
+                or item["name"] == "cpython"
+                or pinned is None
+                or any(
+                    origin[key] != pinned[key]
+                    for key in (
+                        "source_url", "source_tag", "source_commit_sha",
+                        "source_blob_sha",
+                    )
+                )
+                or origin["source_byte_length"] != len(pinned["payload"])
+            ):
+                raise ValueError("pinned runtime license origin is invalid")
+            pinned_origins += 1
+        else:
+            raise ValueError("runtime license origin kind is unsupported")
         payload = runtime_members.get(expected_path)
         if (
             type(payload) is not bytes or not 1 <= len(payload) <= 262144
@@ -805,9 +943,30 @@ def validate_runtime_license_evidence(
             or hashlib.sha256(payload).hexdigest() != record["sha256"]
         ):
             raise ValueError("runtime license payload is missing or invalid")
+        if (
+            manifest["schema_version"] == 2
+            and type(origin) is dict
+            and origin.get("kind") == "PINNED_UPSTREAM_SOURCE"
+            and payload != pinned["payload"]
+        ):
+            raise ValueError("runtime license payload differs from pinned source")
         claimed.add(expected_path)
     if set(runtime_members) != claimed:
         raise ValueError("runtime license evidence includes unclaimed members")
+    if manifest["schema_version"] == 2 and pinned_origins == 0:
+        raise ValueError("pinned runtime license evidence has no pinned source")
+
+
+def _tk_patchlevel_from_library(tk_library: "Path") -> str:
+    """Read the installed Tk script/runtime exact-version binding without loading Tk."""
+    payload = _read_sealed_license_text(tk_library / "tk.tcl")
+    matches = re.findall(
+        rb"(?m)^package require -exact Tk[ \t]+([0-9]+\.[0-9]+\.[0-9]+)[ \t]*\r?$",
+        payload,
+    )
+    if len(matches) != 1:
+        raise ValueError("installed Tk patchlevel binding is unavailable or ambiguous")
+    return matches[0].decode("ascii")
 
 
 def capture_runtime_license_evidence(
@@ -830,21 +989,39 @@ def capture_runtime_license_evidence(
     tcl_version = str(interpreter.eval("info patchlevel"))
     tk_series = str(tkinter.TkVersion)
     tk_library = tcl_library.parent / f"tk{tk_series}"
+    tk_version = _tk_patchlevel_from_library(tk_library)
+    if not tk_version.startswith(f"{tk_series}."):
+        raise ValueError("installed Tk patchlevel differs from tkinter runtime series")
     sources = [
         ("cpython", platform.python_version(), python_license,
          "PYTHON_INSTALL_ROOT/LICENSE.txt"),
         ("tcl", tcl_version, tcl_library / "license.terms",
          "PYTHON_TCL_LIBRARY/license.terms"),
-        ("tk", tk_series, tk_library / "license.terms",
+        ("tk", tk_version, tk_library / "license.terms",
          "PYTHON_TK_LIBRARY/license.terms"),
     ]
     entries = []
     members = {}
+    uses_pinned_upstream = False
     for index, (name, version, path, origin) in enumerate(sources):
         try:
             payload = _read_sealed_license_text(path)
         except OSError as exc:
-            raise ValueError(f"{name} runtime license text is unavailable") from exc
+            pinned = _PINNED_RUNTIME_LICENSES.get((name, version))
+            if pinned is None:
+                raise ValueError(f"{name} runtime license text is unavailable") from exc
+            payload = pinned["payload"]
+            origin_record: object = {
+                "kind": "PINNED_UPSTREAM_SOURCE",
+                "source_url": pinned["source_url"],
+                "source_tag": pinned["source_tag"],
+                "source_commit_sha": pinned["source_commit_sha"],
+                "source_blob_sha": pinned["source_blob_sha"],
+                "source_byte_length": len(payload),
+            }
+            uses_pinned_upstream = True
+        else:
+            origin_record = origin
         member = f"runtime-licenses/{index:03d}-{name}.txt"
         members[member] = payload
         entries.append({
@@ -852,13 +1029,24 @@ def capture_runtime_license_evidence(
             "license_review": "TEXT_PRESENT_REVIEW_REQUIRED",
             "file": {
                 "path": member, "sha256": hashlib.sha256(payload).hexdigest(),
-                "origin": origin,
+                "origin": origin_record,
             },
         })
+    if uses_pinned_upstream:
+        for item in entries:
+            if type(item["file"]["origin"]) is str:
+                item["file"]["origin"] = {
+                    "kind": "INSTALLED_RUNTIME_FILE",
+                    "path": item["file"]["origin"],
+                }
     result = {
-        "schema_version": 1,
+        "schema_version": 2 if uses_pinned_upstream else 1,
         "source_sha": source_sha,
-        "evidence_class": "SEALED_BUILD_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE",
+        "evidence_class": (
+            "SEALED_BUILD_AND_PINNED_UPSTREAM_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE"
+            if uses_pinned_upstream
+            else "SEALED_BUILD_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE"
+        ),
         "runtimes": entries,
     }
     validate_runtime_license_evidence(result, members, source_sha=source_sha)

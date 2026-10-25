@@ -47,6 +47,8 @@ $script:nativeHostMessageStatus = 'NOT_ATTEMPTED'
 $script:nativeHostFocusStatus = 'NOT_ATTEMPTED'
 $script:isolatedHostHandleStatus = 'NOT_ATTEMPTED'
 $script:isolatedRendererHandleStatus = 'NOT_ATTEMPTED'
+$script:failureDiagnosticHostHandle = [IntPtr]::Zero
+$script:failureDiagnosticRendererHandle = [IntPtr]::Zero
 # Only fixed audit-owned stage codes are retained. Never persist a UIA provider
 # exception message, arbitrary COM property, user path, or window title.
 $script:lastDesktopWorkerStage = 'NOT_RUN'
@@ -1528,18 +1530,19 @@ function Find-UiaRootWithElementForProcessFamily {
         }
     }
     $script:nativeSemanticCandidateBuckets = $bucketCounts
-    # Bounded Win32 and independently killable FromHandle differentials precede
-    # the known-blocking in-process UIA worker. They never create a PASS.
+    # Only bounded OS preparation belongs before acceptance. The separately
+    # killable FromHandle differentials are optional and can still perturb the
+    # live provider after their client times out. Cache primitive HWNDs only;
+    # run those diagnostics after a proven gate failure, never before the real
+    # semantic/duplicate/keyboard/STOP/LiveRegion sequence.
+    $script:failureDiagnosticHostHandle = $nativeHostHandle
+    $script:failureDiagnosticRendererHandle = $nativeRendererHandle
     if ($nativeHostHandle -ne [IntPtr]::Zero) {
         $hostProbe = [AutosportNativeWindows]::ProbeVisibleFamilyHost(
             $nativeHostHandle, [int[]]$ProcessIds
         )
         $script:nativeHostMessageStatus = [string]$hostProbe[0]
         $script:nativeHostFocusStatus = [string]$hostProbe[1]
-    }
-    if ([DateTime]::UtcNow.AddSeconds(6) -lt $Deadline) {
-        $script:isolatedHostHandleStatus = Get-IsolatedMtaHandleDiagnostic -Window $nativeHostHandle -ProcessIds ([int[]]$ProcessIds)
-        $script:isolatedRendererHandleStatus = Get-IsolatedMtaHandleDiagnostic -Window $nativeRendererHandle -ProcessIds ([int[]]$ProcessIds)
     }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_READY'
     foreach ($nativeHandle in $nativeWindows) {
@@ -2896,6 +2899,16 @@ try {
     # text, provider properties, source excerpts, paths or arbitrary type names.
     $report.automation_error_line = [int]$_.InvocationInfo.ScriptLineNumber
     $report.automation_error_category = [int]$_.CategoryInfo.Category
+    # Optional independent diagnostics may inspect cached primitive HWNDs only
+    # after acceptance has already failed. They cannot set status or bypass any
+    # gate, and must not reenter even a separate provider after a native worker
+    # timeout has declared that provider poisoned.
+    if ($report.status -ne 'PASS' -and -not $script:semanticWorkerTimedOut) {
+        $script:isolatedHostHandleStatus = Get-IsolatedMtaHandleDiagnostic `
+            -Window $script:failureDiagnosticHostHandle -ProcessIds ([int[]]$lastFamilyIds)
+        $script:isolatedRendererHandleStatus = Get-IsolatedMtaHandleDiagnostic `
+            -Window $script:failureDiagnosticRendererHandle -ProcessIds ([int[]]$lastFamilyIds)
+    }
 } finally {
     # Preserve a bounded count from the actual pre-cleanup UIA search. A vanished
     # launcher with child processes differs from a completely empty process family.

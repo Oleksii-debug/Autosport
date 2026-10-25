@@ -570,15 +570,32 @@ def test_process_isolated_from_handle_is_bounded_and_fail_closed() -> None:
     assert "$child.Kill($true)" in worker
     assert "'TIMEOUT'" in worker and "'FOREIGN_ELEMENT'" in worker
     assert "'INVALID_RESULT'" in worker and "'PROVIDER_ERROR'" in worker
-    assert "Get-IsolatedMtaHandleDiagnostic -Window $nativeHostHandle" in caller
-    assert "Get-IsolatedMtaHandleDiagnostic -Window $nativeRendererHandle" in caller
-    assert "[DateTime]::UtcNow.AddSeconds(6) -lt $Deadline" in caller
+    assert "Get-IsolatedMtaHandleDiagnostic" not in caller
+    assert "$script:failureDiagnosticHostHandle = $nativeHostHandle" in caller
+    assert "$script:failureDiagnosticRendererHandle = $nativeRendererHandle" in caller
     assert "isolated_host_handle_status = 'NOT_ATTEMPTED'" in source
     assert "isolated_renderer_handle_status = 'NOT_ATTEMPTED'" in source
     assert "$report.isolated_host_handle_status = $script:isolatedHostHandleStatus" in source
     assert "$report.isolated_renderer_handle_status = $script:isolatedRendererHandleStatus" in source
     assert "$report.status = 'PASS'" not in worker
     assert "Receive-Job" not in worker
+
+
+def test_optional_handle_diagnostics_run_only_after_failed_acceptance() -> None:
+    source = SCRIPT.read_text(encoding="utf-8")
+    failure_start = source.index("} catch {\n    if ($script:lastDesktopWorkerStage")
+    failure_end = source.index("} finally {", failure_start)
+    failure = source[failure_start:failure_end]
+    assert "if ($report.status -ne 'PASS' -and -not $script:semanticWorkerTimedOut)" in failure
+    assert "-Window $script:failureDiagnosticHostHandle" in failure
+    assert "-Window $script:failureDiagnosticRendererHandle" in failure
+    assert failure.count("Get-IsolatedMtaHandleDiagnostic `") == 2
+    # Every executable invocation is confined to the failure block, not to
+    # semantic readiness or the already-failed cleanup provider boundary.
+    assert source.count("= Get-IsolatedMtaHandleDiagnostic `") == 2
+    assert source.index("$report.duplicate_launch_status = 'PASS'") < failure_start
+    assert source.index("$report.status = 'PASS'") < failure_start
+    assert "$report.status = 'PASS'" not in failure
 
 
 def test_optional_focused_mta_diagnostic_cannot_preempt_product_semantic_probe() -> None:

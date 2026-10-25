@@ -645,3 +645,37 @@ def test_renderer_hwnd_route_cannot_bypass_downstream_packaged_acceptance() -> N
     assert "runtime_witness_status = 'NOT_REQUESTED'" in source
     assert "if ($report.status -ne 'PASS')" in source
     assert "exit 1" in source
+
+
+def test_duplicate_process_creation_is_bounded_after_real_semantic_witness() -> None:
+    """A poisoned primary UIA runspace must not hang on the second Start-Process."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert source.index("Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'") < start
+    assert "$duplicateStartWorker = Start-ThreadJob -ScriptBlock" in launch
+    assert "$duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru" in launch
+    assert launch.index("Start-Process -FilePath") < launch.index("$duplicateStartCompleted.Wait(6000)")
+    assert launch.index("$duplicateStartCompleted.Wait(6000)") < launch.index("$duplicateStartResults.TryDequeue")
+    assert launch.index("$duplicateStartResults.TryDequeue") < launch.index("$duplicateProcess = [System.Diagnostics.Process]$duplicateStarted")
+    assert "Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru" not in source[ready:]
+
+
+def test_duplicate_process_creation_timeout_and_empty_result_fail_closed() -> None:
+    """No timeout or missing process receipt can qualify the duplicate-launch gate."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "throw 'Second packaged launch bounded process creation timed out'" in launch
+    assert "if (-not $duplicateStartResults.TryDequeue([ref]$duplicateStarted) -or" in launch
+    assert "throw 'Second packaged launch did not return a valid process'" in launch
+    assert "$Completion.Set()" in launch
+    assert "Stop-Job -Job $duplicateStartWorker" not in launch
+    assert "duplicate_launch_status = 'PASS'" not in launch
+    # Subsequent UIA dialog, absence-of-second-operator and exit-code gates remain.
+    assert "$duplicateTitle = [string]$duplicateRoot.Current.Name" in source[ready:]
+    assert "Second packaged launch exposed a second semantic WebView operator surface" in source[ready:]
+    assert "$duplicateProcess.ExitCode -ne 2" in source[ready:]

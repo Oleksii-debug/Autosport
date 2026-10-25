@@ -80,7 +80,7 @@ def test_normal_scientific_registry_successors_remain_appendable(tmp_path, monke
     assert reopened.get("ResearchQuestion", "first") is not None
     assert reopened.get("ResearchQuestion", "second") is not None
 
-def test_historyless_nonempty_registry_first_read_establishes_monotonic_baseline(
+def test_historyless_nonempty_registry_first_read_fails_closed_without_tofu(
     tmp_path,
     monkeypatch,
 ):
@@ -97,19 +97,14 @@ def test_historyless_nonempty_registry_first_read_establishes_monotonic_baseline
     legacy_path.parent.mkdir(parents=True, exist_ok=True)
     legacy_path.write_bytes(legacy_prefix)
 
-    # A valid non-empty legacy image has no pre-existing machine authority. The
-    # first fully validated read must establish one exact-byte TOFU baseline.
-    reopened = ScientificRegistry(legacy_path)
-    assert reopened.get("ResearchQuestion", "legacy-prefix") is not None
-
-    source.append(_question("replacement", T1))
-    replacement = source.path.read_bytes()
-    assert replacement != legacy_prefix
-    legacy_path.write_bytes(replacement)
-
-    with pytest.raises(MonotonicAuthorityRollbackError, match="rolled back|unproven|authority"):
+    # A non-empty image without independent machine authority is ambiguous:
+    # legacy import, copied workspace, rollback, or caller-authored bytes. Read-time
+    # TOFU must not mint authority for any of those cases.
+    with pytest.raises(
+        MonotonicAuthorityRollbackError,
+        match="lacks independent authority history|rolled back|unproven|authority",
+    ):
         ScientificRegistry(legacy_path)
 
-    # Detection is fail-closed and does not rewrite the observed replacement.
-    assert legacy_path.read_bytes() == replacement
+    assert legacy_path.read_bytes() == legacy_prefix
 

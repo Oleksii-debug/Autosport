@@ -181,3 +181,57 @@ def test_dom_focus_acknowledgment_is_real_boolean_and_after_native_foreground() 
     assert source.index('initial = focus_status(window.evaluate_js(FOCUS_JS))') < source.index('def run(')
     assert 'focus_status(window.evaluate_js(VERIFY_JS))' in source
     assert 'window.evaluate_js("document.getElementById(' not in source
+
+
+def test_native_webview_focus_transfer_is_explicit_and_fail_closed() -> None:
+    """DOM focus cannot substitute for the WinForms WebView2 focus transfer."""
+    import importlib.util
+
+    source_path = ROOT / "scripts/windows_webview2_uia_control.py"
+    spec = importlib.util.spec_from_file_location("autosport_uia_control_native_focus", source_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    class Control:
+        def __init__(self, result: object) -> None:
+            self.result = result
+            self.calls = 0
+
+        def Focus(self) -> object:
+            self.calls += 1
+            return self.result
+
+    class Browser:
+        def __init__(self, control: Control) -> None:
+            self.webview = control
+
+    class Native:
+        InvokeRequired = False
+
+        def __init__(self, control: Control) -> None:
+            self.browser = Browser(control)
+
+    class Window:
+        def __init__(self, control: Control) -> None:
+            self.native = Native(control)
+
+    accepted = Control(True)
+    rejected = Control(False)
+    assert module.focus_native_webview(Window(accepted)) == "NATIVE_WEBVIEW_FOCUS_CONFIRMED"
+    assert accepted.calls == 1
+    assert module.focus_native_webview(Window(rejected)) == "NATIVE_WEBVIEW_FOCUS_REJECTED"
+    assert rejected.calls == 1
+    assert module.focus_native_webview(object()) == "NATIVE_WEBVIEW_FOCUS_EXCEPTION"
+
+    source = source_path.read_text(encoding="utf-8")
+    host_body = source.split("def host(", 1)[1].split("def family(", 1)[0]
+    assert host_body.index("focus_native_webview(window)") < host_body.index(
+        "window.evaluate_js(VERIFY_JS)"
+    )
+    run_body = source.split("def run(", 1)[1].split("def selftest(", 1)[0]
+    assert run_body.index('focus_code != "DOM_FOCUS_CONFIRMED"') < run_body.index(
+        "probe_exit = probe(child.pid, report)"
+    )
+    assert "NATIVE_WEBVIEW_FOCUS_REJECTED" in module.CODES
+    assert "NATIVE_WEBVIEW_FOCUS_EXCEPTION" in module.CODES

@@ -24,7 +24,8 @@ CODES = {"STARTED", "WINDOWS_REQUIRED", "HOST_NOT_READY", "HOST_EXITED",
          "NO_FOCUSED_ELEMENT", "FOREIGN_FOCUS", "SEMANTIC_MISMATCH",
          "WRONG_BUTTON_SEMANTICS", "WRONG_AUTOMATION_ID",
          "SEMANTIC_BUTTON_RETURNED", "DOM_FOCUS_NOT_CONFIRMED",
-         "DOM_FOCUS_EXCEPTION", "DOM_FOCUS_TIMEOUT"}
+         "DOM_FOCUS_EXCEPTION", "DOM_FOCUS_TIMEOUT",
+         "NATIVE_WEBVIEW_FOCUS_REJECTED", "NATIVE_WEBVIEW_FOCUS_EXCEPTION"}
 
 def emit(path: Path, code: str, *, exact_id: bool = False) -> None:
     if code not in CODES:
@@ -67,6 +68,37 @@ def focus_status(value: object) -> str:
     # JavaScript must return a real Boolean; truthy strings/integers are not proof.
     return "DOM_FOCUS_CONFIRMED" if value is True else "DOM_FOCUS_NOT_CONFIRMED"
 
+
+def focus_native_webview(window: object) -> str:
+    """Move native focus into the WinForms WebView2 control on its UI thread.
+
+    A focused DOM node is not sufficient if the host still owns native focus.
+    WinForms WebView2.Focus() performs the controller MoveFocus operation that
+    transfers focus into the hosted page.  Keep this a fail-closed diagnostic:
+    the subsequent independent UIA identity check remains authoritative.
+    """
+    try:
+        native = getattr(window, "native")
+        control = getattr(getattr(native, "browser"), "webview")
+        accepted = [False]
+
+        def apply_focus() -> None:
+            accepted[0] = bool(control.Focus())
+
+        if bool(getattr(native, "InvokeRequired")):
+            from System import Func, Type
+
+            native.Invoke(Func[Type](apply_focus))
+        else:
+            apply_focus()
+    except Exception:
+        return "NATIVE_WEBVIEW_FOCUS_EXCEPTION"
+    return (
+        "NATIVE_WEBVIEW_FOCUS_CONFIRMED"
+        if accepted[0]
+        else "NATIVE_WEBVIEW_FOCUS_REJECTED"
+    )
+
 def host(ready: Path, profile: Path, *, file_origin: bool = False) -> int:
     import webview
     # The product loads a local packaged HTML file, while the original
@@ -99,6 +131,10 @@ def host(ready: Path, profile: Path, *, file_origin: bool = False) -> int:
         if not focus_request.is_file():
             return  # Controller emits bounded DOM_FOCUS_TIMEOUT.
         try:
+            native_result = focus_native_webview(window)
+            if native_result != "NATIVE_WEBVIEW_FOCUS_CONFIRMED":
+                publish_focus_status(native_result)
+                return
             result = focus_status(window.evaluate_js(VERIFY_JS))
         except Exception:
             result = "DOM_FOCUS_EXCEPTION"
@@ -327,7 +363,9 @@ def run(report: Path, *, file_origin: bool = False) -> int:
                 focus_code = "DOM_FOCUS_NOT_CONFIRMED"
             if focus_code != "DOM_FOCUS_CONFIRMED":
                 emit(report, focus_code if focus_code in {
-                    "DOM_FOCUS_NOT_CONFIRMED", "DOM_FOCUS_EXCEPTION"
+                    "DOM_FOCUS_NOT_CONFIRMED", "DOM_FOCUS_EXCEPTION",
+                    "NATIVE_WEBVIEW_FOCUS_REJECTED",
+                    "NATIVE_WEBVIEW_FOCUS_EXCEPTION",
                 } else "DOM_FOCUS_NOT_CONFIRMED")
                 return 1
             emit(report, "PROBE_ENTERED")

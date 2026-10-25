@@ -1317,11 +1317,30 @@ try {
         [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
         '330'
     )
-    $desktop = [System.Windows.Automation.AutomationElement]::RootElement
-    $windows = $desktop.FindAll(
-        [System.Windows.Automation.TreeScope]::Children,
-        [System.Windows.Automation.Condition]::TrueCondition
-    )
+    # The duplicate process family was already captured by the parent through
+    # the bounded OS/CIM census. Reacquire each real top-level window directly
+    # from its native MainWindowHandle. A desktop-wide RootElement.FindAll call
+    # blocked beyond this probe's six-second fail-closed budget on hosted
+    # Windows, even though the dialog HWND already existed.
+    $windows = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($candidateId in $allowed) {
+        try {
+            $candidateProcess = Get-Process -Id $candidateId -ErrorAction Stop
+            $candidateProcess.Refresh()
+            $handle = [IntPtr]$candidateProcess.MainWindowHandle
+            if ($handle -eq [IntPtr]::Zero) { continue }
+            $window = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+            if (
+                $null -ne $window -and
+                $allowed -contains [int]$window.Current.ProcessId
+            ) {
+                [void]$windows.Add($window)
+            }
+        } catch {
+            # A racing/stale family member is not dialog evidence. The caller
+            # retries until the existing outer duplicate deadline expires.
+        }
+    }
     $dialog = $null
     foreach ($window in $windows) {
         if ($allowed -notcontains [int]$window.Current.ProcessId) { continue }

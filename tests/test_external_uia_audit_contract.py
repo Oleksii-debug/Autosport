@@ -105,7 +105,9 @@ def test_duplicate_dialog_probe_runs_real_uia_in_killable_mta_process() -> None:
     assert "'-NoLogo', '-NoProfile', '-NonInteractive', '-Mta'" in helper
     assert "$child.WaitForExit(6000)" in helper
     assert "$child.Kill($true)" in helper
-    assert "[System.Windows.Automation.AutomationElement]::RootElement" in helper
+    assert "Get-Process -Id $candidateId -ErrorAction Stop" in helper
+    assert "[System.Windows.Automation.AutomationElement]::FromHandle($handle)" in helper
+    assert "[System.Windows.Automation.AutomationElement]::RootElement" not in helper
     assert "[System.Windows.Automation.AutomationElement]::AutomationIdProperty" in helper
     assert "'Автоспорт — помилка запуску'" in helper
     assert "'уже відкритий'" in helper

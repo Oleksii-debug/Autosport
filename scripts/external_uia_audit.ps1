@@ -2133,7 +2133,42 @@ try {
     # fail at the product-owned interactive lock boundary rather than opening a
     # second WebView2/operator instance against either shared mutable root.
     Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'
-    $duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru
+    # The primary UIA provider has already been queried. A synchronous second
+    # Start-Process on this audit runspace stalled for the full 120s watchdog.
+    # Launch from an independent runspace and wait only for process creation,
+    # not for the duplicate app to exit or for its UIA dialog to appear.
+    $duplicateStartResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $duplicateStartCompleted = [System.Threading.ManualResetEventSlim]::new($false)
+    $duplicateStartWorker = Start-ThreadJob -ScriptBlock {
+        param(
+            [string]$exePath, [string]$launchWorkingDirectory,
+            [object]$Results, [object]$Completion
+        )
+        try {
+            $duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru
+            if ($null -ne $duplicateProcess -and [int]$duplicateProcess.Id -gt 0) {
+                $Results.Enqueue($duplicateProcess)
+            }
+        } catch {
+            # Never serialize exception text, process arguments or user paths.
+        } finally {
+            $Completion.Set()
+        }
+    } -ArgumentList @(
+        $exePath, $launchWorkingDirectory, $duplicateStartResults, $duplicateStartCompleted
+    )
+    if (-not $duplicateStartCompleted.Wait(6000)) {
+        # A late or hung launch is a failure, never duplicate-lock proof.
+        # Do not synchronously stop a blocked worker/runspace.
+        throw 'Second packaged launch bounded process creation timed out'
+    }
+    [object]$duplicateStarted = $null
+    if (-not $duplicateStartResults.TryDequeue([ref]$duplicateStarted) -or
+        $null -eq $duplicateStarted) {
+        throw 'Second packaged launch did not return a valid process'
+    }
+    $duplicateProcess = [System.Diagnostics.Process]$duplicateStarted
+    $duplicateStartCompleted.Dispose()
     Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'
     # The packaged second process must be given the caller's actual bounded
     # startup allowance. Ten seconds proved insufficient on the Windows candidate

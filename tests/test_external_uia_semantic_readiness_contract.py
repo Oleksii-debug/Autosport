@@ -63,16 +63,22 @@ def test_external_uia_avoids_early_unready_webview2_provider_probe() -> None:
     assert "Timed out waiting for WebView2 semantic UIA readiness" in script
 
 
-def test_external_uia_semantic_readiness_reuses_bounded_startup_deadline() -> None:
+def test_external_uia_semantic_readiness_has_a_fresh_bounded_provider_budget() -> None:
     script = _audit_script_text()
 
+    witness_guard_index = script.index(
+        'throw "Packaged WebView2 runtime witness unavailable before semantic UIA probe"'
+    )
+    semantic_deadline = "$semanticDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)"
     semantic_state_index = script.index("$semanticReady = $null")
     semantic_timeout_index = script.index(
         'throw "Timed out waiting for WebView2 semantic UIA readiness '
     )
     semantic_block = script[semantic_state_index:semantic_timeout_index]
 
-    assert "while ([DateTime]::UtcNow -lt $deadline)" in semantic_block
+    assert script.count(semantic_deadline) == 1
+    assert witness_guard_index < script.index(semantic_deadline) < semantic_state_index
+    assert "while ([DateTime]::UtcNow -lt $semanticDeadline)" in semantic_block
     direct_probe = "if ([string]$uiaRoot.Current.AutomationId -eq '330') {"
     family_probe = "Get-ProcessFamilyIds -RootProcessId $process.Id"
     assert direct_probe in semantic_block
@@ -83,6 +89,7 @@ def test_external_uia_semantic_readiness_reuses_bounded_startup_deadline() -> No
     assert "if ($now -ge $nextFamilyRefresh)" in semantic_block
     assert "$nextFamilyRefresh = $now.AddMilliseconds(1000)" in semantic_block
     assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in semantic_block
+    assert "-Deadline $semanticDeadline" in semantic_block
     assert "$uiaRoot = $semanticSurface.Root" in semantic_block
     assert "$semanticReady = $semanticSurface.Element" in semantic_block
     assert "Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds" not in semantic_block
@@ -331,3 +338,287 @@ def test_focused_automation_id_requires_exact_launched_process_family() -> None:
     # F2, F8, emergency STOP, owner panel close, manual panel close.
     assert script.count(process_scoped_call) == 5
     assert "Wait-ForFocusedAutomationId -AutomationId" not in script
+
+
+def test_family_host_foreground_fallback_is_exact_family_top_level_and_non_chromium() -> None:
+    """The launcher may have no visible HWND; never activate renderer/foreign HWNDs."""
+    source = _audit_script_text()
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    helper = native.split(
+        "public static bool TryClaimForegroundForVisibleFamilyHost(", 1
+    )[1].split("public static IntPtr[] ForProcessFamily(", 1)[0]
+    assert "Array.IndexOf(familyIds, launcherId) < 0" in helper
+    assert "EnumWindows(callback, IntPtr.Zero)" in helper
+    assert "owner == (uint)launcherId" in helper
+    assert "Array.IndexOf(familyIds, (int)owner) < 0" in helper
+    assert "!IsWindowVisible(window)" in helper
+    assert 'DiagnosticClassBucket(window) != "OTHER_VISIBLE"' in helper
+    assert "if (count >= windows.Length) return false" in helper
+    assert "ProcessIdForHandle(windows[index])" in helper
+    assert "Array.IndexOf(familyIds, owner) < 0" in helper
+    assert 'DiagnosticClassBucket(windows[index]) != "OTHER_VISIBLE"' in helper
+    assert "TryClaimForegroundForProcess(windows[index], owner)" in helper
+    assert "GetWindow(" not in helper
+    assert "AutomationElement" not in helper
+
+
+def test_family_host_activation_only_on_observed_child_top_level_and_never_passes_uia() -> None:
+    source = _audit_script_text()
+    activation = source.split(
+        "$report.native_foreground_activation_status = 'NOT_CLAIMED'", 1
+    )[1].split("$semanticReady = $null", 1)[0]
+    assert "native_foreground_top_level_class -eq 'FAMILY_CHILD_VISIBLE_ONLY'" in activation
+    assert "[AutosportNativeWindows]::TryClaimForegroundForVisibleFamilyHost(" in activation
+    assert "[int]$process.Id, [int[]]$foregroundFamilyIds" in activation
+    assert "if (" in activation
+    assert "$report.status = 'PASS'" not in activation
+    assert "AutomationElement" not in activation
+    assert source.index("$semanticReady = $null") < source.index(
+        "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds"
+    )
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+    assert "if ($report.status -ne 'PASS')" in source
+
+
+def test_renderer_accessibility_activation_is_bounded_and_owned_not_uia_proof() -> None:
+    """The actual WebView2 render HWND gets one finite Win32 request, not fake UIA."""
+    source = _audit_script_text()
+    native = source.split("public static class AutosportNativeWindows", 1)[1].split(
+        "function Get-ProcessFamilyIds", 1
+    )[0]
+    request = native.split("public static string RequestRendererAccessibility(", 1)[1].split(
+        "// Privacy-bounded OS-only classification", 1
+    )[0]
+    assert "private const uint WM_GETOBJECT = 0x003D;" in native
+    assert "private const int OBJID_CLIENT = -4;" in native
+    assert "private const uint SMTO_ABORTIFHUNG = 0x0002;" in native
+    assert "private static extern IntPtr SendMessageTimeout(" in native
+    assert "Array.IndexOf(familyIds, owner) < 0" in request
+    assert 'DiagnosticClassBucket(window) != "RENDER_WIDGET_VISIBLE"' in request
+    assert "SMTO_ABORTIFHUNG, 500, out ignoredReply" in request
+    assert "ProcessIdForHandle(window) != owner" in request
+    assert 'return "STALE";' in request
+    assert 'return dispatched == IntPtr.Zero ? "NO_REPLY" : "DELIVERED";' in request
+    assert "AutomationElement" not in request
+    assert "SetForegroundWindow" not in request
+
+
+def test_renderer_accessibility_request_precedes_real_uia_and_cannot_pass_audit() -> None:
+    source = _audit_script_text()
+    start = source.index("function Find-UiaRootWithElementForProcessFamily")
+    end = source.index("function Wait-ForUiaElement", start)
+    helper = source[start:end]
+    request = "[AutosportNativeWindows]::RequestRendererAccessibility("
+    assert helper.count(request) == 1
+    assert "$script:nativeRendererAccessibilityRequestAttempted = $false" in source
+    assert "-not $script:nativeRendererAccessibilityRequestAttempted" in helper
+    assert helper.index("$script:nativeRendererAccessibilityRequestAttempted = $true") < helper.index(request)
+    assert "if ($classBucket -eq 'RENDER_WIDGET_VISIBLE'" in helper
+    assert helper.index(request) < helper.index("SEMANTIC_NATIVE_HANDLES_READY")
+    assert helper.index(request) < helper.index("SEMANTIC_NATIVE_UIA_PROBE")
+    assert helper.index(request) < helper.index("SEMANTIC_DESKTOP_POINT_PROBE")
+    assert "if ($script:nativeRendererAccessibilityMessageStatus -eq 'DELIVERED')" not in source
+    assert "$report.status = 'PASS'" not in helper
+    assert "AutomationElement]::FromPoint(" in helper
+    assert "$report.native_renderer_accessibility_message_status = $script:nativeRendererAccessibilityMessageStatus" in source
+    assert "if ($null -eq $semanticReady -or $null -eq $uiaRoot)" in source
+
+
+# Plan 6 §7А: genuine packaged WebView2 provider timed out even from a
+# separate pwsh -Mta process; minimal WebView2 control focuses its first
+# semantic button after loaded.  Exercise the actual extracted product callback
+# with fake window events, not a replacement function or synthetic UIA PASS.
+def _product_first_focus_callback(
+    window,
+    *,
+    canonical_bridge=True,
+    renderer_observed=True,
+    trusted_document_observed=True,
+    trusted_document_violation=False,
+    runtime_identity_violation=False,
+    expected_real_url="http://127.0.0.1:8999/index.html",
+):
+    import json
+
+    shell = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "autosport"
+        / "windows_webview_shell.py"
+    ).read_text(encoding="utf-8")
+    start = shell.index("    def seed_initial_accessibility_focus() -> None:")
+    end = shell.index("    close_teardown_lock = threading.Lock()", start)
+    callback_source = shell[start:end]
+    factory = (
+        "def factory(window, *, canonical_bridge, renderer_observed, "
+        "trusted_document_observed, trusted_document_violation, "
+        "runtime_identity_violation, expected_real_url):\\n"
+        "    expected_original_url = 'canonical-index.html'\\n"
+        "    initial_accessibility_focus_attempted = False\\n"
+        "    initial_accessibility_focus_attempts = 0\\n"
+    )
+    # Python strings above contain literal escaped newline sequences, so
+    # normalize them to source newlines before compiling the isolated callback.
+    factory = factory.replace("\\n", "\n")
+    factory += callback_source + "    return seed_initial_accessibility_focus\\n".replace("\\n", "\n")
+
+    def require_document(candidate, *, expected_original_url):
+        if candidate.original_url != expected_original_url:
+            raise ValueError("foreign document")
+        return candidate.real_url
+
+    namespace = {
+        "json": json,
+        "_require_packaged_launch_document": require_document,
+    }
+    exec(compile(factory, "<product-loaded-callback>", "exec"), namespace)
+    return namespace["factory"](
+        window,
+        canonical_bridge=canonical_bridge,
+        renderer_observed=renderer_observed,
+        trusted_document_observed=trusted_document_observed,
+        trusted_document_violation=trusted_document_violation,
+        runtime_identity_violation=runtime_identity_violation,
+        expected_real_url=expected_real_url,
+    )
+
+
+class _FocusSeedWindow:
+    original_url = "canonical-index.html"
+    real_url = "http://127.0.0.1:8999/index.html"
+
+    def __init__(self, *, fail=False):
+        self.calls = []
+        self.fail = fail
+
+    def evaluate_js(self, script):
+        self.calls.append(script)
+        if self.fail:
+            raise RuntimeError("WebView2 not ready")
+        return True
+
+
+def test_webview2_focus_seed_is_loaded_only_after_trusted_before_load_hook():
+    shell = (
+        Path(__file__).resolve().parents[1]
+        / "src"
+        / "autosport"
+        / "windows_webview_shell.py"
+    ).read_text(encoding="utf-8")
+    before = "window.events.before_load += bind_trusted_document"
+    loaded = "window.events.loaded += seed_initial_accessibility_focus"
+    assert shell.count(before) == 1
+    assert shell.count(loaded) == 1
+    assert shell.index(before) < shell.index(loaded)
+    assert "window.events.loaded += seed_initial_accessibility_focus" in shell.split(
+        "if canonical_bridge:", 1
+    )[-1]
+    assert "window.events.closing += close_trusted_window_safely" in shell
+
+
+def test_webview2_focus_seed_uses_only_trusted_first_load_and_never_steals_focus():
+    window = _FocusSeedWindow()
+    callback = _product_first_focus_callback(window)
+    callback()
+    callback()
+    assert len(window.calls) == 1
+    script = window.calls[0]
+    assert 'window.location.href !== "http://127.0.0.1:8999/index.html"' in script
+    assert "document.activeElement !== document.body" in script
+    assert "document.activeElement !== document.documentElement" in script
+    assert "getElementById('303')" in script
+    assert "target.focus({preventScroll:true})" in script
+    assert "target.disabled || target.hidden" in script
+    assert "getElementById('330')" not in script
+
+
+def test_webview2_focus_seed_rejects_untrusted_or_not_ready_document():
+    for settings in (
+        {"canonical_bridge": False},
+        {"renderer_observed": False},
+        {"trusted_document_observed": False},
+        {"trusted_document_violation": True},
+        {"runtime_identity_violation": True},
+        {"expected_real_url": None},
+    ):
+        window = _FocusSeedWindow()
+        callback = _product_first_focus_callback(window, **settings)
+        callback()
+        assert window.calls == [], settings
+
+    foreign = _FocusSeedWindow()
+    foreign.original_url = "foreign.html"
+    _product_first_focus_callback(foreign)()
+    assert foreign.calls == []
+
+    drifted = _FocusSeedWindow()
+    drifted.real_url = "http://127.0.0.1:8999/foreign.html"
+    _product_first_focus_callback(drifted)()
+    assert drifted.calls == []
+
+
+def test_webview2_focus_seed_failure_is_bounded_and_restart_is_fresh():
+    broken = _FocusSeedWindow(fail=True)
+    callback = _product_first_focus_callback(broken)
+    callback()
+    callback()
+    callback()
+    assert len(broken.calls) == 2  # One bounded retry, never unbounded.
+    restarted = _FocusSeedWindow()
+    _product_first_focus_callback(restarted)()
+    assert len(restarted.calls) == 1
+    assert "target.focus(" in restarted.calls[0]
+    # Focus seeding alone is never a semantic, keyboard, STOP or NVDA PASS.
+    audit = _audit_script_text()
+    assert "AutomationId '330'" in audit or "-AutomationId '330'" in audit
+    assert "$report.status = 'PASS'" in audit
+    assert "nvda_verified = $false" in audit
+
+
+class _FocusSeedResultsWindow(_FocusSeedWindow):
+    """Deterministic pywebview evaluate_js result stream for negative tests."""
+
+    def __init__(self, results):
+        super().__init__()
+        self.results = iter(results)
+
+    def evaluate_js(self, script):
+        self.calls.append(script)
+        return next(self.results)
+
+
+def test_webview2_focus_seed_false_js_result_is_not_one_shot_success():
+    # A false/false-like result must not permanently consume the one-shot.
+    # A later trusted load can recover, but only after a strict Boolean True.
+    for false_result in (False, None, 1, "true", "", 0):
+        window = _FocusSeedResultsWindow((false_result, True))
+        callback = _product_first_focus_callback(window)
+        callback()
+        callback()
+        callback()
+        assert len(window.calls) == 2, false_result
+        assert all("document.activeElement" in script for script in window.calls)
+
+
+def test_webview2_focus_seed_false_js_result_is_bounded_without_success():
+    window = _FocusSeedResultsWindow((False, False))
+    callback = _product_first_focus_callback(window)
+    for _ in range(12):
+        callback()
+    assert len(window.calls) == 2
+    # Even if a new document loads, the two-attempt budget cannot spin.
+
+
+def test_webview2_focus_seed_rechecks_trust_before_bounded_retry():
+    window = _FocusSeedResultsWindow((False, True))
+    callback = _product_first_focus_callback(window)
+    callback()
+    window.original_url = "foreign.html"
+    callback()
+    assert len(window.calls) == 1
+    window.original_url = "canonical-index.html"
+    callback()
+    callback()
+    assert len(window.calls) == 2

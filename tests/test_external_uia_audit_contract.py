@@ -353,14 +353,15 @@ def test_external_uia_audit_rejects_second_real_packaged_launch() -> None:
     assert "$report.duplicate_launch_status = 'PASS'" in audit
     assert "$report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode" in audit
     assert "$duplicateProcess.ExitCode -ne 2" in audit
-    assert "Second packaged launch exposed a second semantic WebView operator surface" in audit
+    assert "'SECOND_SEMANTIC_SURFACE'" in audit
+    assert "duplicate-dialog probe failed closed; fixed_code=$duplicateProbe" in audit
     assert "уже відкритий" in audit
     assert "Economic і live state не змінено" in audit
 
 
 def test_missing_duplicate_dialog_exposes_bounded_process_state_without_qualifying() -> None:
     audit = _audit()
-    start = audit.index("if ($null -eq $duplicateRoot) {")
+    start = audit.index("if (-not $duplicateDialogObserved) {")
     end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
     refusal = audit[start:end]
 
@@ -390,31 +391,32 @@ def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening
     assert "Start-Sleep -Milliseconds 250" in duplicate
     assert "while ([DateTime]::UtcNow -lt $duplicateDeadline)" in duplicate
     # Neither a running process nor a missing dialog may be mistaken for PASS.
-    assert "if ($null -eq $duplicateRoot) {" in duplicate
+    assert "if (-not $duplicateDialogObserved) {" in duplicate
     assert "throw \"Second packaged launch did not expose" in duplicate
-    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in duplicate
+    assert "$duplicateProbe -ceq 'DIALOG_CLOSED'" in duplicate
+    assert "$report.duplicate_launch_dialog_title = 'Автоспорт — помилка запуску'" in duplicate
     assert "Автоспорт — помилка запуску" in duplicate
     assert "$duplicateProcess.ExitCode -ne 2" in duplicate
 
 
 def test_duplicate_root_uia_lookup_is_bounded_without_skipping_dialog_evidence() -> None:
-    """A stalled provider cannot hold the duplicate dialog gate indefinitely."""
+    """A stalled provider cannot hold the isolated duplicate dialog gate indefinitely."""
     audit = _audit()
     start = audit.index("$duplicateProcess = [System.Diagnostics.Process]::new()")
     end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
     duplicate = audit[start:end]
     assert "Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'" in duplicate
-    assert "$duplicateFinder = ${function:Find-UiaRootForProcessFamily}" in duplicate
-    assert "$duplicateWorker = Start-ThreadJob -ScriptBlock" in duplicate
-    assert "$duplicateCompleted = [System.Threading.ManualResetEventSlim]::new($false)" in duplicate
-    assert "$duplicateCompleted.Wait(6000)" in duplicate
-    assert "$duplicateResults.TryDequeue([ref]$observedDuplicateRoot)" in duplicate
-    assert "throw 'Second packaged launch bounded duplicate UIA root probe timed out'" in duplicate
-    assert "$duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds" not in duplicate
-    assert "Stop-Job -Job $duplicateWorker" not in duplicate
-    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in duplicate
+    assert "$report.duplicate_dialog_probe_diagnostic = [string]$duplicateProbe" in duplicate
+    assert "$duplicateProbe -ceq 'DIALOG_CLOSED'" in duplicate
+    assert "'TIMEOUT'" in audit
+    assert "$child.WaitForExit(6000)" in audit
+    assert "$child.Kill($true)" in audit
+    assert "$duplicateWorker = Start-ThreadJob" not in duplicate
+    assert "$duplicateRoot.Current.Name" not in duplicate
     assert "$duplicateProcess.ExitCode -ne 2" in duplicate
-    assert "Second packaged launch exposed a second semantic WebView operator surface" in duplicate
+    assert "'SECOND_SEMANTIC_SURFACE'" in audit
 
 
 def test_windows_candidate_requires_duplicate_launch_evidence() -> None:
@@ -1627,7 +1629,8 @@ def test_duplicate_process_census_is_independently_bounded_and_fail_closed() -> 
     assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'") < duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE")
     assert duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE") < duplicate.index("Get-BoundedDuplicateProcessFamilyIds")
     assert duplicate.index("DUPLICATE_PROCESS_FAMILY_READY") < duplicate.index("DUPLICATE_UIA_ROOT_PROBE")
-    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in duplicate
+    assert "$duplicateProbe -ceq 'DIALOG_CLOSED'" in duplicate
     assert "$duplicateProcess.ExitCode -ne 2" in duplicate
-    assert "Second packaged launch exposed a second semantic WebView operator surface" in duplicate
+    assert "'SECOND_SEMANTIC_SURFACE'" in audit
 

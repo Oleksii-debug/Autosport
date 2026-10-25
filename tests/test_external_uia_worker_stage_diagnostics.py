@@ -676,8 +676,8 @@ def test_duplicate_process_creation_timeout_and_empty_result_fail_closed() -> No
     assert "Stop-Job -Job $duplicateStartWorker" not in launch
     assert "duplicate_launch_status = 'PASS'" not in launch
     # Subsequent UIA dialog, absence-of-second-operator and exit-code gates remain.
-    assert "$duplicateTitle = [string]$duplicateRoot.Current.Name" in source[ready:]
-    assert "Second packaged launch exposed a second semantic WebView operator surface" in source[ready:]
+    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in source[ready:]
+    assert "'SECOND_SEMANTIC_SURFACE'" in source
     assert "$duplicateProcess.ExitCode -ne 2" in source[ready:]
 
 def test_duplicate_threadjob_argument_identity_and_fixed_outcomes() -> None:
@@ -725,20 +725,24 @@ def test_duplicate_threadjob_failures_never_promote_lock_or_leak_details() -> No
     assert "Stop-Job -Job $duplicateStartWorker" not in launch
     assert "duplicate_launch_status = 'PASS'" not in launch
     remainder = source[ready:]
-    assert "$duplicateRoot.Current.Name" in remainder
+    assert "Invoke-IsolatedDuplicateDialogProbe -ProcessIds $duplicateFamilyIds" in remainder
+    assert "duplicate-dialog probe failed closed; fixed_code=$duplicateProbe" in remainder
     assert "$duplicateProcess.ExitCode -ne 2" in remainder
     assert "keyboard_shortcuts_status" in remainder
     assert "live_region_event_status" in remainder
 
 def test_external_uia_threadjob_pool_cannot_starve_duplicate_launch() -> None:
-    """Blocked UIA providers must not exhaust the five-thread default pool."""
+    """Duplicate UIA runs outside the bounded four-worker ThreadJob pool."""
     source = SCRIPT.read_text(encoding="utf-8")
     # The pool limit is session-global and is set by the first Start-ThreadJob.
-    # Each call explicitly reserves enough capacity for four concurrent desktop
-    # routes, independent handle/focus probes, and later duplicate-lock checks.
-    assert source.count("Start-ThreadJob -ScriptBlock") == 5
-    assert source.count("-ThrottleLimit 16") == 5
+    # Each remaining call explicitly reserves enough capacity for the primary
+    # routes. The duplicate UIA provider runs in a separately killable process.
+    assert source.count("Start-ThreadJob -ScriptBlock") == 4
+    assert source.count("-ThrottleLimit 16") == 4
     assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in source
+    assert "function Invoke-IsolatedDuplicateDialogProbe {" in source
+    assert "$child.WaitForExit(6000)" in source
+    assert "$child.Kill($true)" in source
     start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
     ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
     launch = source[start:ready]

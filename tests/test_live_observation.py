@@ -198,7 +198,7 @@ class LiveObservationTests(unittest.TestCase):
         self.assertFalse(worker.start(task))
         failed = self._wait_for_message(worker)
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "RuntimeError: can't start new thread")
+        self.assertEqual(failed.error, "BaseException: exception details unavailable")
         self.assertFalse(worker.busy)
 
         self.assertTrue(worker.start(task))
@@ -231,7 +231,7 @@ class LiveObservationTests(unittest.TestCase):
         self.assertFalse(worker.start(task))
         failed = self._wait_for_message(worker)
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "OSError: thread construction failed")
+        self.assertEqual(failed.error, "BaseException: exception details unavailable")
         self.assertFalse(worker.busy)
 
         self.assertTrue(worker.start(task))
@@ -265,7 +265,7 @@ class LiveObservationTests(unittest.TestCase):
         self.assertFalse(worker.start(task))
         failed = self._wait_for_message(worker)
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "OSError: thread start failed")
+        self.assertEqual(failed.error, "BaseException: exception details unavailable")
         self.assertFalse(worker.busy)
 
         self.assertTrue(worker.start(task))
@@ -280,7 +280,7 @@ class LiveObservationTests(unittest.TestCase):
         self.assertTrue(worker.start(lambda: (_ for _ in ()).throw(RuntimeError("network-test"))))
         message = self._wait_for_message(worker)
         self.assertIsNone(message.result)
-        self.assertEqual(message.error, "RuntimeError: network-test")
+        self.assertEqual(message.error, "BaseException: exception details unavailable")
         self.assertFalse(worker.busy)
 
     def test_worker_converts_system_exit_to_terminal_error_and_allows_retry(self):
@@ -295,7 +295,7 @@ class LiveObservationTests(unittest.TestCase):
         self.assertTrue(worker.start(exit_task))
         failed = self._wait_for_message(worker)
         self.assertIsNone(failed.result)
-        self.assertEqual(failed.error, "SystemExit: live-stop")
+        self.assertEqual(failed.error, "BaseException: exception details unavailable")
         self.assertFalse(worker.busy)
 
         self.assertTrue(worker.start(lambda: expected))

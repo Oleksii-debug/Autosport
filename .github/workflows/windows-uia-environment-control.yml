@@ -76,7 +76,7 @@ jobs:
         run: |
           python -m pip install -e .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q --noconftest tests/test_external_uia_audit_contract.py tests/test_external_uia_worker_stage_diagnostics.py tests/test_as02_external_uia_export_redaction.py tests/test_as02_external_uia_case_exactness.py tests/test_external_uia_duplicate_native_dialog.py tests/test_external_uia_export_bindings.py tests/test_duplicate_python_diagnostic.py
+          python -m pytest -q --noconftest tests/test_external_uia_duplicate_native_dialog.py tests/test_external_uia_audit_contract.py tests/test_external_uia_worker_stage_diagnostics.py tests/test_as02_external_uia_export_redaction.py tests/test_as02_external_uia_case_exactness.py tests/test_external_uia_export_bindings.py tests/test_duplicate_python_diagnostic.py
           exit $LASTEXITCODE
       - name: Validate the two fixed-class diagnostic reports (never product UIA)
         if: ${{ !cancelled() }}

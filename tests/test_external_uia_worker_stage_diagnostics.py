@@ -751,13 +751,21 @@ def test_duplicate_threadjob_failures_never_promote_lock_or_leak_details() -> No
     assert "live_region_event_status" in remainder
 
 def test_external_uia_threadjob_pool_cannot_starve_duplicate_launch() -> None:
-    """Duplicate UIA runs outside the bounded four-worker ThreadJob pool."""
+    """Primary four workers plus one failure-only sampler cannot starve launch."""
     source = SCRIPT.read_text(encoding="utf-8")
     # The pool limit is session-global and is set by the first Start-ThreadJob.
     # Each remaining call explicitly reserves enough capacity for the primary
     # routes. The duplicate UIA provider runs in a separately killable process.
-    assert source.count("Start-ThreadJob -ScriptBlock") == 4
-    assert source.count("-ThrottleLimit 16") == 4
+    diagnostic_start = source.index("function Get-DuplicatePythonStackDiagnostics {")
+    diagnostic_end = source.index("# Diagnostic only: isolate FromHandle", diagnostic_start)
+    diagnostic = source[diagnostic_start:diagnostic_end]
+    primary = source[:diagnostic_start] + source[diagnostic_end:]
+    assert primary.count("Start-ThreadJob -ScriptBlock") == 4
+    assert primary.count("-ThrottleLimit 16") == 4
+    assert diagnostic.count("Start-ThreadJob -ScriptBlock") == 1
+    assert diagnostic.count("-ThrottleLimit 16") == 1
+    assert "$completion.Wait(8000)" in diagnostic
+    assert "$capture.WaitForExit(6000)" in diagnostic
     assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in source
     assert "function Invoke-IsolatedDuplicateDialogProbe {" in source
     assert "$child.WaitForExit(6000)" in source

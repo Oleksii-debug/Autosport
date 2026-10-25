@@ -2,10 +2,15 @@ from __future__ import annotations
 
 import hashlib
 import json
-from dataclasses import dataclass
+import threading
+import weakref
+from contextvars import ContextVar
+from dataclasses import dataclass, field
+from types import MappingProxyType
 from datetime import datetime, timezone
 from decimal import Decimal
 from enum import Enum
+from typing import Any
 
 from .bookmaker_capability import (
     BookmakerAccountSnapshot,
@@ -60,11 +65,16 @@ def _text(value: object, name: str) -> str:
     return value
 
 
-def _time(value: object, name: str) -> datetime:
+def _time(
+    value: object,
+    name: str,
+    _datetime=datetime,
+    _value_error=ValueError,
+) -> datetime:
     raw = _text(value, name)
     try:
-        parsed = datetime.fromisoformat(raw.replace("Z", "+00:00"))
-    except ValueError as exc:
+        parsed = _datetime.fromisoformat(raw.replace("Z", "+00:00"))
+    except _value_error as exc:
         raise SupervisedExecutionError(f"{name} must be ISO-8601") from exc
     if parsed.tzinfo is None or parsed.utcoffset() is None:
         raise SupervisedExecutionError(f"{name} must be timezone-aware")
@@ -78,9 +88,35 @@ def _sha(value: object, name: str) -> str:
     return raw
 
 
-def _digest(value: object) -> str:
+def _digest(
+    value: object,
+    *,
+    _json_module=json,
+    _json_dumps=json.dumps,
+    _json_dumps_code=getattr(json.dumps, "__code__", None),
+    _hashlib_module=hashlib,
+    _sha256=hashlib.sha256,
+    _sha256_code=getattr(hashlib.sha256, "__code__", None),
+) -> str:
+    if (
+        globals().get("json") is not _json_module
+        or _json_module.dumps is not _json_dumps
+        or (
+            _json_dumps_code is not None
+            and getattr(_json_dumps, "__code__", None) is not _json_dumps_code
+        )
+        or globals().get("hashlib") is not _hashlib_module
+        or _hashlib_module.sha256 is not _sha256
+        or (
+            _sha256_code is not None
+            and getattr(_sha256, "__code__", None) is not _sha256_code
+        )
+    ):
+        raise SupervisedExecutionError(
+            "canonical supervised execution digest authority changed"
+        )
     try:
-        raw = json.dumps(
+        raw = _json_dumps(
             value,
             ensure_ascii=False,
             sort_keys=True,
@@ -89,11 +125,55 @@ def _digest(value: object) -> str:
         ).encode("utf-8")
     except (TypeError, ValueError, UnicodeEncodeError) as exc:
         raise SupervisedExecutionError("bridge evidence is not canonical JSON") from exc
-    return hashlib.sha256(raw).hexdigest()
+    return _sha256(raw).hexdigest()
 
 
-def _trusted_now() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+_TEST_TRUSTED_NOW: ContextVar[str | None] = ContextVar(
+    "autosport_supervised_execution_test_trusted_now",
+    default=None,
+)
+
+
+def _trusted_now(
+    _datetime=datetime,
+    _utc=timezone.utc,
+    _test_now=_TEST_TRUSTED_NOW,
+) -> str:
+    """Return product-owned UTC wall time; deterministic override is test-internal."""
+
+    test_value = _test_now.get()
+    if test_value is not None:
+        return test_value
+    return _datetime.now(_utc).isoformat(timespec="microseconds")
+
+
+_CANONICAL_TRUSTED_NOW = _trusted_now
+_CANONICAL_TRUSTED_NOW_CODE = getattr(_CANONICAL_TRUSTED_NOW, "__code__", None)
+_CANONICAL_TRUSTED_NOW_DEFAULTS = _CANONICAL_TRUSTED_NOW.__defaults__
+_CANONICAL_TEST_TRUSTED_NOW = _TEST_TRUSTED_NOW
+
+
+def _canonical_trusted_now(
+    *,
+    _clock=_CANONICAL_TRUSTED_NOW,
+    _clock_code=_CANONICAL_TRUSTED_NOW_CODE,
+    _clock_defaults=_CANONICAL_TRUSTED_NOW_DEFAULTS,
+    _test_now=_CANONICAL_TEST_TRUSTED_NOW,
+) -> str:
+    if (
+        globals().get("_trusted_now") is not _clock
+        or globals().get("_CANONICAL_TRUSTED_NOW") is not _clock
+        or globals().get("_CANONICAL_TRUSTED_NOW_CODE") is not _clock_code
+        or globals().get("_CANONICAL_TRUSTED_NOW_DEFAULTS") is not _clock_defaults
+        or globals().get("_TEST_TRUSTED_NOW") is not _test_now
+        or globals().get("_CANONICAL_TEST_TRUSTED_NOW") is not _test_now
+        or getattr(_clock, "__code__", None) is not _clock_code
+        or _clock.__defaults__ is not _clock_defaults
+    ):
+        raise SupervisedExecutionError(
+            "canonical supervised execution trusted clock authority changed"
+        )
+    return _clock()
 
 
 def _quote_payload(quote: object) -> dict[str, object]:
@@ -268,7 +348,7 @@ class ProfileBinding:
     profile_sha256: str
 
 
-@dataclass(frozen=True, slots=True)
+@dataclass(frozen=True, slots=True, weakref_slot=True)
 class BoundSupervisedExecutionPlan:
     execution_plan: ExecutionPlan
     portfolio_plan_sha256: str
@@ -278,6 +358,12 @@ class BoundSupervisedExecutionPlan:
     approval_fingerprint: str
     profile_bindings: tuple[ProfileBinding, ...]
     constraints: tuple[ExecutionLegConstraint, ...]
+    _product_issuance_token: object | None = field(
+        default=None,
+        init=False,
+        repr=False,
+        compare=False,
+    )
 
     def __post_init__(self) -> None:
         self.verify_binding()
@@ -330,10 +416,57 @@ def _bound_binding_sha256(
     approval_fingerprint: str,
     profile_bindings: tuple[ProfileBinding, ...],
     constraints: tuple[ExecutionLegConstraint, ...],
+    *,
+    _plan_type=ExecutionPlan,
+    _plan_to_dict=ExecutionPlan.to_dict,
+    _plan_to_dict_code=getattr(ExecutionPlan.to_dict, "__code__", None),
+    _action_type=ExecutionAction,
+    _action_to_dict=ExecutionAction.to_dict,
+    _action_to_dict_code=getattr(ExecutionAction.to_dict, "__code__", None),
+    _constraint_type=ExecutionLegConstraint,
+    _constraint_to_dict=ExecutionLegConstraint.to_dict,
+    _constraint_to_dict_code=getattr(ExecutionLegConstraint.to_dict, "__code__", None),
+    _profile_type=ProfileBinding,
+    _digest_fn=_digest,
+    _digest_code=getattr(_digest, "__code__", None),
 ) -> str:
-    plan = execution_plan.to_dict()
+    if (
+        globals().get("ExecutionPlan") is not _plan_type
+        or type(execution_plan) is not _plan_type
+        or vars(_plan_type).get("to_dict") is not _plan_to_dict
+        or (
+            _plan_to_dict_code is not None
+            and getattr(_plan_to_dict, "__code__", None) is not _plan_to_dict_code
+        )
+        or globals().get("ExecutionAction") is not _action_type
+        or any(type(item) is not _action_type for item in execution_plan.actions)
+        or vars(_action_type).get("to_dict") is not _action_to_dict
+        or (
+            _action_to_dict_code is not None
+            and getattr(_action_to_dict, "__code__", None) is not _action_to_dict_code
+        )
+        or globals().get("ExecutionLegConstraint") is not _constraint_type
+        or any(type(item) is not _constraint_type for item in constraints)
+        or vars(_constraint_type).get("to_dict") is not _constraint_to_dict
+        or (
+            _constraint_to_dict_code is not None
+            and getattr(_constraint_to_dict, "__code__", None)
+            is not _constraint_to_dict_code
+        )
+        or globals().get("ProfileBinding") is not _profile_type
+        or any(type(item) is not _profile_type for item in profile_bindings)
+        or globals().get("_digest") is not _digest_fn
+        or (
+            _digest_code is not None
+            and getattr(_digest_fn, "__code__", None) is not _digest_code
+        )
+    ):
+        raise SupervisedExecutionError(
+            "canonical supervised execution binding authority changed"
+        )
+    plan = _plan_to_dict(execution_plan)
     plan.pop("plan_id")
-    return _digest(
+    return _digest_fn(
         {
             "schema": "autosport.supervised_execution_bridge_binding",
             "schema_version": 2,
@@ -354,9 +487,67 @@ def _bound_binding_sha256(
                 }
                 for item in profile_bindings
             ],
-            "constraints": [item.to_dict() for item in constraints],
+            "constraints": [_constraint_to_dict(item) for item in constraints],
         }
     )
+
+
+def _bound_plan_witness(
+    value: BoundSupervisedExecutionPlan,
+    *,
+    _bound_type=BoundSupervisedExecutionPlan,
+    _verify=BoundSupervisedExecutionPlan.verify_binding,
+    _verify_code=getattr(BoundSupervisedExecutionPlan.verify_binding, "__code__", None),
+    _binding=_bound_binding_sha256,
+    _binding_code=getattr(_bound_binding_sha256, "__code__", None),
+) -> str:
+    if (
+        globals().get("BoundSupervisedExecutionPlan") is not _bound_type
+        or type(value) is not _bound_type
+        or vars(_bound_type).get("verify_binding") is not _verify
+        or (
+            _verify_code is not None
+            and getattr(_verify, "__code__", None) is not _verify_code
+        )
+        or globals().get("_bound_binding_sha256") is not _binding
+        or (
+            _binding_code is not None
+            and getattr(_binding, "__code__", None) is not _binding_code
+        )
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan binding changed"
+        )
+    _verify(value)
+    return _binding(
+        value.execution_plan,
+        value.portfolio_plan_sha256,
+        value.economic_goal_contract_sha256,
+        value.intent_id,
+        value.intent_sha256,
+        value.approval_fingerprint,
+        value.profile_bindings,
+        value.constraints,
+    )
+
+
+_BOUND_PLAN_WITNESS = _bound_plan_witness
+_BOUND_PLAN_WITNESS_CODE = getattr(_BOUND_PLAN_WITNESS, "__code__", None)
+
+
+def _canonical_bound_plan_witness(
+    value: BoundSupervisedExecutionPlan,
+    _witness=_BOUND_PLAN_WITNESS,
+    _witness_code=_BOUND_PLAN_WITNESS_CODE,
+) -> str:
+    if (
+        globals().get("_bound_plan_witness") is not _witness
+        or getattr(_witness, "__code__", None) is not _witness_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan witness changed"
+        )
+    return _witness(value)
 
 
 @dataclass(frozen=True, slots=True)
@@ -707,12 +898,379 @@ def build_supervised_execution_plan(
     )
 
 
+def _install_bound_supervised_execution_plan_authority() -> None:
+    raw_build = build_supervised_execution_plan
+    raw_build_code = getattr(raw_build, "__code__", None)
+    witness_fn = _canonical_bound_plan_witness
+    witness_code = getattr(witness_fn, "__code__", None)
+    token_guard = object()
+
+    # Token construction alone is not sufficient provenance: an in-process caller can
+    # recover the nested token type and bypass __init__ with object.__new__. Keep an
+    # independent copy-on-write exact-object registry for first product issuance.
+    # The immutable mapping exposed through closure inspection cannot be mutated in place,
+    # while weak references prevent authority bookkeeping from retaining dead plans.
+    registry_lock = threading.RLock()
+    immutable_mapping_type = MappingProxyType
+    issued = immutable_mapping_type({})
+
+    class IssuanceToken:
+        __slots__ = ("reference", "witness")
+
+        def __init__(
+            self,
+            guard: object,
+            value: BoundSupervisedExecutionPlan,
+            witness: str,
+        ) -> None:
+            if guard is not token_guard:
+                raise TypeError("bound plan issuance token is product-internal")
+            self.reference = weakref.ref(value)
+            self.witness = witness
+
+    token_type = IssuanceToken
+
+    def require_internal_dispatch() -> None:
+        if (
+            getattr(raw_build, "__code__", None) is not raw_build_code
+            or globals().get("_canonical_bound_plan_witness") is not witness_fn
+            or getattr(witness_fn, "__code__", None) is not witness_code
+        ):
+            raise SupervisedExecutionError(
+                "canonical bound supervised execution plan issuer internals changed"
+            )
+
+    def authoritative_build(
+        portfolio_plan: PortfolioPlan,
+        intents: tuple[OpportunityIntent, ...],
+        routing_proposal: ParallelRoutingProposal,
+        profiles: tuple[BookmakerCapabilityProfile, ...],
+        approval: SupervisedApproval,
+        constraints: tuple[ExecutionLegConstraint, ...],
+        *,
+        created_at: str,
+    ) -> BoundSupervisedExecutionPlan:
+        require_internal_dispatch()
+        value = raw_build(
+            portfolio_plan,
+            intents,
+            routing_proposal,
+            profiles,
+            approval,
+            constraints,
+            created_at=created_at,
+        )
+        require_internal_dispatch()
+        witness = witness_fn(value)
+        token = token_type(token_guard, value, witness)
+        object.__setattr__(value, "_product_issuance_token", token)
+        identity = id(value)
+
+        def clear(
+            reference: weakref.ReferenceType[BoundSupervisedExecutionPlan],
+            *,
+            _identity: int = identity,
+        ) -> None:
+            nonlocal issued
+            with registry_lock:
+                record = issued.get(_identity)
+                if record is not None and record[0] is reference:
+                    updated = dict(issued)
+                    updated.pop(_identity, None)
+                    issued = immutable_mapping_type(updated)
+
+        reference = weakref.ref(value, clear)
+        with registry_lock:
+            updated = dict(issued)
+            updated[identity] = (reference, witness)
+            issued = immutable_mapping_type(updated)
+        return value
+
+    def assert_authoritative(value: BoundSupervisedExecutionPlan) -> None:
+        require_internal_dispatch()
+        try:
+            witness = witness_fn(value)
+            token = object.__getattribute__(value, "_product_issuance_token")
+        except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            ) from exc
+        if (
+            type(token) is not token_type
+            or token.reference() is not value
+            or token.witness != witness
+        ):
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            )
+        with registry_lock:
+            record = issued.get(id(value))
+        if (
+            record is None
+            or record[0]() is not value
+            or record[1] != witness
+        ):
+            raise SupervisedExecutionError(
+                "bound supervised execution plan is not current canonical product issuance"
+            )
+
+    globals()["build_supervised_execution_plan"] = authoritative_build
+    globals()[
+        "assert_bound_supervised_execution_plan_authoritative"
+    ] = assert_authoritative
+
+
+_install_bound_supervised_execution_plan_authority()
+del _install_bound_supervised_execution_plan_authority
+
+_BUILD_SUPERVISED_EXECUTION_PLAN = build_supervised_execution_plan
+_BUILD_SUPERVISED_EXECUTION_PLAN_CODE = getattr(
+    _BUILD_SUPERVISED_EXECUTION_PLAN,
+    "__code__",
+    None,
+)
+_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE = (
+    assert_bound_supervised_execution_plan_authoritative
+)
+_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE_CODE = getattr(
+    _ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE,
+    "__code__",
+    None,
+)
+
+
+def _canonical_bound_plan_authority_dispatch(
+    *,
+    _build=_BUILD_SUPERVISED_EXECUTION_PLAN,
+    _build_code=_BUILD_SUPERVISED_EXECUTION_PLAN_CODE,
+    _assert=_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE,
+    _assert_code=_ASSERT_BOUND_SUPERVISED_EXECUTION_PLAN_AUTHORITATIVE_CODE,
+):
+    if (
+        globals().get("build_supervised_execution_plan") is not _build
+        or getattr(_build, "__code__", None) is not _build_code
+        or globals().get("assert_bound_supervised_execution_plan_authoritative")
+        is not _assert
+        or getattr(_assert, "__code__", None) is not _assert_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan authority changed"
+        )
+    return _build, _assert
+
+
+def _canonical_supervised_ledger_dispatch(
+    ledger: RealExecutionLedger,
+    *,
+    _ledger_type=RealExecutionLedger,
+    _surface=(
+        (
+            "reserve_plan",
+            RealExecutionLedger.reserve_plan,
+            getattr(RealExecutionLedger.reserve_plan, "__code__", None),
+        ),
+        (
+            "saga",
+            RealExecutionLedger.saga,
+            getattr(RealExecutionLedger.saga, "__code__", None),
+        ),
+        (
+            "_bind_supervised_plan_issuance",
+            RealExecutionLedger._bind_supervised_plan_issuance,
+            getattr(
+                RealExecutionLedger._bind_supervised_plan_issuance,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "supervised_plan_issuance_is_current",
+            RealExecutionLedger.supervised_plan_issuance_is_current,
+            getattr(
+                RealExecutionLedger.supervised_plan_issuance_is_current,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "bind_supervised_approval",
+            RealExecutionLedger.bind_supervised_approval,
+            getattr(
+                RealExecutionLedger.bind_supervised_approval,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "supervised_approval_is_active",
+            RealExecutionLedger.supervised_approval_is_active,
+            getattr(
+                RealExecutionLedger.supervised_approval_is_active,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "revoke_supervised_approval",
+            RealExecutionLedger.revoke_supervised_approval,
+            getattr(
+                RealExecutionLedger.revoke_supervised_approval,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "begin_attempt",
+            RealExecutionLedger.begin_attempt,
+            getattr(RealExecutionLedger.begin_attempt, "__code__", None),
+        ),
+        (
+            "provider_order_reference",
+            RealExecutionLedger.provider_order_reference,
+            getattr(
+                RealExecutionLedger.provider_order_reference,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "provider_evidence_binding",
+            RealExecutionLedger.provider_evidence_binding,
+            getattr(
+                RealExecutionLedger.provider_evidence_binding,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "acknowledge",
+            RealExecutionLedger.acknowledge,
+            getattr(RealExecutionLedger.acknowledge, "__code__", None),
+        ),
+        (
+            "reconcile_found",
+            RealExecutionLedger.reconcile_found,
+            getattr(RealExecutionLedger.reconcile_found, "__code__", None),
+        ),
+        (
+            "bind_provider_evidence",
+            RealExecutionLedger.bind_provider_evidence,
+            getattr(
+                RealExecutionLedger.bind_provider_evidence,
+                "__code__",
+                None,
+            ),
+        ),
+        (
+            "attempt_state",
+            RealExecutionLedger.attempt_state,
+            getattr(RealExecutionLedger.attempt_state, "__code__", None),
+        ),
+        (
+            "reconcile_not_found",
+            RealExecutionLedger.reconcile_not_found,
+            getattr(
+                RealExecutionLedger.reconcile_not_found,
+                "__code__",
+                None,
+            ),
+        ),
+    ),
+    _dynamic_surface=tuple(
+        (
+            name,
+            vars(RealExecutionLedger)[name],
+            getattr(
+                getattr(
+                    vars(RealExecutionLedger)[name],
+                    "__func__",
+                    vars(RealExecutionLedger)[name],
+                ),
+                "__code__",
+                None,
+            ),
+        )
+        for name in (
+            "_events",
+            "_plan_event",
+            "_append",
+            "_mutate",
+            "_ensure_existing_path_durable",
+            "_sync_parent_directory",
+            "_validate_event",
+            "_parse",
+            "_validate_semantics",
+        )
+    ),
+) -> dict[str, Any]:
+    if RealExecutionLedger is not _ledger_type or type(ledger) is not _ledger_type:
+        raise SupervisedExecutionError(
+            "canonical real execution ledger authority changed"
+        )
+    bound: dict[str, Any] = {}
+    for name, expected, expected_code in _surface:
+        current = vars(_ledger_type).get(name)
+        if (
+            current is not expected
+            or (
+                expected_code is not None
+                and getattr(current, "__code__", None) is not expected_code
+            )
+        ):
+            raise SupervisedExecutionError(
+                "canonical real execution ledger authority changed"
+            )
+        bound[name] = expected.__get__(ledger, _ledger_type)
+    instance_state = vars(ledger)
+    for name, expected, expected_code in _dynamic_surface:
+        current = vars(_ledger_type).get(name)
+        current_callable = getattr(current, "__func__", current)
+        if (
+            current is not expected
+            or name in instance_state
+            or (
+                expected_code is not None
+                and getattr(current_callable, "__code__", None) is not expected_code
+            )
+        ):
+            raise SupervisedExecutionError(
+                "canonical real execution ledger internal authority changed"
+            )
+    return bound
+
+
+def _require_bound_plan_structure(
+    bound: BoundSupervisedExecutionPlan,
+    _witness=_canonical_bound_plan_witness,
+    _witness_code=getattr(_canonical_bound_plan_witness, "__code__", None),
+) -> None:
+    if (
+        globals().get("_canonical_bound_plan_witness") is not _witness
+        or getattr(_witness, "__code__", None) is not _witness_code
+    ):
+        raise SupervisedExecutionError(
+            "canonical bound supervised execution plan witness changed"
+        )
+    try:
+        _witness(bound)
+    except (SupervisedExecutionError, AttributeError, TypeError, ValueError) as exc:
+        raise SupervisedExecutionError(
+            "bound supervised execution plan is not a canonical structural binding"
+        ) from exc
+
+
 def _require_approval(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
     at: str,
 ) -> None:
-    bound.verify_binding()
+    _require_bound_plan_structure(bound)
+    now = _time(at, "approval check time")
+    created = _time(bound.execution_plan.created_at, "execution plan created_at")
+    if created > now:
+        raise SupervisedExecutionError(
+            "execution plan creation is in the future relative to trusted clock"
+        )
     approval.require_active(at)
     if (
         approval.portfolio_plan_sha256 != bound.portfolio_plan_sha256
@@ -728,7 +1286,9 @@ def _require_durable_approval(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
 ) -> None:
-    if not ledger.supervised_approval_is_active(
+    methods = _canonical_supervised_ledger_dispatch(ledger)
+    approval_is_active = methods["supervised_approval_is_active"]
+    if not approval_is_active(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
@@ -738,14 +1298,36 @@ def _require_durable_approval(
         )
 
 
-def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
-    bound.verify_binding()
+def _durable_reserved_plan_fingerprint(
+    ledger: RealExecutionLedger,
+    bound: BoundSupervisedExecutionPlan,
+) -> str | None:
+    _require_bound_plan_structure(bound)
+    _canonical_bound_plan_authority_dispatch()
+    methods = _canonical_supervised_ledger_dispatch(ledger)
+    saga_reader = methods["saga"]
+    issuance_current = methods["supervised_plan_issuance_is_current"]
     try:
-        saga = ledger.saga(bound.execution_plan.plan_id)
-    except KeyError as exc:
-        raise SupervisedExecutionError("execution plan is not reserved") from exc
+        saga = saga_reader(bound.execution_plan.plan_id)
+    except KeyError:
+        return None
     if saga.plan_fingerprint != bound.execution_plan.fingerprint:
         raise SupervisedExecutionError("durable execution-plan fingerprint mismatch")
+    witness = _canonical_bound_plan_witness(bound)
+    if not issuance_current(
+        plan_id=bound.execution_plan.plan_id,
+        bound_plan_witness=witness,
+        plan_fingerprint=saga.plan_fingerprint,
+    ):
+        return None
+    return saga.plan_fingerprint
+
+
+def _require_reserved(ledger: RealExecutionLedger, bound: BoundSupervisedExecutionPlan) -> None:
+    if _durable_reserved_plan_fingerprint(ledger, bound) is None:
+        raise SupervisedExecutionError(
+            "execution plan is not durably product-issued and reserved"
+        )
 
 
 def reserve_supervised_plan(
@@ -753,14 +1335,38 @@ def reserve_supervised_plan(
     bound: BoundSupervisedExecutionPlan,
     approval: SupervisedApproval,
 ) -> str:
-    now = _trusted_now()
+    now = _canonical_trusted_now()
     _require_approval(bound, approval, now)
-    fingerprint = ledger.reserve_plan(bound.execution_plan)
-    ledger.bind_supervised_approval(
+    _, assert_bound = _canonical_bound_plan_authority_dispatch()
+    methods = _canonical_supervised_ledger_dispatch(ledger)
+    reserve_plan = methods["reserve_plan"]
+    bind_issuance = methods["_bind_supervised_plan_issuance"]
+    issuance_current = methods["supervised_plan_issuance_is_current"]
+    bind_approval = methods["bind_supervised_approval"]
+    fingerprint = _durable_reserved_plan_fingerprint(ledger, bound)
+    if fingerprint is None:
+        assert_bound(bound)
+        fingerprint = reserve_plan(bound.execution_plan)
+        witness = _canonical_bound_plan_witness(bound)
+        bind_issuance(
+            plan_id=bound.execution_plan.plan_id,
+            bound_plan_witness=witness,
+            plan_fingerprint=fingerprint,
+        )
+        if not issuance_current(
+            plan_id=bound.execution_plan.plan_id,
+            bound_plan_witness=witness,
+            plan_fingerprint=fingerprint,
+        ):
+            raise SupervisedExecutionError(
+                "supervised plan issuance was not durably recorded"
+            )
+    bind_approval(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
         approved_at=approval.approved_at,
+        expires_at=approval.expires_at,
         evidence_sha256=approval.evidence_sha256,
     )
     _require_durable_approval(ledger, bound, approval)
@@ -780,11 +1386,14 @@ def revoke_supervised_approval(
         or approval.ledger_identity != bound.execution_plan.approval_id
     ):
         raise SupervisedExecutionError("approval identity mismatches bound plan")
-    ledger.revoke_supervised_approval(
+    revoke_approval = _canonical_supervised_ledger_dispatch(ledger)[
+        "revoke_supervised_approval"
+    ]
+    revoke_approval(
         plan_id=bound.execution_plan.plan_id,
         approval_id=approval.ledger_identity,
         approval_fingerprint=approval.fingerprint,
-        revoked_at=_trusted_now(),
+        revoked_at=_canonical_trusted_now(),
         revocation_evidence_sha256=_sha(
             revocation_evidence_sha256, "revocation_evidence_sha256"
         ),
@@ -799,14 +1408,15 @@ def begin_supervised_attempt(
     action_id: str,
     attempt_id: str,
 ) -> ExecutionAttempt:
-    now = _trusted_now()
+    now = _canonical_trusted_now()
     _require_approval(bound, approval, now)
     _require_reserved(ledger, bound)
     _require_durable_approval(ledger, bound, approval)
     action = bound.action_for(action_id)
     if _time(now, "trusted current time") >= _time(action.expires_at, "expires_at"):
         raise SupervisedExecutionError("attempt is at/after quote expiry")
-    return ledger.begin_attempt(
+    begin_attempt = _canonical_supervised_ledger_dispatch(ledger)["begin_attempt"]
+    return begin_attempt(
         plan_id=bound.execution_plan.plan_id,
         action_id=action_id,
         attempt_id=attempt_id,
@@ -820,7 +1430,8 @@ def _attempt_action(
     attempt_id: str,
 ) -> tuple[ExecutionAction, AttemptState]:
     _require_reserved(ledger, bound)
-    saga = ledger.saga(bound.execution_plan.plan_id)
+    saga_reader = _canonical_supervised_ledger_dispatch(ledger)["saga"]
+    saga = saga_reader(bound.execution_plan.plan_id)
     action_id = saga.attempt_action_ids.get(attempt_id)
     if action_id is None:
         raise SupervisedExecutionError("attempt does not belong to bound plan")
@@ -836,7 +1447,10 @@ def _require_attempt_provider_order_reference(
 ) -> None:
     """Fail closed when #561 evidence is not bound to the attempt's durable provider ref."""
 
-    expected = ledger.provider_order_reference(
+    provider_order_reference = _canonical_supervised_ledger_dispatch(ledger)[
+        "provider_order_reference"
+    ]
+    expected = provider_order_reference(
         attempt_id=attempt_id,
         provider_id=action.bookmaker_id,
     )
@@ -957,7 +1571,10 @@ def reconcile_provider_readback(
         readback.accepted_odds,
     )
 
-    direct_binding = ledger.provider_evidence_binding(attempt_id)
+    provider_evidence_binding = _canonical_supervised_ledger_dispatch(ledger)[
+        "provider_evidence_binding"
+    ]
+    direct_binding = provider_evidence_binding(attempt_id)
     reconciliation_evidence_id = (
         None if direct_binding is not None else readback.evidence_id
     )
@@ -979,9 +1596,13 @@ def reconcile_provider_readback(
             raise SupervisedExecutionError(
                 "durable direct-ACK provider evidence conflicts on replay"
             )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     elif state is AttemptState.UNKNOWN:
-        ledger.reconcile_found(
+        reconcile_found = _canonical_supervised_ledger_dispatch(ledger)[
+            "reconcile_found"
+        ]
+        reconcile_found(
             ExternalEffectReconciliation(
                 attempt_id=attempt_id,
                 evidence_id=readback.evidence_id,
@@ -999,9 +1620,13 @@ def reconcile_provider_readback(
             accepted_stake=readback.accepted_stake,
             reconciliation_evidence_id=readback.evidence_id,
         )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     elif state is AttemptState.SUBMITTED:
-        ledger.bind_provider_evidence(
+        bind_provider_evidence = _canonical_supervised_ledger_dispatch(ledger)[
+            "bind_provider_evidence"
+        ]
+        bind_provider_evidence(
             attempt_id=attempt_id,
             evidence_id=readback.evidence_id,
             observed_at=readback.observed_at,
@@ -1016,12 +1641,14 @@ def reconcile_provider_readback(
             accepted_stake=readback.accepted_stake,
             reconciliation_evidence_id=None,
         )
-        ledger.acknowledge(acknowledgement)
+        acknowledge = _canonical_supervised_ledger_dispatch(ledger)["acknowledge"]
+        acknowledge(acknowledgement)
     else:
         raise SupervisedExecutionError(
             "readback requires SUBMITTED/UNKNOWN or exact terminal replay"
         )
-    final = ledger.attempt_state(attempt_id)
+    attempt_state = _canonical_supervised_ledger_dispatch(ledger)["attempt_state"]
+    final = attempt_state(attempt_id)
     outcome = {
         AttemptState.ACCEPTED: ReadbackOutcome.ACCEPTED,
         AttemptState.PARTIAL: ReadbackOutcome.PARTIAL,
@@ -1091,7 +1718,10 @@ def reconcile_provider_not_found(
         adapter_version=readback.adapter_version,
         profile_version=readback.profile_version,
     )
-    ledger.reconcile_not_found(
+    reconcile_not_found = _canonical_supervised_ledger_dispatch(ledger)[
+        "reconcile_not_found"
+    ]
+    reconcile_not_found(
         ReconciliationSnapshot(
             attempt_id=attempt_id,
             evidence_id=readback.evidence_id,
@@ -1106,7 +1736,7 @@ def reconcile_provider_not_found(
     )
     return ReconciliationResult(
         ReadbackOutcome.NOT_FOUND,
-        ledger.attempt_state(attempt_id),
+        _canonical_supervised_ledger_dispatch(ledger)["attempt_state"](attempt_id),
         readback.evidence_id,
     )
 
@@ -1163,3 +1793,174 @@ def reconcile_account_snapshot(
             raise SupervisedExecutionError("matched stake exceeds requested stake")
 
     return ReconciliationResult(ReadbackOutcome.UNKNOWN, AttemptState.UNKNOWN, None)
+
+
+def _install_supervised_execution_composition_guard() -> None:
+    """Seal transitive authority helpers used by state-mutating supervised APIs."""
+
+    helper_names = (
+        "_canonical_bound_plan_authority_dispatch",
+        "_canonical_supervised_ledger_dispatch",
+        "_canonical_trusted_now",
+        "_canonical_bound_plan_witness",
+        "_digest",
+        "_time",
+        "_sha",
+        "_text",
+        "assert_verified_provider_evidence_authoritative",
+        "_require_bound_plan_structure",
+        "_require_approval",
+        "_require_durable_approval",
+        "_durable_reserved_plan_fingerprint",
+        "_require_reserved",
+        "_attempt_action",
+        "_require_attempt_provider_order_reference",
+        "_validate_slippage",
+        "_require_verified_profile",
+    )
+    helper_surface = tuple(
+        (
+            name,
+            globals()[name],
+            getattr(globals()[name], "__code__", None),
+            getattr(globals()[name], "__defaults__", None),
+            getattr(globals()[name], "__kwdefaults__", None),
+        )
+        for name in helper_names
+    )
+    object_surface = (
+        ("SupervisedApproval", SupervisedApproval),
+        ("VerifiedProviderEffectEvidence", VerifiedProviderEffectEvidence),
+        ("VerifiedProviderAbsenceEvidence", VerifiedProviderAbsenceEvidence),
+        ("ExternalAcknowledgement", ExternalAcknowledgement),
+        ("ExternalEffectReconciliation", ExternalEffectReconciliation),
+        ("ReconciliationSnapshot", ReconciliationSnapshot),
+        ("AcknowledgementStatus", AcknowledgementStatus),
+        ("AttemptState", AttemptState),
+    )
+
+    def descriptor_code(descriptor: object) -> object | None:
+        executable = descriptor.fget if isinstance(descriptor, property) else descriptor
+        return getattr(executable, "__code__", None)
+
+    descriptor_surface = (
+        (
+            BoundSupervisedExecutionPlan,
+            "action_for",
+            BoundSupervisedExecutionPlan.action_for,
+            getattr(BoundSupervisedExecutionPlan.action_for, "__code__", None),
+        ),
+        (
+            BoundSupervisedExecutionPlan,
+            "constraint_for",
+            BoundSupervisedExecutionPlan.constraint_for,
+            getattr(BoundSupervisedExecutionPlan.constraint_for, "__code__", None),
+        ),
+        (
+            BoundSupervisedExecutionPlan,
+            "profile_for",
+            BoundSupervisedExecutionPlan.profile_for,
+            getattr(BoundSupervisedExecutionPlan.profile_for, "__code__", None),
+        ),
+        (
+            SupervisedApproval,
+            "require_active",
+            SupervisedApproval.require_active,
+            getattr(SupervisedApproval.require_active, "__code__", None),
+        ),
+        (
+            SupervisedApproval,
+            "fingerprint",
+            vars(SupervisedApproval)["fingerprint"],
+            descriptor_code(vars(SupervisedApproval)["fingerprint"]),
+        ),
+        (
+            SupervisedApproval,
+            "ledger_identity",
+            vars(SupervisedApproval)["ledger_identity"],
+            descriptor_code(vars(SupervisedApproval)["ledger_identity"]),
+        ),
+        (
+            ExecutionPlan,
+            "fingerprint",
+            vars(ExecutionPlan)["fingerprint"],
+            descriptor_code(vars(ExecutionPlan)["fingerprint"]),
+        ),
+    )
+
+    def require_pristine_composition() -> None:
+        for (
+            name,
+            expected,
+            expected_code,
+            expected_defaults,
+            expected_kwdefaults,
+        ) in helper_surface:
+            current = globals().get(name)
+            if (
+                current is not expected
+                or (
+                    expected_code is not None
+                    and getattr(current, "__code__", None) is not expected_code
+                )
+                or getattr(current, "__defaults__", None) is not expected_defaults
+                or getattr(current, "__kwdefaults__", None) is not expected_kwdefaults
+            ):
+                raise SupervisedExecutionError(
+                    "canonical supervised execution composition changed"
+                )
+        for name, expected in object_surface:
+            if globals().get(name) is not expected:
+                raise SupervisedExecutionError(
+                    "canonical supervised execution composition changed"
+                )
+        for owner, name, expected, expected_code in descriptor_surface:
+            current = vars(owner).get(name)
+            if (
+                current is not expected
+                or (
+                    expected_code is not None
+                    and descriptor_code(current) is not expected_code
+                )
+            ):
+                raise SupervisedExecutionError(
+                    "canonical supervised execution composition changed"
+                )
+
+    for name in (
+        "reserve_supervised_plan",
+        "revoke_supervised_approval",
+        "begin_supervised_attempt",
+        "reconcile_provider_readback",
+        "reconcile_provider_not_found",
+    ):
+        raw = globals()[name]
+        raw_code = getattr(raw, "__code__", None)
+
+        def guarded(*args, __raw=raw, __raw_code=raw_code, **kwargs):
+            require_pristine_composition()
+            if (
+                __raw_code is not None
+                and getattr(__raw, "__code__", None) is not __raw_code
+            ):
+                raise SupervisedExecutionError(
+                    "canonical supervised execution entrypoint changed"
+                )
+            return __raw(*args, **kwargs)
+
+        # Preserve diagnostic metadata without functools.wraps(): __wrapped__ would
+        # expose the unguarded mutating delegate as an ordinary public function
+        # attribute and permit callers to bypass composition validation.
+        guarded.__name__ = raw.__name__
+        guarded.__qualname__ = raw.__qualname__
+        guarded.__doc__ = raw.__doc__
+        guarded.__module__ = raw.__module__
+        if hasattr(guarded, "__wrapped__"):
+            raise RuntimeError(
+                "supervised execution composition guard must not expose raw delegate"
+            )
+        globals()[name] = guarded
+
+
+_install_supervised_execution_composition_guard()
+del _install_supervised_execution_composition_guard

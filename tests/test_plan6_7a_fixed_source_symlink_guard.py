@@ -156,7 +156,7 @@ def test_real_git_ignored_root_pytest_module_cannot_forge_success(
         root = Path(temporary) / "проєкт з пробілом"
         source = _real_git_fixture(root)
         source.write_text("def test_fail():\n    assert False\n", encoding="utf-8")
-        rule = "pytest.py\n" if module_path == "pytest.py" else "pytest/\n"
+        rule = "pytest.py\n__pycache__/\n" if module_path == "pytest.py" else "pytest/\n__pycache__/\n"
         if ignore_location == "gitignore":
             (root / ".gitignore").write_text(rule, encoding="utf-8")
             add_paths = ["tests/test_localization_catalog.py", ".gitignore"]

@@ -26,9 +26,15 @@ def fixture():
                 "name": name, "status": "completed", "conclusion": "success",
                 "steps": steps(required)}
     ci = {"id": 100, "run_attempt": 2, "event": "pull_request", "name": "CI",
-          "head_sha": SHA, "status": "completed", "conclusion": "success"}
+          "head_sha": SHA, "path": ".github/workflows/ci.yml",
+          "repository": {"full_name": "Oleksii-debug/Autosport"},
+          "head_repository": {"full_name": "Oleksii-debug/Autosport"},
+          "status": "completed", "conclusion": "success"}
     win = {"id": 101, "run_attempt": 2, "event": "pull_request",
            "name": "Windows candidate", "head_sha": SHA,
+           "path": ".github/workflows/windows-build.yml",
+           "repository": {"full_name": "Oleksii-debug/Autosport"},
+           "head_repository": {"full_name": "Oleksii-debug/Autosport"},
            "status": "completed", "conclusion": "success"}
     cj = {"jobs": [job(n, i + 1, 100,
                        _ADMISSION_STEPS | frozenset({_CI_ADMISSION})

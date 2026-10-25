@@ -18,6 +18,11 @@ from pathlib import Path
 from typing import Any
 
 _SHA = re.compile(r"[0-9a-f]{40}\Z")
+_REPOSITORY = "Oleksii-debug/Autosport"
+_WORKFLOW_PATHS = {
+    "CI": ".github/workflows/ci.yml",
+    "Windows candidate": ".github/workflows/windows-build.yml",
+}
 _CI = frozenset({"test (ubuntu-latest, 3.11)", "test (ubuntu-latest, 3.12)",
                  "test (windows-latest, 3.11)", "test (windows-latest, 3.12)",
                  "superseded_run_admission"})
@@ -119,6 +124,17 @@ def check_workflow(run: Any, jobs_response: Any, *, expected_sha: str,
     attempt = _positive_id(run.get("run_attempt"), "run attempt")
     if run.get("name") != expected_name or run.get("head_sha") != expected_sha:
         raise GateError(f"run {run_id}: workflow name/SHA mismatch")
+    # Workflow display names are not unique. Without binding both the
+    # repository and workflow file, a green same-name job from another
+    # workflow/repository could be mistaken for Autosport acceptance.
+    if run.get("path") != _WORKFLOW_PATHS.get(expected_name):
+        raise GateError(f"run {run_id}: workflow path mismatch")
+    repository = _object(run.get("repository"), "run repository")
+    if repository.get("full_name") != _REPOSITORY:
+        raise GateError(f"run {run_id}: repository mismatch")
+    head_repository = _object(run.get("head_repository"), "run head repository")
+    if head_repository.get("full_name") != _REPOSITORY:
+        raise GateError(f"run {run_id}: head repository mismatch")
     event = run.get("event")
     allowed_events = ("pull_request", "push") if expected_name == "CI" else (
         "pull_request", "push", "workflow_dispatch")

@@ -8,6 +8,7 @@ import base64
 import ctypes
 from ctypes import wintypes
 import os
+import json
 from pathlib import Path
 import shutil
 import subprocess
@@ -76,6 +77,30 @@ def _run_probe(owner: int, handle: int) -> str:
     return result.stdout.strip()
 
 
+
+def _run_stack_probe(child_pid: int) -> dict:
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Get-DuplicatePythonStackDiagnostics {")
+    end = source.index("# Diagnostic only: isolate FromHandle", start)
+    command = (
+        "$ErrorActionPreference='Stop'\n" + source[start:end]
+        + f"\nGet-DuplicatePythonStackDiagnostics -ProcessIds @({os.getpid()},{child_pid}) "
+        + f"-RootProcessId {os.getpid()} "
+        + "-CaptureScript $env:UIA_CAPTURE_SCRIPT -SourceRoot $env:UIA_CAPTURE_ROOT "
+        + "| ConvertTo-Json -Depth 8 -Compress\n"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=30, check=False,
+        env=dict(os.environ,
+            UIA_CAPTURE_SCRIPT=str(SCRIPT.parent / "capture_duplicate_python_diagnostic.py"),
+            UIA_CAPTURE_ROOT=str(SCRIPT.parents[1] / "src" / "autosport")),
+    )
+    assert result.returncode == 0, result.stderr
+    return json.loads(result.stdout)
+
+
 @pytest.mark.parametrize(
     ("copy", "foreign_family", "expected"),
     [(COPY, False, "DIALOG_CLOSED"), (COPY, True, "NO_DIALOG"),
@@ -120,6 +145,14 @@ def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path) -> None:
         )
         try:
             handle = _visible_handle(child)
+            if os.environ.get("AUTOSPORT_UIA_STACK_SAMPLER"):
+                stacks = _run_stack_probe(child.pid)
+                assert stacks["status"] == "FAILURE_ONLY"
+                assert len(stacks["samples"]) == 1
+                sample = stacks["samples"][0]
+                assert sample["status"] == "CAPTURED"
+                assert any(frame["module"] == "windows_entry.py" for frame in sample["locations"])
+                assert sample["human_tested"] is False and sample["nvda_verified"] is False
             assert _run_probe(child.pid, handle) == "DIALOG_CLOSED"
             assert child.wait(timeout=10) == 2
         finally:

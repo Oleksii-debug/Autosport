@@ -103,6 +103,7 @@ jobs:
       - shell: pwsh
         run: ./scripts/build_windows_candidate.ps1
       - name: Materialize verified independent package extraction
+        id: verified_package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -329,6 +330,17 @@ jobs:
           if ($freshEvidence.real_money_execution -ne $false -or $freshEvidence.human_tested -ne $false -or $freshEvidence.nvda_verified -ne $false) {
             throw 'Fresh-extracted research demo audit violated release truth labels'
           }
+      - name: Prepare failure-only Python stack sampler
+        shell: pwsh
+        run: |
+          $samplerRoot = Join-Path $env:RUNNER_TEMP 'Autosport-failure-stack-sampler'
+          python -m venv $samplerRoot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $samplerPython = Join-Path $samplerRoot 'Scripts/python.exe'
+          & $samplerPython -m pip install --no-deps --only-binary=:all: py-spy==0.4.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AUTOSPORT_UIA_STACK_PYTHON=$samplerPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AUTOSPORT_UIA_STACK_SAMPLER=$(Join-Path $samplerRoot 'Scripts/py-spy.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: External UIA fresh-extraction gate
         shell: pwsh
         run: |
@@ -513,6 +525,13 @@ jobs:
           $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_workspace -NotePropertyValue $expectedWorkspace -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_localappdata -NotePropertyValue $isolatedLocalAppData -Force
           $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
+      - name: Preserve verified bytes for failed-product diagnostics (NOT release qualification)
+        if: failure() && steps.verified_package.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-verified-bytes-UIA-NOT-QUALIFIED
+          path: dist/Autosport-V1-windows-x64.zip
+          if-no-files-found: error
       - name: Upload external UIA failure evidence
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

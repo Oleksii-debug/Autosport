@@ -10,6 +10,8 @@ on:
       - 'scripts/windows_uia_environment_control.ps1'
       - 'tests/test_windows_uia_environment_control_contract.py'
       - 'tests/test_external_uia_duplicate_native_dialog.py'
+      - 'tests/test_duplicate_python_diagnostic.py'
+      - 'scripts/capture_duplicate_python_diagnostic.py'
       - 'tests/test_external_uia_export_bindings.py'
       - 'tests/test_as05_focused_uia_control_contract.py'
       - 'tests/test_as05_inconsistent_machine_evidence.py'
@@ -58,12 +60,23 @@ jobs:
           & ./scripts/windows_uia_environment_control.ps1 -ProbeMode FocusedElement -ReportPath ./uia-focus-control.json
           $focusedElementExit = $LASTEXITCODE
           if ($fromHandleExit -ne 0 -or $focusedElementExit -ne 0) { exit 1 }
+      - name: Prepare failure-only Python stack sampler
+        shell: pwsh
+        run: |
+          $samplerRoot = Join-Path $env:RUNNER_TEMP 'Autosport-failure-stack-sampler'
+          python -m venv $samplerRoot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $samplerPython = Join-Path $samplerRoot 'Scripts/python.exe'
+          & $samplerPython -m pip install --no-deps --only-binary=:all: py-spy==0.4.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AUTOSPORT_UIA_STACK_PYTHON=$samplerPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AUTOSPORT_UIA_STACK_SAMPLER=$(Join-Path $samplerRoot 'Scripts/py-spy.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: Exercise shipped duplicate-dialog probe against real native dialogs
         shell: pwsh
         run: |
           python -m pip install -e .
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          python -m pytest -q --noconftest tests/test_external_uia_duplicate_native_dialog.py tests/test_external_uia_export_bindings.py
+          python -m pytest -q --noconftest tests/test_external_uia_audit_contract.py tests/test_external_uia_worker_stage_diagnostics.py tests/test_as02_external_uia_export_redaction.py tests/test_as02_external_uia_case_exactness.py tests/test_external_uia_duplicate_native_dialog.py tests/test_external_uia_export_bindings.py tests/test_duplicate_python_diagnostic.py
           exit $LASTEXITCODE
       - name: Validate the two fixed-class diagnostic reports (never product UIA)
         if: ${{ !cancelled() }}

@@ -1204,6 +1204,105 @@ try {
     }
 }
 
+# Failure-only stack capture in a bounded independent runspace. Never expose raw
+# sampler JSON/stderr, command lines, local variables or arbitrary filenames.
+function Get-DuplicatePythonStackDiagnostics {
+    param(
+        [int[]]$ProcessIds, [int]$RootProcessId,
+        [string]$CaptureScript = '', [string]$SourceRoot = ''
+    )
+    $python = $env:AUTOSPORT_UIA_STACK_PYTHON
+    $sampler = $env:AUTOSPORT_UIA_STACK_SAMPLER
+    if ([string]::IsNullOrWhiteSpace($CaptureScript)) {
+        $CaptureScript = Join-Path $PSScriptRoot 'capture_duplicate_python_diagnostic.py'
+    }
+    if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+        $SourceRoot = Join-Path $PSScriptRoot '../src/autosport'
+    }
+    if (
+        [string]::IsNullOrWhiteSpace($python) -or
+        [string]::IsNullOrWhiteSpace($sampler) -or
+        -not (Test-Path -LiteralPath $CaptureScript -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $SourceRoot -PathType Container)
+    ) {
+        return [pscustomobject]@{ status = 'NOT_CONFIGURED'; samples = @() }
+    }
+    $samples = [System.Collections.Generic.List[object]]::new()
+    foreach ($targetId in @($ProcessIds | Where-Object { $_ -ne $RootProcessId } | Sort-Object -Unique | Select-Object -First 2)) {
+        $results = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+        $completion = [System.Threading.ManualResetEventSlim]::new($false)
+        $arguments = [object[]]::new(7)
+        $arguments[0] = $python
+        $arguments[1] = $CaptureScript
+        $arguments[2] = $sampler
+        $arguments[3] = $SourceRoot
+        $arguments[4] = [int]$targetId
+        $arguments[5] = $results
+        $arguments[6] = $completion
+        $job = Start-ThreadJob -ScriptBlock {
+            param($Python, $Script, $Sampler, $SourceRoot, [int]$TargetId, $Results, $Completion)
+            $capture = $null
+            try {
+                Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+                $start = [System.Diagnostics.ProcessStartInfo]::new()
+                $start.FileName = $Python
+                $start.UseShellExecute = $false
+                $start.CreateNoWindow = $true
+                $start.RedirectStandardOutput = $true
+                $start.RedirectStandardError = $true
+                foreach ($argument in @($Script, '--sampler', $Sampler, '--pid', [string]$TargetId, '--source-root', $SourceRoot)) {
+                    [void]$start.ArgumentList.Add($argument)
+                }
+                $capture = [System.Diagnostics.Process]::new()
+                $capture.StartInfo = $start
+                if (-not $capture.Start()) { throw 'Sampler launch unavailable' }
+                $outputTask = $capture.StandardOutput.ReadToEndAsync()
+                $errorTask = $capture.StandardError.ReadToEndAsync()
+                if (-not $capture.WaitForExit(6000)) {
+                    try { $capture.Kill($true) } catch {}
+                    $Results.Enqueue([object]([pscustomobject]@{ status = 'CAPTURE_TIMEOUT' }))
+                    return
+                }
+                $raw = [string]$outputTask.GetAwaiter().GetResult()
+                [void]$errorTask.GetAwaiter().GetResult()
+                if ($capture.ExitCode -ne 0 -or $raw.Length -gt 16384) {
+                    throw 'Sampler capture unavailable'
+                }
+                $value = ConvertFrom-Json -InputObject $raw -ErrorAction Stop
+                if (
+                    $value.evidence_class -cne 'FAILURE_ONLY_PYTHON_STACK_LOCATIONS_NOT_ACCEPTANCE' -or
+                    $value.status -cnotin @('CAPTURED','SAMPLER_ERROR','SAMPLER_TIMEOUT','INVALID_PAYLOAD','PAYLOAD_LIMIT','UNAVAILABLE') -or
+                    $value.human_tested -ne $false -or
+                    $value.nvda_verified -ne $false -or
+                    $value.real_money_execution -ne $false
+                ) { throw 'Sampler schema unavailable' }
+                $Results.Enqueue([object]$value)
+            } catch {
+                $Results.Enqueue([object]([pscustomobject]@{ status = 'CAPTURE_ERROR' }))
+            } finally {
+                if ($null -ne $capture) {
+                    try { if (-not $capture.HasExited) { $capture.Kill($true) } } catch {}
+                    $capture.Dispose()
+                }
+                $Completion.Set()
+            }
+        } -ArgumentList $arguments -ThrottleLimit 16
+        if (-not $completion.Wait(8000)) {
+            [void]$samples.Add([pscustomobject]@{ status = 'WORKER_TIMEOUT' })
+            # Do not inspect ThreadJob.State or synchronously stop a stuck worker.
+            continue
+        }
+        [object]$sample = $null
+        if ($results.TryDequeue([ref]$sample)) {
+            [void]$samples.Add($sample)
+        } else {
+            [void]$samples.Add([pscustomobject]@{ status = 'EMPTY_CAPTURE' })
+        }
+        $completion.Dispose()
+    }
+    return [pscustomobject]@{ status = 'FAILURE_ONLY'; samples = @($samples.ToArray()) }
+}
+
 # Diagnostic only: isolate FromHandle in a separately killable MTA process.
 # An exact ID here is not a UIA witness for the packaged audit and cannot
 # replace the real keyboard, STOP, LiveRegion or runtime gates.
@@ -2041,6 +2140,7 @@ $report = [ordered]@{
     duplicate_dialog_probe_diagnostic = 'NOT_RUN'
     duplicate_launch_exit_code = $null
     duplicate_launch_dialog_title = $null
+    duplicate_python_stacks = $null
     duplicate_process_state = 'NOT_OBSERVED'
     duplicate_process_exit_code = $null
     duplicate_process_family_count = 0
@@ -2899,6 +2999,10 @@ try {
     # text, provider properties, source excerpts, paths or arbitrary type names.
     $report.automation_error_line = [int]$_.InvocationInfo.ScriptLineNumber
     $report.automation_error_category = [int]$_.CategoryInfo.Category
+    if ($null -ne $duplicateProcess) {
+        $report.duplicate_python_stacks = Get-DuplicatePythonStackDiagnostics `
+            -ProcessIds ([int[]]$duplicateFamilyIds) -RootProcessId ([int]$duplicateProcess.Id)
+    }
     # Optional independent diagnostics may inspect cached primitive HWNDs only
     # after acceptance has already failed. They cannot set status or bypass any
     # gate, and must not reenter even a separate provider after a native worker

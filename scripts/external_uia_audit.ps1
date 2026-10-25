@@ -10,6 +10,12 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Start-Job launches a clean PowerShell process.  Hosted Windows run
+# 40171001725 completed the real audit but could not publish its final report
+# because that worker did not auto-load ConvertTo-Json.  Load the built-in
+# utility module before any UIA work so PASS and FAIL evidence always retain
+# the same fail-closed JSON publication path.
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 # This file is a bounded diagnostic of the real external audit, NOT audit PASS.
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {

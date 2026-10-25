@@ -43,6 +43,15 @@ def test_external_uia_audit_loads_required_automation_assemblies() -> None:
     assert "Add-Type -AssemblyName System.Windows.Forms" in audit
 
 
+def test_external_uia_audit_preloads_json_cmdlet_for_clean_background_worker() -> None:
+    audit = _audit()
+
+    module_import = "Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop"
+    assert module_import in audit
+    assert audit.index(module_import) < audit.index("Write-ExternalUiaProgress -Stage 'START'")
+    assert audit.count("$report | ConvertTo-Json -Depth 8") == 2
+
+
 def test_external_uia_live_region_probe_resolves_runtime_monitor_without_compiler_forwarders() -> None:
     """Maintain a real runtime Monitor lock without a C# Monitor type-reference gate."""
 

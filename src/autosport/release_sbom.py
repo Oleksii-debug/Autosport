@@ -137,6 +137,24 @@ terms specified in this license.
     },
 }
 
+# Python 3.12 Windows toolcache images have used both 8.6.13 and 8.6.14.
+# The license blobs are byte-identical, while the release tags and commits are
+# distinct and remain separately bound here.
+_PINNED_RUNTIME_LICENSES.update({
+    ("tcl", "8.6.13"): {
+        **_PINNED_RUNTIME_LICENSES[("tcl", "8.6.14")],
+        "source_url": "https://github.com/tcltk/tcl/blob/core-8-6-13/license.terms",
+        "source_tag": "core-8-6-13",
+        "source_commit_sha": "338c6692672696a76b6cb4073820426406c6f3f9",
+    },
+    ("tk", "8.6.13"): {
+        **_PINNED_RUNTIME_LICENSES[("tk", "8.6.14")],
+        "source_url": "https://github.com/tcltk/tk/blob/core-8-6-13/license.terms",
+        "source_tag": "core-8-6-13",
+        "source_commit_sha": "0540bb61e34516730b6e0f8d44b39589d6c71f20",
+    },
+})
+
 
 def _normalize_name(name: str) -> str:
     if not isinstance(name, str) or not _NAME.fullmatch(name):
@@ -1009,7 +1027,9 @@ def capture_runtime_license_evidence(
         except OSError as exc:
             pinned = _PINNED_RUNTIME_LICENSES.get((name, version))
             if pinned is None:
-                raise ValueError(f"{name} runtime license text is unavailable") from exc
+                raise ValueError(
+                    f"{name} runtime license text is unavailable for {version}"
+                ) from exc
             payload = pinned["payload"]
             origin_record: object = {
                 "kind": "PINNED_UPSTREAM_SOURCE",

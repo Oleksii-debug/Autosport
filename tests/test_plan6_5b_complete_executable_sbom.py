@@ -238,10 +238,14 @@ def _install_fake_tcl_tk_runtime(
     )
 
 
+@pytest.mark.parametrize("runtime_version", ["8.6.13", "8.6.14"])
 def test_runtime_license_capture_uses_exact_pinned_tcl_tk_release_when_files_absent(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, runtime_version: str,
 ) -> None:
-    _install_fake_tcl_tk_runtime(tmp_path, monkeypatch)
+    _install_fake_tcl_tk_runtime(
+        tmp_path, monkeypatch,
+        tcl_version=runtime_version, tk_version=runtime_version,
+    )
 
     manifest, members = release_sbom.capture_runtime_license_evidence(SHA)
 
@@ -250,14 +254,14 @@ def test_runtime_license_capture_uses_exact_pinned_tcl_tk_release_when_files_abs
         "SEALED_BUILD_AND_PINNED_UPSTREAM_RUNTIME_LICENSE_TEXT_NOT_CLEARANCE"
     )
     assert [item["version"] for item in manifest["runtimes"]] == [
-        release_sbom.platform.python_version(), "8.6.14", "8.6.14",
+        release_sbom.platform.python_version(), runtime_version, runtime_version,
     ]
     assert manifest["runtimes"][0]["file"]["origin"] == {
         "kind": "INSTALLED_RUNTIME_FILE",
         "path": "PYTHON_INSTALL_ROOT/LICENSE.txt",
     }
     for name, item in zip(("tcl", "tk"), manifest["runtimes"][1:]):
-        pinned = release_sbom._PINNED_RUNTIME_LICENSES[(name, "8.6.14")]
+        pinned = release_sbom._PINNED_RUNTIME_LICENSES[(name, runtime_version)]
         origin = item["file"]["origin"]
         assert origin["kind"] == "PINNED_UPSTREAM_SOURCE"
         assert origin["source_commit_sha"] == pinned["source_commit_sha"]

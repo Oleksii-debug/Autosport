@@ -172,7 +172,7 @@ def test_dom_focus_acknowledgment_is_real_boolean_and_after_native_foreground() 
     source = source_path.read_text(encoding="utf-8")
     run_body = source.split("def run(", 1)[1].split("def selftest(", 1)[0]
     assert run_body.index("if not foreground(hwnd):") < run_body.index('focus_request.write_text("FOCUS')
-    assert run_body.index('focus_code != "DOM_FOCUS_CONFIRMED"') < run_body.index('probe_exit = probe(child.pid, report)')
+    assert run_body.index('focus_code != "DOM_FOCUS_CONFIRMED"') < run_body.index('probe_exit = probe(child.pid, report, hwnd=hwnd)')
     assert 'ready.write_text("LOADED' in source
     assert 'window.evaluate_js(FOCUS_JS)' in source
     assert 'window.evaluate_js(VERIFY_JS)' in source
@@ -183,12 +183,78 @@ def test_dom_focus_acknowledgment_is_real_boolean_and_after_native_foreground() 
     assert 'window.evaluate_js("document.getElementById(' not in source
 
 
+def test_bounded_real_uia_tree_discriminator_never_grants_focus_success(monkeypatch, tmp_path):
+    """An exact button in the tree does not excuse wrong FocusedElement."""
+    import importlib.util
+    import json
+    import subprocess
+    from types import SimpleNamespace
+
+    source_path = ROOT / "scripts/windows_webview2_uia_control.py"
+    spec = importlib.util.spec_from_file_location("autosport_uia_tree_discriminator", source_path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+
+    seen = []
+    def fake_run(args, **kwargs):
+        seen.append((args, kwargs))
+        return SimpleNamespace(stdout="TREE_BUTTON_FOUND\n", returncode=0)
+    monkeypatch.setattr(module.subprocess, "run", fake_run)
+    assert module.tree_probe(123, {7, 8}) == "TREE_BUTTON_FOUND"
+    assert seen[0][1]["timeout"] == 7
+    assert seen[0][1]["env"]["AUTOSPORT_UIA_HOST_HWND"] == "123"
+    assert seen[0][1]["env"]["AUTOSPORT_UIA_ALLOWED_PIDS"] == "7,8"
+    assert "-Mta" in seen[0][0]
+    assert module.tree_probe(0, {7}) == "TREE_NOT_RUN"
+
+    def timeout(*args, **kwargs):
+        raise subprocess.TimeoutExpired(args[0], 7)
+    monkeypatch.setattr(module.subprocess, "run", timeout)
+    assert module.tree_probe(123, {7}) == "TREE_TIMEOUT"
+    monkeypatch.setattr(module.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(
+                            stdout="raw private UIA name\n", returncode=0))
+    assert module.tree_probe(123, {7}) == "TREE_PROVIDER_ERROR"
+    monkeypatch.setattr(module.subprocess, "run",
+                        lambda *args, **kwargs: SimpleNamespace(
+                            stdout="TREE_BUTTON_FOUND\n", returncode=1))
+    assert module.tree_probe(123, {7}) == "TREE_PROVIDER_ERROR"
+
+    report = tmp_path / "diagnostic.json"
+    module.emit(report, "WRONG_BUTTON_SEMANTICS",
+                tree_status="TREE_BUTTON_FOUND")
+    evidence = json.loads(report.read_text(encoding="utf-8"))
+    assert evidence["status"] == "WRONG_BUTTON_SEMANTICS"
+    assert evidence["exact_automation_id"] is False
+    assert evidence["tree_diagnostic_status"] == "TREE_BUTTON_FOUND"
+    assert evidence["autosport_product_uia_pass"] is False
+    assert evidence["human_tested"] is False
+    assert evidence["nvda_verified"] is False
+    assert evidence["real_money_execution"] is False
+
+
+def test_tree_discriminator_is_genuine_hwnd_uia_and_only_on_failed_focus():
+    source = (ROOT / "scripts/windows_webview2_uia_control.py").read_text(encoding="utf-8")
+    assert "AutomationElement]::FromHandle($handle)" in source
+    assert "$root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)" in source
+    assert "AutomationIdProperty" in source
+    assert "if ($allowed -notcontains [int]$current.ProcessId)" in source
+    assert "if code != \"SEMANTIC_BUTTON_RETURNED\" and hwnd > 0:" in source
+    assert 'probe_exit = probe(child.pid, report, hwnd=hwnd)' in source
+    assert 'tree_status = tree_probe(hwnd, allowed)' in source
+    assert 'child.returncode == 0 and code == "SEMANTIC_BUTTON_RETURNED"' in source
+    assert "TREE_BUTTON_FOUND" not in source.split("return 0 if (", 1)[1].split("else 1", 1)[0]
+
+
 def test_native_webview_focus_transfer_is_explicit_and_fail_closed() -> None:
     """DOM focus cannot substitute for the WinForms WebView2 focus transfer."""
     import importlib.util
 
     source_path = ROOT / "scripts/windows_webview2_uia_control.py"
-    spec = importlib.util.spec_from_file_location("autosport_uia_control_native_focus", source_path)
+    spec = importlib.util.spec_from_file_location(
+        "autosport_uia_control_native_focus", source_path
+    )
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -220,11 +286,20 @@ def test_native_webview_focus_transfer_is_explicit_and_fail_closed() -> None:
     accepted = Control(True)
     child_accepted = Control(False, contains_focus=True)
     rejected = Control(False)
-    assert module.focus_native_webview(Window(accepted)) == "NATIVE_WEBVIEW_FOCUS_CONFIRMED"
+    assert (
+        module.focus_native_webview(Window(accepted))
+        == "NATIVE_WEBVIEW_FOCUS_CONFIRMED"
+    )
     assert accepted.calls == 1
-    assert module.focus_native_webview(Window(child_accepted)) == "NATIVE_WEBVIEW_FOCUS_CONFIRMED"
+    assert (
+        module.focus_native_webview(Window(child_accepted))
+        == "NATIVE_WEBVIEW_FOCUS_CONFIRMED"
+    )
     assert child_accepted.calls == 1
-    assert module.focus_native_webview(Window(rejected)) == "NATIVE_WEBVIEW_FOCUS_REJECTED"
+    assert (
+        module.focus_native_webview(Window(rejected))
+        == "NATIVE_WEBVIEW_FOCUS_REJECTED"
+    )
     assert rejected.calls == 1
     assert module.focus_native_webview(object()) == "NATIVE_WEBVIEW_FOCUS_EXCEPTION"
 
@@ -235,7 +310,7 @@ def test_native_webview_focus_transfer_is_explicit_and_fail_closed() -> None:
     )
     run_body = source.split("def run(", 1)[1].split("def selftest(", 1)[0]
     assert run_body.index('focus_code != "DOM_FOCUS_CONFIRMED"') < run_body.index(
-        "probe_exit = probe(child.pid, report)"
+        "probe_exit = probe(child.pid, report, hwnd=hwnd)"
     )
     assert "NATIVE_WEBVIEW_FOCUS_REJECTED" in module.CODES
     assert "NATIVE_WEBVIEW_FOCUS_EXCEPTION" in module.CODES

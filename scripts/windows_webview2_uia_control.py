@@ -27,12 +27,20 @@ CODES = {"STARTED", "WINDOWS_REQUIRED", "HOST_NOT_READY", "HOST_EXITED",
          "DOM_FOCUS_EXCEPTION", "DOM_FOCUS_TIMEOUT",
          "NATIVE_WEBVIEW_FOCUS_REJECTED", "NATIVE_WEBVIEW_FOCUS_EXCEPTION"}
 
-def emit(path: Path, code: str, *, exact_id: bool = False) -> None:
+TREE_CODES = {"TREE_NOT_RUN", "TREE_BUTTON_FOUND", "TREE_BUTTON_NOT_FOUND",
+              "TREE_BUTTON_WRONG_SEMANTICS", "TREE_FOREIGN_ELEMENT",
+              "TREE_PROVIDER_ERROR", "TREE_TIMEOUT"}
+
+def emit(path: Path, code: str, *, exact_id: bool = False,
+         tree_status: str = "TREE_NOT_RUN") -> None:
     if code not in CODES:
         raise ValueError("unknown diagnostic code")
+    if tree_status not in TREE_CODES:
+        raise ValueError("unknown tree diagnostic code")
     data = {"schema_version": 1, "status": code,
             "scope": "independent packaged WebView2 diagnostic, not product",
             "exact_automation_id": bool(exact_id),
+            "tree_diagnostic_status": tree_status,
             "autosport_product_uia_pass": False,
             "real_money_execution": False, "human_tested": False,
             "nvda_verified": False}
@@ -281,7 +289,76 @@ try {
 }
 """
 
-def probe(root_pid: int, report: Path) -> int:
+# An independent, bounded, real UIA tree check runs only AFTER the mandatory
+# FocusedElement probe fails. It distinguishes an exposed-but-unfocused button
+# from a missing provider tree. It can NEVER turn a failed focus probe into PASS.
+# No raw UIA name, HWND, PID, or error text is written to evidence.
+PS_TREE_PROBE = r"""
+$ErrorActionPreference = 'Stop'
+try {
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+        Write-Output 'TREE_PROVIDER_ERROR'; exit 1
+    }
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $allowed = @($env:AUTOSPORT_UIA_ALLOWED_PIDS.Split(',') | ForEach-Object {
+        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+    })
+    $handle = [IntPtr]::new([long]::Parse($env:AUTOSPORT_UIA_HOST_HWND,
+        [System.Globalization.CultureInfo]::InvariantCulture))
+    $root = [System.Windows.Automation.AutomationElement]::FromHandle($handle)
+    if ($null -eq $root) { Write-Output 'TREE_BUTTON_NOT_FOUND'; exit 0 }
+    if ($allowed -notcontains [int]$root.Current.ProcessId) {
+        Write-Output 'TREE_FOREIGN_ELEMENT'; exit 0
+    }
+    $condition = [System.Windows.Automation.PropertyCondition]::new(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        'autosport-webview2-uia-control')
+    $button = $root.FindFirst([System.Windows.Automation.TreeScope]::Descendants, $condition)
+    if ($null -eq $button) { Write-Output 'TREE_BUTTON_NOT_FOUND'; exit 0 }
+    $current = $button.Current
+    if ($allowed -notcontains [int]$current.ProcessId) {
+        Write-Output 'TREE_FOREIGN_ELEMENT'; exit 0
+    }
+    if ([string]$current.AutomationId -cne 'autosport-webview2-uia-control' -or
+        [string]$current.ControlType.ProgrammaticName -cne 'ControlType.Button' -or
+        [string]$current.Name -cne 'Autosport WebView2 calibration button') {
+        Write-Output 'TREE_BUTTON_WRONG_SEMANTICS'; exit 0
+    }
+    Write-Output 'TREE_BUTTON_FOUND'; exit 0
+} catch {
+    Write-Output 'TREE_PROVIDER_ERROR'; exit 1
+}
+"""
+
+def tree_probe(hwnd: int, allowed: set[int]) -> str:
+    """A failed or timed-out tree probe is only diagnostic, never acceptance."""
+    if hwnd <= 0 or not allowed:
+        return "TREE_NOT_RUN"
+    env = os.environ.copy()
+    env["AUTOSPORT_UIA_ALLOWED_PIDS"] = ",".join(str(p) for p in sorted(allowed))
+    env["AUTOSPORT_UIA_HOST_HWND"] = str(hwnd)
+    encoded = base64.b64encode(PS_TREE_PROBE.encode("utf-16le")).decode("ascii")
+    try:
+        child = subprocess.run(
+            ["pwsh", "-NoLogo", "-NoProfile", "-NonInteractive", "-Mta",
+             "-WindowStyle", "Hidden", "-EncodedCommand", encoded],
+            stdin=subprocess.DEVNULL, stdout=subprocess.PIPE,
+            stderr=subprocess.DEVNULL, text=True, timeout=7, env=env,
+            check=False,
+        )
+    except subprocess.TimeoutExpired:
+        return "TREE_TIMEOUT"
+    except OSError:
+        return "TREE_PROVIDER_ERROR"
+    lines = child.stdout.strip().splitlines()
+    if len(lines) != 1 or lines[0] not in TREE_CODES - {"TREE_NOT_RUN", "TREE_TIMEOUT"}:
+        return "TREE_PROVIDER_ERROR"
+    if child.returncode != 0 and lines[0] != "TREE_PROVIDER_ERROR":
+        return "TREE_PROVIDER_ERROR"
+    return lines[0]
+
+def probe(root_pid: int, report: Path, *, hwnd: int = 0) -> int:
     allowed = family(root_pid)
     if not allowed:
         emit(report, "FOREIGN_FOCUS")
@@ -310,7 +387,10 @@ def probe(root_pid: int, report: Path) -> int:
     if code not in CODES or exact not in {"0", "1"}:
         emit(report, "PROBE_EXCEPTION")
         return 1
-    emit(report, code, exact_id=exact == "1")
+    tree_status = "TREE_NOT_RUN"
+    if code != "SEMANTIC_BUTTON_RETURNED" and hwnd > 0:
+        tree_status = tree_probe(hwnd, allowed)
+    emit(report, code, exact_id=exact == "1", tree_status=tree_status)
     return 0 if (
         child.returncode == 0 and code == "SEMANTIC_BUTTON_RETURNED" and exact == "1"
     ) else 1
@@ -377,7 +457,7 @@ def run(report: Path, *, file_origin: bool = False) -> int:
             # The genuine COM client already runs in its own bounded pwsh MTA
             # process. Avoid a second windowed PyInstaller bootloader whose
             # exit code can differ from the completed child probe's result.
-            probe_exit = probe(child.pid, report)
+            probe_exit = probe(child.pid, report, hwnd=hwnd)
             try:
                 data = json.loads(report.read_text(encoding="utf-8"))
             except (OSError, ValueError):
@@ -423,6 +503,13 @@ def selftest() -> int:
         emit(path, "SEMANTIC_BUTTON_RETURNED", exact_id=True)
         data = json.loads(path.read_text(encoding="utf-8"))
         assert data["autosport_product_uia_pass"] is False
+        assert data["tree_diagnostic_status"] == "TREE_NOT_RUN"
+        try:
+            emit(path, "SEMANTIC_BUTTON_RETURNED", tree_status="invalid")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unknown tree status must fail closed")
         assert data["human_tested"] is False and data["nvda_verified"] is False
     return 0
 

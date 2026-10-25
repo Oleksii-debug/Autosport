@@ -358,6 +358,26 @@ def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening
     assert "$duplicateProcess.ExitCode -ne 2" in duplicate
 
 
+def test_duplicate_root_uia_lookup_is_bounded_without_skipping_dialog_evidence() -> None:
+    """A stalled provider cannot hold the duplicate dialog gate indefinitely."""
+    audit = _audit()
+    start = audit.index("$duplicateProcess = Start-Process")
+    end = audit.index("$report.duplicate_launch_status = 'PASS'", start)
+    duplicate = audit[start:end]
+    assert "Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'" in duplicate
+    assert "$duplicateFinder = ${function:Find-UiaRootForProcessFamily}" in duplicate
+    assert "$duplicateWorker = Start-ThreadJob -ScriptBlock" in duplicate
+    assert "$duplicateCompleted = [System.Threading.ManualResetEventSlim]::new($false)" in duplicate
+    assert "$duplicateCompleted.Wait(6000)" in duplicate
+    assert "$duplicateResults.TryDequeue([ref]$observedDuplicateRoot)" in duplicate
+    assert "throw 'Second packaged launch bounded duplicate UIA root probe timed out'" in duplicate
+    assert "$duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds" not in duplicate
+    assert "Stop-Job -Job $duplicateWorker" not in duplicate
+    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "$duplicateProcess.ExitCode -ne 2" in duplicate
+    assert "Second packaged launch exposed a second semantic WebView operator surface" in duplicate
+
+
 def test_windows_candidate_requires_duplicate_launch_evidence() -> None:
     workflow = _windows_workflow()
     step_start = workflow.index("- name: External UIA fresh-extraction gate")
@@ -1434,8 +1454,10 @@ def test_actual_desktop_uia_provider_is_bounded_inside_real_mta_worker() -> None
     assert "Start-ThreadJob -ScriptBlock {" in helper
     assert "External desktop UIA semantic worker requires MTA" in helper
     assert "ManualResetEventSlim]::new($false)" in helper
-    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in helper
+    assert "$state.Completion.Wait(0)" in helper
     assert "[Math]::Min(4, $remainingSeconds)" in helper
+    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS', 'RENDERER'))" in helper
+    assert "if ($unfinished.Count -gt 0)" in helper
     assert "$script:semanticWorkerTimedOut = $true" in helper
     assert "last_desktop_stage=$lastWorkerStage" in helper
     assert "Stop-Job -Job $desktopJob" not in helper
@@ -1532,3 +1554,41 @@ def test_external_uia_critical_identity_scan_is_bounded_and_rejects_duplicates()
     assert "$report.failures += 'external UIA critical identity scan exceeded bounded collection limit'" in probe
     # No second full-desktop tree walk to defeat the WebView2 COM watchdog.
     assert probe.count("FindAll(") == 0
+
+def test_duplicate_process_census_is_independently_bounded_and_fail_closed() -> None:
+    """A stuck CIM census must not block the real duplicate-dialog UIA gate."""
+    audit = _audit()
+    workflow = _windows_workflow()
+    start = audit.index("function Get-BoundedDuplicateProcessFamilyIds {")
+    end = audit.index("# Traverse one UIA children level per provider call.", start)
+    helper = audit[start:end]
+    duplicate_start = audit.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    duplicate_end = audit.index("$report.duplicate_launch_status = 'PASS'", duplicate_start)
+    duplicate = audit[duplicate_start:duplicate_end]
+
+    assert "$familyFinder = ${function:Get-ProcessFamilyIds}" in helper
+    assert "$worker = Start-ThreadJob -ScriptBlock" in helper
+    assert "$completed = [System.Threading.ManualResetEventSlim]::new($false)" in helper
+    assert "$completed.Wait(6000)" in helper
+    assert "$results.TryDequeue([ref]$observedFamily)" in helper
+    assert "$familyIds -contains $RootProcessId" in helper
+    assert "throw 'Second packaged launch bounded process-family probe timed out'" in helper
+    assert "Stop-Job" in helper and "Stop-Job -Job" not in helper
+    assert "Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id" in duplicate
+    assert "Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id" not in duplicate
+    for stage in (
+        "DUPLICATE_START_PROCESS_PROBE",
+        "DUPLICATE_START_PROCESS_READY",
+        "DUPLICATE_PROCESS_FAMILY_PROBE",
+        "DUPLICATE_PROCESS_FAMILY_READY",
+    ):
+        assert f"Write-ExternalUiaProgress -Stage '{stage}'" in audit
+        assert f"'{stage}'" in workflow
+    assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'") < duplicate.index("$duplicateProcess = Start-Process")
+    assert duplicate.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'") < duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE")
+    assert duplicate.index("DUPLICATE_PROCESS_FAMILY_PROBE") < duplicate.index("Get-BoundedDuplicateProcessFamilyIds")
+    assert duplicate.index("DUPLICATE_PROCESS_FAMILY_READY") < duplicate.index("DUPLICATE_UIA_ROOT_PROBE")
+    assert "$duplicateRoot.Current.Name" in duplicate
+    assert "$duplicateProcess.ExitCode -ne 2" in duplicate
+    assert "Second packaged launch exposed a second semantic WebView operator surface" in duplicate
+

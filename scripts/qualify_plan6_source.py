@@ -148,6 +148,16 @@ def _identity(root: Path) -> str:
     )
     if ignored_controls:
         raise ValueError("source tree contains ignored pytest configuration")
+    # Ignored root modules can shadow python -m pytest (or its imports).
+    # A fake pytest.py can print a forged passed summary and exit zero while
+    # pinned tracked tests fail, despite Git reporting a clean HEAD.
+    ignored_imports = _git(
+        root, "ls-files", "--others", "--ignored", "--exclude-standard",
+        "-z", "--", "pytest.py", "pytest", "_pytest", "pluggy.py",
+        "pluggy", "sitecustomize.py", "usercustomize.py",
+    )
+    if ignored_imports:
+        raise ValueError("source tree contains ignored Python import hooks")
     return sha
 
 def _test_group(root: Path, name: str, paths: tuple[str, ...], *, timeout: int) -> dict:

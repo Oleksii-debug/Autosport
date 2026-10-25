@@ -66,8 +66,8 @@ def test_desktop_worker_timeout_stage_is_allowlisted_and_persisted_fail_closed()
     helper = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
         "function Wait-ForUiaElement {", 1
     )[0]
-    timeout = helper.split("if (-not $workerTerminal) {", 1)[1].split(
-        "Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_RESULT_PROBE'", 1
+    timeout = helper.split("if ($unfinished.Count -gt 0) {", 1)[1].split(
+        "foreach ($state in $workerStates) { $state.Completion.Dispose() }", 1
     )[0]
     assert "$script:lastDesktopWorkerStage = 'NOT_RUN'" in source
     assert "$allowedDesktopWorkerStages = @(" in timeout
@@ -197,7 +197,7 @@ def test_render_point_probe_is_bounded_real_uia_not_native_hwnd_acceptance() -> 
     assert "$ProcessIds -contains [int]$pointSemantic.Current.ProcessId" in worker
     assert "New-BoundedUiaPair -Window $pointRoot -Element $pointSemantic" in worker
     assert "$report.status = 'PASS'" not in worker
-    assert "$workerCompleted.Wait($budgetSeconds * 1000)" in desktop
+    assert "$state.Completion.Wait(0)" in desktop
     assert "$script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'" in desktop
 
 
@@ -219,7 +219,8 @@ def test_render_point_is_win32_only_and_process_family_scoped() -> None:
     assert "if ($pointCoordinates.Count -eq 2)" in desktop
     assert "$pointX = [int]$pointCoordinates[0]" in desktop
     assert "$pointY = [int]$pointCoordinates[1]" in desktop
-    assert "$processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY, $Deadline" in desktop
+    assert "$workerMode, $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY," in desktop
+    assert "$nativeRendererHandle, $rendererProcessId, $Deadline," in desktop
     assert "$report.status = 'PASS'" not in desktop
 
 
@@ -252,7 +253,7 @@ def test_render_point_timeout_stages_are_fixed_and_not_provider_text() -> None:
     assert len(progress_stages) == len(set(progress_stages))
     assert "$allowedDesktopWorkerStages -ccontains $lastWorkerStage" in desktop
     assert "'UNKNOWN_FIXED_STAGE'" in desktop
-    assert "if (-not $workerTerminal)" in desktop
+    assert "if ($unfinished.Count -gt 0)" in desktop
     assert "Stop-Job -Job $desktopJob" not in desktop
     assert "$report.status = 'PASS'" not in desktop
 
@@ -454,12 +455,15 @@ def test_product_mta_differential_never_short_circuits_packaged_gates() -> None:
     field = "isolated_mta_focus_diagnostic_status"
     assert source.count(field) == 2
     assert field + " = 'NOT_RUN'" in source
-    assign = "$report." + field + " = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$foregroundFamilyIds)"
+    assign = "$report." + field + " = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$lastFamilyIds)"
     assert assign in source
-    assert source.index(assign) < source.index("$semanticReady = $null")
-    assert source.index(assign) > source.index(
-        "$report.native_foreground_activation_status = 'NOT_CLAIMED'"
+    failure_guard = "if ($null -eq $semanticReady -or $null -eq $uiaRoot)"
+    assert source.index(assign) > source.index(failure_guard)
+    assert source.index(assign) > source.index("$semanticReady = $null")
+    assert source.index(assign) < source.index(
+        'throw "Timed out waiting for WebView2 semantic UIA readiness'
     )
+    assert assign not in source.split("$semanticReady = $null", 1)[0]
     assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in source
     assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'" in source
     assert "if ($report.status -ne 'PASS')" in source
@@ -467,3 +471,277 @@ def test_product_mta_differential_never_short_circuits_packaged_gates() -> None:
     assert "keyboard_shortcuts_status = 'NOT_RUN'" in source
     assert "live_region_event_status = 'NOT_RUN'" in source
     assert "emergency_stop_activation_status = 'NOT_RUN'" in source
+
+
+def test_desktop_fallback_routes_are_independent_and_never_accept_native_only_evidence() -> None:
+    """A stalled FocusedElement must not starve process-root or point UIA probes."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
+        "} -ArgumentList @(", 1
+    )[0]
+    assert "foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS', 'RENDERER'))" in desktop
+    assert "[string]$Mode, [string]$ProcessIdsCsv" in worker
+    assert "if ($Mode -eq 'FOCUS')" in worker
+    assert "if ($Mode -eq 'POINT')" in worker
+    assert "if ($Mode -eq 'ROOT')" in worker
+    assert worker.index("if ($Mode -eq 'FOCUS')") < worker.index(
+        "if ($Mode -eq 'POINT')"
+    ) < worker.index("if ($Mode -eq 'ROOT')")
+    assert "$workerMode, $processIdsCsv, $AutomationId" in desktop
+    assert "$workerStates += [pscustomobject]@{" in desktop
+    assert "$workerResults.TryDequeue([ref]$result)" in desktop
+    assert "$state.Completion.Wait(0)" in desktop
+    assert "if ($unfinished.Count -gt 0)" in desktop
+    assert "$script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'" in desktop
+    assert "Stop-Job -Job $desktopJob" not in desktop
+    assert "Remove-Job -Job $desktopJob" not in desktop
+    assert "$ProcessIds -contains $focusedPid" in worker
+    assert "$ProcessIds -contains $pointPid" in worker
+    assert "ProcessIdProperty" in worker
+    assert "[string]$focusSemantic.Current.AutomationId -cne $AutomationId" in worker
+    assert "[string]$pointSemantic.Current.AutomationId -cne $AutomationId" in worker
+    assert "$report.status = 'PASS'" not in desktop
+
+def test_independent_desktop_uia_routes_publish_fixed_failure_stages() -> None:
+    """One stalled ROOT route must not conceal POINT/FOCUS evidence or grant PASS."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    helper = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    timeout = helper.split("if ($unfinished.Count -gt 0) {", 1)[1].split(
+        "$script:semanticWorkerTimedOut = $true", 1
+    )[0]
+    assert "$script:lastDesktopWorkerRouteStages = [ordered]@{" in source
+    assert all(f"{mode} = 'NOT_RUN'" in source for mode in ("ROOT", "POINT", "FOCUS", "RENDERER"))
+    assert "foreach ($state in $workerStates)" in timeout
+    assert "$state.Progress.TryDequeue([ref]$workerStage)" in timeout
+    assert "$state.Completion.Wait(0)" in timeout
+    assert "$script:lastDesktopWorkerRouteStages[$state.Mode] = 'COMPLETED'" in timeout
+    assert "$script:lastDesktopWorkerRouteStages[$state.Mode] = $safeStage" in timeout
+    assert "$allowedDesktopWorkerStages -ccontains $routeStage" in timeout
+    assert "'UNKNOWN_FIXED_STAGE'" in timeout
+    assert "semantic_desktop_worker_route_stages = $null" in source
+    assert "$report.semantic_desktop_worker_route_stages = $script:lastDesktopWorkerRouteStages" in source
+    assert "Stop-Job" not in timeout
+    assert "Receive-Job" not in timeout
+    assert "$report.status = 'PASS'" not in timeout
+
+
+def test_native_host_win32_differential_is_bounded_and_not_semantic_acceptance() -> None:
+    """OS responsiveness and GUI focus cannot be substituted for real UIA."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    native = source.split("public static string[] ProbeVisibleFamilyHost(", 1)[1].split(
+        "// WebView2 can defer renderer accessibility", 1
+    )[0]
+    assert "IsVisibleFamilyHost(window, familyIds)" in native
+    assert "GetAncestor(window, GA_ROOT) == window" in source
+    assert "GetForegroundWindow() != window" in native
+    assert "GetGUIThreadInfo(threadId, ref info)" in native
+    assert "WM_NULL" in native and "SMTO_ABORTIFHUNG, 250" in native
+    assert "ProcessIdForHandle(window) != owner" in native
+    assert "RESPONSIVE" in native and "NO_REPLY" in native
+    assert "FOCUS_IN_FAMILY" in native and "FOCUS_FOREIGN" in native
+    assert "native_host_message_status = 'NOT_ATTEMPTED'" in source
+    assert "native_host_focus_status = 'NOT_ATTEMPTED'" in source
+    assert "$report.native_host_message_status = $script:nativeHostMessageStatus" in source
+    assert "$report.native_host_focus_status = $script:nativeHostFocusStatus" in source
+    assert "return new[] { messageStatus" in native
+    assert "$report.status = 'PASS'" not in native
+
+
+def test_process_isolated_from_handle_is_bounded_and_fail_closed() -> None:
+    """Host/renderer provider stalls cannot hang the parent diagnostic."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    worker = source.split("function Get-IsolatedMtaHandleDiagnostic {", 1)[1].split(
+        "function Find-UiaRootWithElementForProcessFamily {", 1
+    )[0]
+    caller = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    assert "ProcessIdForHandle($Window)" in worker
+    assert "AutomationElement]::FromHandle(" in worker
+    assert "$allowed -notcontains [int]$element.Current.ProcessId" in worker
+    assert "[string]$element.Current.AutomationId -ceq '330'" in worker
+    assert "'-Mta'" in worker and "'-NonInteractive'" in worker
+    assert "$child.WaitForExit(2500)" in worker
+    assert "$child.Kill($true)" in worker
+    assert "'TIMEOUT'" in worker and "'FOREIGN_ELEMENT'" in worker
+    assert "'INVALID_RESULT'" in worker and "'PROVIDER_ERROR'" in worker
+    assert "Get-IsolatedMtaHandleDiagnostic -Window $nativeHostHandle" in caller
+    assert "Get-IsolatedMtaHandleDiagnostic -Window $nativeRendererHandle" in caller
+    assert "[DateTime]::UtcNow.AddSeconds(6) -lt $Deadline" in caller
+    assert "isolated_host_handle_status = 'NOT_ATTEMPTED'" in source
+    assert "isolated_renderer_handle_status = 'NOT_ATTEMPTED'" in source
+    assert "$report.isolated_host_handle_status = $script:isolatedHostHandleStatus" in source
+    assert "$report.isolated_renderer_handle_status = $script:isolatedRendererHandleStatus" in source
+    assert "$report.status = 'PASS'" not in worker
+    assert "Receive-Job" not in worker
+
+
+def test_optional_focused_mta_diagnostic_cannot_preempt_product_semantic_probe() -> None:
+    """A diagnostic COM timeout must not poison a potentially healthy product gate."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("$semanticReady = $null")
+    real_gate = source.index(
+        "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'",
+        start,
+    )
+    failure = source.index("if ($null -eq $semanticReady -or $null -eq $uiaRoot)", real_gate)
+    diagnostic = source.index(
+        "$report.isolated_mta_focus_diagnostic_status = Get-IsolatedMtaFocusDiagnostic",
+        failure,
+    )
+    assert start < real_gate < failure < diagnostic
+    assert "Get-IsolatedMtaFocusDiagnostic" not in source[start:failure]
+    assert source.count(
+        "$report.isolated_mta_focus_diagnostic_status = Get-IsolatedMtaFocusDiagnostic"
+    ) == 1
+    assert "Get-IsolatedMtaFocusDiagnostic" not in source[
+        source.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'"):
+    ]
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_renderer_hwnd_route_requires_real_in_family_semantic_descendant() -> None:
+    """An observed native renderer is a candidate, never accessibility PASS."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    desktop = source.split("function Find-UiaRootWithElementForProcessFamily {", 1)[1].split(
+        "function Wait-ForUiaElement {", 1
+    )[0]
+    worker = desktop.split("$desktopJob = Start-ThreadJob -ScriptBlock {", 1)[1].split(
+        "} -ArgumentList @(", 1
+    )[0]
+    assert "$nativeRendererHandle -ne [IntPtr]::Zero" in desktop
+    assert "$rendererProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeRendererHandle)" in desktop
+    assert "($ProcessIds -contains $rendererProcessId)" in desktop
+    assert "if ($workerMode -eq 'RENDERER' -and -not $rendererCandidateValid) { continue }" in desktop
+    assert "if ($Mode -eq 'RENDERER')" in worker
+    renderer = worker.split("if ($Mode -eq 'RENDERER')", 1)[1].split(
+        "if ($Mode -eq 'FOCUS')", 1
+    )[0]
+    assert "Find-BoundedUiaSemanticViaChildren" in renderer
+    assert "-NativeWindowHandle $RendererHandle -ExpectedProcessId $RendererProcessId" in renderer
+    assert "$rendererPair.Element.Current.AutomationId -cne $AutomationId" in renderer
+    assert "$ProcessIds -contains [int]$rendererPair.Element.Current.ProcessId" in renderer
+    assert "$rendererPair.Root.Current.ProcessId -ne $RendererProcessId" in renderer
+    assert "$ResultQueue.Enqueue([object]$rendererPair)" in renderer
+    assert "$report.status = 'PASS'" not in renderer
+    assert "isolated_renderer_handle_status" not in renderer
+    assert "'SEMANTIC_DESKTOP_RENDERER_PROBE'" in desktop
+    assert "'SEMANTIC_DESKTOP_RENDERER_READY'" in desktop
+
+
+def test_renderer_hwnd_route_cannot_bypass_downstream_packaged_acceptance() -> None:
+    """A real renderer descendant still needs runtime, keyboard and STOP gates."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'" in source
+    assert "keyboard_shortcuts_status = 'NOT_RUN'" in source
+    assert "live_region_event_status = 'NOT_RUN'" in source
+    assert "emergency_stop_activation_status = 'NOT_RUN'" in source
+    assert "runtime_witness_status = 'NOT_REQUESTED'" in source
+    assert "if ($report.status -ne 'PASS')" in source
+    assert "exit 1" in source
+
+
+def test_duplicate_process_creation_is_bounded_after_real_semantic_witness() -> None:
+    """A poisoned primary UIA runspace must not hang on the second Start-Process."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert source.index("Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'") < start
+    assert "$duplicateStartWorker = Start-ThreadJob -ScriptBlock" in launch
+    assert "$duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru" in launch
+    assert launch.index("Start-Process -FilePath") < launch.index("$duplicateStartCompleted.Wait(6000)")
+    assert launch.index("$duplicateStartCompleted.Wait(6000)") < launch.index("$duplicateStartResults.TryDequeue")
+    assert launch.index("$duplicateStartResults.TryDequeue") < launch.index("$duplicateProcess = [System.Diagnostics.Process]$duplicateStarted")
+    assert "Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru" not in source[ready:]
+
+
+def test_duplicate_process_creation_timeout_and_empty_result_fail_closed() -> None:
+    """No timeout or missing process receipt can qualify the duplicate-launch gate."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "throw 'Second packaged launch bounded process creation timed out'" in launch
+    assert "if (-not $duplicateStartResults.TryDequeue([ref]$duplicateStarted) -or" in launch
+    assert "throw 'Second packaged launch did not return a valid process'" in launch
+    assert "$Completion.Set()" in launch
+    assert "Stop-Job -Job $duplicateStartWorker" not in launch
+    assert "duplicate_launch_status = 'PASS'" not in launch
+    # Subsequent UIA dialog, absence-of-second-operator and exit-code gates remain.
+    assert "$duplicateTitle = [string]$duplicateRoot.Current.Name" in source[ready:]
+    assert "Second packaged launch exposed a second semantic WebView operator surface" in source[ready:]
+    assert "$duplicateProcess.ExitCode -ne 2" in source[ready:]
+
+def test_duplicate_threadjob_argument_identity_and_fixed_outcomes() -> None:
+    """An empty enumerable queue must not shift the completion event argument."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "$duplicateStartArguments = [object[]]::new(5)" in launch
+    for slot, value in enumerate((
+        "$exePath", "$launchWorkingDirectory", "$duplicateStartResults",
+        "$duplicateStartOutcomes", "$duplicateStartCompleted",
+    )):
+        assert f"$duplicateStartArguments[{slot}] = {value}" in launch
+    assert "} -ArgumentList $duplicateStartArguments" in launch
+    assert "} -ArgumentList @(" not in launch
+    assert "$duplicateStartOutcomes.TryDequeue([ref]$duplicateStartOutcome)" in launch
+    assert "$duplicateStartResults.TryDequeue([ref]$duplicateStarted)" in launch
+    assert "$duplicateProcess = [System.Diagnostics.Process]$duplicateStarted" in launch
+    assert "if ($null -eq $duplicateProcess -or [int]$duplicateProcess.Id -le 0)" in launch
+    assert "$report.duplicate_start_diagnostic = 'RETURNED'" in launch
+    assert source.index("$report.duplicate_start_diagnostic = 'RETURNED'") < ready
+
+
+def test_duplicate_threadjob_failures_never_promote_lock_or_leak_details() -> None:
+    """Timeout, missing receipt, bad PID and launch exceptions are fail-closed."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "duplicate_start_diagnostic = 'NOT_RUN'" in source
+    for code in ("TIMED_OUT", "LAUNCH_FAILED", "EMPTY_RESULT", "INVALID_PROCESS", "RETURNED"):
+        assert f"$report.duplicate_start_diagnostic = '{code}'" in launch
+    assert "Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru -ErrorAction Stop" in launch
+    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "throw 'Second packaged launch bounded process creation timed out'" in launch
+    assert "throw 'Second packaged launch did not return a valid process'" in launch
+    assert "throw 'Second packaged launch returned invalid process receipt'" in launch
+    assert "$Outcomes.Enqueue('LAUNCH_FAILED')" in launch
+    assert "$Outcomes.Enqueue('INVALID_PROCESS')" in launch
+    assert "$Outcomes.Enqueue('RETURNED')" in launch
+    assert "$Completion.Set()" in launch
+    assert "Stop-Job -Job $duplicateStartWorker" not in launch
+    assert "duplicate_launch_status = 'PASS'" not in launch
+    remainder = source[ready:]
+    assert "$duplicateRoot.Current.Name" in remainder
+    assert "$duplicateProcess.ExitCode -ne 2" in remainder
+    assert "keyboard_shortcuts_status" in remainder
+    assert "live_region_event_status" in remainder
+
+def test_external_uia_threadjob_pool_cannot_starve_duplicate_launch() -> None:
+    """Blocked UIA providers must not exhaust the five-thread default pool."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    # The pool limit is session-global and is set by the first Start-ThreadJob.
+    # Each call explicitly reserves enough capacity for four concurrent desktop
+    # routes, independent handle/focus probes, and later duplicate-lock checks.
+    assert source.count("Start-ThreadJob -ScriptBlock") == 5
+    assert source.count("-ThrottleLimit 16") == 5
+    assert "Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren}" in source
+    start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:ready]
+    assert "} -ArgumentList $duplicateStartArguments -ThrottleLimit 16" in launch
+    assert "if (-not $duplicateStartCompleted.Wait(6000)) {" in launch
+    assert "$report.duplicate_start_diagnostic = 'TIMED_OUT'" in launch
+    assert "$report.duplicate_start_diagnostic = 'RETURNED'" in launch
+    assert "duplicate_launch_status = 'PASS'" not in launch

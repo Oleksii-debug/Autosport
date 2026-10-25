@@ -937,7 +937,11 @@ def capture_dependency_license_evidence(
                 and allowed_name
             ):
                 if not _owned_distribution_license_record(source_name, name, version):
-                    raise ValueError("distribution license RECORD origin mismatches owner/version")
+                    raise ValueError(
+                        "distribution license RECORD origin mismatches owner/version: "
+                        f"component={name!a} version={version!a} "
+                        f"record={source_name!a}"
+                    )
                 candidates.append((source_name, entry))
         if len(candidates) > 16:
             raise ValueError("distribution has unbounded license-file candidates")

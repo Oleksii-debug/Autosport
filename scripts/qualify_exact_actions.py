@@ -189,6 +189,12 @@ def qualify(ci_run: Any, ci_jobs: Any, windows_run: Any, windows_jobs: Any,
                              expected_name="Windows candidate", required_jobs=_WINDOWS)
     if ci["run_id"] == windows["run_id"]:
         raise GateError("CI and Windows must be different runs")
+    # GitHub job IDs identify jobs globally, not merely within a workflow.
+    # Two distinct runs cannot legitimately contain the same job identity.
+    # Both job lists were type-checked by check_workflow above.
+    ci_job_ids = {job["id"] for job in ci_jobs["jobs"]}
+    if any(job["id"] in ci_job_ids for job in windows_jobs["jobs"]):
+        raise GateError("CI and Windows share a GitHub job id")
     return {"status": "PASS", "sha": expected_sha, "ci": ci, "windows": windows,
             "limitations": ["Input JSON authenticity is not verified",
                             "Workflow step names are pinned to 2026-10-24 source",

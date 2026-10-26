@@ -47,6 +47,31 @@ def _exact_decimal(name: str, value: object) -> Decimal:
     return value
 
 
+def _exact_decimal_text(name: str, value: object) -> str:
+    """Return compact context-independent identity text for one exact Decimal."""
+
+    decimal_value = _exact_decimal(name, value)
+    if decimal_value == 0:
+        return "0"
+    parts = decimal_value.as_tuple()
+    digits = list(parts.digits)
+    exponent = int(parts.exponent)
+    while len(digits) > 1 and digits[-1] == 0:
+        digits.pop()
+        exponent += 1
+    normalized = Decimal((parts.sign, tuple(digits), exponent))
+
+    if exponent >= 0:
+        fixed_length = len(digits) + exponent + parts.sign
+    elif -exponent < len(digits):
+        fixed_length = len(digits) + 1 + parts.sign
+    else:
+        fixed_length = -exponent + 2 + parts.sign
+    if fixed_length <= 256:
+        return format(normalized, "f")
+    return str(normalized)
+
+
 def _exact_decimal_add(left: Decimal, right: Decimal) -> Decimal:
     """Add two finite Decimals exactly without consulting ambient Decimal context."""
 
@@ -121,7 +146,7 @@ class ActionEstimate:
         return {
             "action_type": self.action_type,
             "observations": self.observations,
-            "reward_sum": str(self.reward_sum),
+            "reward_sum": _exact_decimal_text("reward_sum", self.reward_sum),
         }
 
 
@@ -267,7 +292,10 @@ class BanditPolicyState:
                 raise LearningEnvironmentError(
                     "policy reward_sum must be finite canonical Decimal text"
                 ) from exc
-            if not reward_sum.is_finite() or str(reward_sum) != reward_text:
+            if (
+                not reward_sum.is_finite()
+                or _exact_decimal_text("reward_sum", reward_sum) != reward_text
+            ):
                 raise LearningEnvironmentError(
                     "policy reward_sum must be finite canonical Decimal text"
                 )

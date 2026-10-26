@@ -25,7 +25,7 @@ from .betfair_provider_billing_inputs import (
 
 
 _SCHEMA = "autosport.provider_billing_row_attribution"
-_SCHEMA_VERSION = 1
+_SCHEMA_VERSION = 2
 _MISSING_AUTHORITIES = (
     "AUTOSPORT_ACTIVITY_NUMERATOR",
     "PROVIDER_WINDOW_TOTAL_DENOMINATOR",
@@ -135,6 +135,8 @@ def _build_capability():
         row_amount_sign: str
         row_item_class: str
         row_item_class_data_sha256: str
+        row_provider_charge_class: str | None
+        row_provider_transaction_id: int | None
         attribution_state: str
         missing_authorities: tuple[str, ...]
         evidence_sha256: str
@@ -178,6 +180,24 @@ def _build_capability():
                 self.row_item_class_data_sha256,
                 "row_item_class_data_sha256",
             )
+            if self.row_provider_charge_class is None:
+                if self.row_provider_transaction_id is not None:
+                    raise error_cls(
+                        "row provider transaction id requires provider charge class"
+                    )
+            else:
+                if (
+                    type(self.row_provider_charge_class) is not str
+                    or self.row_provider_charge_class != "BETFAIR_TRANSACTION_CHARGE"
+                ):
+                    raise error_cls("unsupported row provider charge class")
+                if (
+                    type(self.row_provider_transaction_id) is not int
+                    or self.row_provider_transaction_id <= 0
+                ):
+                    raise error_cls(
+                        "row provider transaction id must be a positive exact integer"
+                    )
             if self.row_amount_sign != amount_sign(self.row_amount):
                 raise error_cls("row amount sign mismatch")
             if self.attribution_state != "UNPROVEN":
@@ -212,6 +232,8 @@ def _build_capability():
         row_amount_sign: str,
         row_item_class: str,
         row_item_class_data_sha256: str,
+        row_provider_charge_class: str | None,
+        row_provider_transaction_id: int | None,
     ) -> dict[str, object]:
         return {
             "schema": schema,
@@ -233,6 +255,8 @@ def _build_capability():
                 "amount_sign": row_amount_sign,
                 "item_class": row_item_class,
                 "item_class_data_sha256": row_item_class_data_sha256,
+                "provider_charge_class": row_provider_charge_class,
+                "provider_transaction_id": row_provider_transaction_id,
             },
             "attribution_state": "UNPROVEN",
             "missing_authorities": list(missing_authorities),
@@ -257,6 +281,8 @@ def _build_capability():
                 row_amount_sign=value.row_amount_sign,
                 row_item_class=value.row_item_class,
                 row_item_class_data_sha256=value.row_item_class_data_sha256,
+                row_provider_charge_class=value.row_provider_charge_class,
+                row_provider_transaction_id=value.row_provider_transaction_id,
             )
         )
 
@@ -320,6 +346,8 @@ def _build_capability():
             row_amount_sign=sign,
             row_item_class=row.item_class,
             row_item_class_data_sha256=row.item_class_data_sha256,
+            row_provider_charge_class=row.provider_charge_class,
+            row_provider_transaction_id=row.provider_transaction_id,
         )
         return ProviderBillingRowAttributionEvidence(
             venue_id=source.entitlement.venue_id,
@@ -340,6 +368,8 @@ def _build_capability():
             row_amount_sign=sign,
             row_item_class=row.item_class,
             row_item_class_data_sha256=row.item_class_data_sha256,
+            row_provider_charge_class=row.provider_charge_class,
+            row_provider_transaction_id=row.provider_transaction_id,
             attribution_state="UNPROVEN",
             missing_authorities=missing_authorities,
             evidence_sha256=canonical_sha256(payload),

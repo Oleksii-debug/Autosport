@@ -130,6 +130,7 @@ jobs:
         with:
           artifact-ids: '12697343003'
           run-id: '40414794336'
+          merge-multiple: true
           github-token: ${{ github.token }}
           path: ${{ runner.temp }}/autosport-uia-replay-input
       - name: Verify old package identity before any extraction or execution

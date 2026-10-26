@@ -23,6 +23,8 @@ def test_failed_bytes_are_pinned_and_completely_verified_before_extraction():
     assert 'REPLAY_SOURCE_SHA: c5c2890c1ec40afa005705bc82d4d149a3413241' in source
     assert 'REPLAY_PACKAGE_SHA256: 1e523a9cedfafb1cf53e212edcfbd71e3bd5545e79805169984dfa43b21e506c' in source
     assert "artifact-ids: '12697343003'" in source and "run-id: '40414794336'" in source
+    # ID-based downloads otherwise nest even one artifact beneath its name.
+    assert 'merge-multiple: true' in source
     assert 'actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093' in source
     assert source.index('Get-FileHash -LiteralPath $env:REPLAY_ARCHIVE') < source.index('verify_windows_package(') < source.index('Expand-Archive')
     for field in ('source_manifest', 'dependency_metadata', 'dependency_graph',

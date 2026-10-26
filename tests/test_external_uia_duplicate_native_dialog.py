@@ -34,7 +34,30 @@ def _probe_source() -> str:
     return source[start:end]
 
 
-def _visible_handle(process: subprocess.Popen, *, timeout: int = 15) -> int:
+def _family_ids(root_pid: int) -> set[int]:
+    """Reuse the shipped OS census, bounded by a killable PowerShell process."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Get-ProcessFamilyIds {")
+    end = source.index("# The duplicate-instance process census", start)
+    command = (
+        "$ErrorActionPreference='Stop'\n" + source[start:end]
+        + f"\nConvertTo-Json -InputObject @(Get-ProcessFamilyIds -RootProcessId {root_pid}) -Compress\n"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0, "Canonical process-family census failed"
+    family = json.loads(result.stdout)
+    assert type(family) is list and 1 <= len(family) <= 512
+    assert all(type(pid) is int and pid > 0 for pid in family)
+    assert root_pid in family
+    return set(family)
+
+
+def _visible_handle(process: subprocess.Popen, *, timeout: int = 15,
+                    process_family: bool = False) -> tuple[int, int]:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
@@ -42,15 +65,20 @@ def _visible_handle(process: subprocess.Popen, *, timeout: int = 15) -> int:
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
     deadline = time.monotonic() + timeout
+    next_family_refresh = 0.0
+    allowed = {process.pid}
     while time.monotonic() < deadline:
+        if process_family and time.monotonic() >= next_family_refresh:
+            allowed = _family_ids(process.pid)
+            next_family_refresh = time.monotonic() + 1
         handles = []
 
         @callback_type
         def visit(handle, _state):
             owner = wintypes.DWORD()
             user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
-            if owner.value == process.pid and user32.IsWindowVisible(handle):
-                handles.append(int(handle))
+            if owner.value in allowed and user32.IsWindowVisible(handle):
+                handles.append((int(owner.value), int(handle)))
             return True
 
         assert user32.EnumWindows(visit, 0), "Native test window census failed"
@@ -114,8 +142,8 @@ def test_real_native_dialog_probe(copy: str, foreign_family: bool, expected: str
     )
     child = subprocess.Popen([sys.executable, "-c", child_code])
     try:
-        handle = _visible_handle(child)
-        owner = os.getpid() if foreign_family else child.pid
+        window_owner, handle = _visible_handle(child)
+        owner = os.getpid() if foreign_family else window_owner
         assert _run_probe(owner, handle) == expected
         if expected == "DIALOG_CLOSED":
             assert child.wait(timeout=10) == 2
@@ -156,7 +184,9 @@ def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path, packaged: 
             command, env=env, cwd=cwd,
         )
         try:
-            handle = _visible_handle(child, timeout=90 if packaged else 15)
+            window_owner, handle = _visible_handle(
+                child, timeout=90 if packaged else 15, process_family=packaged,
+            )
             if os.environ.get("AUTOSPORT_UIA_STACK_SAMPLER") and not packaged:
                 stacks = _run_stack_probe(child.pid)
                 assert stacks["status"] == "FAILURE_ONLY"
@@ -165,7 +195,7 @@ def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path, packaged: 
                 assert sample["status"] == "CAPTURED"
                 assert any(frame["module"] == "windows_entry.py" for frame in sample["locations"])
                 assert sample["human_tested"] is False and sample["nvda_verified"] is False
-            assert _run_probe(child.pid, handle) == "DIALOG_CLOSED"
+            assert _run_probe(window_owner, handle) == "DIALOG_CLOSED"
             assert child.wait(timeout=10) == 2
         finally:
             if child.poll() is None:

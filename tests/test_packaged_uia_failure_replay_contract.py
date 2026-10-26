@@ -67,4 +67,8 @@ def test_source_and_frozen_lock_controls_precede_the_primary_gui_audit():
     native = (ROOT / 'tests/test_external_uia_duplicate_native_dialog.py').read_text(encoding='utf-8')
     assert 'env.pop("PYTHONPATH", None)' in native
     assert 'command = [packaged_exe]' in native
-    assert '_visible_handle(child, timeout=90 if packaged else 15)' in native
+    assert 'child, timeout=90 if packaged else 15, process_family=packaged' in native
+    assert 'source.index("function Get-ProcessFamilyIds {")' in native
+    assert 'allowed = _family_ids(process.pid)' in native
+    assert 'owner.value in allowed' in native
+    assert '_run_probe(window_owner, handle)' in native

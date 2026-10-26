@@ -73,6 +73,165 @@ class _DerivedRunEconomics:
     can_complete: bool
 
 
+_RUN_ACTION_BINDING_EVENT = "RUN_ACTION_BINDING"
+
+
+def _run_action_binding_payload(
+    plan: ExecutionPlan,
+    config: PaperExecutionModelConfig,
+) -> dict[str, Any]:
+    """Canonical durable action/model projection for PAPER attempt authority."""
+
+    if not isinstance(plan, ExecutionPlan):
+        raise TypeError("plan must be ExecutionPlan")
+    if not isinstance(config, PaperExecutionModelConfig):
+        raise TypeError("config must be PaperExecutionModelConfig")
+    return {
+        "plan_id": plan.plan_id,
+        "plan_fingerprint": plan.fingerprint,
+        "model_fingerprint": config.fingerprint,
+        "actions": [action.to_dict() for action in plan.actions],
+    }
+
+
+def _resolve_run_action_binding(
+    run_events: list[dict[str, Any]] | tuple[dict[str, Any], ...],
+    *,
+    run_id: str,
+) -> tuple[dict[str, Any], tuple[ExecutionAction, ...]]:
+    """Resolve one binding and prove it agrees with the durable reservation."""
+
+    reservations = [
+        event for event in run_events if event["event_type"] == "RUN_RESERVED"
+    ]
+    if len(reservations) != 1:
+        raise PaperExecutionIntegrityError(
+            "run needs exactly one durable reservation"
+        )
+    bindings = [
+        event
+        for event in run_events
+        if event["event_type"] == _RUN_ACTION_BINDING_EVENT
+    ]
+    if len(bindings) != 1:
+        raise PaperExecutionIntegrityError(
+            "run needs exactly one durable action/model binding"
+        )
+    binding = bindings[0]
+    if binding["run_id"] != run_id:
+        raise PaperExecutionIntegrityError(
+            "durable action/model binding run identity mismatch"
+        )
+    payload = binding["payload"]
+    if type(payload) is not dict or set(payload) != {
+        "plan_id",
+        "plan_fingerprint",
+        "model_fingerprint",
+        "actions",
+    }:
+        raise PaperExecutionIntegrityError(
+            "durable action/model binding payload schema is invalid"
+        )
+    for field in ("plan_id", "plan_fingerprint", "model_fingerprint"):
+        if type(payload[field]) is not str or not payload[field]:
+            raise PaperExecutionIntegrityError(
+                f"durable action/model binding {field} is invalid"
+            )
+    raw_actions = payload["actions"]
+    if type(raw_actions) is not list or not raw_actions:
+        raise PaperExecutionIntegrityError(
+            "durable action/model binding actions are invalid"
+        )
+    actions: list[ExecutionAction] = []
+    for raw in raw_actions:
+        if type(raw) is not dict:
+            raise PaperExecutionIntegrityError(
+                "durable action/model binding action is invalid"
+            )
+        try:
+            action = ExecutionAction(**raw)
+        except (TypeError, ValueError) as exc:
+            raise PaperExecutionIntegrityError(
+                "durable action/model binding action is invalid"
+            ) from exc
+        if action.to_dict() != raw:
+            raise PaperExecutionIntegrityError(
+                "durable action/model binding action is non-canonical"
+            )
+        actions.append(action)
+    if len({action.action_id for action in actions}) != len(actions):
+        raise PaperExecutionIntegrityError(
+            "durable action/model binding action ids are not unique"
+        )
+
+    reservation = reservations[0]["payload"]
+    if type(reservation) is not dict:
+        raise PaperExecutionIntegrityError(
+            "durable reservation payload is invalid"
+        )
+    action_ids = reservation.get("action_ids")
+    if (
+        type(action_ids) is not list
+        or any(type(item) is not str or not item for item in action_ids)
+    ):
+        raise PaperExecutionIntegrityError(
+            "durable reservation action_ids are invalid"
+        )
+    if (
+        payload["plan_id"] != reservation.get("plan_id")
+        or payload["plan_fingerprint"] != reservation.get("plan_fingerprint")
+        or payload["model_fingerprint"] != reservation.get("model_fingerprint")
+        or [action.action_id for action in actions] != action_ids
+    ):
+        raise PaperExecutionIntegrityError(
+            "durable action/model binding conflicts with reservation"
+        )
+    return payload, tuple(actions)
+
+
+def _validate_attempt_against_binding(
+    attempt: PaperLegAttempt,
+    *,
+    run_id: str,
+    binding: dict[str, Any],
+    actions: tuple[ExecutionAction, ...],
+) -> None:
+    """Fail closed before caller-authored attempt economics can become truth."""
+
+    if not isinstance(attempt, PaperLegAttempt):
+        raise TypeError("attempt must be PaperLegAttempt")
+    if (
+        attempt.run_id != run_id
+        or attempt.plan_id != binding["plan_id"]
+        or attempt.model_fingerprint != binding["model_fingerprint"]
+        or attempt.sequence >= len(actions)
+    ):
+        raise PaperExecutionIntegrityError(
+            "PAPER attempt conflicts with reserved action/model binding"
+        )
+    action = actions[attempt.sequence]
+    if action.side != "BACK":
+        raise PaperExecutionStateError(
+            "PAPER capital-at-risk binding supports BACK only"
+        )
+    if (
+        attempt.action_id != action.action_id
+        or attempt.bookmaker_id != action.bookmaker_id
+        or attempt.account_id != action.account_id
+        or attempt.event_id != action.event_id
+        or attempt.market_id != action.market_id
+        or attempt.selection_id != action.selection_id
+        or attempt.side != action.side
+        or attempt.decision_quote_id != action.quote_id
+        or attempt.decision_odds != action.requested_odds
+        or attempt.requested_stake != action.requested_stake
+        or attempt.decision_observed_at != action.quote_observed_at
+    ):
+        raise PaperExecutionIntegrityError(
+            "PAPER attempt conflicts with reserved action/model binding"
+        )
+
+
 def _derive_run_economics(
     action_ids: tuple[str, ...],
     attempts: tuple[PaperLegAttempt, ...],
@@ -141,6 +300,52 @@ def _derive_run_economics(
 
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
+
+    def reserve_run(
+        self,
+        *,
+        run_id: str,
+        trigger_id: str,
+        plan: ExecutionPlan,
+        config: PaperExecutionModelConfig,
+        started_at: str,
+        observation_evidence_ids: Mapping[str, str],
+    ) -> None:
+        # Keep the historical RUN_RESERVED payload stable, then add a separate
+        # append-only authority projection.  A crash between these events is safe:
+        # attempts fail closed until the same canonical reservation call retries
+        # and durably installs the idempotent binding.
+        super().reserve_run(
+            run_id=run_id,
+            trigger_id=trigger_id,
+            plan=plan,
+            config=config,
+            started_at=started_at,
+            observation_evidence_ids=observation_evidence_ids,
+        )
+        self._append_event(
+            event_type=_RUN_ACTION_BINDING_EVENT,
+            run_id=run_id,
+            key=f"{run_id}:action-binding",
+            payload=_run_action_binding_payload(plan, config),
+        )
+
+    def record_attempt(self, attempt: PaperLegAttempt) -> None:
+        if not isinstance(attempt, PaperLegAttempt):
+            raise TypeError("attempt must be PaperLegAttempt")
+        run_id = _impl._text(attempt.run_id, "run_id")
+        run_events = list(self.events(run_id))
+        binding, actions = _resolve_run_action_binding(
+            run_events,
+            run_id=run_id,
+        )
+        _validate_attempt_against_binding(
+            attempt,
+            run_id=run_id,
+            binding=binding,
+            actions=actions,
+        )
+        super().record_attempt(attempt)
 
     def _append_completion_unlocked(
         self,
@@ -222,14 +427,10 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 raise PaperExecutionIntegrityError(
                     "completion requires exactly one durable reservation"
                 )
-            action_ids_raw = reservations[0]["payload"].get("action_ids")
-            if (
-                type(action_ids_raw) is not list
-                or any(type(item) is not str or not item for item in action_ids_raw)
-            ):
-                raise PaperExecutionIntegrityError(
-                    "durable reservation action_ids are invalid"
-                )
+            binding, actions = _resolve_run_action_binding(
+                run_events,
+                run_id=run_id,
+            )
             attempts = tuple(
                 sorted(
                     (
@@ -240,7 +441,17 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                     key=lambda item: item.sequence,
                 )
             )
-            derived = _derive_run_economics(tuple(action_ids_raw), attempts)
+            for attempt in attempts:
+                _validate_attempt_against_binding(
+                    attempt,
+                    run_id=run_id,
+                    binding=binding,
+                    actions=actions,
+                )
+            derived = _derive_run_economics(
+                tuple(action.action_id for action in actions),
+                attempts,
+            )
             if not derived.can_complete:
                 raise PaperExecutionStateError(
                     "run cannot complete before a terminal outcome or all actions ACCEPTED"
@@ -300,6 +511,15 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         if reserve[0]["payload"] != expected_reserve:
             raise PaperExecutionStateError("run identity conflicts with durable reservation")
 
+        binding, bound_actions = _resolve_run_action_binding(
+            list(events),
+            run_id=run_id,
+        )
+        if binding != _run_action_binding_payload(plan, config):
+            raise PaperExecutionIntegrityError(
+                "durable action/model binding conflicts with supplied plan/config"
+            )
+
         attempt_events = [
             event for event in events if event["event_type"] == "ATTEMPT_RECORDED"
         ]
@@ -309,8 +529,15 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
                 key=lambda item: item.sequence,
             )
         )
+        for attempt in attempts:
+            _validate_attempt_against_binding(
+                attempt,
+                run_id=run_id,
+                binding=binding,
+                actions=bound_actions,
+            )
         derived = _derive_run_economics(
-            tuple(action.action_id for action in plan.actions),
+            tuple(action.action_id for action in bound_actions),
             attempts,
         )
 

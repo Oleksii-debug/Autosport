@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import os
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Decimal
@@ -18,6 +19,11 @@ from pathlib import Path
 from typing import Any, Final
 
 from .integrity import atomic_write_json
+from .monotonic_workspace_authority import (
+    AuthorityPhase,
+    MonotonicWorkspaceAuthority,
+    MonotonicWorkspaceAuthorityError,
+)
 from .learning_environment import (
     Action,
     EnvironmentCheckpoint,
@@ -48,6 +54,9 @@ from .workspace_lock import WorkspaceEconomicLock
 AGENT_LOOP_SCHEMA: Final = "autosport.agent_loop"
 AGENT_LOOP_SCHEMA_VERSION: Final = 3
 AGENT_LOOP_LEGACY_SCHEMA_VERSION: Final = 2
+_AGENT_LOOP_MONOTONIC_DOMAIN: Final = "agent-loop-state"
+_AGENT_LOOP_MONOTONIC_BINDING_SCHEMA: Final = "autosport.agent_loop.monotonic_binding"
+_AGENT_LOOP_MONOTONIC_BINDING_VERSION: Final = 1
 _HEX: Final = frozenset("0123456789abcdef")
 
 
@@ -483,11 +492,18 @@ class AgentLoopRuntime:
             "updated_at": _timestamp_identity(at, "at"),
         }
         target.parent.mkdir(parents=True, exist_ok=True)
+        runtime = object.__new__(cls)
+        runtime.path = target
         with WorkspaceEconomicLock(target.parent):
             if not target.exists():
+                runtime._assert_pristine_creation_allowed()
                 cls._write_state(target, initial)
             else:
-                existing = cls(target)._read()
+                existing = runtime._read_local()
+                runtime._ensure_monotonic_state(
+                    existing,
+                    adopt_if_missing=existing["sequence"] > 0,
+                )
                 if existing["identity"] != identity:
                     raise ConflictingAgentLoopEvidenceError(
                         "existing AgentLoop identity conflicts with initialization"
@@ -554,7 +570,177 @@ class AgentLoopRuntime:
         state["state_sha256"] = _digest(state_without_digest)
         atomic_write_json(path, state)
 
+    @staticmethod
+    def _monotonic_key(path: Path) -> str:
+        name = os.path.normcase(Path(path).name)
+        return "agent-loop-" + hashlib.sha256(name.encode("utf-8")).hexdigest()
+
+    @classmethod
+    def _monotonic_authority(cls, path: Path) -> MonotonicWorkspaceAuthority:
+        absolute = Path(os.path.abspath(os.fspath(path)))
+        return MonotonicWorkspaceAuthority(
+            workspace=absolute.parent,
+            domain=_AGENT_LOOP_MONOTONIC_DOMAIN,
+            key=cls._monotonic_key(absolute),
+        )
+
+    @classmethod
+    def _monotonic_binding(cls, path: Path, state: dict[str, Any]) -> str:
+        return _digest(
+            {
+                "schema": _AGENT_LOOP_MONOTONIC_BINDING_SCHEMA,
+                "schema_version": _AGENT_LOOP_MONOTONIC_BINDING_VERSION,
+                "state_key": cls._monotonic_key(path),
+                "identity": state["identity"],
+            }
+        )
+
+    @staticmethod
+    def _monotonic_tx_id(
+        *,
+        operation: str,
+        observed_state_sha256: str | None,
+        intended_state_sha256: str,
+        semantic_binding_sha256: str,
+        authority_tip_sha256: str | None = None,
+    ) -> str:
+        return _digest(
+            {
+                "operation": operation,
+                "observed_state_sha256": observed_state_sha256,
+                "intended_state_sha256": intended_state_sha256,
+                "semantic_binding_sha256": semantic_binding_sha256,
+                "authority_tip_sha256": authority_tip_sha256,
+            }
+        )
+
+    @staticmethod
+    def _raise_monotonic_error(exc: MonotonicWorkspaceAuthorityError) -> None:
+        raise AgentLoopError(
+            f"AgentLoop monotonic state authority rejected local state: {exc}"
+        ) from exc
+
+    def _assert_pristine_creation_allowed(self) -> None:
+        try:
+            history = self._monotonic_authority(self.path).read_history()
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+        if history:
+            raise AgentLoopError(
+                "AgentLoop state is missing but monotonic authority preserves prior history"
+            )
+
+    def _ensure_monotonic_state(
+        self,
+        state: dict[str, Any],
+        *,
+        adopt_if_missing: bool,
+    ) -> None:
+        state_sha256 = state["state_sha256"]
+        binding_sha256 = self._monotonic_binding(self.path, state)
+        try:
+            authority = self._monotonic_authority(self.path)
+            history = authority.read_history()
+            if not history:
+                if not adopt_if_missing:
+                    return
+                tx_id = self._monotonic_tx_id(
+                    operation="ADOPT_VALIDATED_BASELINE",
+                    observed_state_sha256=None,
+                    intended_state_sha256=state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                authority.prepare(
+                    tx_id=tx_id,
+                    observed_state_sha256=None,
+                    intended_state_sha256=state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                authority.commit(
+                    tx_id=tx_id,
+                    observed_state_sha256=state_sha256,
+                    semantic_binding_sha256=binding_sha256,
+                )
+                return
+
+            latest = history[-1]
+            if latest.phase is AuthorityPhase.PREPARE:
+                authority.recover(
+                    observed_state_sha256=state_sha256,
+                    tx_id=latest.tx_id,
+                    semantic_binding_sha256=binding_sha256,
+                )
+            else:
+                authority.recover(observed_state_sha256=state_sha256)
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
+    def _publish_monotonic_state(
+        self,
+        *,
+        observed_state_sha256: str,
+        state_without_digest: dict[str, Any],
+    ) -> None:
+        intended_state_sha256 = _digest(state_without_digest)
+        candidate = dict(state_without_digest)
+        candidate["state_sha256"] = intended_state_sha256
+        binding_sha256 = self._monotonic_binding(self.path, candidate)
+        try:
+            authority = self._monotonic_authority(self.path)
+            history = authority.read_history()
+            if not history:
+                raise AgentLoopError(
+                    "AgentLoop monotonic baseline is missing before state publication"
+                )
+            if history[-1].phase is AuthorityPhase.PREPARE:
+                raise AgentLoopError(
+                    "AgentLoop monotonic authority still has an unresolved PREPARE"
+                )
+            tx_id = self._monotonic_tx_id(
+                operation="PUBLISH",
+                observed_state_sha256=observed_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=binding_sha256,
+                authority_tip_sha256=history[-1].record_sha256,
+            )
+            authority.prepare(
+                tx_id=tx_id,
+                observed_state_sha256=observed_state_sha256,
+                intended_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=binding_sha256,
+            )
+            self._write_state(self.path, state_without_digest)
+            published = self._read_local()
+            if published["state_sha256"] != intended_state_sha256:
+                raise AgentLoopError(
+                    "published AgentLoop state digest differs from prepared monotonic state"
+                )
+            if self._monotonic_binding(self.path, published) != binding_sha256:
+                raise AgentLoopError(
+                    "published AgentLoop identity differs from prepared monotonic binding"
+                )
+            authority.commit(
+                tx_id=tx_id,
+                observed_state_sha256=intended_state_sha256,
+                semantic_binding_sha256=binding_sha256,
+            )
+        except MonotonicWorkspaceAuthorityError as exc:
+            self._raise_monotonic_error(exc)
+
     def _read(self) -> dict[str, Any]:
+        with WorkspaceEconomicLock(self.path.parent):
+            try:
+                state = self._read_local()
+            except FileNotFoundError:
+                self._assert_pristine_creation_allowed()
+                raise
+            self._ensure_monotonic_state(
+                state,
+                adopt_if_missing=state["sequence"] > 0,
+            )
+            return state
+
+    def _read_local(self) -> dict[str, Any]:
         raw = self.path.read_text(encoding="utf-8")
         try:
             state = json.loads(
@@ -1610,7 +1796,9 @@ class AgentLoopRuntime:
     def _mutate(self, at: str, mutate) -> AgentLoopSnapshot:
         now = _timestamp_identity(at, "at")
         with WorkspaceEconomicLock(self.path.parent):
-            state = self._read()
+            state = self._read_local()
+            self._ensure_monotonic_state(state, adopt_if_missing=True)
+            observed_state_sha256 = state["state_sha256"]
             if _instant(now, "at") < _instant(
                 state["updated_at"], "updated_at"
             ):
@@ -1618,7 +1806,10 @@ class AgentLoopRuntime:
             mutate(state, now)
             state["sequence"] += 1
             state["updated_at"] = now
-            self._write_state(self.path, self._without_digest(state))
+            self._publish_monotonic_state(
+                observed_state_sha256=observed_state_sha256,
+                state_without_digest=self._without_digest(state),
+            )
         return self.snapshot()
 
     def begin_observation(

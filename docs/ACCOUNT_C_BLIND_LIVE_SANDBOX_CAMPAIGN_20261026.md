@@ -1,0 +1,92 @@
+# Account C blind live PAPER campaign — 2026-10-26
+
+## Decision
+
+The development campaign runs against ParlayAPI's documented no-auth table-tennis
+sandbox. It is a synthetic, PAPER-only endurance exercise. It is not a bookmaker
+feed, match-result feed, forward-evidence population, profitability test, or release
+qualification. The decision policy receives only the market scope, quote count, and
+snapshot identity. The audit and settlement authorities always retain the explicit
+`SIMULATED` truth label and simulation-model identity.
+
+The workflow starts two one-hour processes over one durable workspace. Session two
+must load the exact PaperBook, causal-environment checkpoint, policy generation,
+deduplication identity, and counters produced by session one. A fixed cutoff is
+created before the first decision. Every synthetic settlement is derived only from a
+later available snapshot, and the runner refuses a segment with fewer than two source
+snapshots.
+
+No API model, Drive credential, real-money account, bookmaker login, bet-placement
+route, or user secret is used.
+
+## Ten-platform Ukrainian market screen
+
+This is a compliance screen, not a popularity ranking and not authorization to copy
+site content. The current regulatory source of truth is the PlayCity open-data and
+license-register page: <https://playcity.gov.ua/publichna-informatsiia/vidkryti-dani-playcity>.
+
+| Candidate | Screen result | Automated collection decision |
+|---|---|---|
+| GGBET | Public live/table-tennis UI and Ukrainian licence disclosure found | UI diagnostic only; terms prohibit bot/copy use without permission |
+| VBET | Candidate licensed Ukrainian operator | No collection without a machine-use licence or contracted API |
+| BETON | Candidate licensed Ukrainian operator | No collection without a machine-use licence or contracted API |
+| BETKING | Candidate licensed Ukrainian operator | No collection without a machine-use licence or contracted API |
+| Favbet | Licence status requires fresh registry verification after reported 2026 termination decision | Rejected pending authoritative re-verification |
+| Parimatch | No current admissible source contract established | Rejected |
+| 1xBet | No current admissible Ukrainian licence/source contract established | Rejected |
+| bet365 | No current admissible Ukrainian licence/source contract established | Rejected |
+| Melbet | No current admissible Ukrainian licence/source contract established | Rejected |
+| Pin-Up | No current admissible Ukrainian licence/source contract established | Rejected |
+
+GGBET was selected only for public-page reachability diagnosis. It was not scraped.
+The production path remains fail-closed until an operator or data vendor supplies
+documented rights for automated in-play prices, provider-owned timestamps, stable
+event identities, and authoritative results.
+
+## Source diagnostics
+
+ParlayAPI documents table tennis and a sandbox intended for integration testing:
+<https://parlay-api.com/docs>. The no-key public preview currently rejects table
+tennis, while the documented sandbox period-market endpoint returns synthetic rows.
+The endpoint's use of “live” does not establish a bookmaker in-play state or an
+authoritative match outcome. For that reason, later price movement is used only as
+an explicitly named simulation model.
+
+The stored evidence includes neither raw bookmaker content nor reusable source
+pricing. Only bounded synthetic PaperBook state, causal hashes, aggregate counters,
+and the transparent policy state are uploaded for 14 days.
+
+## Frozen safety and scientific boundaries
+
+- Initial virtual bankroll is exactly 10,000 UAH; maximum stake is 50 UAH and never
+  more than 0.5% of current virtual balance.
+- Seven of every ten curriculum slots admit only two-event parlays when two distinct
+  events exist; two slots admit singles; one slot lets the transparent policy choose.
+- Decision evidence contains no execution-mode or synthetic-truth feature. Audit,
+  outcome, reward, and summary records always contain that truth.
+- The same decision snapshot cannot create a second action. A later snapshot and
+  later availability timestamp are mandatory before settlement and learning.
+- Positive and negative rewards are both retained. No observed result is inferred
+  from price movement.
+- `forward_evidence_eligible`, `promotion_authorized`, and `profitability_claim` are
+  mechanically false.
+- Existing forward-campaign adapters reject simulated witnesses, preventing this
+  campaign from entering NEW, REPLAY, RETENTION, or HOLDOUT product populations.
+
+## Reproduction
+
+```bash
+python -m pip install -e '.[test]'
+python -m pytest -q tests/test_paper_live_sandbox_campaign.py
+python scripts/run_account_c_blind_paper_campaign.py \
+  --workspace account-c-paper-evidence \
+  --segment-seconds 3600 --poll-seconds 30 \
+  --cutoff-seconds 7800 --expect-new
+python scripts/run_account_c_blind_paper_campaign.py \
+  --workspace account-c-paper-evidence \
+  --segment-seconds 3600 --poll-seconds 30 --expect-resume
+```
+
+The GitHub workflow executes the same two-process sequence. A green workflow proves
+only sandbox endurance, restart fidelity, and evidence-boundary enforcement. It does
+not prove sporting prediction quality, an economic edge, or profitability.

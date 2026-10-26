@@ -13,7 +13,7 @@ re-read keeps its real later availability timestamp instead of being backdated.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime
 import hashlib
 import json
 from weakref import WeakKeyDictionary, ref
@@ -181,6 +181,29 @@ def _nonempty_secret(value: object, name: str) -> None:
         )
 
 
+def _canonical_observed_at(clock: object) -> str:
+    """Read provider time only from the client clock sealed at construction."""
+    if not callable(clock):
+        raise scope.CampaignProviderScopeError(
+            "Betfair developer-app observation clock is unavailable"
+        )
+    try:
+        value = clock()
+    except Exception:
+        raise scope.CampaignProviderScopeError(
+            "Betfair developer-app observation clock failed"
+        ) from None
+    if (
+        not isinstance(value, datetime)
+        or value.tzinfo is None
+        or value.utcoffset() is None
+    ):
+        raise scope.CampaignProviderScopeError(
+            "Betfair developer-app observation clock must return timezone-aware datetime"
+        )
+    return value.isoformat()
+
+
 def _read_developer_account_identity(
     client: BetfairReadOnlyClient,
 ) -> _DeveloperAppIdentity:
@@ -191,10 +214,11 @@ def _read_developer_account_identity(
             "stable authenticated Betfair account identity is unavailable from non-canonical client"
         )
     origin = _CANONICAL_CLIENT_ORIGINS.get(client)
+    clock = client._clock
     if (
         origin is None
         or client._transport is not origin.transport
-        or client._clock is not origin.clock
+        or clock is not origin.clock
         or client._credentials is not origin.credentials
         or type(client._transport) is not UrllibBetfairHttpTransport
     ):
@@ -292,7 +316,7 @@ def _read_developer_account_identity(
     account_identity_sha256 = hashlib.sha256(
         _canonical_json(identity_payload)
     ).hexdigest()
-    observed_at = datetime.now(timezone.utc).isoformat()
+    observed_at = _canonical_observed_at(clock)
     return _DeveloperAppIdentity(account_identity_sha256, observed_at)
 
 

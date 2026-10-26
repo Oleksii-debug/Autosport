@@ -62,6 +62,13 @@ def _require_key(name: str, value: object) -> str:
     return value
 
 
+def _require_sport_key(value: object) -> str:
+    sport_key = _require_key("sport_key", value)
+    if sport_key in {"unknown", "mixed"}:
+        raise SurfaceCapabilityError("sport_key must not use a reserved dataset scope identity")
+    return sport_key
+
+
 def _require_utc(name: str, value: object) -> datetime:
     if not isinstance(value, datetime) or value.tzinfo is None:
         raise SurfaceCapabilityError(f"{name} must be timezone-aware")
@@ -133,7 +140,7 @@ class ParlaySurfaceObservation:
     def __post_init__(self) -> None:
         if self.provider_id != "parlayapi":
             raise SurfaceCapabilityError("provider_id must be exactly parlayapi")
-        object.__setattr__(self, "sport_key", _require_key("sport_key", self.sport_key))
+        object.__setattr__(self, "sport_key", _require_sport_key(self.sport_key))
         if type(self.surface) is not Surface:
             raise SurfaceCapabilityError("surface must be an exact Surface")
         observed = _require_utc("observed_at", self.observed_at)

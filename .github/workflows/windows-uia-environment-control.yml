@@ -96,3 +96,120 @@ jobs:
             uia-control.json
             uia-focus-control.json
           if-no-files-found: warn
+
+  packaged-failure-replay:
+    name: Pinned failed package replay (MIXED HEAD, NOT acceptance)
+    if: >-
+      github.event_name == 'pull_request' &&
+      (github.event.pull_request.number == 2573 ||
+      (github.event.pull_request.base.ref == 'account-b/plan6-6a-packaged-lifecycle-smoke' &&
+      github.event.pull_request.head.ref == 'account-b/plan6-uia-pinned-replay-20261027'))
+    runs-on: windows-latest
+    timeout-minutes: 8
+    permissions:
+      contents: read
+      actions: read
+    env:
+      REPLAY_SOURCE_SHA: c5c2890c1ec40afa005705bc82d4d149a3413241
+      REPLAY_PACKAGE_SHA256: 1e523a9cedfafb1cf53e212edcfbd71e3bd5545e79805169984dfa43b21e506c
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha }}
+          persist-credentials: false
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install exact checkout verifier (not the archived product)
+        shell: pwsh
+        run: |
+          python -m pip install --no-deps -e .
+          exit $LASTEXITCODE
+      - name: Download pinned independently verified failed bytes
+        uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4
+        with:
+          artifact-ids: '12697343003'
+          run-id: '40414794336'
+          github-token: ${{ github.token }}
+          path: ${{ runner.temp }}/autosport-uia-replay-input
+      - name: Verify old package identity before any extraction or execution
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $env:REPLAY_ARCHIVE = Join-Path $env:RUNNER_TEMP 'autosport-uia-replay-input/Autosport-V1-windows-x64.zip'
+          $actual = (Get-FileHash -LiteralPath $env:REPLAY_ARCHIVE -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -cne $env:REPLAY_PACKAGE_SHA256) { throw 'Pinned failed package digest mismatch' }
+          python -c 'import json,os; from autosport.release_package import verify_windows_package; print(json.dumps(verify_windows_package(os.environ["REPLAY_ARCHIVE"], expected_source_sha=os.environ["REPLAY_SOURCE_SHA"], require_source_manifest=True, require_dependency_metadata=True, require_dependency_graph=True, require_dependency_license_evidence=True, require_runtime_license_evidence=True, require_embedded_executable_inventory=True, require_binary_module_attribution=True, require_complete_binary_sbom=True)))'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $auditSha = (git rev-parse HEAD).Trim()
+          if ($auditSha -cne '${{ github.event.pull_request.head.sha }}') { throw 'Replay audit source drifted' }
+          [ordered]@{
+            evidence_class = 'MIXED_HEAD_FAILURE_REPLAY_NOT_RELEASE_QUALIFICATION'
+            archive_source_sha = $env:REPLAY_SOURCE_SHA
+            audit_source_sha = $auditSha
+            package_sha256 = $actual
+            human_tested = $false; nvda_verified = $false
+            whole_product_complete = $false; real_money_execution = $false
+          } | ConvertTo-Json | Set-Content -LiteralPath './uia-replay-binding.json' -Encoding utf8
+          $extract = Join-Path $env:RUNNER_TEMP 'autosport-uia-replay-extraction'
+          Expand-Archive -LiteralPath $env:REPLAY_ARCHIVE -DestinationPath $extract
+      - name: Prepare isolated failure-only sampler
+        shell: pwsh
+        run: |
+          $samplerRoot = Join-Path $env:RUNNER_TEMP 'Autosport-replay-stack-sampler'
+          python -m venv $samplerRoot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $samplerPython = Join-Path $samplerRoot 'Scripts/python.exe'
+          & $samplerPython -m pip install --no-deps --only-binary=:all: py-spy==0.4.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AUTOSPORT_UIA_STACK_PYTHON=$samplerPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AUTOSPORT_UIA_STACK_SAMPLER=$(Join-Path $samplerRoot 'Scripts/py-spy.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Replay existing external audit (never exact-head acceptance)
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $packageRoot = Join-Path $env:RUNNER_TEMP 'autosport-uia-replay-extraction/Autosport-V1'
+          $sandbox = Join-Path $env:RUNNER_TEMP 'autosport-uia-replay-state'
+          $env:LOCALAPPDATA = Join-Path $sandbox 'localappdata'
+          $env:AUTOSPORT_WORKSPACE = Join-Path $sandbox 'workspace'
+          New-Item -ItemType Directory -Path $env:LOCALAPPDATA | Out-Null
+          New-Item -ItemType Directory -Path $env:AUTOSPORT_WORKSPACE | Out-Null
+          $report = Join-Path $PWD 'uia-replay-audit.json'
+          $progress = Join-Path $PWD 'uia-replay-stage.txt'
+          $sid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          if ([string]::IsNullOrWhiteSpace($sid) -or $sid -notmatch '^S-') { throw 'Replay SID unavailable' }
+          $fenced = $false
+          try {
+            & icacls $packageRoot /deny "*${sid}:(OI)(CI)(WD,AD,WEA,WA,DE,DC)" /T /C | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Replay read-only fence failed' }
+            $fenced = $true
+            $audit = Start-Job -ScriptBlock {
+              param($scriptPath, $packageRoot, $report, $progress, $workspace, $hostile)
+              & $scriptPath -Exe (Join-Path $packageRoot 'Autosport.exe') -Output $report -ProgressOutput $progress -Workspace $workspace -WorkingDirectory $hostile
+            } -ArgumentList @((Join-Path $PWD 'scripts/external_uia_audit.ps1'), $packageRoot, $report, $progress, $env:AUTOSPORT_WORKSPACE, (Join-Path $env:SystemRoot 'System32'))
+            if ($null -eq (Wait-Job -Job $audit -Timeout 180)) {
+              # Never block on a poisoned COM provider's Stop-Job cleanup.
+              if ($null -ne $audit.ChildJobs[0].Process) {
+                try { $audit.ChildJobs[0].Process.Kill($true) } catch {}
+              }
+              throw 'Failure replay watchdog expired; NOT release qualification'
+            }
+            Receive-Job -Job $audit -ErrorAction Stop | Out-Null
+            if (-not (Test-Path -LiteralPath $report -PathType Leaf)) { throw 'Replay report missing' }
+            $result = Get-Content -LiteralPath $report -Raw | ConvertFrom-Json
+            Get-Content -LiteralPath $report -Raw | Write-Host
+            if ($result.status -cne 'PASS') { throw 'Pinned old-package replay failed; diagnostic only' }
+            Write-Host 'Replay observed PASS, but MIXED HEAD remains NOT release qualification'
+          } finally {
+            if ($fenced) { & icacls $packageRoot /remove:d "*$sid" /T /C | Out-Null }
+          }
+      - name: Preserve mixed-head replay evidence (NOT qualified release)
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: Windows-packaged-failure-replay-NOT-QUALIFIED
+          path: |
+            uia-replay-binding.json
+            uia-replay-audit.json
+            uia-replay-stage.txt
+          if-no-files-found: warn

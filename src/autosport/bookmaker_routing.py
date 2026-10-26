@@ -43,6 +43,89 @@ def _amount(value: object, name: str, *, positive: bool = False) -> Decimal:
     return value
 
 
+def _decimal_coefficient_and_exponent(value: Decimal) -> tuple[int, int]:
+    """Return exact finite Decimal as signed coefficient × 10**exponent."""
+
+    parts = value.as_tuple()
+    coefficient = 0
+    for digit in parts.digits:
+        coefficient = coefficient * 10 + digit
+    if parts.sign:
+        coefficient = -coefficient
+    return coefficient, int(parts.exponent)
+
+
+def _decimal_from_coefficient(coefficient: int, exponent: int) -> Decimal:
+    """Construct a Decimal without consulting the ambient Decimal context."""
+
+    sign = 1 if coefficient < 0 else 0
+    absolute = abs(coefficient)
+    if absolute == 0:
+        digits = (0,)
+    else:
+        reversed_digits: list[int] = []
+        while absolute:
+            absolute, digit = divmod(absolute, 10)
+            reversed_digits.append(digit)
+        digits = tuple(reversed(reversed_digits))
+    return Decimal((sign, digits, exponent))
+
+
+def _exact_decimal_sum(values: Iterable[Decimal]) -> Decimal:
+    """Sum finite Decimals exactly, independent of getcontext().prec."""
+
+    parts = tuple(_decimal_coefficient_and_exponent(value) for value in values)
+    if not parts:
+        return Decimal("0")
+    common_exponent = min(exponent for _, exponent in parts)
+    total = sum(
+        coefficient * (10 ** (exponent - common_exponent))
+        for coefficient, exponent in parts
+    )
+    return _decimal_from_coefficient(total, common_exponent)
+
+
+def _exact_decimal_add(left: Decimal, right: Decimal) -> Decimal:
+    return _exact_decimal_sum((left, right))
+
+
+def _exact_decimal_subtract(left: Decimal, right: Decimal) -> Decimal:
+    left_coefficient, left_exponent = _decimal_coefficient_and_exponent(left)
+    right_coefficient, right_exponent = _decimal_coefficient_and_exponent(right)
+    common_exponent = min(left_exponent, right_exponent)
+    result = (
+        left_coefficient * (10 ** (left_exponent - common_exponent))
+        - right_coefficient * (10 ** (right_exponent - common_exponent))
+    )
+    return _decimal_from_coefficient(result, common_exponent)
+
+
+def _exact_decimal_mul_int(value: Decimal, multiplier: int) -> Decimal:
+    if type(multiplier) is not int or multiplier < 0:
+        raise RoutingContractError("exact Decimal multiplier must be a non-negative int")
+    coefficient, exponent = _decimal_coefficient_and_exponent(value)
+    return _decimal_from_coefficient(coefficient * multiplier, exponent)
+
+
+def _exact_decimal_divmod_nonnegative(
+    value: Decimal,
+    quantum: Decimal,
+) -> tuple[int, Decimal]:
+    """Return exact integer quotient/remainder for non-negative finite Decimals."""
+
+    value_coefficient, value_exponent = _decimal_coefficient_and_exponent(value)
+    quantum_coefficient, quantum_exponent = _decimal_coefficient_and_exponent(quantum)
+    if value_coefficient < 0 or quantum_coefficient <= 0:
+        raise RoutingContractError(
+            "exact Decimal divmod requires non-negative value and positive quantum"
+        )
+    common_exponent = min(value_exponent, quantum_exponent)
+    scaled_value = value_coefficient * (10 ** (value_exponent - common_exponent))
+    scaled_quantum = quantum_coefficient * (10 ** (quantum_exponent - common_exponent))
+    quotient, remainder = divmod(scaled_value, scaled_quantum)
+    return quotient, _decimal_from_coefficient(remainder, common_exponent)
+
+
 @dataclass(frozen=True, slots=True)
 class VenueQuote:
     """One preselected execution venue bound to its own immutable quote evidence."""
@@ -333,20 +416,20 @@ def route_residual(
             continue
 
         accepted = accepted_by_identity.get(identity, Decimal("0"))
-        accepted += item.confirmed_accepted
+        accepted = _exact_decimal_add(accepted, item.confirmed_accepted)
         venue = by_identity[identity]
         if accepted > venue.acceptance_ceiling:
             raise RoutingContractError(
                 "confirmed accepted stake exceeds venue acceptance ceiling"
             )
         accepted_by_identity[identity] = accepted
-        confirmed += item.confirmed_accepted
+        confirmed = _exact_decimal_add(confirmed, item.confirmed_accepted)
         if confirmed > requested:
             raise RoutingContractError(
                 "confirmed accepted stake exceeds requested stake"
             )
 
-    residual = requested - confirmed
+    residual = _exact_decimal_subtract(requested, confirmed)
     if has_unknown:
         return RoutingDecision(
             RoutingState.BLOCKED_UNKNOWN,
@@ -367,7 +450,10 @@ def route_residual(
         if identity in refused or not venue.account_enabled:
             continue
         accepted = accepted_by_identity.get(identity, Decimal("0"))
-        remaining_capacity = venue.acceptance_ceiling - accepted
+        remaining_capacity = _exact_decimal_subtract(
+            venue.acceptance_ceiling,
+            accepted,
+        )
         if remaining_capacity <= 0:
             continue
         proposed = min(residual, remaining_capacity)

@@ -234,11 +234,41 @@ class SessionEvidence:
             raise CampaignError("session counts must be integers")
         if self.wins + self.losses + self.voids > self.bets:
             raise CampaignError("wins + losses + voids cannot exceed bets")
-        if _canonical_decimal(self.starting_bankroll, "starting_bankroll", non_negative=True) is None:
+        for name in (
+            "starting_bankroll",
+            "ending_bankroll",
+            "net_profit",
+            "turnover",
+        ):
+            value = getattr(self, name)
+            if value is not None and type(value) is not Decimal:
+                raise CampaignError(f"{name} must be an exact Decimal")
+        starting_bankroll_text = _canonical_decimal(
+            self.starting_bankroll,
+            "starting_bankroll",
+            non_negative=True,
+        )
+        if starting_bankroll_text is None:
             raise CampaignError("starting_bankroll is required")
-        if _canonical_decimal(self.ending_bankroll, "ending_bankroll", non_negative=True) is None:
+        ending_bankroll_text = _canonical_decimal(
+            self.ending_bankroll,
+            "ending_bankroll",
+            non_negative=True,
+        )
+        if ending_bankroll_text is None:
             raise CampaignError("ending_bankroll is required")
-        _canonical_decimal(self.net_profit, "net_profit")
+        net_profit_text = _canonical_decimal(self.net_profit, "net_profit")
+        if net_profit_text is None:
+            raise CampaignError("net_profit is required")
+        if _sum_decimal(
+            (
+                Decimal(starting_bankroll_text),
+                Decimal(net_profit_text),
+            )
+        ) != Decimal(ending_bankroll_text):
+            raise CampaignError(
+                "ending_bankroll must equal starting_bankroll + net_profit"
+            )
         _canonical_decimal(self.turnover, "turnover", non_negative=True)
         for name in ("brier_sum", "log_loss_sum", "max_drawdown", "peak_exposure", "risk_of_ruin", "volatility"):
             _canonical_decimal(getattr(self, name), name, non_negative=(name not in {"risk_of_ruin"}))

@@ -16,6 +16,12 @@ created before the first decision. Every synthetic settlement is derived only fr
 later available snapshot, and the runner refuses a segment with fewer than two source
 snapshots.
 
+After session two, a third independent Python process reloads the final state before
+artifact upload. The workflow exports the existing PaperBook authority's separate
+append-only witness chain alongside the state and records SHA-256 for every exported
+file. The witness remains deliberately bound to its original absolute path; the
+export is audit evidence, not permission to transplant or rebind economic authority.
+
 No API model, Drive credential, real-money account, bookmaker login, bet-placement
 route, or user secret is used.
 
@@ -85,6 +91,8 @@ python scripts/run_account_c_blind_paper_campaign.py \
 python scripts/run_account_c_blind_paper_campaign.py \
   --workspace account-c-paper-evidence \
   --segment-seconds 3600 --poll-seconds 30 --expect-resume
+python scripts/run_account_c_blind_paper_campaign.py \
+  --workspace account-c-paper-evidence --verify-only
 ```
 
 The GitHub workflow executes the same two-process sequence. A green workflow proves

@@ -36,6 +36,7 @@ jobs:
     env:
       SEGMENT_SECONDS: ${{ inputs.segment_seconds || 3600 }}
       POLL_SECONDS: ${{ inputs.poll_seconds || 30 }}
+      AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR: ${{ runner.temp }}/account-c-paper-authority-${{ github.run_id }}
     steps:
       - name: Checkout exact source
         uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
@@ -66,6 +67,22 @@ jobs:
           --segment-seconds "$SEGMENT_SECONDS"
           --poll-seconds "$POLL_SECONDS"
           --expect-resume
+      - name: Independently reload final durable checkpoint
+        run: >-
+          python scripts/run_account_c_blind_paper_campaign.py
+          --workspace account-c-paper-evidence
+          --verify-only
+      - name: Export independent PaperBook authority and artifact digests
+        shell: bash
+        run: |
+          mkdir -p account-c-paper-evidence/independent-authority-export
+          cp -R "$AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR"/. \
+            account-c-paper-evidence/independent-authority-export/
+          find account-c-paper-evidence -type f \
+            ! -name artifact-sha256.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > account-c-paper-evidence/artifact-sha256.txt
       - name: Upload bounded synthetic evidence
         if: always()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

@@ -34,6 +34,7 @@ def _parser() -> argparse.ArgumentParser:
     mode = parser.add_mutually_exclusive_group(required=True)
     mode.add_argument("--expect-new", action="store_true")
     mode.add_argument("--expect-resume", action="store_true")
+    mode.add_argument("--verify-only", action="store_true")
     return parser
 
 
@@ -52,6 +53,18 @@ def _new_campaign(args: argparse.Namespace) -> BlindPaperSandboxCampaign:
     )
 
 
+def _validate_boundary(summary: dict[str, object]) -> None:
+    if (
+        summary["truth"] != "simulated"
+        or summary["paper_only"] is not True
+        or summary["real_money_execution"] is not False
+        or summary["forward_evidence_eligible"] is not False
+        or summary["promotion_authorized"] is not False
+        or summary["profitability_claim"] is not False
+    ):
+        raise SandboxCampaignError("sandbox evidence boundary was violated")
+
+
 def main() -> int:
     args = _parser().parse_args()
     state_path = args.workspace / "campaign_state.json"
@@ -61,8 +74,26 @@ def main() -> int:
         campaign = _new_campaign(args)
     else:
         if not state_path.is_file():
-            raise SandboxCampaignError("expect-resume requires campaign_state.json")
+            raise SandboxCampaignError(
+                "expect-resume/verify-only requires campaign_state.json"
+            )
         campaign = BlindPaperSandboxCampaign.load(args.workspace)
+
+    if args.verify_only:
+        summary = campaign.summary()
+        counters = summary["counters"]
+        if (
+            type(counters) is not dict
+            or summary["policy_generation"] <= 0
+            or counters.get("NETWORK_SNAPSHOTS", 0) < 2
+        ):
+            raise SandboxCampaignError(
+                "verified campaign lacks completed network learning evidence"
+            )
+        _validate_boundary(summary)
+        summary["independent_restart_verification"] = "PASS"
+        print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
+        return 0
 
     summary = run_network_endurance(
         campaign,
@@ -76,15 +107,7 @@ def main() -> int:
     )
     if summary["network_snapshots_segment"] < 2:
         raise SandboxCampaignError("segment requires at least two source snapshots")
-    if (
-        summary["truth"] != "simulated"
-        or summary["paper_only"] is not True
-        or summary["real_money_execution"] is not False
-        or summary["forward_evidence_eligible"] is not False
-        or summary["promotion_authorized"] is not False
-        or summary["profitability_claim"] is not False
-    ):
-        raise SandboxCampaignError("sandbox evidence boundary was violated")
+    _validate_boundary(summary)
     print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
     return 0
 

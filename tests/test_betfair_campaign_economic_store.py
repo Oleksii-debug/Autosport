@@ -283,3 +283,251 @@ def test_provider_correction_rejects_wrong_predecessor_receipt_link(
         )
     assert store.latest() == first
     assert store.verify_chain() == (first,)
+
+def test_multiple_market_commissions_share_one_durable_campaign_economics(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_receipt = _receipt(
+        market_id="1.234",
+        commission=Decimal("2.25"),
+    )
+    source, campaign, origin_client = _authorities(
+        monkeypatch,
+        receipt=first_receipt,
+    )
+    second_receipt = _receipt(
+        market_id="1.999",
+        commission=Decimal("1.25"),
+    )
+    receipts = {
+        first_receipt.receipt_id: first_receipt,
+        second_receipt.receipt_id: second_receipt,
+    }
+
+    def resolve_receipt(source, *, receipt_id, record_sha256, as_of):
+        receipt = receipts[receipt_id]
+        assert record_sha256 == receipt.record_sha256
+        return receipt, origin_client
+
+    monkeypatch.setattr(
+        commission_bridge._source_origin,
+        "resolve_bound_receipt",
+        resolve_receipt,
+    )
+
+    workspace = tmp_path / "multi-market-workspace"
+    authority_root = tmp_path / "multi-market-authority"
+    first_store = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=_scope(market_id="1.234"),
+        authority_root=authority_root,
+    )
+    first_id = first_store.append_betfair_commission(
+        receipt_id=first_receipt.receipt_id,
+        record_sha256=first_receipt.record_sha256,
+        as_of=NOW,
+    )
+    first_version = first_store.latest()
+    assert first_version is not None
+    assert first_version.version_id == first_id
+
+    second_store = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=_scope(market_id="1.999"),
+        authority_root=authority_root,
+    )
+    second_id = second_store.append_betfair_commission(
+        receipt_id=second_receipt.receipt_id,
+        record_sha256=second_receipt.record_sha256,
+        as_of=NOW,
+    )
+    combined = second_store.latest()
+    assert combined is not None
+    assert combined.version_id == second_id
+    assert combined.previous_version_id == first_version.version_id
+    assert {
+        (item.source.evidence_id, item.amount)
+        for item in combined.costs
+    } == {
+        (first_receipt.receipt_id, Decimal("2.25")),
+        (second_receipt.receipt_id, Decimal("1.25")),
+    }
+    assert durable_store._UNRESOLVED_REASON not in combined.incomplete_reasons
+    assert second_store.verify_chain() == (first_version, combined)
+
+    restarted_second = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=_scope(market_id="1.999"),
+        authority_root=authority_root,
+    )
+    assert restarted_second.latest() == combined
+    assert (
+        restarted_second.append_betfair_commission(
+            receipt_id=second_receipt.receipt_id,
+            record_sha256=second_receipt.record_sha256,
+            as_of=NOW,
+        )
+        == combined.version_id
+    )
+    assert restarted_second.verify_chain() == (first_version, combined)
+
+    restarted_first = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=_scope(market_id="1.234"),
+        authority_root=authority_root,
+    )
+    assert (
+        restarted_first.append_betfair_commission(
+            receipt_id=first_receipt.receipt_id,
+            record_sha256=first_receipt.record_sha256,
+            as_of=NOW,
+        )
+        == combined.version_id
+    )
+    assert restarted_first.verify_chain() == (first_version, combined)
+
+
+def test_multi_market_correction_replaces_only_exact_market_predecessor(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    first_receipt = _receipt(
+        market_id="1.234",
+        commission=Decimal("2.25"),
+    )
+    source, campaign, origin_client = _authorities(
+        monkeypatch,
+        receipt=first_receipt,
+    )
+    second_receipt = _receipt(
+        market_id="1.999",
+        commission=Decimal("1.25"),
+    )
+    receipts = {
+        first_receipt.receipt_id: first_receipt,
+        second_receipt.receipt_id: second_receipt,
+    }
+
+    def resolve_receipt(source, *, receipt_id, record_sha256, as_of):
+        receipt = receipts[receipt_id]
+        assert record_sha256 == receipt.record_sha256
+        return receipt, origin_client
+
+    monkeypatch.setattr(
+        commission_bridge._source_origin,
+        "resolve_bound_receipt",
+        resolve_receipt,
+    )
+
+    workspace = tmp_path / "selective-correction-workspace"
+    authority_root = tmp_path / "selective-correction-authority"
+    first_store = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=_scope(market_id="1.234"),
+        authority_root=authority_root,
+    )
+    first_store.append_betfair_commission(
+        receipt_id=first_receipt.receipt_id,
+        record_sha256=first_receipt.record_sha256,
+        as_of=NOW,
+    )
+    first_version = first_store.latest()
+    assert first_version is not None
+    first_cost = first_version.costs[0]
+
+    second_store = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=_scope(market_id="1.999"),
+        authority_root=authority_root,
+    )
+    second_store.append_betfair_commission(
+        receipt_id=second_receipt.receipt_id,
+        record_sha256=second_receipt.record_sha256,
+        as_of=NOW,
+    )
+    before_correction = second_store.latest()
+    assert before_correction is not None
+    second_cost = next(
+        item
+        for item in before_correction.costs
+        if item.source.evidence_id == second_receipt.receipt_id
+    )
+
+    corrected_receipt = _receipt(
+        market_id="1.999",
+        commission=Decimal("1.75"),
+        supersedes_receipt_id=second_receipt.receipt_id,
+    )
+    receipts[corrected_receipt.receipt_id] = corrected_receipt
+
+    corrected_id = second_store.append_betfair_commission(
+        receipt_id=corrected_receipt.receipt_id,
+        record_sha256=corrected_receipt.record_sha256,
+        as_of=NOW,
+    )
+    corrected = second_store.latest()
+    assert corrected is not None
+    assert corrected.version_id == corrected_id
+    assert corrected.previous_version_id == before_correction.version_id
+    assert len(corrected.costs) == 2
+
+    retained_first = next(
+        item
+        for item in corrected.costs
+        if item.source.evidence_id == first_receipt.receipt_id
+    )
+    corrected_second = next(
+        item
+        for item in corrected.costs
+        if item.source.evidence_id == corrected_receipt.receipt_id
+    )
+    assert retained_first == first_cost
+    assert second_cost.cost_evidence_id not in {
+        item.cost_evidence_id for item in corrected.costs
+    }
+    assert corrected_second.amount == Decimal("1.75")
+    assert corrected_second.supersedes_cost_evidence_ids == (
+        second_cost.cost_evidence_id,
+    )
+    assert durable_store._UNRESOLVED_REASON not in corrected.incomplete_reasons
+    assert second_store.verify_chain() == (
+        first_version,
+        before_correction,
+        corrected,
+    )
+
+    restarted_second = BetfairCampaignEconomicEvidenceStore(
+        workspace,
+        campaign=campaign,
+        source=source,
+        provider_scope=_scope(market_id="1.999"),
+        authority_root=authority_root,
+    )
+    assert restarted_second.latest() == corrected
+    assert (
+        restarted_second.append_betfair_commission(
+            receipt_id=corrected_receipt.receipt_id,
+            record_sha256=corrected_receipt.record_sha256,
+            as_of=NOW,
+        )
+        == corrected.version_id
+    )
+    assert restarted_second.verify_chain() == (
+        first_version,
+        before_correction,
+        corrected,
+    )
+

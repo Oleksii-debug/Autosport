@@ -90,3 +90,22 @@ python scripts/run_account_c_blind_paper_campaign.py \
 The GitHub workflow executes the same two-process sequence. A green workflow proves
 only sandbox endurance, restart fidelity, and evidence-boundary enforcement. It does
 not prove sporting prediction quality, an economic edge, or profitability.
+
+## Existing research-to-learning integration
+
+The production multi-leg path continues to use the existing
+`ResearchDecisionPipeline`, `PaperBook`, `PaperSettlementLearningBridge`, and
+`PaperCampaignRuntime`; no second settlement or learning engine is introduced.
+`ResearchDecisionPipeline.decide_and_open` now accepts an optional exact causal
+`Observation`. When supplied, its complete immutable identity is written into the
+economic decision and the same binding enters the material-action intent hash. A
+retry with another observation therefore conflicts instead of silently reusing the
+ticket.
+
+The settlement bridge admits `OPEN_PAPER_RESEARCH_TICKET` only for the established
+`PAPER_PROPOSAL` AgentLoop action. It verifies the causal observation, availability
+before decision, exact ticket identity, stake, and the complete unique set of
+candidate quote keys before binding. A two-leg integration test then resolves the
+ticket through the existing observed settlement authority and obtains one causal
+reward plus one advanced environment checkpoint. Simulated sandbox outcomes remain
+outside this observed path.

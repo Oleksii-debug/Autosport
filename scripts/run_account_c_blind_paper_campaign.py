@@ -69,6 +69,10 @@ def main() -> int:
         workspace=args.workspace,
         duration_seconds=args.segment_seconds,
         poll_interval_seconds=args.poll_seconds,
+        progress=lambda event: print(
+            json.dumps(event, ensure_ascii=False, sort_keys=True),
+            flush=True,
+        ),
     )
     if summary["network_snapshots_segment"] < 2:
         raise SandboxCampaignError("segment requires at least two source snapshots")

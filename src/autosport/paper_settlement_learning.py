@@ -12,6 +12,7 @@ import json
 import re
 import os
 import tempfile
+from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime, timezone
 from decimal import Context, Decimal, DecimalException, Inexact, InvalidOperation, Overflow, Underflow, localcontext
@@ -56,8 +57,10 @@ _PAPER_DECISION_AGENT_ACTION_BINDINGS: Final = frozenset(
     {
         ("OPEN_PAPER_TICKET", "PAPER_PROPOSAL"),
         ("OPEN_PAPER_VALUE_TICKET", "PAPER_PROPOSAL"),
+        ("OPEN_PAPER_RESEARCH_TICKET", "PAPER_PROPOSAL"),
     }
 )
+_RESEARCH_DECISION_ACTION: Final = "OPEN_PAPER_RESEARCH_TICKET"
 
 
 class PaperSettlementLearningBridgeError(RuntimeError):
@@ -539,16 +542,51 @@ class PaperSettlementLearningBridge:
         if type(observation) is not Observation:
             raise TypeError("observation must use the exact canonical Observation type")
         Observation.__post_init__(observation)
-        if record.context_hash != observation.observation_id:
-            raise PaperSettlementLearningBridgeError(
-                "economic decision context_hash does not bind exact learning Observation"
-            )
-        if _instant(record.observed_ts, "decision observed_ts") != _instant(
-            observation.observed_at, "observation observed_at"
-        ):
-            raise PaperSettlementLearningBridgeError(
-                "economic decision observed_ts differs from exact learning Observation"
-            )
+        if record.action == _RESEARCH_DECISION_ACTION:
+            binding = record.payload.get("causal_observation")
+            if not isinstance(binding, Mapping) or set(binding) != {
+                "environment_id",
+                "observation_id",
+                "observed_at",
+                "available_at",
+                "evidence",
+            }:
+                raise PaperSettlementLearningBridgeError(
+                    "research decision does not bind exact learning Observation"
+                )
+            try:
+                bound_evidence = tuple(tuple(item) for item in binding["evidence"])
+            except (TypeError, ValueError) as exc:
+                raise PaperSettlementLearningBridgeError(
+                    "research decision causal observation evidence is invalid"
+                ) from exc
+            if (
+                binding["environment_id"] != observation.environment_id
+                or binding["observation_id"] != observation.observation_id
+                or binding["observed_at"] != observation.observed_at
+                or binding["available_at"] != observation.available_at
+                or bound_evidence != observation.evidence
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "research decision does not bind exact learning Observation"
+                )
+            if _instant(record.observed_ts, "decision observed_ts") < _instant(
+                observation.available_at, "observation available_at"
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "research decision predates learning Observation availability"
+                )
+        else:
+            if record.context_hash != observation.observation_id:
+                raise PaperSettlementLearningBridgeError(
+                    "economic decision context_hash does not bind exact learning Observation"
+                )
+            if _instant(record.observed_ts, "decision observed_ts") != _instant(
+                observation.observed_at, "observation observed_at"
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "economic decision observed_ts differs from exact learning Observation"
+                )
 
     def verify_decision_observation_binding(
         self,
@@ -605,7 +643,18 @@ class PaperSettlementLearningBridge:
                 "economic decision stake differs from PaperTicket"
             )
         keys = tuple(sorted(leg.quote_key for leg in ticket.legs))
-        if "quote_keys" in payload:
+        if decision_action == _RESEARCH_DECISION_ACTION:
+            raw_keys = payload.get("candidate_quote_keys")
+            if (
+                not isinstance(raw_keys, (list, tuple))
+                or any(type(value) is not str for value in raw_keys)
+                or len(raw_keys) != len(set(raw_keys))
+                or tuple(sorted(raw_keys)) != keys
+            ):
+                raise PaperSettlementLearningBridgeError(
+                    "research decision candidate_quote_keys differ from PaperTicket"
+                )
+        elif "quote_keys" in payload:
             if tuple(payload["quote_keys"]) != keys:
                 raise PaperSettlementLearningBridgeError(
                     "economic decision quote_keys differ from PaperTicket"

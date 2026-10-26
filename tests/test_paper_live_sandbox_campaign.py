@@ -12,6 +12,7 @@ from autosport.paper_live_sandbox_campaign import (
     BlindPaperSandboxCampaign,
     SandboxCampaignError,
     parse_sandbox_live_payload,
+    run_network_endurance,
 )
 
 
@@ -221,3 +222,41 @@ def test_three_hour_endurance_is_bounded_by_frozen_cutoff() -> None:
 
     with pytest.raises(SandboxCampaignError, match="exceeds frozen campaign cutoff"):
         campaign.step(_snapshot(2), _snapshot(4))
+
+
+def test_network_runner_checkpoints_and_emits_sanitized_progress(
+    tmp_path,
+    monkeypatch,
+) -> None:
+    campaign = BlindPaperSandboxCampaign(_plan())
+    snapshots = iter((_snapshot(1), _snapshot(2)))
+    monotonic = iter((0.0, 0.0, 0.1, 0.2, 2.0))
+    events = []
+    monkeypatch.setattr(
+        "autosport.paper_live_sandbox_campaign.fetch_sandbox_live_snapshot",
+        lambda: next(snapshots),
+    )
+    monkeypatch.setattr(
+        "autosport.paper_live_sandbox_campaign.time.monotonic",
+        lambda: next(monotonic),
+    )
+    monkeypatch.setattr(
+        "autosport.paper_live_sandbox_campaign.time.sleep",
+        lambda _seconds: None,
+    )
+
+    summary = run_network_endurance(
+        campaign,
+        workspace=tmp_path,
+        duration_seconds=1,
+        poll_interval_seconds=5,
+        progress=events.append,
+    )
+
+    assert summary["network_snapshots_segment"] == 2
+    assert summary["policy_generation"] == 1
+    assert len(events) == 2
+    assert events[-1]["truth"] == "simulated"
+    assert events[-1]["profitability_claim"] is False
+    assert "snapshot_sha256" not in events[-1]
+    assert (tmp_path / "campaign_state.json").is_file()

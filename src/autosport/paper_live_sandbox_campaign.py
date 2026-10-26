@@ -15,7 +15,7 @@ from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from decimal import ROUND_DOWN, Decimal, InvalidOperation
 from pathlib import Path
-from typing import Final
+from typing import Callable, Final
 from urllib.request import Request, urlopen
 
 from .domain import TicketLeg
@@ -743,6 +743,7 @@ def run_network_endurance(
     workspace: str | Path,
     duration_seconds: int,
     poll_interval_seconds: int = 30,
+    progress: Callable[[dict[str, object]], None] | None = None,
 ) -> dict[str, object]:
     """Run a bounded sandbox diagnostic; network failure never creates evidence."""
 
@@ -767,9 +768,18 @@ def run_network_endurance(
     while time.monotonic() < deadline:
         try:
             current = fetch_sandbox_live_snapshot()
-        except Exception:
+        except Exception as exc:
             fetch_failures += 1
             campaign.counters["NETWORK_FAILURES"] += 1
+            event = {
+                "event": "account_c_sandbox_progress",
+                "truth": EvidenceTruth.SIMULATED.value,
+                "network_failure_type": type(exc).__name__,
+                "network_snapshots": campaign.counters["NETWORK_SNAPSHOTS"],
+                "network_failures": campaign.counters["NETWORK_FAILURES"],
+                "policy_generation": campaign.policy.generation,
+                "profitability_claim": False,
+            }
         else:
             fetched += 1
             campaign.counters["NETWORK_SNAPSHOTS"] += 1
@@ -777,8 +787,20 @@ def run_network_endurance(
                 advanced = campaign.step(previous, current)
                 if not advanced:
                     campaign.counters["DEDUP_SKIPS"] += 1
-                campaign.save(workspace)
             previous = current
+            event = {
+                "event": "account_c_sandbox_progress",
+                "truth": EvidenceTruth.SIMULATED.value,
+                "network_snapshots": campaign.counters["NETWORK_SNAPSHOTS"],
+                "network_failures": campaign.counters["NETWORK_FAILURES"],
+                "policy_generation": campaign.policy.generation,
+                "paper_balance": str(campaign.book.balance),
+                "open_stake": str(campaign.book.committed_stake),
+                "profitability_claim": False,
+            }
+        campaign.save(workspace)
+        if progress is not None:
+            progress(event)
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break

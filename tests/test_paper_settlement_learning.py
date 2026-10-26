@@ -44,6 +44,7 @@ def _fixture(
     placed_at: str = "2026-09-19T21:19:10+00:00",
     effect_state: ExternalEffectState = ExternalEffectState.PAPER_ONLY,
     bind_action_to_decision: bool = True,
+    decision_action: str = "OPEN_PAPER_TICKET",
 ):
     goal = EconomicGoalContract(
         goal_id="bridge-goal",
@@ -85,19 +86,31 @@ def _fixture(
 
     ledger = JsonlDecisionLedger(root / "decisions.jsonl")
     quote_keys = tuple(sorted(leg.quote_key for leg in legs))
-    decision_action = "OPEN_PAPER_TICKET"
     payload = {
         "ticket_id": ticket.ticket_id,
         "stake": str(ticket.stake),
     }
-    if len(quote_keys) == 1:
+    if decision_action == "OPEN_PAPER_RESEARCH_TICKET":
+        payload["candidate_quote_keys"] = list(quote_keys)
+        payload["causal_observation"] = {
+            "environment_id": observation.environment_id,
+            "observation_id": observation.observation_id,
+            "observed_at": observation.observed_at,
+            "available_at": observation.available_at,
+            "evidence": [list(item) for item in observation.evidence],
+        }
+    elif len(quote_keys) == 1:
         payload["quote_key"] = quote_keys[0]
     else:
         payload["quote_keys"] = list(quote_keys)
     decision = DecisionRecord(
         replay_run_id="bridge-run",
         agent="bridge-fixture",
-        observed_ts=observation.observed_at,
+        observed_ts=(
+            "2026-09-19T21:19:03+00:00"
+            if decision_action == "OPEN_PAPER_RESEARCH_TICKET"
+            else observation.observed_at
+        ),
         action=decision_action,
         payload=payload,
         context_hash=observation.observation_id,
@@ -208,6 +221,65 @@ def _settle(
 
 
 class PaperSettlementLearningBridgeTests(unittest.TestCase):
+
+    def test_research_parlay_flows_through_existing_settlement_learning_bridge(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            legs = (
+                TicketLeg(
+                    event_id="research-event-1",
+                    market_id="winner",
+                    selection_id="home",
+                    locked_odds=Decimal("1.80"),
+                    sport="table_tennis",
+                ),
+                TicketLeg(
+                    event_id="research-event-2",
+                    market_id="winner",
+                    selection_id="away",
+                    locked_odds=Decimal("2.00"),
+                    sport="table_tennis",
+                ),
+            )
+            (
+                _goal,
+                _risk,
+                ticket,
+                decision,
+                environment,
+                baseline,
+                _runtime,
+                observation,
+                action,
+                bridge,
+            ) = _fixture(
+                root,
+                legs=legs,
+                decision_action="OPEN_PAPER_RESEARCH_TICKET",
+            )
+            bridge.bind_ticket(
+                ticket_id=ticket.ticket_id,
+                decision_id=decision.decision_id,
+                environment=environment,
+                observation=observation,
+                action=action,
+                baseline_checkpoint=baseline,
+            )
+            _book, resolutions = _settle(
+                root,
+                outcomes={leg.quote_key: "win" for leg in legs},
+            )
+            bridge.reconcile_after_settlement(
+                paper_book_path=root / "paper_book.json",
+                resolutions=resolutions,
+                settled_ticket_ids=(ticket.ticket_id,),
+                at="2026-09-19T21:20:00+00:00",
+            )
+
+            witness = bridge.resolution_witness(ticket.ticket_id)
+            self.assertEqual(witness.reward.reward, Decimal("26.0000"))
+            self.assertEqual(witness.outcome.truth.value, "observed")
+            self.assertEqual(witness.next_checkpoint.step_index, 1)
 
 
     def test_bridge_reread_rejects_boolean_schema_version_with_valid_digest(self) -> None:

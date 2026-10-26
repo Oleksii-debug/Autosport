@@ -165,6 +165,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           "AUTOSPORT_UIA_STACK_PYTHON=$samplerPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_UIA_STACK_SAMPLER=$(Join-Path $samplerRoot 'Scripts/py-spy.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Compare source and pinned frozen lock-refusal without a primary GUI
+        shell: pwsh
+        run: |
+          python -m pip install pytest==8.4.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $env:AUTOSPORT_NATIVE_PRODUCT_EXE = Join-Path $env:RUNNER_TEMP 'autosport-uia-replay-extraction/Autosport-V1/Autosport.exe'
+          python -m pytest -v --noconftest tests/test_external_uia_duplicate_native_dialog.py -k test_real_product_lock_refusal_reaches_native_uia --junitxml=uia-replay-startup-control.xml
+          exit $LASTEXITCODE
       - name: Replay existing external audit (never exact-head acceptance)
         shell: pwsh
         run: |
@@ -213,4 +221,5 @@ jobs:
             uia-replay-binding.json
             uia-replay-audit.json
             uia-replay-stage.txt
+            uia-replay-startup-control.xml
           if-no-files-found: warn

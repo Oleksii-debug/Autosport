@@ -34,14 +34,14 @@ def _probe_source() -> str:
     return source[start:end]
 
 
-def _visible_handle(process: subprocess.Popen) -> int:
+def _visible_handle(process: subprocess.Popen, *, timeout: int = 15) -> int:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
     user32.EnumWindows.restype = wintypes.BOOL
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:
         handles = []
 
@@ -127,9 +127,16 @@ def test_real_native_dialog_probe(copy: str, foreign_family: bool, expected: str
         child.wait(timeout=10)
 
 
-def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path) -> None:
+@pytest.mark.parametrize("packaged", (False, True), ids=("source", "pinned-frozen"))
+def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path, packaged: bool) -> None:
     """Do not substitute a synthetic MessageBox for the actual startup path."""
     from autosport.workspace_lock import WorkspaceInteractiveLock
+
+    packaged_exe = os.environ.get("AUTOSPORT_NATIVE_PRODUCT_EXE")
+    if packaged and not packaged_exe:
+        pytest.skip("Pinned independently verified packaged product was not supplied")
+    if packaged:
+        assert Path(packaged_exe).is_absolute() and Path(packaged_exe).is_file()
 
     workspace = tmp_path / "workspace-пробіл"
     local_app_data = tmp_path / "localappdata-пробіл"
@@ -138,14 +145,19 @@ def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path) -> None:
     env = dict(os.environ, AUTOSPORT_WORKSPACE=str(workspace), LOCALAPPDATA=str(local_app_data))
     # Diagnostic workflow imports the exact checkout, not another installed tree.
     env["PYTHONPATH"] = str(SCRIPT.parents[1] / "src")
+    command = [sys.executable, "-c", "from autosport.windows_entry import main; raise SystemExit(main([]))"]
+    cwd = None
+    if packaged:
+        command = [packaged_exe]
+        env.pop("PYTHONPATH", None)
+        cwd = str(Path(os.environ["SystemRoot"]) / "System32")
     with WorkspaceInteractiveLock(workspace):
         child = subprocess.Popen(
-            [sys.executable, "-c", "from autosport.windows_entry import main; raise SystemExit(main([]))"],
-            env=env,
+            command, env=env, cwd=cwd,
         )
         try:
-            handle = _visible_handle(child)
-            if os.environ.get("AUTOSPORT_UIA_STACK_SAMPLER"):
+            handle = _visible_handle(child, timeout=90 if packaged else 15)
+            if os.environ.get("AUTOSPORT_UIA_STACK_SAMPLER") and not packaged:
                 stacks = _run_stack_probe(child.pid)
                 assert stacks["status"] == "FAILURE_ONLY"
                 assert len(stacks["samples"]) == 1

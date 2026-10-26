@@ -57,3 +57,14 @@ def test_mixed_head_cannot_be_misrepresented_as_release_qualification():
     assert 'REPLAY_SOURCE_SHA' not in normal and '12697343003' not in normal
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in normal
     assert 'External UIA fresh-extraction gate' in normal
+
+
+def test_source_and_frozen_lock_controls_precede_the_primary_gui_audit():
+    source = replay()
+    assert source.index('Verify old package identity') < source.index('Compare source and pinned frozen lock-refusal') < source.index('Replay existing external audit')
+    assert '$env:AUTOSPORT_NATIVE_PRODUCT_EXE = Join-Path' in source
+    assert '--junitxml=uia-replay-startup-control.xml' in source
+    native = (ROOT / 'tests/test_external_uia_duplicate_native_dialog.py').read_text(encoding='utf-8')
+    assert 'env.pop("PYTHONPATH", None)' in native
+    assert 'command = [packaged_exe]' in native
+    assert '_visible_handle(child, timeout=90 if packaged else 15)' in native

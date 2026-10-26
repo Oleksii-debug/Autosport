@@ -664,13 +664,19 @@ def test_renderer_hwnd_route_cannot_bypass_downstream_packaged_acceptance() -> N
     assert "exit 1" in source
 
 
-def test_duplicate_process_creation_is_bounded_after_real_semantic_witness() -> None:
-    """A poisoned primary UIA runspace must not hang on the second Start-Process."""
+def test_duplicate_process_creation_is_bounded_before_deep_semantic_provider_use() -> None:
+    """The real lock witness must precede duplicate launch and deep COM traversal."""
     source = SCRIPT.read_text(encoding="utf-8")
     start = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
     ready = source.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
     launch = source[start:ready]
-    assert source.index("Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'") < start
+    witness = source.index("$preSemanticWitness = Join-Path (")
+    witness_required = source.index(
+        'throw "Packaged WebView2 runtime witness unavailable before semantic UIA probe"',
+        witness,
+    )
+    semantic = source.index("Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'")
+    assert witness < witness_required < start < semantic
     assert "$duplicateStartWorker = Start-ThreadJob -ScriptBlock" in launch
     assert "$duplicateProcess = [System.Diagnostics.Process]::new()" in launch
     assert launch.index("$duplicateProcess.Start()") < launch.index("$duplicateStartCompleted.Wait(6000)")

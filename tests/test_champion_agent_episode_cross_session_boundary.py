@@ -7,6 +7,10 @@ from autosport.champion_agent_episode import (
     ChampionAgentEpisode,
     ChampionAgentEpisodeError,
 )
+from autosport.champion_eligibility import (
+    ChampionEligibilityDecision,
+    ChampionEligibilityStatus,
+)
 from autosport.learning_environment import EnvironmentIdentity
 from autosport.policy_deployment import ActivationBinding, DeploymentScope
 from autosport.transparent_bandit_policy import BanditPolicyState
@@ -40,6 +44,36 @@ def _policy(training: EnvironmentIdentity) -> BanditPolicyState:
         config_sha256=CONFIG_SHA,
         seed=training.seed,
         action_types=frozenset({"WAIT"}),
+    )
+
+
+def _eligibility(
+    policy: BanditPolicyState,
+    training: EnvironmentIdentity,
+) -> ChampionEligibilityDecision:
+    return ChampionEligibilityDecision(
+        status=ChampionEligibilityStatus.ELIGIBLE,
+        canonical_strategy_id=STRATEGY_ID,
+        strategy_version_id=policy.policy_id,
+        model_version_id="model-cross-session-v1",
+        environment_sha256=training.environment_id,
+        protocol_id=PROTOCOL_ID,
+        config_sha256=CONFIG_SHA,
+        sport="football",
+        league="league:test",
+        regime="paper",
+        finding_ids=("finding-current",),
+        finding_record_sha256s=("f" * 64,),
+        window_start=T1,
+        window_end=T1,
+        evaluated_at=T2,
+        valid_until=T2,
+        minimum_samples=1,
+        minimum_effective_sample_size=1,
+        effective_sample_size=1,
+        degraded_streak=0,
+        recovery_streak=2,
+        admissible_actions=("WAIT",),
     )
 
 
@@ -114,6 +148,7 @@ def test_cross_session_episode_runs_only_after_boundary_re_resolves_semantics(tm
     training = _identity("training-data", T1)
     deployment = _identity("deployment-data", T2)
     policy = _policy(training)
+    eligibility = _eligibility(policy, training)
     scope = _scope()
     binding = _binding(policy, training, deployment, scope)
     path = tmp_path / "agent-loop.json"
@@ -144,6 +179,7 @@ def test_cross_session_episode_runs_only_after_boundary_re_resolves_semantics(tm
             at=T2,
             training_identity=training,
             activation_binding=binding,
+            eligibility_decision=eligibility,
             semantic_inputs=semantic_inputs,
             market_store=market_store,
             runtime_authority_store=runtime_store,
@@ -180,6 +216,7 @@ def test_cross_session_episode_runs_only_after_boundary_re_resolves_semantics(tm
             episode_key="later-session",
             admissible_actions=frozenset({"WAIT"}),
             semantic_inputs=semantic_inputs,
+            eligibility_decision=eligibility,
             market_store=market_store,
             runtime_authority_store=runtime_store,
         )
@@ -192,6 +229,7 @@ def test_caller_scope_cannot_override_canonical_resolver_scope(tmp_path) -> None
     training = _identity("training-data", T1)
     deployment = _identity("deployment-data", T2)
     policy = _policy(training)
+    eligibility = _eligibility(policy, training)
     canonical_scope = _scope()
     caller_scope = DeploymentScope(
         canonical_strategy_id=STRATEGY_ID,
@@ -238,6 +276,7 @@ def test_caller_scope_cannot_override_canonical_resolver_scope(tmp_path) -> None
                 training_identity=training,
                 deployment_scope=caller_scope,
                 activation_binding=binding,
+                eligibility_decision=eligibility,
                 semantic_inputs=semantic_inputs,
                 market_store=market_store,
                 runtime_authority_store=runtime_store,

@@ -72,13 +72,21 @@ def _plan(decision_id: str = "decision-origin-reload") -> ExecutionPlan:
 def test_repeated_origin_module_reload_preserves_originless_reserve_load_and_execute(
     tmp_path,
 ) -> None:
+    pristine_authority = origin_module._ORIGINAL_LEDGER_AUTHORITY_SEAL
+
     importlib.reload(origin_module)
     importlib.reload(origin_module)
 
     try:
+        assert origin_module._ORIGINAL_LEDGER_AUTHORITY_SEAL is pristine_authority
+        assert origin_module._ORIGINAL_LEDGER_RESERVE is pristine_authority[0]
+        assert origin_module._ORIGINAL_LEDGER_LOAD is pristine_authority[1]
+        assert origin_module._ORIGINAL_LEDGER_EVENTS is pristine_authority[2]
+        assert origin_module._ORIGINAL_RUNTIME_EXECUTE is pristine_authority[3]
         config = _config()
         plan = _plan()
         ledger = PaperExecutionLedger(tmp_path / "paper-execution.jsonl")
+        suspensions = frozenset({plan.actions[0].action_id})
 
         ledger.reserve_run(
             run_id="manual-originless-reload-run",
@@ -87,6 +95,7 @@ def test_repeated_origin_module_reload_preserves_originless_reserve_load_and_exe
             config=config,
             started_at=STARTED_AT,
             observation_evidence_ids={},
+            suspended_action_ids=suspensions,
         )
         manual = ledger.load_run(
             run_id="manual-originless-reload-run",
@@ -95,6 +104,7 @@ def test_repeated_origin_module_reload_preserves_originless_reserve_load_and_exe
             config=config,
             started_at=STARTED_AT,
             observation_evidence_ids={},
+            suspended_action_ids=suspensions,
         )
         assert manual is not None
         assert ledger.reservation_decision_origin("manual-originless-reload-run") is None
@@ -194,6 +204,7 @@ def test_guard_reload_repairs_tampered_delegate_mirrors_from_closure_seal(
 
     ledger = PaperExecutionLedger(tmp_path / "sealed-reload.jsonl")
     plan = _plan("decision-sealed-reload")
+    suspensions = frozenset({plan.actions[0].action_id})
     ledger.reserve_run(
         run_id="sealed-reload-run",
         trigger_id=plan.decision_id,
@@ -201,7 +212,18 @@ def test_guard_reload_repairs_tampered_delegate_mirrors_from_closure_seal(
         config=_config(),
         started_at=STARTED_AT,
         observation_evidence_ids={},
+        suspended_action_ids=suspensions,
     )
+    restored = ledger.load_run(
+        run_id="sealed-reload-run",
+        trigger_id=plan.decision_id,
+        plan=plan,
+        config=_config(),
+        started_at=STARTED_AT,
+        observation_evidence_ids={},
+        suspended_action_ids=suspensions,
+    )
+    assert restored is not None
     assert ledger.reservation_decision_origin("sealed-reload-run") is None
     assert [event["event_type"] for event in ledger.events("sealed-reload-run")] == [
         "RUN_RESERVED"

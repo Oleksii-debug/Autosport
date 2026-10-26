@@ -139,8 +139,55 @@ def _derive_run_economics(
     )
 
 
+def _canonical_suspended_action_ids(
+    suspended_action_ids: frozenset[str],
+) -> tuple[str, ...]:
+    if type(suspended_action_ids) is not frozenset:
+        raise TypeError("suspended_action_ids must be an exact frozenset")
+    if any(type(action_id) is not str or not action_id for action_id in suspended_action_ids):
+        raise ValueError("suspended_action_ids must contain non-empty exact strings")
+    return tuple(sorted(suspended_action_ids))
+
+
 class PaperExecutionLedger(_impl.PaperExecutionLedger):
     """PAPER ledger with mechanically derived completion economics."""
+
+    def reserve_run(
+        self,
+        *,
+        run_id: str,
+        trigger_id: str,
+        plan: ExecutionPlan,
+        config: PaperExecutionModelConfig,
+        started_at: str,
+        observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] = frozenset(),
+    ) -> None:
+        canonical_suspensions = _canonical_suspended_action_ids(
+            suspended_action_ids
+        )
+        payload: dict[str, object] = {
+            "trigger_id": trigger_id,
+            "plan_id": plan.plan_id,
+            "plan_fingerprint": plan.fingerprint,
+            "model_fingerprint": config.fingerprint,
+            "started_at": started_at,
+            "action_ids": [action.action_id for action in plan.actions],
+            "observation_evidence_ids": dict(
+                sorted(observation_evidence_ids.items())
+            ),
+        }
+        # Empty suspension predates this binding and has no semantic effect. Keep its
+        # durable shape byte-compatible; non-empty suspension is execution semantics
+        # and therefore must be part of the immutable reservation identity.
+        if canonical_suspensions:
+            payload["suspended_action_ids"] = list(canonical_suspensions)
+        self._append_event(
+            event_type="RUN_RESERVED",
+            run_id=run_id,
+            key=f"{run_id}:reserve",
+            payload=payload,
+        )
 
     def _append_completion_unlocked(
         self,
@@ -281,6 +328,7 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         config: PaperExecutionModelConfig,
         started_at: str,
         observation_evidence_ids: Mapping[str, str],
+        suspended_action_ids: frozenset[str] = frozenset(),
     ) -> PaperExecutionRun | None:
         events = self.events(run_id)
         if not events:
@@ -288,7 +336,10 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
         reserve = [event for event in events if event["event_type"] == "RUN_RESERVED"]
         if len(reserve) != 1:
             raise PaperExecutionIntegrityError("run needs exactly one reservation")
-        expected_reserve = {
+        canonical_suspensions = _canonical_suspended_action_ids(
+            suspended_action_ids
+        )
+        expected_reserve: dict[str, object] = {
             "trigger_id": trigger_id,
             "plan_id": plan.plan_id,
             "plan_fingerprint": plan.fingerprint,
@@ -297,6 +348,8 @@ class PaperExecutionLedger(_impl.PaperExecutionLedger):
             "action_ids": [action.action_id for action in plan.actions],
             "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
         }
+        if canonical_suspensions:
+            expected_reserve["suspended_action_ids"] = list(canonical_suspensions)
         if reserve[0]["payload"] != expected_reserve:
             raise PaperExecutionStateError("run identity conflicts with durable reservation")
 
@@ -527,7 +580,9 @@ def execute_paper_plan(
     action_by_id = {action.action_id: action for action in plan.actions}
     if set(observations) - set(action_by_id):
         raise PaperExecutionStateError("observations contain action outside execution plan")
-    if set(suspended_action_ids) - set(action_by_id):
+    canonical_suspensions = _canonical_suspended_action_ids(suspended_action_ids)
+    suspension_set = frozenset(canonical_suspensions)
+    if set(suspension_set) - set(action_by_id):
         raise PaperExecutionStateError(
             "suspended_action_ids contain action outside execution plan"
         )
@@ -557,6 +612,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspension_set,
     )
     existing = ledger.load_run(
         run_id=run_id,
@@ -565,6 +621,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspension_set,
     )
     assert existing is not None
     if existing.completed:
@@ -589,6 +646,7 @@ def execute_paper_plan(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspension_set,
         )
         assert result is not None
         return result
@@ -630,7 +688,7 @@ def execute_paper_plan(
                 sequence=sequence,
                 config=config,
                 started_at=started_at,
-                suspended=action.action_id in suspended_action_ids,
+                suspended=action.action_id in suspension_set,
             )
         ledger.record_attempt(attempt)
         attempts.append(attempt)
@@ -676,6 +734,7 @@ def execute_paper_plan(
                 config=config,
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
+                suspended_action_ids=suspension_set,
             )
             assert result is not None
             return result
@@ -693,6 +752,7 @@ def execute_paper_plan(
         config=config,
         started_at=started_at,
         observation_evidence_ids=observation_evidence_ids,
+        suspended_action_ids=suspension_set,
     )
     assert result is not None
     return result

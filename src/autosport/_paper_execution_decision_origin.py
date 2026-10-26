@@ -14,6 +14,7 @@ from .paper_execution_reality import (
     PaperExecutionIntegrityError,
     PaperExecutionLedger,
     PaperExecutionStateError,
+    _canonical_suspended_action_ids,
 )
 
 
@@ -126,10 +127,42 @@ _MASK_ORIGIN_FOR_LEGACY_LOAD: ContextVar[bool] = ContextVar(
     default=False,
 )
 
-_ORIGINAL_LEDGER_RESERVE = PaperExecutionLedger.reserve_run
-_ORIGINAL_LEDGER_LOAD = PaperExecutionLedger.load_run
-_ORIGINAL_LEDGER_EVENTS = PaperExecutionLedger.events
-_ORIGINAL_RUNTIME_EXECUTE = PaperExecutionAdoptionRuntime.execute
+_ORIGINAL_AUTHORITY_SENTINEL = (
+    "_autosport_decision_origin_pristine_authority_seal_v1"
+)
+_existing_class_authority = PaperExecutionLedger.__dict__.get(
+    _ORIGINAL_AUTHORITY_SENTINEL
+)
+_existing_module_authority = globals().get("_ORIGINAL_LEDGER_AUTHORITY_SEAL")
+if _existing_class_authority is None and _existing_module_authority is None:
+    _ORIGINAL_LEDGER_AUTHORITY_SEAL = (
+        PaperExecutionLedger.reserve_run,
+        PaperExecutionLedger.load_run,
+        PaperExecutionLedger.events,
+        PaperExecutionAdoptionRuntime.execute,
+    )
+    setattr(
+        PaperExecutionLedger,
+        _ORIGINAL_AUTHORITY_SENTINEL,
+        _ORIGINAL_LEDGER_AUTHORITY_SEAL,
+    )
+elif (
+    type(_existing_class_authority) is tuple
+    and len(_existing_class_authority) == 4
+    and _existing_module_authority is _existing_class_authority
+):
+    _ORIGINAL_LEDGER_AUTHORITY_SEAL = _existing_class_authority
+else:
+    raise RuntimeError(
+        "decision-origin pristine authority seal changed across module reload"
+    )
+
+(
+    _ORIGINAL_LEDGER_RESERVE,
+    _ORIGINAL_LEDGER_LOAD,
+    _ORIGINAL_LEDGER_EVENTS,
+    _ORIGINAL_RUNTIME_EXECUTE,
+) = _ORIGINAL_LEDGER_AUTHORITY_SEAL
 
 
 def _raw_events(
@@ -194,7 +227,10 @@ def _reserve_run_with_decision_origin(
     config,
     started_at: str,
     observation_evidence_ids: Mapping[str, str],
+    suspended_action_ids: frozenset[str] = frozenset(),
 ) -> None:
+    canonical_suspensions = _canonical_suspended_action_ids(suspended_action_ids)
+    suspension_set = frozenset(canonical_suspensions)
     origin = _DECISION_ORIGIN.get()
     if origin is None:
         return _ORIGINAL_LEDGER_RESERVE(
@@ -205,6 +241,7 @@ def _reserve_run_with_decision_origin(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspension_set,
         )
     if type(self) is not PaperExecutionLedger:
         raise PaperExecutionDecisionOriginError(
@@ -223,8 +260,10 @@ def _reserve_run_with_decision_origin(
         "started_at": started_at,
         "action_ids": [action.action_id for action in plan.actions],
         "observation_evidence_ids": dict(sorted(observation_evidence_ids.items())),
-        "decision_origin": origin.to_dict(),
     }
+    if canonical_suspensions:
+        payload["suspended_action_ids"] = list(canonical_suspensions)
+    payload["decision_origin"] = origin.to_dict()
     self._append_event(
         event_type="RUN_RESERVED",
         run_id=run_id,
@@ -242,7 +281,10 @@ def _load_run_with_decision_origin(
     config,
     started_at: str,
     observation_evidence_ids: Mapping[str, str],
+    suspended_action_ids: frozenset[str] = frozenset(),
 ):
+    canonical_suspensions = _canonical_suspended_action_ids(suspended_action_ids)
+    suspension_set = frozenset(canonical_suspensions)
     events = _raw_events(self, run_id)
     stored = _reservation_origin_from_events(events)
     expected = _DECISION_ORIGIN.get()
@@ -272,6 +314,7 @@ def _load_run_with_decision_origin(
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspension_set,
         )
     finally:
         _MASK_ORIGIN_FOR_LEGACY_LOAD.reset(token)

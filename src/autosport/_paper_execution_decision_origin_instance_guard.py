@@ -77,7 +77,7 @@ def _initial_seal():
         _SEAL_MARKER,
         JsonlDecisionLedger.verified_snapshot,
         _verify_bytes_descriptor(),
-        _legacy_reality.PaperExecutionLedger.reserve_run,
+        _origin._ORIGINAL_LEDGER_RESERVE,
         _legacy_reality.PaperExecutionLedger._append_event,
         _paper_reality.execute_paper_plan.__code__,
         _staticmethod_descriptor("_json_object_without_duplicate_keys"),
@@ -516,6 +516,7 @@ def _build_guard(seal):
         config,
         started_at: str,
         observation_evidence_ids,
+        suspended_action_ids: frozenset[str] = frozenset(),
     ) -> None:
         require_canonical_seal()
         origin = _origin._DECISION_ORIGIN.get()
@@ -528,6 +529,7 @@ def _build_guard(seal):
                 config=config,
                 started_at=started_at,
                 observation_evidence_ids=observation_evidence_ids,
+                suspended_action_ids=suspended_action_ids,
             )
 
         if type(self) is not PaperExecutionLedger:
@@ -552,6 +554,7 @@ def _build_guard(seal):
             config=config,
             started_at=started_at,
             observation_evidence_ids=observation_evidence_ids,
+            suspended_action_ids=suspended_action_ids,
         )
 
     return (

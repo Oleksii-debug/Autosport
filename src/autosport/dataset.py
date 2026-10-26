@@ -261,9 +261,17 @@ class ReplayDataset:
     schema_version: int = 1
     governance: DatasetGovernance | None = None
     import_identity: str | None = None
+    manifest_file_sha256: str | None = None
 
     def _assert_retention_current(self, retention_as_of: str | None = None) -> None:
         _assert_governance_retention_current(self.governance, retention_as_of)
+
+    def _assert_manifest_current(self) -> None:
+        if self.manifest_file_sha256 is None:
+            return
+        payload = (self.root / "manifest.json").read_bytes()
+        if hashlib.sha256(payload).hexdigest() != self.manifest_file_sha256:
+            raise ValueError("dataset manifest hash changed after verification")
 
     def _assert_sport_scope(self, events: list[MarketEvent]) -> tuple[str, ...]:
         if self.schema_version < 3:
@@ -294,6 +302,7 @@ class ReplayDataset:
 
     def load_market_events(self) -> list[MarketEvent]:
         self._assert_retention_current()
+        self._assert_manifest_current()
         digest = hashlib.sha256()
         events: list[MarketEvent] = []
         with self.market_path.open("rb") as handle:
@@ -315,6 +324,7 @@ class ReplayDataset:
 
     def load_results_after_replay(self) -> dict[str, str]:
         self._assert_retention_current()
+        self._assert_manifest_current()
         payload = self.results_path.read_bytes()
         if hashlib.sha256(payload).hexdigest() != self.results_sha256:
             raise ValueError("sealed results hash changed after verification")
@@ -803,8 +813,10 @@ def _import_identity(
 def load_dataset(root: str | Path) -> ReplayDataset:
     root = Path(root)
     manifest_path = root / "manifest.json"
+    manifest_payload = manifest_path.read_bytes()
+    manifest_file_sha256 = hashlib.sha256(manifest_payload).hexdigest()
     raw = _strict_json_bytes(
-        manifest_path.read_bytes(),
+        manifest_payload,
         context="dataset manifest",
     )
     if not isinstance(raw, dict):
@@ -888,6 +900,7 @@ def load_dataset(root: str | Path) -> ReplayDataset:
         schema_version=schema_version,
         governance=governance,
         import_identity=import_identity,
+        manifest_file_sha256=manifest_file_sha256,
     )
     if schema_version == 3:
         # Prove event-level sport truth while the verified market bytes are still

@@ -5,6 +5,7 @@ from unittest.mock import patch
 
 import pytest
 
+import autosport.champion_policy as champion_policy_module
 from autosport.champion_policy import (
     ChampionPolicyError,
     POLICY_ARTIFACT_KIND,
@@ -194,10 +195,140 @@ def _load_with_authority(registry, store, policy, *, as_of=PROMOTED_AT, **overri
         return load_champion_policy(registry, store, **arguments)
 
 
+def test_persist_policy_rejects_policy_subclass_before_virtual_dispatch(tmp_path):
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    hostile_calls: list[str] = []
+
+    class HostilePolicy(BanditPolicyState):
+        def __getattribute__(self, name):
+            hostile_calls.append(name)
+            raise AssertionError("hostile policy dispatch executed")
+
+    forged = object.__new__(HostilePolicy)
+    with pytest.raises(TypeError, match="exact BanditPolicyState"):
+        persist_policy_state(store, forged)
+
+    assert hostile_calls == []
+
+
+def test_persist_policy_rejects_store_subclass_before_write_dispatch(tmp_path):
+    _, successor, _ = _policy_successor()
+    hostile_calls: list[str] = []
+
+    class HostileStore(FactoryArtifactStore):
+        def write(self, *args, **kwargs):
+            hostile_calls.append("write")
+            raise AssertionError("hostile artifact-store write executed")
+
+    forged_store = object.__new__(HostileStore)
+    with pytest.raises(TypeError, match="exact FactoryArtifactStore"):
+        persist_policy_state(forged_store, successor)
+
+    assert hostile_calls == []
+
+
+def test_persist_policy_rejects_rebound_policy_type_root_before_dispatch(tmp_path):
+    _, successor, _ = _policy_successor()
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+
+    class ForgedPolicy:
+        pass
+
+    with patch.object(champion_policy_module, "BanditPolicyState", ForgedPolicy):
+        with pytest.raises(
+            ChampionPolicyError,
+            match="durable type authority changed",
+        ):
+            persist_policy_state(store, successor)
+
+
+def test_load_champion_rejects_registry_subclass_before_virtual_dispatch(tmp_path):
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    hostile_calls: list[str] = []
+
+    class HostileRegistry(ScientificRegistry):
+        def __getattribute__(self, name):
+            hostile_calls.append(name)
+            raise AssertionError("hostile registry dispatch executed")
+
+    forged_registry = object.__new__(HostileRegistry)
+    with pytest.raises(TypeError, match="exact ScientificRegistry"):
+        load_champion_policy(
+            forged_registry,
+            store,
+            as_of=PROMOTED_AT,
+            canonical_strategy_id=STRATEGY_ID,
+            environment_id=ENVIRONMENT_ID,
+            protocol_id=PROTOCOL_ID,
+            config_sha256=CONFIG_SHA256,
+            admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
+        )
+
+    assert hostile_calls == []
+
+
+def test_persist_policy_rejects_live_and_canonical_policy_root_rebinding(
+    tmp_path,
+):
+    _, successor, _ = _policy_successor()
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    original_live = champion_policy_module.BanditPolicyState
+    original_alias = champion_policy_module._CANONICAL_POLICY_TYPE
+
+    class ForgedPolicy:
+        pass
+
+    champion_policy_module.BanditPolicyState = ForgedPolicy
+    champion_policy_module._CANONICAL_POLICY_TYPE = ForgedPolicy
+    try:
+        with pytest.raises(
+            ChampionPolicyError,
+            match="durable type authority changed",
+        ):
+            persist_policy_state(store, successor)
+    finally:
+        champion_policy_module.BanditPolicyState = original_live
+        champion_policy_module._CANONICAL_POLICY_TYPE = original_alias
+
+
+def test_load_rejects_live_and_canonical_registry_root_rebinding(tmp_path):
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    original_live = champion_policy_module.ScientificRegistry
+    original_alias = champion_policy_module._CANONICAL_REGISTRY_TYPE
+
+    class ForgedRegistry:
+        pass
+
+    champion_policy_module.ScientificRegistry = ForgedRegistry
+    champion_policy_module._CANONICAL_REGISTRY_TYPE = ForgedRegistry
+    try:
+        with pytest.raises(
+            ChampionPolicyError,
+            match="durable type authority changed",
+        ):
+            load_champion_policy(
+                registry,
+                store,
+                as_of=PROMOTED_AT,
+                canonical_strategy_id=STRATEGY_ID,
+                environment_id=ENVIRONMENT_ID,
+                protocol_id=PROTOCOL_ID,
+                config_sha256=CONFIG_SHA256,
+                admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
+            )
+    finally:
+        champion_policy_module.ScientificRegistry = original_live
+        champion_policy_module._CANONICAL_REGISTRY_TYPE = original_alias
+
+
 def test_policy_payload_round_trip_preserves_exact_identity_and_decimal():
     _, successor, _ = _policy_successor()
 
-    restored = BanditPolicyState.from_payload(successor.to_payload())
+    restored = BanditPolicyState.from_payload(
+        successor.to_payload(),
+        expected_policy_id=successor.policy_id,
+    )
 
     assert restored == successor
     assert restored.policy_id == successor.policy_id
@@ -211,7 +342,10 @@ def test_policy_payload_rejects_nonfinite_or_noncanonical_decimal(reward_text):
     payload["estimates"][-1]["reward_sum"] = reward_text
 
     with pytest.raises(ValueError, match="finite canonical Decimal"):
-        BanditPolicyState.from_payload(payload)
+        BanditPolicyState.from_payload(
+            payload,
+            expected_policy_id=successor.policy_id,
+        )
 
 
 def test_promoted_policy_restarts_and_changes_next_episode_choice(tmp_path):
@@ -289,6 +423,21 @@ def test_future_or_missing_champion_fails_closed(tmp_path):
                 config_sha256=CONFIG_SHA256,
                 admissible_actions=frozenset({"PAPER_PROPOSAL", "WAIT"}),
             )
+
+
+def test_champion_restart_rejects_rewritten_replay_history_against_promoted_identity(tmp_path):
+    _, successor, _ = _policy_successor()
+    registry = ScientificRegistry.initialize_pristine(tmp_path / "registry.json")
+    store = FactoryArtifactStore(tmp_path / "artifacts")
+    persist_policy_state(store, successor)
+    path = store.path_for_testing(POLICY_ARTIFACT_KIND, successor.policy_id)
+    artifact = json.loads(path.read_text(encoding="utf-8"))
+    artifact["policy"]["applied_action_ids"] = ["1" * 64]
+    artifact["policy"]["applied_reward_ids"] = ["2" * 64]
+    path.write_text(json.dumps(artifact), encoding="utf-8")
+
+    with pytest.raises(ChampionPolicyError, match="payload is invalid"):
+        _load_with_authority(registry, store, successor)
 
 
 def test_missing_or_tampered_champion_artifact_fails_closed(tmp_path):

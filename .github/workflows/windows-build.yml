@@ -406,7 +406,7 @@ jobs:
               $stageEvidence
             )
             try {
-              $completedAudit = Wait-Job -Job $auditJob -Timeout 120
+              $completedAudit = Wait-Job -Job $auditJob -Timeout 180
               if ($null -eq $completedAudit) {
                 # Only fixed stage tokens are logged; malformed/absent diagnostics
                 # never count as proof and never cause the gate to pass.
@@ -417,7 +417,7 @@ jobs:
                   if ($allowedStages -ccontains $candidateStage) { $observedStage = $candidateStage }
                   else { $observedStage = 'INVALID' }
                 }
-                throw "External UIA audit exceeded 120-second watchdog at stage=$observedStage; real accessibility evidence remains unqualified"
+                throw "External UIA audit exceeded 180-second watchdog at stage=$observedStage; real accessibility evidence remains unqualified"
               }
               Receive-Job -Job $auditJob -ErrorAction Stop | Out-Null
               if ($auditJob.State -ne 'Completed') {

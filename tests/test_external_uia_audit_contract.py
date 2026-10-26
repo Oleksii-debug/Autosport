@@ -399,7 +399,7 @@ def test_duplicate_packaged_launch_uses_bounded_startup_budget_without_weakening
     duplicate = audit[start:end]
     # A slow frozen application on the runner must not be incorrectly qualified.
     assert "$duplicateDeadline = [DateTime]::UtcNow.AddSeconds(" in duplicate
-    assert "[Math]::Max(40, $TimeoutSeconds)" in duplicate
+    assert "[Math]::Max(90, $TimeoutSeconds)" in duplicate
     assert "[Math]::Min(10, $TimeoutSeconds)" not in duplicate
     # Expensive cross-process enumeration is rate limited, and polling is bounded.
     assert "$nextDuplicateFamilyProbe = [DateTime]::MinValue" in duplicate
@@ -811,7 +811,7 @@ def test_windows_candidate_bounds_blocking_external_uia_without_false_pass() -> 
 
     worker = gate.index("$auditJob = Start-Job -ScriptBlock")
     actual_audit = gate.index("& $auditScript", worker)
-    wait = gate.index("$completedAudit = Wait-Job -Job $auditJob -Timeout 120")
+    wait = gate.index("$completedAudit = Wait-Job -Job $auditJob -Timeout 180")
     receive = gate.index("Receive-Job -Job $auditJob -ErrorAction Stop")
     evidence = gate.index("$external = Get-Content $evidence -Raw | ConvertFrom-Json")
 
@@ -895,11 +895,11 @@ def test_windows_uia_watchdog_records_fresh_allowlisted_stage_and_stays_fail_clo
     assert "if (Test-Path -LiteralPath $stageEvidence) { Remove-Item" in gate
     assert "param($packageRoot, $evidence, $hostileCwd, $expectedWorkspace, $auditScript, $stageEvidence)" in gate
     assert "-ProgressOutput $stageEvidence" in gate
-    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in gate
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 180" in gate
     assert "$observedStage = 'NOT_EMITTED'" in gate
     assert "$observedStage = 'INVALID'" in gate
     assert "if ($allowedStages -ccontains $candidateStage)" in gate
-    assert "throw \"External UIA audit exceeded 120-second watchdog at stage=$observedStage;" in gate
+    assert "throw \"External UIA audit exceeded 180-second watchdog at stage=$observedStage;" in gate
     assert "Receive-Job -Job $auditJob -ErrorAction Stop" in gate
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in gate
     assert "dist/fresh-extraction-external-uia-stage.txt" in workflow
@@ -1004,7 +1004,7 @@ def test_external_uia_scoped_collection_iteration_has_watchdog_visible_boundarie
     for stage in ("SEMANTIC_DESKTOP_COUNT_PROBE", "SEMANTIC_DESKTOP_ITEM_PROBE"):
         assert f"'{stage}'" in workflow
         assert f"'{stage}'" in audit.split("function Write-ExternalUiaProgress", 1)[1].split("function", 1)[0]
-    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 180" in workflow
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
 
 
@@ -1047,7 +1047,7 @@ def test_external_uia_local_native_probe_never_enters_blocking_unscoped_subtree(
     assert "Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_DESCENDANT_PROBE'" not in audit
     assert "Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330'" in audit[family:]
     assert "SEMANTIC_LOCAL_ROOT_ID_PROBE" in workflow
-    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 180" in workflow
     assert "$external.status -ne 'PASS'" in workflow
     assert "Write-ExternalUiaProgress -Stage 'PASS'" not in audit
 
@@ -1252,7 +1252,7 @@ def test_external_uia_provider_child_traversal_is_time_bounded_without_fake_acce
     assert "Find-UiaSemanticViaChildren -Root $nativeRoot" not in family
     assert "Find-UiaSemanticViaChildren -Root $window" not in family
     assert "if ($null -eq $external -or $external.status -ne 'PASS')" in workflow
-    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 180" in workflow
     assert "SEMANTIC_NATIVE_DESCENDANT_PROBE" in workflow
     assert "AutomationId -ceq $AutomationId" in audit
     assert "live_region_event_status" in workflow
@@ -1271,7 +1271,7 @@ def test_external_uia_watchdog_does_not_block_on_provider_cleanup() -> None:
     end = workflow.index("- name: Upload external UIA failure evidence", start)
     gate = workflow[start:end]
     assert "$auditJob = Start-Job -ScriptBlock" in gate
-    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in gate
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 180" in gate
     assert "if ($null -eq $completedAudit)" in gate
     assert "real accessibility evidence remains unqualified" in gate
     assert "Stop-Job -Job $auditJob" not in gate
@@ -1387,7 +1387,7 @@ def test_external_uia_worker_diagnostic_stages_are_accepted_by_windows_watchdog(
     assert "SEMANTIC_WORKER_TIMEOUT_PROBE" in emitted
     assert "if ($allowedStages -ccontains $candidateStage)" in workflow
     assert "$observedStage = 'INVALID'" in workflow
-    assert "External UIA audit exceeded 120-second watchdog" in workflow
+    assert "External UIA audit exceeded 180-second watchdog" in workflow
 
 def test_native_uia_com_reads_are_owned_by_bounded_mta_worker() -> None:
     """No UIA COM object may be read during native caller-to-worker admission."""
@@ -1500,7 +1500,7 @@ def test_external_uia_watchdog_distinguishes_native_enumeration_from_desktop_com
         "Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ENUM_PROBE'"
     )
     assert "$report.status = 'PASS'" not in native
-    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 120" in workflow
+    assert "$completedAudit = Wait-Job -Job $auditJob -Timeout 180" in workflow
 
 
 def test_actual_desktop_uia_provider_is_bounded_inside_real_mta_worker() -> None:

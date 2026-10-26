@@ -2547,10 +2547,10 @@ try {
     # A PyInstaller one-file duplicate must unpack before Python can acquire the
     # existing workspace lock and display the native refusal dialog. Hosted
     # Windows under load exceeded the ordinary 20-second UIA phase budget.
-    # Keep this phase bounded inside the independent 120-second workflow
+    # Keep this phase bounded inside the independent 180-second workflow
     # watchdog without weakening any semantic dialog/exit requirement.
     $duplicateDeadline = [DateTime]::UtcNow.AddSeconds(
-        [Math]::Max(40, $TimeoutSeconds)
+        [Math]::Max(90, $TimeoutSeconds)
     )
     $report.duplicate_dialog_probe_diagnostic = 'NOT_RUN'
     $duplicateDialogObserved = $false

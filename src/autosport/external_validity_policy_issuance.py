@@ -30,6 +30,10 @@ from .external_validity_baseline import (
     PolicyEvaluation,
 )
 from .monotonic_workspace_authority import resolve_monotonic_authority_root
+from .policy_evaluation import (
+    CANONICAL_PAPER_ABSTENTION_ACTIONS,
+    CANONICAL_PAPER_MATERIAL_ACTIONS,
+)
 from .monotonic_workspace_binding import (
     WorkspaceBindingConflictError,
     WorkspaceBindingIntegrityError,
@@ -95,6 +99,10 @@ class ProductPolicyEvaluationWorkspace:
 
 
 _ISSUER_SOURCE_SHA256 = "aa95112ec260878167b36071f2682f196cb27f8731c677e14d1d7659aac28c90"
+# SHA-256("autosport.external-validity-policy-issuance.no-action.v1").
+# Preserve the generic evaluator identity for unchanged candidate/other-baseline
+# projections while versioning the corrected factual-zero NO_ACTION semantics.
+_NO_ACTION_ISSUER_SOURCE_SHA256 = "8c6c5cbcbdf4e6e54bdea34cc7b0087c7dd5d7c287dbf11af8ddb969cdc64285"
 _RESULT_ARTIFACT_KIND = "external-validity-policy-result"
 _BUNDLE_ID_PREFIX = "external-validity-policy-result:"
 _BOOTSTRAP_REPLICATES = 1024
@@ -833,25 +841,37 @@ def _target(protocol: FrozenBaselineProtocol, baseline_kind: BaselineKind | None
     )
 
 
+def _issuer_source_sha256(target: _Target) -> str:
+    if target.baseline_kind is BaselineKind.NO_BET_WAIT:
+        return _NO_ACTION_ISSUER_SOURCE_SHA256
+    return _ISSUER_SOURCE_SHA256
+
+
 def _issuance_id(
     authority: ProductPolicyEvaluationWorkspace,
     protocol: FrozenBaselineProtocol,
     target: _Target,
 ) -> str:
-    return _digest(
-        {
-            "schema_version": 3,
-            "kind": "autosport-external-validity-product-issuance-identity-v3",
-            "workspace_instance_id": authority.workspace_instance_id,
-            "workspace_locator_sha256": authority.workspace_locator_sha256,
-            "protocol_sha256": protocol.identity_sha256,
-            "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
-            "cohort_sha256": protocol.evidence_scope.cohort_sha256,
-            "policy_id": target.policy_id,
-            "policy_artifact_sha256": target.policy_artifact_sha256,
-            "baseline_definition_sha256": target.baseline_definition_sha256,
-        }
-    )
+    identity = {
+        "schema_version": 3,
+        "kind": "autosport-external-validity-product-issuance-identity-v3",
+        "workspace_instance_id": authority.workspace_instance_id,
+        "workspace_locator_sha256": authority.workspace_locator_sha256,
+        "protocol_sha256": protocol.identity_sha256,
+        "evidence_scope_sha256": protocol.evidence_scope.identity_sha256,
+        "cohort_sha256": protocol.evidence_scope.cohort_sha256,
+        "policy_id": target.policy_id,
+        "policy_artifact_sha256": target.policy_artifact_sha256,
+        "baseline_definition_sha256": target.baseline_definition_sha256,
+    }
+    if target.baseline_kind is BaselineKind.NO_BET_WAIT:
+        # The factual-zero NO_ACTION projection supersedes the earlier generic-v3
+        # semantics.  Bind it to a new slot so any already-materialized hindsight-
+        # valued artifact can never collide with or be reinterpreted as repaired truth.
+        identity["schema_version"] = 4
+        identity["kind"] = "autosport-external-validity-product-issuance-identity-v4"
+        identity["projection_evaluator_source_sha256"] = _issuer_source_sha256(target)
+    return _digest(identity)
 
 
 def _require_source_factory_evaluation(
@@ -1270,7 +1290,15 @@ def _derive_policy_evaluation(
     abstain_action = _text(
         source.evaluator_config.get("abstain_action"), "source abstain_action"
     )
+    if abstain_action in CANONICAL_PAPER_MATERIAL_ACTIONS:
+        raise ProductPolicyEvaluationIssuanceError(
+            "source abstain_action names a canonical material PAPER action"
+        )
+    abstention_actions = CANONICAL_PAPER_ABSTENTION_ACTIONS | frozenset(
+        {abstain_action}
+    )
     sample_ids: list[str] = []
+    sample_actions: list[str] = []
     rows: list[tuple[str, str, Decimal]] = []
     total_cost = Decimal(0)
     abstention_count = 0
@@ -1302,9 +1330,10 @@ def _derive_policy_evaluation(
                 "source case source_evidence_sha256",
             )
             sample_ids.append(sample_id)
+            sample_actions.append(action)
             rows.append((sample_id, regime_id, net))
             total_cost += cost
-            if action == abstain_action:
+            if action in abstention_actions:
                 abstention_count += 1
 
         if len(sample_ids) != len(set(sample_ids)):
@@ -1322,16 +1351,74 @@ def _derive_policy_evaluation(
         )
 
     challenger_metrics = policy_evaluation.get("challenger_metrics")
-    if type(challenger_metrics) is not dict or "policy_loss" not in challenger_metrics:
+    required_challenger_metrics = {
+        "policy_loss",
+        "abstention_rate",
+        "action_rate",
+    }
+    if (
+        type(challenger_metrics) is not dict
+        or not required_challenger_metrics.issubset(challenger_metrics)
+    ):
         raise ProductPolicyEvaluationIssuanceError(
-            "source policy evaluator lacks exact challenger policy_loss"
+            "source policy evaluator lacks exact challenger policy/abstention metrics"
         )
     policy_loss = _decimal(
         challenger_metrics.get("policy_loss"), "source challenger policy_loss"
     )
+    abstention_rate = _decimal(
+        challenger_metrics.get("abstention_rate"),
+        "source challenger abstention_rate",
+        nonnegative=True,
+    )
+    action_rate = _decimal(
+        challenger_metrics.get("action_rate"),
+        "source challenger action_rate",
+        nonnegative=True,
+    )
+    # Match the canonical paired evaluator's _policy_metrics arithmetic exactly.
+    # Using a different precision would reject valid non-terminating rates such as 1/3.
+    with localcontext() as context:
+        context.prec = 50
+        expected_abstention_rate = Decimal(abstention_count) / Decimal(observed_count)
+        expected_action_rate = Decimal(scored_count) / Decimal(observed_count)
+    if (
+        abstention_rate > 1
+        or action_rate > 1
+        or abstention_rate != expected_abstention_rate
+        or action_rate != expected_action_rate
+    ):
+        raise ProductPolicyEvaluationIssuanceError(
+            "source policy evaluator abstention metrics do not reconcile to canonical samples"
+        )
     if metric_value != -policy_loss:
         raise ProductPolicyEvaluationIssuanceError(
             "source sample utility does not reconcile to canonical policy_loss"
+        )
+
+    projection_rule = "predictive_net_utility=-policy_loss"
+    if target.baseline_kind is BaselineKind.NO_BET_WAIT:
+        if any(
+            action not in CANONICAL_PAPER_ABSTENTION_ACTIONS
+            for action in sample_actions
+        ):
+            raise ProductPolicyEvaluationIssuanceError(
+                "NO_BET_WAIT source policy must abstain canonically on every frozen sample"
+            )
+        # The paired evaluator may carry qualified counterfactual WAIT/NO_BET reward
+        # for ordinary learning/scientific use. NO_ACTION realizes none of that
+        # counterfactual value, so product issuance cannot convert hindsight
+        # avoided-loss knowledge into factual action utility. Applicable costs stay
+        # separately represented by total_cost and are deliberately preserved.
+        rows = [
+            (sample_id, regime_id, Decimal(0))
+            for sample_id, regime_id, _source_net in rows
+        ]
+        metric_value = Decimal(0)
+        projection_rule = (
+            "no_action_action_utility=0;"
+            "counterfactual_wait_reward_excluded;"
+            "applicable_cost_preserved_separately"
         )
 
     low, high = _bootstrap_interval(protocol, rows)
@@ -1378,7 +1465,12 @@ def _derive_policy_evaluation(
         "source_policy_evaluation_sha256": source.policy_evaluation_sha256,
         "source_metric": "policy_loss",
         "projection_metric": protocol.primary_metric,
-        "projection_rule": "predictive_net_utility=-policy_loss",
+        "projection_rule": projection_rule,
+        **(
+            {"projection_evaluator_source_sha256": _issuer_source_sha256(target)}
+            if target.baseline_kind is BaselineKind.NO_BET_WAIT
+            else {}
+        ),
         "uncertainty_method": protocol.uncertainty_method,
         "bootstrap_replicates": _BOOTSTRAP_REPLICATES,
         "bootstrap_schedule": "sha256-frozen-protocol-cohort-sample-blocks-v1",
@@ -1483,7 +1575,7 @@ def issue_product_policy_evaluation(
     bundle = EvaluationBundleRef(
         evaluation_bundle_id=evaluation_bundle_id,
         bundle_sha256=evaluation.evaluation_bundle_sha256,
-        evaluator_source_sha256=_ISSUER_SOURCE_SHA256,
+        evaluator_source_sha256=_issuer_source_sha256(target),
         dataset_snapshot_id=source.dataset_snapshot_id,
         protocol_sha256=protocol.identity_sha256,
         artifact_hashes=artifact_hashes,
@@ -1563,7 +1655,7 @@ def resolve_product_policy_evaluation(
     if _sha256(
         bundle_payload.get("evaluator_source_sha256"),
         "issued EvaluationBundle.evaluator_source_sha256",
-    ) != _ISSUER_SOURCE_SHA256:
+    ) != _issuer_source_sha256(target):
         raise ProductPolicyEvaluationIssuanceError(
             "issued EvaluationBundle evaluator authority mismatch"
         )

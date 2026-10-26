@@ -52,6 +52,10 @@ def _fake_dialog(monkeypatch, tmp_path):
             self.values = []
             self.focused = False
             self.destroyed = False
+            self.bindings = {}
+            self.acc_name = None
+            self.acc_description = None
+            self.automation_id = None
             widgets.append(self)
 
         def pack(self, **_kwargs):
@@ -72,8 +76,8 @@ def _fake_dialog(monkeypatch, tmp_path):
         def minsize(self, *_size):
             pass
 
-        def bind(self, *_args):
-            pass
+        def bind(self, sequence, callback, *_args):
+            self.bindings[sequence] = callback
 
         def configure(self, **kwargs):
             self.options.update(kwargs)
@@ -105,8 +109,21 @@ def _fake_dialog(monkeypatch, tmp_path):
         monkeypatch.setattr(layout.ttk, name, Widget)
     monkeypatch.setattr(layout.tk, "StringVar", Variable)
     monkeypatch.setattr(layout.tk, "BooleanVar", Variable)
-    for name in ("set_acc_name", "set_acc_description", "set_automation_id"):
-        monkeypatch.setattr(layout.tk_uia, name, lambda *_args: None)
+    monkeypatch.setattr(
+        layout.tk_uia,
+        "set_acc_name",
+        lambda widget, value: setattr(widget, "acc_name", value),
+    )
+    monkeypatch.setattr(
+        layout.tk_uia,
+        "set_acc_description",
+        lambda widget, value: setattr(widget, "acc_description", value),
+    )
+    monkeypatch.setattr(
+        layout.tk_uia,
+        "set_automation_id",
+        lambda widget, value: setattr(widget, "automation_id", value),
+    )
     monkeypatch.setattr(layout.messagebox, "askokcancel", lambda *_args, **_kwargs: 1 / 0)
     monkeypatch.setattr(layout.messagebox, "showerror", lambda _title, message, **_kwargs: errors.append(message))
     workspace = [tmp_path]
@@ -144,6 +161,72 @@ def test_keyboard_review_is_readable_before_distinct_confirm_and_edit_requires_r
     assert button.options["state"] == "disabled"
     assert not errors
     assert widgets[0].destroyed is False
+
+
+def test_conditional_owner_form_has_static_keyboard_and_accessibility_contract(
+    tmp_path, monkeypatch
+):
+    """Machine-check static annotations/focus only; this is not NVDA or external UIA proof."""
+
+    widgets, _variables, _workspace, errors, button, readback = _fake_dialog(
+        monkeypatch, tmp_path
+    )
+    path = tmp_path / EconomicGoalStore.FILE_NAME
+
+    expected_ids = {
+        key: automation_id
+        for key, automation_id in layout.OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS.items()
+        if 309 <= automation_id <= 328
+    }
+    assert sorted(expected_ids.values()) == list(range(309, 329))
+
+    conditional_widgets = [
+        widget for widget in widgets if widget.automation_id in expected_ids.values()
+    ]
+    observed_ids = [widget.automation_id for widget in conditional_widgets]
+    assert len(observed_ids) == len(expected_ids)
+    assert len(set(observed_ids)) == len(expected_ids)
+
+    by_id = {widget.automation_id: widget for widget in conditional_widgets}
+    for field in layout.OWNER_ECONOMIC_FORM_FIELDS:
+        widget = by_id[layout.OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS[field]]
+        assert widget.options.get("takefocus") is True
+        assert widget.acc_name == text(f"ui.windows.owner_authority.field.{field}")
+        assert widget.acc_name.strip()
+
+    emergency_stop = by_id[
+        layout.OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["emergency_stop"]
+    ]
+    assert emergency_stop.options.get("takefocus") is True
+    assert emergency_stop.acc_name == text(
+        "ui.windows.owner_authority.field.emergency_stop"
+    )
+
+    create = by_id[layout.OWNER_ECONOMIC_DIALOG_AUTOMATION_IDS["create"]]
+    assert create is button
+    assert create.options.get("takefocus") is True
+    assert create.acc_name == text("ui.windows.owner_authority.button.review")
+    assert create.acc_description == text(
+        "ui.windows.owner_authority.accessibility.create.description"
+    )
+    assert not path.exists()
+
+    dialog = widgets[0]
+    assert "<Control-Return>" in dialog.bindings
+
+    button.invoke()
+    assert not path.exists()
+    assert readback.focused
+    assert create.acc_name == text("ui.windows.owner_authority.button.confirm")
+    assert create.acc_description == text(
+        "ui.windows.owner_authority.accessibility.confirm.description"
+    )
+
+    create.focused = False
+    dialog.bindings["<Control-Return>"](None)
+    assert create.focused
+    assert not errors
+    assert not path.exists()
 
 
 def test_cancellation_and_workspace_switch_after_review_never_write(tmp_path, monkeypatch):

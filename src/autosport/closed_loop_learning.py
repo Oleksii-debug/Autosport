@@ -189,6 +189,18 @@ def bind_challenger_artifact(
         raise TypeError("supervisor must be ResearchSupervisor")
     if not isinstance(registry, ScientificRegistry):
         raise TypeError("registry must be ScientificRegistry")
+    try:
+        supervisor_registry_path = supervisor.scientific_registry.path.resolve(strict=True)
+        registry_path = registry.path.resolve(strict=True)
+    except (OSError, RuntimeError) as exc:
+        raise ClosedLoopBindingError(
+            "scientific registry authority path cannot be resolved"
+        ) from exc
+    if registry_path != supervisor_registry_path:
+        raise ClosedLoopBindingError(
+            "ScientificRegistry does not match ResearchSupervisor authority"
+        )
+    registry = supervisor.scientific_registry
     if not isinstance(spec, FactoryCandidateSpec):
         raise TypeError("spec must be FactoryCandidateSpec")
     if not isinstance(staged, StagedFactoryEvaluation):
@@ -266,6 +278,18 @@ def bind_challenger_artifact(
     for name, expected in expected_stage.items():
         if getattr(staged, name) != expected:
             raise ClosedLoopBindingError(f"staged factory identity mismatch: {name}")
+
+    supervisor_bindings = dict(origin.bindings)
+    for name, expected in (
+        ("experiment_id", spec.experiment_id),
+        ("model_version_id", spec.model_version_id),
+        ("strategy_version_id", spec.strategy_version_id),
+        ("evaluation_bundle_id", spec.evaluation_bundle_id),
+    ):
+        if supervisor_bindings.get(name) != expected:
+            raise ClosedLoopBindingError(
+                f"ResearchSupervisor factory binding mismatch: {name}"
+            )
 
     experiment = registry.get("Experiment", spec.experiment_id)
     model = registry.get("ModelVersion", spec.model_version_id)

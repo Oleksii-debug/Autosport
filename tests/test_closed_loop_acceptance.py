@@ -303,6 +303,59 @@ def _phase_one(tmp_path):
         rule=rule,
         at=T7,
     )
+
+    supervisor_snapshot = supervisor.status(origin.run_id)
+    assert dict(supervisor_snapshot.bindings)["strategy_version_id"] == staged.strategy_version_id
+
+    alternate_spec = replace(
+        spec,
+        experiment_id="experiment-closed-loop-v1",
+        model_version_id="model-closed-loop-v1",
+        strategy_version_id="strategy-closed-loop-v1",
+        evaluation_bundle_id="eval-closed-loop-v1",
+        promotion_decision_id="promotion-closed-loop-v1",
+    )
+    alternate_stage = replace(
+        staged,
+        experiment_id=alternate_spec.experiment_id,
+        model_version_id=alternate_spec.model_version_id,
+        strategy_version_id=alternate_spec.strategy_version_id,
+        evaluation_bundle_id=alternate_spec.evaluation_bundle_id,
+        promotion_decision_id=alternate_spec.promotion_decision_id,
+    )
+    with pytest.raises(
+        ClosedLoopBindingError,
+        match="ResearchSupervisor factory binding mismatch",
+    ):
+        bind_challenger_artifact(
+            runtime=AgentLoopRuntime(runtime.path),
+            curriculum=curriculum,
+            selection=selection,
+            replay_binding=replay_binding,
+            supervisor=supervisor,
+            registry=registry,
+            spec=alternate_spec,
+            staged=alternate_stage,
+        )
+
+    shadow_registry_path = tmp_path / "shadow-scientific-registry.json"
+    shadow_registry_path.write_bytes(registry.path.read_bytes())
+    shadow_registry = ScientificRegistry(shadow_registry_path)
+    with pytest.raises(
+        ClosedLoopBindingError,
+        match="ScientificRegistry does not match ResearchSupervisor authority",
+    ):
+        bind_challenger_artifact(
+            runtime=AgentLoopRuntime(runtime.path),
+            curriculum=curriculum,
+            selection=selection,
+            replay_binding=replay_binding,
+            supervisor=supervisor,
+            registry=shadow_registry,
+            spec=spec,
+            staged=staged,
+        )
+
     artifact = bind_challenger_artifact(
         runtime=AgentLoopRuntime(runtime.path),
         curriculum=curriculum,
@@ -313,6 +366,25 @@ def _phase_one(tmp_path):
         spec=spec,
         staged=staged,
     )
+
+    class CallerSelectedRegistry(ScientificRegistry):
+        def get(self, *args, **kwargs):
+            raise AssertionError(
+                "caller-selected registry methods must not be authoritative"
+            )
+
+    caller_selected_registry = CallerSelectedRegistry(registry.path)
+    rebound_artifact = bind_challenger_artifact(
+        runtime=AgentLoopRuntime(runtime.path),
+        curriculum=curriculum,
+        selection=selection,
+        replay_binding=replay_binding,
+        supervisor=supervisor,
+        registry=caller_selected_registry,
+        spec=spec,
+        staged=staged,
+    )
+    assert rebound_artifact == artifact
     assert artifact.research_question_id == question.question_id
     assert artifact.environment_id == environment.environment_id
     assert artifact.economic_goal_fingerprint == GOAL_SHA

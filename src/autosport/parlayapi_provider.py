@@ -11,7 +11,7 @@ from decimal import Decimal, InvalidOperation
 from typing import Any, Callable, Mapping
 from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import Request, urlopen
+from urllib.request import HTTPRedirectHandler, Request, build_opener
 
 from .domain import MarketType, utc_now_iso
 from .providers import ProviderBatch, ProviderQuote, ProviderUnavailableError
@@ -72,6 +72,8 @@ class HistoricalCoverageReport:
 Transport = Callable[[str, Mapping[str, str], float], HttpJsonResponse]
 Clock = Callable[[], str]
 Sleeper = Callable[[float], None]
+
+_PARLAY_API_BASE_URL = "https://parlay-api.com"
 
 
 def _finite_runtime_float(value: object, *, field: str, allow_zero: bool) -> float:
@@ -137,10 +139,19 @@ def _decode_provider_json(raw: bytes) -> Any:
         raise ProviderPayloadError("provider returned invalid JSON") from exc
 
 
+class _RejectRedirects(HTTPRedirectHandler):
+    """Reject HTTP redirects before urllib can construct a credential-bearing follow-up."""
+
+    def redirect_request(self, req, fp, code, msg, headers, newurl):  # noqa: ANN001
+        del req, fp, code, msg, headers, newurl
+        return None
+
+
 def _default_transport(url: str, headers: Mapping[str, str], timeout: float) -> HttpJsonResponse:
     request = Request(url, headers=dict(headers), method="GET")
+    opener = build_opener(_RejectRedirects())
     try:
-        with urlopen(request, timeout=timeout) as response:  # nosec B310 - fixed HTTPS base URL by default
+        with opener.open(request, timeout=timeout) as response:  # nosec B310 - caller validates HTTPS base URL
             raw = response.read()
             payload = _decode_provider_json(raw)
             return HttpJsonResponse(payload, int(response.status), dict(response.headers.items()))
@@ -183,13 +194,16 @@ class ParlayApiTableTennisProvider:
         )
         if not regions or not markets:
             raise ValueError("regions and markets must not be empty")
-        if not base_url.startswith("https://"):
-            raise ValueError("provider base_url must use https")
+        if base_url.rstrip("/") != _PARLAY_API_BASE_URL:
+            raise ValueError(
+                "provider base_url must be the canonical ParlayAPI origin "
+                f"{_PARLAY_API_BASE_URL}"
+            )
         self.api_key = api_key
         self.public_preview = public_preview
         self.regions = regions
         self.markets = markets
-        self.base_url = base_url.rstrip("/")
+        self.base_url = _PARLAY_API_BASE_URL
         self.timeout_seconds = timeout_seconds
         self.max_attempts = max_attempts
         self.max_backoff_seconds = max_backoff_seconds
@@ -367,7 +381,14 @@ class ParlayApiTableTennisProvider:
             try:
                 return self.transport(url, headers, self.timeout_seconds)
             except ProviderTransportError as exc:
-                retryable = exc.status_code == 429 or (exc.status_code is not None and exc.status_code >= 500)
+                # No HTTP status means the provider never produced a response
+                # (for example DNS/socket/timeout failure). Treat that as transient
+                # availability loss, but keep recovery bounded by the same retry policy.
+                retryable = (
+                    exc.status_code is None
+                    or exc.status_code == 429
+                    or exc.status_code >= 500
+                )
                 if not retryable or attempt >= self.max_attempts:
                     raise
                 requested = exc.retry_after if exc.retry_after is not None else 0.25 * attempt

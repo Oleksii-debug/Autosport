@@ -2286,13 +2286,15 @@ try {
             )
             try {
                 $Stages.Enqueue('WORKER_ENTER')
-                # Bypass Start-Process/ShellExecute's synchronous Windows
-                # invocation path. The worker is bounded by the independent
-                # completion event and runs before deep semantic COM traversal.
+                # A hidden Start-Job host has redirected standard handles.
+                # Launch the GUI executable through ShellExecute rather than
+                # inheriting that host's handles through CreateProcess. The
+                # independent event still bounds shell invocation; real HWND,
+                # exact dialog/copy, dismissal and exit 2 remain mandatory.
                 $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
                 $startInfo.FileName = $exePath
                 $startInfo.WorkingDirectory = $launchWorkingDirectory
-                $startInfo.UseShellExecute = $false
+                $startInfo.UseShellExecute = $true
                 $startInfo.CreateNoWindow = $false
                 $duplicateProcess = [System.Diagnostics.Process]::new()
                 $duplicateProcess.StartInfo = $startInfo

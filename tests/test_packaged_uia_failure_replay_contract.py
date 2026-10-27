@@ -84,3 +84,13 @@ def test_paired_frozen_control_never_queries_the_primary_provider():
     assert '_run_probe(primary' not in paired
     assert 'capture_duplicate_python_diagnostic.py' in native
     assert 'FAILURE_ONLY_OWNED_FAMILY_STACK_LOCATIONS_NOT_ACCEPTANCE' in native
+
+
+def test_independent_controls_use_the_same_read_only_package_precondition():
+    source = replay()
+    control = source.split('- name: Compare held-lock and two-frozen startup controls', 1)[1].split('- name: Replay existing external audit', 1)[0]
+    assert '$controlPackageRoot = Split-Path -Parent $env:AUTOSPORT_NATIVE_PRODUCT_EXE' in control
+    assert 'icacls $controlPackageRoot /deny ("*" + $controlSid + ":(OI)(CI)(WD,AD,WEA,WA,DE,DC)")' in control
+    assert control.index('icacls $controlPackageRoot /deny') < control.index('python -m pytest -v')
+    assert '} finally {' in control and 'icacls $controlPackageRoot /remove:d' in control
+    assert '$testExit = $LASTEXITCODE' in control and 'exit $testExit' in control

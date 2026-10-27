@@ -168,11 +168,28 @@ jobs:
       - name: Compare held-lock and two-frozen startup controls before the audit
         shell: pwsh
         run: |
+          $ErrorActionPreference = 'Stop'
           python -m pip install pytest==8.4.2
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           $env:AUTOSPORT_NATIVE_PRODUCT_EXE = Join-Path $env:RUNNER_TEMP 'autosport-uia-replay-extraction/Autosport-V1/Autosport.exe'
-          python -m pytest -v --noconftest tests/test_external_uia_duplicate_native_dialog.py -k "test_real_product_lock_refusal_reaches_native_uia or test_packaged_primary_then_duplicate_without_primary_uia" --junitxml=uia-replay-startup-control.xml
-          exit $LASTEXITCODE
+          $controlPackageRoot = Split-Path -Parent $env:AUTOSPORT_NATIVE_PRODUCT_EXE
+          $controlSid = [System.Security.Principal.WindowsIdentity]::GetCurrent().User.Value
+          if ([string]::IsNullOrWhiteSpace($controlSid) -or $controlSid -notmatch '^S-') { throw 'Control SID unavailable' }
+          $controlFenced = $false
+          $testExit = 1
+          try {
+            $controlFenced = $true
+            & icacls $controlPackageRoot /deny ("*" + $controlSid + ":(OI)(CI)(WD,AD,WEA,WA,DE,DC)") /T /C | Out-Null
+            if ($LASTEXITCODE -ne 0) { throw 'Control package read-only fence failed' }
+            python -m pytest -v --noconftest tests/test_external_uia_duplicate_native_dialog.py -k "test_real_product_lock_refusal_reaches_native_uia or test_packaged_primary_then_duplicate_without_primary_uia" --junitxml=uia-replay-startup-control.xml
+            $testExit = $LASTEXITCODE
+          } finally {
+            if ($controlFenced) {
+              & icacls $controlPackageRoot /remove:d ("*" + $controlSid) /T /C | Out-Null
+              if ($LASTEXITCODE -ne 0) { throw 'Control package fence cleanup failed' }
+            }
+          }
+          exit $testExit
       - name: Replay existing external audit (never exact-head acceptance)
         shell: pwsh
         run: |

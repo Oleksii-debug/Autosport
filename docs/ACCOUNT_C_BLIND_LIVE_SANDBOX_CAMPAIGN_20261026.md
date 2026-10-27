@@ -75,11 +75,20 @@ and the transparent policy state are uploaded for 14 days.
 
 - Initial virtual bankroll is exactly 10,000 UAH; maximum stake is 50 UAH and never
   more than 0.5% of current virtual balance.
-- Seven of every ten curriculum slots admit only two-event parlays when two distinct
-  events exist; two slots admit singles; one slot lets the transparent policy choose.
+- Seven of every ten curriculum slots are reserved for the two-event parlay family
+  when two distinct events exist; two slots for singles; one lets the policy choose.
   Within the single and parlay families, the existing transparent bandit separately
-  learns HIGH_ODDS and LOW_ODDS selection strategies. Ranking uses only odds in the
-  decision snapshot; the future snapshot is unavailable until settlement.
+  learns HIGH_ODDS and LOW_ODDS selection strategies. Each strategy receives a
+  bounded eight-observation warmup; later family slots admit only strategies with
+  positive historical mean reward and select the highest mean. If neither qualifies,
+  the slot becomes a causal WAIT. A zero mean cannot win a lexical tie against WAIT.
+  Ranking uses only decision-time odds; the future snapshot is unavailable until
+  settlement. Eight samples are an engineering warmup, not statistical confidence.
+  Once all strategies abstain, this campaign does not learn about a later recovery;
+  a separately qualified fresh campaign is required to reassess that regime.
+  Schema v3 binds the selection protocol and warmup to the immutable plan identity.
+  Existing v1/v2 campaign files remain evidence for their original code and are not
+  silently migrated or resumed under the changed selection rule.
 - Decision evidence contains no execution-mode or synthetic-truth feature. Audit,
   outcome, reward, and summary records always contain that truth.
 - The same decision snapshot cannot create a second action. A later snapshot and

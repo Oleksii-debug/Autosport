@@ -40,12 +40,14 @@ SANDBOX_URL: Final = (
 )
 SIMULATION_MODEL_ID: Final = "parlayapi-sandbox-line-movement-v1"
 STATE_SCHEMA: Final = "autosport.account_c.blind_live_sandbox_campaign"
-STATE_VERSION: Final = 2
+STATE_VERSION: Final = 3
 PARLAY_ACTIONS: Final = frozenset(
     {"PARLAY_2_HIGH_ODDS", "PARLAY_2_LOW_ODDS"}
 )
 SINGLE_ACTIONS: Final = frozenset({"SINGLE_HIGH_ODDS", "SINGLE_LOW_ODDS"})
 ACTION_TYPES: Final = frozenset({"WAIT", *PARLAY_ACTIONS, *SINGLE_ACTIONS})
+STRATEGY_MIN_OBSERVATIONS: Final = 8
+SELECTION_PROTOCOL: Final = "bounded-family-warmup-positive-mean-v3"
 
 
 class SandboxCampaignError(ValueError):
@@ -245,6 +247,8 @@ class BlindPaperCampaignPlan:
             "max_stake": str(self.max_stake),
             "curriculum_period": self.curriculum_period,
             "parlay_slots": self.parlay_slots,
+            "selection_protocol": SELECTION_PROTOCOL,
+            "strategy_min_observations": STRATEGY_MIN_OBSERVATIONS,
             "truth": EvidenceTruth.SIMULATED.value,
             "simulation_model_id": SIMULATION_MODEL_ID,
             "paper_only": True,
@@ -483,27 +487,49 @@ class BlindPaperSandboxCampaign:
         if slot < self.plan.parlay_slots:
             if distinct_events < 2:
                 return frozenset({"WAIT"})
-            strategy = (
-                "PARLAY_2_LOW_ODDS"
-                if slot % 2 == 0
-                else "PARLAY_2_HIGH_ODDS"
-            )
-            return frozenset({strategy})
+            return self._explore_then_admit_family(PARLAY_ACTIONS)
         if slot < self.plan.curriculum_period - 1:
             if not snapshot.quotes:
                 return frozenset({"WAIT"})
-            strategy = (
-                "SINGLE_LOW_ODDS"
-                if (slot - self.plan.parlay_slots) % 2 == 0
-                else "SINGLE_HIGH_ODDS"
-            )
-            return frozenset({strategy})
-        actions = {"WAIT"}
+            return self._explore_then_admit_family(SINGLE_ACTIONS)
+        actions: set[str] = set()
         if snapshot.quotes:
-            actions.update(SINGLE_ACTIONS)
+            actions.update(self._explore_then_admit_family(SINGLE_ACTIONS))
         if distinct_events >= 2:
-            actions.update(PARLAY_ACTIONS)
-        return frozenset(actions)
+            actions.update(self._explore_then_admit_family(PARLAY_ACTIONS))
+        return frozenset(actions or {"WAIT"})
+
+    def _explore_then_admit_family(
+        self,
+        family: frozenset[str],
+    ) -> frozenset[str]:
+        """Collect a bounded warmup per strategy, then let the bandit exploit it.
+
+        The curriculum still controls SINGLE versus PARLAY exposure.  Inside
+        that fixed family, a small deterministic cold-start sample is required
+        for every strategy before the existing transparent mean-reward policy
+        may choose between them.  No future snapshot enters this decision.
+        """
+
+        estimates = {item.action_type: item for item in self.policy.estimates}
+        under_sampled = sorted(
+            (
+                estimates[action_type].observations,
+                action_type,
+            )
+            for action_type in family
+            if estimates[action_type].observations < STRATEGY_MIN_OBSERVATIONS
+        )
+        if under_sampled:
+            return frozenset({under_sampled[0][1]})
+        # A non-positive historical reward is not a reason to keep forcing
+        # exposure. WAIT is a genuine causal action and preserves the book.
+        # These empirical means are selection feedback, not an edge estimate.
+        positive = frozenset(
+            action_type for action_type in family
+            if estimates[action_type].exact_mean_reward > 0
+        )
+        return positive or frozenset({"WAIT"})
 
     @staticmethod
     def _selected_quotes(

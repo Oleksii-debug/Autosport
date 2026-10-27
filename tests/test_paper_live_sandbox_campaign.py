@@ -190,6 +190,69 @@ def test_selection_strategies_rank_only_decision_time_odds() -> None:
     assert len({quote.match_id for quote in low}) == 2
 
 
+def test_family_curriculum_balances_bounded_warmup_before_exploitation() -> None:
+    campaign = BlindPaperSandboxCampaign(_plan())
+
+    # Cold start deterministically samples the least-observed strategy instead
+    # of locking forever onto the result of one lucky or unlucky observation.
+    assert campaign.step(_snapshot(1), _snapshot(2))
+    assert campaign.step(_snapshot(2), _snapshot(3))
+
+    admitted = campaign._admissible_actions(_snapshot(3))
+    assert admitted == frozenset({"PARLAY_2_HIGH_ODDS"})
+
+
+def test_losing_families_stop_exposure_and_remember_after_restart(tmp_path) -> None:
+    def rising_snapshot(index):
+        raw = _payload(index)
+        for row in raw["results"]:
+            row["price"] = 100 + index * 3
+        return parse_sandbox_live_payload(
+            raw, available_at=_stamp(T0 + timedelta(seconds=index, microseconds=500_000))
+        )
+
+    campaign = BlindPaperSandboxCampaign(_plan())
+    for index in range(1, 101):
+        campaign.step(rising_snapshot(index), rising_snapshot(index + 1))
+    assert len(campaign.book.tickets) == 32  # eight observations per strategy
+    assert campaign.counters["WAIT"] == 68
+    balance = campaign.book.balance
+    campaign.save(tmp_path)
+    resumed = BlindPaperSandboxCampaign.load(tmp_path)
+    for index in range(101, 111):
+        resumed.step(rising_snapshot(index), rising_snapshot(index + 1))
+    assert resumed.book.balance == balance
+    assert len(resumed.book.tickets) == 32
+    assert resumed.counters["WAIT"] == 78
+    assert resumed.diagnostics()["ticket_count"] == 32
+
+
+def test_after_warmup_a_losing_strategy_no_longer_gets_forced_equal_exposure() -> None:
+    campaign = BlindPaperSandboxCampaign(_plan())
+    for index in range(1, 101):
+        campaign.step(_snapshot(index), _snapshot(index + 1))
+    estimates = {e.action_type: e for e in campaign.policy.estimates}
+    # This alternating fixture makes HIGH lose during balanced cold start and
+    # LOW win. Continuing after warmup must use the learned distinction.
+    assert estimates["PARLAY_2_HIGH_ODDS"].observations == 8
+    assert estimates["PARLAY_2_LOW_ODDS"].observations > 8
+    assert estimates["PARLAY_2_HIGH_ODDS"].reward_sum < 0
+
+
+def test_selection_protocol_is_bound_to_plan_and_cannot_change_on_resume(tmp_path) -> None:
+    campaign = BlindPaperSandboxCampaign(_plan())
+    campaign.step(_snapshot(1), _snapshot(2))
+    campaign.save(tmp_path)
+    state_path = tmp_path / "campaign_state.json"
+    raw = json.loads(state_path.read_text("utf-8"))
+    raw["plan"]["strategy_min_observations"] = 1
+    state_path.write_text(json.dumps(raw), encoding="utf-8")
+    before = state_path.read_bytes()
+    with pytest.raises(SandboxCampaignError, match="plan payload is not canonical"):
+        BlindPaperSandboxCampaign.load(tmp_path)
+    assert state_path.read_bytes() == before
+
+
 def test_negative_american_odds_do_not_create_inexact_followup_stake() -> None:
     campaign = BlindPaperSandboxCampaign(_plan())
     snapshots = []

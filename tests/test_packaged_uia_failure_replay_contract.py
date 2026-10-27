@@ -61,7 +61,7 @@ def test_mixed_head_cannot_be_misrepresented_as_release_qualification():
 
 def test_source_and_frozen_lock_controls_precede_the_primary_gui_audit():
     source = replay()
-    assert source.index('Verify old package identity') < source.index('Compare source and pinned frozen lock-refusal') < source.index('Replay existing external audit')
+    assert source.index('Verify old package identity') < source.index('Compare held-lock and two-frozen startup controls') < source.index('Replay existing external audit')
     assert '$env:AUTOSPORT_NATIVE_PRODUCT_EXE = Join-Path' in source
     assert '--junitxml=uia-replay-startup-control.xml' in source
     native = (ROOT / 'tests/test_external_uia_duplicate_native_dialog.py').read_text(encoding='utf-8')
@@ -74,21 +74,13 @@ def test_source_and_frozen_lock_controls_precede_the_primary_gui_audit():
     assert '_run_probe(window_owner, handle)' in native
 
 
-def test_no_primary_uia_provider_is_entered_before_real_duplicate_refusal():
-    source = (ROOT / 'scripts/external_uia_audit.ps1').read_text(encoding='utf-8')
-    flow = source[source.index('$process = $null'):]
-    duplicate = flow.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
-    first_primary = flow.index('$uiaRoot = Find-UiaRootForProcessFamily')
-    assert flow.index('$startupNativeObserved = $false') < duplicate < first_primary
-    assert 'VisibleTopLevelWindowsForProcess(' in flow[:duplicate]
-    assert '$preSemanticWitness = Join-Path (' in flow[:duplicate]
-    assert '.Current.' not in flow[:duplicate]
-    assert 'Find-UiaRootForProcessFamily' not in flow[:duplicate]
-    duplicate_pass = flow.index("$report.duplicate_launch_status = 'PASS'")
-    assert duplicate < duplicate_pass < first_primary
-    for required in ("$report.initial_window_observed = $true",
-                     "Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'",
-                     "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'",
-                     "$report.keyboard_shortcuts_status = 'PASS'",
-                     "$report.status = 'PASS'"):
-        assert flow.index(required) > duplicate_pass
+def test_paired_frozen_control_never_queries_the_primary_provider():
+    native = (ROOT / 'tests/test_external_uia_duplicate_native_dialog.py').read_text(encoding='utf-8')
+    paired = native.split('def test_packaged_primary_then_duplicate_without_primary_uia(', 1)[1]
+    assert 'subprocess.Popen([executable], cwd=hostile, env=env)' in paired
+    assert '_visible_handle(primary, timeout=20, process_family=True, single=False)' in paired
+    assert 'native_core_webview2_environment' in paired
+    assert '_run_probe(owner, handle)' in paired and 'duplicate.wait(timeout=10) == 2' in paired
+    assert '_run_probe(primary' not in paired
+    assert 'capture_duplicate_python_diagnostic.py' in native
+    assert 'FAILURE_ONLY_OWNED_FAMILY_STACK_LOCATIONS_NOT_ACCEPTANCE' in native

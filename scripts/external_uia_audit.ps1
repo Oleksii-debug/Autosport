@@ -2196,28 +2196,35 @@ try {
     $report.launcher_process_id = $process.Id
     Write-ExternalUiaProgress -Stage 'WINDOW_LAUNCHED'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    # OS-only readiness: do not call AutomationElement/Current for the primary
-    # GUI before the mandatory duplicate gate. A first FromHandle/Name request
-    # remains a possible provider side effect even before deep traversal.
-    $startupNativeObserved = $false
     while ([DateTime]::UtcNow -lt $deadline) {
         $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
-        foreach ($startupFamilyId in $lastFamilyIds) {
-            $startupWindows = @(
-                [AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(
-                    [int]$startupFamilyId
-                )
-            )
-            if ($startupWindows.Count -gt 0) {
-                $startupNativeObserved = $true
-                break
-            }
-        }
-        if ($startupNativeObserved) { break }
+        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
+        if ($null -ne $uiaRoot) { break }
         Start-Sleep -Milliseconds 250
     }
-    if (-not $startupNativeObserved) {
-        throw 'Timed out waiting for a real OS-visible primary product window'
+    if ($null -eq $uiaRoot) {
+        throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
+    }
+    $report.initial_window_observed = $true
+    Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'
+
+    # Record the exact last bounded diagnostic before a potentially blocking
+    # native UIA provider property read. Native emergency/startup dialogs must
+    # fail closed here, not be misinterpreted as missing semantic WebView DOM.
+    # UIA window names never enter the progress file or the error text.
+    Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'
+    $initialNativeName = ''
+    try { $initialNativeName = [string]$uiaRoot.Current.Name } catch {}
+    if ([string]::Equals($initialNativeName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
+        throw 'Packaged native emergency window is not semantic WebView2 readiness'
+    }
+    if ([string]::Equals($initialNativeName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
+        throw 'Packaged native startup-error window is not semantic WebView2 readiness'
+    }
+    if ([string]::Equals($initialNativeName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
     }
 
     # Native host visibility is not semantic readiness. The local native HWND
@@ -2249,7 +2256,7 @@ try {
     }
 
     # Launch and fully verify the mandatory second normal instance before the
-    # ANY primary COM/UIA provider access. Exact Windows Candidate evidence showed
+    # deep semantic COM/UIA traversal. Exact Windows Candidate evidence showed
     # that launching it after the traversal produced a live two-process
     # PyInstaller family with no Python/native dialog surface for 90 seconds.
     # The product-owned runtime witness above can only be published from inside
@@ -2432,39 +2439,6 @@ try {
     }
     $report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode
     $report.duplicate_launch_status = 'PASS'
-
-    # Deferred primary UIA acquisition remains mandatory after duplicate exit2.
-    $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    while ([DateTime]::UtcNow -lt $deadline) {
-        $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
-        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
-        if ($null -ne $uiaRoot) { break }
-        Start-Sleep -Milliseconds 250
-    }
-    if ($null -eq $uiaRoot) {
-        throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
-    }
-    $report.initial_window_observed = $true
-    Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'
-
-    # Record the exact last bounded diagnostic before a potentially blocking
-    # native UIA provider property read. Native emergency/startup dialogs must
-    # fail closed here, not be misinterpreted as missing semantic WebView DOM.
-    # UIA window names never enter the progress file or the error text.
-    Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'
-    $initialNativeName = ''
-    try { $initialNativeName = [string]$uiaRoot.Current.Name } catch {}
-    if ([string]::Equals($initialNativeName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
-        throw 'Packaged native emergency window is not semantic WebView2 readiness'
-    }
-    if ([string]::Equals($initialNativeName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
-        throw 'Packaged native startup-error window is not semantic WebView2 readiness'
-    }
-    if ([string]::Equals($initialNativeName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
-    }
 
     # Startup and semantic provider readiness are two independent bounded
     # phases. Windows Candidate 40032504012 published the genuine runtime

@@ -63,6 +63,7 @@ def capture(sampler: str, pid: int, source_root: Path) -> dict:
         result = subprocess.run(
             [sampler, "dump", "--json", "--nonblocking", "--pid", str(pid)],
             capture_output=True, timeout=3, check=False,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
         )
     except subprocess.TimeoutExpired:
         return {"status": "SAMPLER_TIMEOUT"}

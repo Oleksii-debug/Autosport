@@ -359,7 +359,8 @@ def test_external_uia_audit_rejects_second_real_packaged_launch() -> None:
         "-WorkingDirectory $launchWorkingDirectory -PassThru"
     )
     second_launch = "$duplicateProcess.Start()"
-    assert "$startInfo.UseShellExecute = $false" in audit
+    assert "$startInfo.UseShellExecute = $true" in audit
+    assert "$startInfo.UseShellExecute = $false" not in audit
     assert "$startInfo.WorkingDirectory = $launchWorkingDirectory" in audit
     assert first_launch in audit
     assert second_launch in audit
@@ -1653,3 +1654,37 @@ def test_duplicate_process_census_is_independently_bounded_and_fail_closed() -> 
     assert "$duplicateProcess.ExitCode -ne 2" in duplicate
     assert "'SECOND_SEMANTIC_SURFACE'" in audit
 
+
+
+def test_duplicate_gui_launch_precedes_every_primary_uia_provider_read() -> None:
+    """Real Windows launch controls require a fresh client before duplicate exit2."""
+    audit = _audit()
+    primary = audit.index("$process = Start-Process -FilePath $exePath")
+    duplicate_pass = audit.index("$report.duplicate_launch_status = 'PASS'", primary)
+    before_duplicate = audit[primary:duplicate_pass]
+    assert "[AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(" in before_duplicate
+    assert "if (-not $startupNativeObserved)" in before_duplicate
+    assert "Packaged WebView2 runtime witness unavailable before semantic UIA probe" in before_duplicate
+    assert "Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds" not in before_duplicate
+    assert "$uiaRoot.Current" not in before_duplicate
+    assert "$startInfo.UseShellExecute = $true" in before_duplicate
+    assert "$duplicateStartCompleted.Wait(6000)" in before_duplicate
+    assert "$duplicateProcess.ExitCode -ne 2" in before_duplicate
+    after_duplicate = audit[duplicate_pass:]
+    assert "$uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds" in after_duplicate
+    assert "$initialNativeName = [string]$uiaRoot.Current.Name" in after_duplicate
+    assert "NATIVE_STARTUP_ERROR" in after_duplicate and "NATIVE_EMERGENCY_STOP" in after_duplicate
+    assert "SEMANTIC_UIA_OBSERVED" in after_duplicate
+
+
+def test_native_timeout_stage_and_primary_stack_remain_failure_only() -> None:
+    audit = _audit()
+    assert "$script:lastNativeWorkerStage = 'NOT_RUN'" in audit
+    assert "$lastWorkerStage -cin $allowedNativeStages" in audit
+    assert "$report.native_semantic_worker_last_stage = $script:lastNativeWorkerStage" in audit
+    failure = audit.split("} catch {\n    if ($script:lastDesktopWorkerStage", 1)[1].split("} finally {", 1)[0]
+    assert "$null -ne $process -and $script:semanticWorkerTimedOut" in failure
+    assert "foreach ($familyId in $lastFamilyIds)" in failure
+    assert "[System.IO.Path]::GetFileNameWithoutExtension($exePath)" in failure
+    assert "$report.primary_python_stacks = Get-DuplicatePythonStackDiagnostics" in failure
+    assert "$report.status = 'PASS'" not in failure

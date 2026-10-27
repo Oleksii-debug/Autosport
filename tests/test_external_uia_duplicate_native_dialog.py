@@ -9,6 +9,7 @@ import ctypes
 from ctypes import wintypes
 import os
 import json
+import runpy
 from pathlib import Path
 import shutil
 import subprocess
@@ -34,28 +35,57 @@ def _probe_source() -> str:
     return source[start:end]
 
 
-def _visible_handle(process: subprocess.Popen) -> int:
+def _family_ids(root_pid: int) -> set[int]:
+    """Reuse the shipped OS census, bounded by a killable PowerShell process."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Get-ProcessFamilyIds {")
+    end = source.index("# The duplicate-instance process census", start)
+    command = (
+        "$ErrorActionPreference='Stop'\n" + source[start:end]
+        + f"\nConvertTo-Json -InputObject @(Get-ProcessFamilyIds -RootProcessId {root_pid}) -Compress\n"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=10, check=False,
+    )
+    assert result.returncode == 0, "Canonical process-family census failed"
+    family = json.loads(result.stdout)
+    assert type(family) is list and 1 <= len(family) <= 512
+    assert all(type(pid) is int and pid > 0 for pid in family)
+    assert root_pid in family
+    return set(family)
+
+
+def _visible_handle(process: subprocess.Popen, *, timeout: int = 15,
+                    process_family: bool = False, single: bool = True) -> tuple[int, int]:
     user32 = ctypes.WinDLL("user32", use_last_error=True)
     callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
     user32.EnumWindows.argtypes = [callback_type, wintypes.LPARAM]
     user32.EnumWindows.restype = wintypes.BOOL
     user32.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
     user32.IsWindowVisible.argtypes = [wintypes.HWND]
-    deadline = time.monotonic() + 15
+    deadline = time.monotonic() + timeout
+    next_family_refresh = 0.0
+    allowed = {process.pid}
     while time.monotonic() < deadline:
+        if process_family and time.monotonic() >= next_family_refresh:
+            allowed = _family_ids(process.pid)
+            next_family_refresh = time.monotonic() + 1
         handles = []
 
         @callback_type
         def visit(handle, _state):
             owner = wintypes.DWORD()
             user32.GetWindowThreadProcessId(handle, ctypes.byref(owner))
-            if owner.value == process.pid and user32.IsWindowVisible(handle):
-                handles.append(int(handle))
+            if owner.value in allowed and user32.IsWindowVisible(handle):
+                handles.append((int(owner.value), int(handle)))
             return True
 
         assert user32.EnumWindows(visit, 0), "Native test window census failed"
         if handles:
-            assert len(handles) == 1
+            if single:
+                assert len(handles) == 1
             return handles[0]
         assert process.poll() is None, "Native dialog fixture exited before UIA"
         time.sleep(0.05)
@@ -114,8 +144,8 @@ def test_real_native_dialog_probe(copy: str, foreign_family: bool, expected: str
     )
     child = subprocess.Popen([sys.executable, "-c", child_code])
     try:
-        handle = _visible_handle(child)
-        owner = os.getpid() if foreign_family else child.pid
+        window_owner, handle = _visible_handle(child)
+        owner = os.getpid() if foreign_family else window_owner
         assert _run_probe(owner, handle) == expected
         if expected == "DIALOG_CLOSED":
             assert child.wait(timeout=10) == 2
@@ -127,9 +157,16 @@ def test_real_native_dialog_probe(copy: str, foreign_family: bool, expected: str
         child.wait(timeout=10)
 
 
-def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path) -> None:
+@pytest.mark.parametrize("packaged", (False, True), ids=("source", "pinned-frozen"))
+def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path, packaged: bool) -> None:
     """Do not substitute a synthetic MessageBox for the actual startup path."""
     from autosport.workspace_lock import WorkspaceInteractiveLock
+
+    packaged_exe = os.environ.get("AUTOSPORT_NATIVE_PRODUCT_EXE")
+    if packaged and not packaged_exe:
+        pytest.skip("Pinned independently verified packaged product was not supplied")
+    if packaged:
+        assert Path(packaged_exe).is_absolute() and Path(packaged_exe).is_file()
 
     workspace = tmp_path / "workspace-пробіл"
     local_app_data = tmp_path / "localappdata-пробіл"
@@ -138,14 +175,21 @@ def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path) -> None:
     env = dict(os.environ, AUTOSPORT_WORKSPACE=str(workspace), LOCALAPPDATA=str(local_app_data))
     # Diagnostic workflow imports the exact checkout, not another installed tree.
     env["PYTHONPATH"] = str(SCRIPT.parents[1] / "src")
+    command = [sys.executable, "-c", "from autosport.windows_entry import main; raise SystemExit(main([]))"]
+    cwd = None
+    if packaged:
+        command = [packaged_exe]
+        env.pop("PYTHONPATH", None)
+        cwd = str(Path(os.environ["SystemRoot"]) / "System32")
     with WorkspaceInteractiveLock(workspace):
         child = subprocess.Popen(
-            [sys.executable, "-c", "from autosport.windows_entry import main; raise SystemExit(main([]))"],
-            env=env,
+            command, env=env, cwd=cwd,
         )
         try:
-            handle = _visible_handle(child)
-            if os.environ.get("AUTOSPORT_UIA_STACK_SAMPLER"):
+            window_owner, handle = _visible_handle(
+                child, timeout=90 if packaged else 15, process_family=packaged,
+            )
+            if os.environ.get("AUTOSPORT_UIA_STACK_SAMPLER") and not packaged:
                 stacks = _run_stack_probe(child.pid)
                 assert stacks["status"] == "FAILURE_ONLY"
                 assert len(stacks["samples"]) == 1
@@ -153,9 +197,187 @@ def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path) -> None:
                 assert sample["status"] == "CAPTURED"
                 assert any(frame["module"] == "windows_entry.py" for frame in sample["locations"])
                 assert sample["human_tested"] is False and sample["nvda_verified"] is False
-            assert _run_probe(child.pid, handle) == "DIALOG_CLOSED"
+            assert _run_probe(window_owner, handle) == "DIALOG_CLOSED"
             assert child.wait(timeout=10) == 2
         finally:
             if child.poll() is None:
                 child.kill()
             child.wait(timeout=10)
+
+
+def _failure_stack_snapshot(primary, duplicate, *, include_primary_root=False):
+    """Reuse the redacting sampler from this already-running host; no new Python."""
+    samples = []
+    sampler = os.environ.get("AUTOSPORT_UIA_STACK_SAMPLER")
+    if sampler:
+        try:
+            capture = runpy.run_path(str(SCRIPT.parent / "capture_duplicate_python_diagnostic.py"))["capture"]
+            for role, process in (("DUPLICATE", duplicate), ("PRIMARY", primary)):
+                if process is None or process.poll() is not None:
+                    continue
+                owned = sorted(_family_ids(process.pid) - {process.pid})[:8]
+                if include_primary_root and role == "PRIMARY":
+                    owned.insert(0, process.pid)
+                for pid in owned:
+                    value = capture(sampler, pid, SCRIPT.parents[1] / "src" / "autosport")
+                    samples.append({"role": role, "sample": value})
+                    if value.get("status") == "CAPTURED":
+                        break
+        except Exception:
+            # A diagnostic failure must never replace the original test failure.
+            samples.append({"status": "UNAVAILABLE"})
+    print(json.dumps({
+        "evidence_class": "FAILURE_ONLY_OWNED_FAMILY_STACK_LOCATIONS_NOT_ACCEPTANCE",
+        "human_tested": False, "nvda_verified": False,
+        "whole_product_complete": False, "real_money_execution": False,
+        "samples": samples,
+    }, sort_keys=True))
+
+
+def _canonical_threadjob_launch(executable: str, env: dict, cwd: str):
+    """Execute the shipped launch block inside the same hidden job topology."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    end = source.index("    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:end]
+    command = (
+        "$ErrorActionPreference='Stop'\n"
+        "$job = Start-Job -ScriptBlock {\n"
+        "param($exePath, $launchWorkingDirectory)\n"
+        "function Write-ExternalUiaProgress { param([string]$Stage) }\n"
+        "$report=@{duplicate_start_diagnostic='NOT_RUN';duplicate_start_worker_stage='NOT_RUN'}\n"
+        + launch
+        + "\nif (-not $duplicateProcess.WaitForExit(110000)) { "
+          "try {$duplicateProcess.Kill($true)} catch {}; throw 'Control child did not exit' }\n"
+          "[int]$duplicateProcess.ExitCode\n"
+          "} -ArgumentList @($env:AUTOSPORT_NATIVE_PRODUCT_EXE, $env:AUTOSPORT_CONTROL_CWD)\n"
+          "if ($null -eq (Wait-Job -Job $job -Timeout 125)) { throw 'Control launcher timed out' }\n"
+          "$value=@(Receive-Job -Job $job -ErrorAction Stop)\n"
+          "if ($value.Count -ne 1 -or $value[0] -isnot [int]) { throw 'Invalid control child exit receipt' }\n"
+          "exit ([int]$value[0])\n"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    return subprocess.Popen(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        cwd=cwd, env=dict(env, AUTOSPORT_CONTROL_CWD=cwd),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+@pytest.mark.parametrize("launcher", ("python", "threadjob"), ids=("python", "threadjob"))
+def test_packaged_primary_then_duplicate_without_primary_uia(tmp_path: Path, launcher: str):
+
+    """Two real frozen instances, no AutomationElement access to the primary."""
+    executable = os.environ.get("AUTOSPORT_NATIVE_PRODUCT_EXE")
+    if not executable:
+        pytest.skip("Pinned independently verified packaged product was not supplied")
+    assert Path(executable).is_absolute() and Path(executable).is_file()
+    workspace = tmp_path / "two-instance-workspace"
+    local_app_data = tmp_path / "two-instance-localappdata"
+    workspace.mkdir()
+    local_app_data.mkdir()
+    env = dict(os.environ, AUTOSPORT_WORKSPACE=str(workspace), LOCALAPPDATA=str(local_app_data))
+    env.pop("PYTHONPATH", None)
+    hostile = str(Path(os.environ["SystemRoot"]) / "System32")
+    primary = subprocess.Popen([executable], cwd=hostile, env=env)
+    duplicate = None
+    try:
+        startup_deadline = time.monotonic() + 20
+        _visible_handle(primary, timeout=20, process_family=True, single=False)
+        witness = workspace / "webview2-runtime-witness.json"
+        while not witness.is_file() and time.monotonic() < startup_deadline:
+            assert primary.poll() is None, "Primary exited before native runtime witness"
+            time.sleep(0.1)
+        assert witness.is_file(), "Primary native runtime witness missing"
+        observed = json.loads(witness.read_text(encoding="utf-8"))
+        assert observed["observation_source"] == "native_core_webview2_environment"
+        assert observed["real_money_execution"] is False
+        assert observed["human_tested"] is False and observed["nvda_verified"] is False
+        # Allow the ordinary trusted-loaded callback to run before the second
+        # launch; do not query the primary provider or inject any product API.
+        time.sleep(1)
+        assert primary.poll() is None, "Primary exited before second launch"
+        duplicate = (_canonical_threadjob_launch(executable, env, hostile)
+                     if launcher == "threadjob" else
+                     subprocess.Popen([executable], cwd=hostile, env=env))
+        owner, handle = _visible_handle(duplicate, timeout=90, process_family=True)
+        assert _run_probe(owner, handle) == "DIALOG_CLOSED"
+        assert duplicate.wait(timeout=10) == 2
+    except (AssertionError, pytest.fail.Exception, subprocess.SubprocessError):
+        _failure_stack_snapshot(primary, duplicate)
+        raise
+    finally:
+        # Disposable, explicitly spawned fixture roots only; never another app.
+        for process in (duplicate, primary):
+            if process is not None and process.poll() is None:
+                subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
+                               capture_output=True, timeout=10, check=False)
+                process.wait(timeout=10)
+
+
+def _run_primary_semantic_probe(owner: int, handle: int, family: set[int]) -> str:
+    """Reuse the real shipped native traversal, not a DOM/bridge diagnostic."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Find-UiaSemanticViaChildren {")
+    end = source.index("function Find-UiaRootForProcessFamily {", start)
+    command = (
+        "$ErrorActionPreference='Stop'\n"
+        "Add-Type -AssemblyName UIAutomationClient\n"
+        "Add-Type -AssemblyName UIAutomationTypes\n"
+        + source[start:end]
+        + f"\n$observed=Find-UiaSemanticViaChildren -AutomationId '330' "
+          f"-NativeWindowHandle ([IntPtr]::new({handle})) -ExpectedProcessId {owner} "
+          "-Deadline ([DateTime]::UtcNow.AddSeconds(20))\n"
+        + "$allowed=@(" + ",".join(str(pid) for pid in sorted(family)) + ")\n"
+          "if ($null -eq $observed -or "
+          "$observed.Element.Current.AutomationId -cne '330' -or "
+          "$allowed -notcontains [int]$observed.Element.Current.ProcessId) "
+          "{ throw 'Real source primary semantic witness unavailable' }\n"
+          "Write-Output 'SEMANTIC_ID_330'\n"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Mta", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, "Real source primary UIA traversal failed"
+    return result.stdout.strip()
+
+
+def test_real_source_primary_reaches_semantic_uia(tmp_path: Path):
+    """Component Windows source proof only; never frozen-release acceptance."""
+    if os.environ.get("AUTOSPORT_UIA_PRIMARY_SOURCE_CONTROL") != "1":
+        pytest.skip("Explicit real source GUI control was not requested")
+    workspace = tmp_path / "source-primary-workspace"
+    local_app_data = tmp_path / "source-primary-localappdata"
+    workspace.mkdir()
+    local_app_data.mkdir()
+    env = dict(os.environ, AUTOSPORT_WORKSPACE=str(workspace),
+               LOCALAPPDATA=str(local_app_data),
+               PYTHONPATH=str(SCRIPT.parents[1] / "src"))
+    primary = subprocess.Popen(
+        [sys.executable, "-c", "from autosport.windows_entry import main; raise SystemExit(main([]))"],
+        cwd=str(Path(os.environ["SystemRoot"]) / "System32"), env=env,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        owner, handle = _visible_handle(primary, timeout=20, process_family=True, single=False)
+        witness = workspace / "webview2-runtime-witness.json"
+        while not witness.is_file() and time.monotonic() < deadline:
+            assert primary.poll() is None, "Source GUI exited before native runtime witness"
+            time.sleep(0.1)
+        assert witness.is_file(), "Source native runtime witness missing"
+        observed = json.loads(witness.read_text(encoding="utf-8"))
+        assert observed["observation_source"] == "native_core_webview2_environment"
+        assert observed["human_tested"] is False and observed["nvda_verified"] is False
+        assert _run_primary_semantic_probe(owner, handle, _family_ids(primary.pid)) == "SEMANTIC_ID_330"
+    except (AssertionError, pytest.fail.Exception, subprocess.SubprocessError):
+        _failure_stack_snapshot(primary, None, include_primary_root=True)
+        raise
+    finally:
+        # Force cleanup of our disposable root is not ordinary-close evidence.
+        if primary.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(primary.pid), "/T", "/F"],
+                           capture_output=True, timeout=10, check=False)
+            primary.wait(timeout=10)

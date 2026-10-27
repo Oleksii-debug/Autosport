@@ -735,7 +735,7 @@ def test_duplicate_threadjob_failures_never_promote_lock_or_leak_details() -> No
     assert "duplicate_start_diagnostic = 'NOT_RUN'" in source
     for code in ("TIMED_OUT", "LAUNCH_FAILED", "EMPTY_RESULT", "INVALID_PROCESS", "RETURNED"):
         assert f"$report.duplicate_start_diagnostic = '{code}'" in launch
-    assert "$startInfo.UseShellExecute = $false" in launch
+    assert "$startInfo.UseShellExecute = $true" in launch
     assert "$startInfo.WorkingDirectory = $launchWorkingDirectory" in launch
     assert "if (-not $duplicateProcess.Start()) {" in launch
     assert "if (-not $duplicateStartTerminal) {" in launch
@@ -799,7 +799,7 @@ def test_duplicate_launch_native_process_stage_evidence_is_bounded_and_redacted(
     assert "$duplicateStartCompleted.Wait(6000)" in launch
     assert "$duplicateStartStages.TryDequeue([ref]$duplicateWorkerStage)" in launch
     assert "$report.duplicate_start_diagnostic = 'TIMED_OUT'" in launch
-    assert "$startInfo.UseShellExecute = $false" in launch
+    assert "$startInfo.UseShellExecute = $true" in launch
     assert "$startInfo.FileName = $exePath" in launch
     assert "$startInfo.WorkingDirectory = $launchWorkingDirectory" in launch
     assert "$duplicateProcess.Start()" in launch

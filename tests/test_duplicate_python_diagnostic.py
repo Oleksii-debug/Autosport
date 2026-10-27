@@ -54,7 +54,8 @@ def test_sampler_never_requests_locals_pause_or_arbitrary_subprocesses(tmp_path,
     monkeypatch.setattr(mod.subprocess, "run", run)
     assert mod.capture("sampler.exe", 1234, tmp_path)["status"] == "CAPTURED"
     assert observed == [(["sampler.exe", "dump", "--json", "--nonblocking", "--pid", "1234"],
-        {"capture_output": True, "timeout": 3, "check": False})]
+        {"capture_output": True, "timeout": 3, "check": False,
+         "creationflags": getattr(subprocess, "CREATE_NO_WINDOW", 0)})]
 
 
 @pytest.mark.parametrize("result,status", [
@@ -89,3 +90,16 @@ def test_failure_sampler_cannot_run_before_audit_gate_failure():
     workflow = (ROOT / ".github/workflows/windows-build.yml").read_text(encoding="utf-8")
     assert "py-spy==0.4.2" in workflow
     assert workflow.index("Prepare failure-only Python stack sampler") > workflow.index("Audit packaged research demo path")
+
+
+def test_native_sampler_does_not_allocate_a_new_console(tmp_path, monkeypatch):
+    (tmp_path / "windows_entry.py").write_text("# fixture", encoding="utf-8")
+    monkeypatch.setattr(mod.subprocess, "CREATE_NO_WINDOW", 0x08000000, raising=False)
+    observed = []
+    def run(args, **kwargs):
+        observed.append(kwargs)
+        return SimpleNamespace(returncode=0, stdout=json.dumps([{"frames": [frame()]}]).encode())
+    monkeypatch.setattr(mod.subprocess, "run", run)
+    assert mod.capture("sampler.exe", 1234, tmp_path)["status"] == "CAPTURED"
+    assert observed[0]["creationflags"] == 0x08000000
+    assert observed[0]["timeout"] == 3

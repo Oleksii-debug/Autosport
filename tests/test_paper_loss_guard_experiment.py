@@ -2,6 +2,9 @@ from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from decimal import Decimal
 import json
+import os
+import subprocess
+import sys
 
 import pytest
 
@@ -135,3 +138,50 @@ def test_saved_decisions_are_causal_and_results_are_not_overwritten(tmp_path):
         assert a[14][name]["action"] == b[14][name]["action"]
     with pytest.raises(SandboxCampaignError, match="overwrite"):
         compare_snapshots(original, config, output=tmp_path / "a")
+
+
+def test_published_campaigns_reload_from_their_final_paths(tmp_path):
+    output = tmp_path / "published"
+    report = compare_snapshots(stream(12), ComparisonConfig(samples=12), output=output)
+    for name in ("baseline", "loss_guard"):
+        loaded = BlindPaperSandboxCampaign.load(output / name)
+        assert loaded.summary() == report["variants"][name]["summary"]
+
+
+def test_interrupted_publication_preserves_evidence_without_success_marker(tmp_path, monkeypatch):
+    output = tmp_path / "partial"
+    save = BlindPaperSandboxCampaign.save
+    count = 0
+
+    def fail_second_save(self, path):
+        nonlocal count
+        count += 1
+        if count == 2:
+            raise OSError("injected write failure")
+        return save(self, path)
+
+    monkeypatch.setattr(BlindPaperSandboxCampaign, "save", fail_second_save)
+    snapshots, config = stream(12), ComparisonConfig(samples=12)
+    with pytest.raises(OSError, match="injected"):
+        compare_snapshots(snapshots, config, output=output)
+    assert not (output / "comparison.json").exists()
+    baseline = BlindPaperSandboxCampaign.load(output / "baseline")
+    assert baseline.policy.generation == 11
+    with pytest.raises(SandboxCampaignError, match="overwrite"):
+        compare_snapshots(snapshots, config, output=output)
+
+
+def test_published_campaign_reload_in_new_interpreter(tmp_path, monkeypatch):
+    monkeypatch.setenv("AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR", str(tmp_path / "authority"))
+    output = tmp_path / "published"
+    report = compare_snapshots(stream(12), ComparisonConfig(samples=12), output=output)
+    code = (
+        "import json,sys; from pathlib import Path; "
+        "from autosport.paper_live_sandbox_campaign import BlindPaperSandboxCampaign as C; "
+        "print(json.dumps({n:C.load(Path(sys.argv[1])/n).summary() "
+        "for n in ('baseline','loss_guard')},sort_keys=True))"
+    )
+    child = subprocess.run([sys.executable, "-c", code, str(output)],
+                           env=os.environ.copy(), capture_output=True, text=True, check=True)
+    loaded = json.loads(child.stdout)
+    assert loaded == {name: item["summary"] for name, item in report["variants"].items()}

@@ -1,5 +1,14 @@
 # Agent economics experiments — 2026-10-27
 
+## Ціль власника — уточнення 27 жовтня 2026
+
+Олексію потрібна фінальна працездатна програма, яка заробляє гроші.
+Перевірки, кількість агентів, тести, PR і звіти — допоміжні засоби, а не кінцевий
+результат. Зелений CI не підтверджує прибутковість. Кандидат зі збитковими
+результатами не стає прибутковим через завершення розробки або успішну перевірку.
+Наступна робота повинна усувати конкретні перешкоди до цієї продуктової цілі,
+зберігаючи фактичні збитки, витрати, причинність і межі доказів.
+
 Owner priority: improve and measure agents' virtual economic performance before
 packaging. This contribution targets Account C's existing #2583 lineage at
 `2c3cb80c348dd5328668cae042b4b2507baab0f8`. It does not reopen terminal Plan-3
@@ -118,3 +127,64 @@ pre-match signal, verified quote/result timing, and a frozen prospective campaig
 with execution costs. Merely recalibrating the same odds has not supplied that
 signal. Synthetic and recorded-outcome memories remain separate. No real-money
 execution or guaranteed-profit claim is authorized by these experiments.
+
+## Shadow recovery and a repaired published restart
+
+The follow-up adds an experimental rolling selector over separately labelled
+hypothetical returns. Unlike cumulative executed-only memory, it can observe
+declined actions and recover after conditions change while its chosen action is
+WAIT. It never puts declined rewards into chosen-action accounting or the
+canonical executed learner. This is a research selection rule, not a new durable
+learner, journal, Factory or promotion authority.
+
+The recorded-outcome driver reuses the existing parser, three price proxies and
+return accounting. Configuration was fixed before this run: trailing 200
+observations, at least 100 required, mean net return strictly above 2%, 1% cost
+per unit stake, 48-hour assumed outcome release lag. Choices use only outcomes
+strictly earlier than the lag boundary. Same-time matches and the current result
+cannot change the choice. A 48-hour lag is NOT proof that a postponed match or
+late correction was actually available; quote/result availability is still
+unverified. Validation outcomes may update later decisions, so this is delayed
+retrospective adaptation, not an untouched frozen-model holdout.
+
+Exact source CSV SHA256 remains
+`c7964f06b9aa02800381c50aca4637ef8c1ad7e940855d3f9c3b5f1bd40e53c5`.
+Frozen configuration SHA256:
+`94f1c06f72b775f4a2e610c82698fbac18777473df5c24bb902c17e095211284`.
+
+On the same 2,357 validation records: 879 hypothetical bets, 1,478 WAIT,
+**−22.740 net units**, ROI **−2.587%**, maximum drawdown 56.010 units after
+the 1% assumed cost. All-bet LOW_ODDS returned −56.600 units, ROI −2.401%,
+maximum drawdown 92.190. Fewer bets reduced total loss/exposure but did NOT
+improve per-stake ROI or demonstrate profitability. **Candidate remains
+research-only; no runtime deployment or profit acceptance.** Parameters were
+not retuned after viewing this result. Earlier validation results were already
+known, so this is exploratory evidence with selection bias, not a fresh test.
+
+```bash
+python scripts/evaluate_recorded_shadow_agent.py --csv tipsaudit-predictions.csv --config examples/recorded_shadow_recovery.json --output shadow-results.json
+```
+
+A separate reproduced defect affected `compare_snapshots(..., output=...)`:
+the old implementation saved PaperBook under a temporary directory, verified it
+there, then renamed the directory. The independent witness remained bound to the
+temporary absolute path, so loading the published result failed with
+`missing independent durable opening witness`. The repair reserves the final
+directory exclusively, writes and reloads both books at their final paths, and
+atomically writes `comparison.json` LAST as the completion marker. Interrupted
+publication retains partial evidence without a success report and refuses an
+overwrite. It neither relocates nor weakens PaperBook authority.
+
+Focused validation covers shadow recovery/relapse, sparse-memory WAIT, costs,
+exact ranking, same-time/current/future-result isolation, delayed release,
+deterministic replay, published-path reload, a new interpreter reload, and an
+injected second-book write failure. No Plan 6, durable journal/CLI/Factory or
+`continual_learning_cycle.py` source was modified. Whole-product and profitable
+operation remain unfinished.
+
+Executed targeted regression: **94 passed in 4.73 seconds**, Python 3.12/Linux;
+compile and `git diff --check` PASS. The published-path regression failed on the
+unchanged predecessor and passed after the repair, including a fresh interpreter.
+Parent #2585's CI/Windows were still running at publication preparation, so this
+follow-up is isolated on its own branch based on the exact parent tree; the
+parent run and #2583 head stay frozen. Hosted checks are not represented as PASS.

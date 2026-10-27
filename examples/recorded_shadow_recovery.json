@@ -1,0 +1,10 @@
+{
+  "split_date": "2026-09-21",
+  "outcome_lag_hours": 48,
+  "selector": {
+    "window": 200,
+    "minimum_observations": 100,
+    "minimum_net_return": "0.02",
+    "cost_bps_per_stake": 100
+  }
+}

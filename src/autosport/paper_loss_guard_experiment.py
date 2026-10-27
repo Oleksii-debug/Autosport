@@ -8,7 +8,6 @@ from __future__ import annotations
 
 import hashlib
 import json
-import tempfile
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -135,18 +134,21 @@ def compare_snapshots(
         "variants": reports,
     }
     if output is not None:
-        from .offline_release_lifecycle import _publish_directory_no_replace
-
         output.parent.mkdir(parents=True, exist_ok=True)
-        with tempfile.TemporaryDirectory(prefix=".comparison-", dir=output.parent) as temporary:
-            stage = Path(temporary) / "result"
-            stage.mkdir()
-            for name, campaign in campaigns.items():
-                campaign.save(stage / name)
-                restored = BlindPaperSandboxCampaign.load(stage / name)
-                if restored.summary() != campaign.summary():
-                    raise SandboxCampaignError("comparison restart readback mismatch")
-            atomic_write_json(stage / "decisions.json", {"decisions": decisions})
-            atomic_write_json(stage / "comparison.json", report)
-            _publish_directory_no_replace(stage, output)
+        # PaperBook witnesses bind the absolute snapshot path. Saving under a
+        # temporary directory then renaming it made the published books unloadable.
+        # Reserve the final directory exclusively and publish the completion
+        # report LAST. A failed partial result is retained, never overwritten or
+        # presented as a complete comparison.
+        try:
+            output.mkdir()
+        except FileExistsError as exc:
+            raise SandboxCampaignError("comparison refuses to overwrite existing results") from exc
+        for name, campaign in campaigns.items():
+            campaign.save(output / name)
+            restored = BlindPaperSandboxCampaign.load(output / name)
+            if restored.summary() != campaign.summary():
+                raise SandboxCampaignError("comparison restart readback mismatch")
+        atomic_write_json(output / "decisions.json", {"decisions": decisions})
+        atomic_write_json(output / "comparison.json", report)
     return report

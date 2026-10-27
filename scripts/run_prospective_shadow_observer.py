@@ -9,6 +9,7 @@ import time
 from urllib.request import Request, urlopen
 
 from autosport.prospective_shadow_observer import ObserverPlan, observe_cycle
+from autosport.prospective_forecast_learning import forecast_learning_cycle
 
 
 SOURCES = {"predictions": "https://tipsaudit.com/api/v1/predictions",
@@ -42,6 +43,9 @@ def main():
             report = observe_cycle(args.workspace, predictions=predictions, results=results,
                                    received_at=datetime.now(timezone.utc).isoformat(), plan=plan)
             print(json.dumps({"event": "public_shadow_cycle", **report}, ensure_ascii=False), flush=True)
+            learned = forecast_learning_cycle(args.workspace, predictions=predictions, results=results,
+                                              received_at=datetime.now(timezone.utc).isoformat())
+            print(json.dumps({"event": "public_forecast_learning", **learned}), flush=True)
             failures = 0
         except (OSError, TimeoutError) as exc:
             failures += 1

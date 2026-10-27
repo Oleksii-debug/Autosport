@@ -7,12 +7,15 @@ on:
     paths:
       - src/autosport/shadow_strategy_memory.py
       - src/autosport/prospective_shadow_observer.py
+      - src/autosport/prospective_forecast_learning.py
       - scripts/run_prospective_shadow_observer.py
+      - scripts/restore_prospective_shadow.py
       - examples/prospective_shadow_observer.json
       - .github/workflows/prospective-shadow-observer.yml
 
 permissions:
   contents: read
+  actions: read
 
 concurrency:
   group: prospective-shadow-${{ github.ref }}
@@ -39,6 +42,11 @@ jobs:
           python -m pytest -q tests/test_shadow_strategy_memory.py
           tests/test_prospective_shadow_observer.py tests/test_recorded_shadow_memory.py
           tests/test_recorded_cross_book_value.py
+          tests/test_prospective_forecast_learning.py tests/test_restore_prospective_shadow.py
+      - name: Restore previous completed learning state
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: python scripts/restore_prospective_shadow.py --workspace prospective-shadow-evidence
       - name: Record source and attribution
         run: |
           mkdir -p prospective-shadow-evidence

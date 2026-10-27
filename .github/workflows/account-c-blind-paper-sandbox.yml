@@ -9,6 +9,14 @@ on:
       - 'scripts/run_account_c_blind_paper_campaign.py'
       - 'tests/test_paper_live_sandbox_campaign.py'
       - '.github/workflows/account-c-blind-paper-sandbox.yml'
+  pull_request:
+    branches:
+      - account-b/plan6-6a-packaged-lifecycle-smoke
+    paths:
+      - 'src/autosport/paper_live_sandbox_campaign.py'
+      - 'scripts/run_account_c_blind_paper_campaign.py'
+      - 'tests/test_paper_live_sandbox_campaign.py'
+      - '.github/workflows/account-c-blind-paper-sandbox.yml'
   workflow_dispatch:
     inputs:
       segment_seconds:

@@ -356,7 +356,11 @@ def test_endurance_workflow_removes_transient_locks_before_manifest() -> None:
     remove_locks = "find account-c-paper-evidence -type f -name '*.lock' -delete"
     manifest = "! -name artifact-sha256.txt -print0"
     upload = "path: account-c-paper-evidence"
+    pull_request_trigger = "pull_request:"
+    exact_base = "account-b/plan6-6a-packaged-lifecycle-smoke"
     assert remove_locks in workflow
     assert manifest in workflow
     assert upload in workflow
+    assert pull_request_trigger in workflow
+    assert exact_base in workflow
     assert workflow.index(remove_locks) < workflow.index(manifest) < workflow.index(upload)

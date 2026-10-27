@@ -1,0 +1,19 @@
+{
+  "protocol_id": "autosport-recorded-price-gap-shadow-20261027-v1",
+  "minimum_probability": "0.30",
+  "minimum_model_value": "0.05",
+  "maximum_model_value": "0.12",
+  "maximum_odds": "3.5",
+  "maximum_benchmark_age_seconds": 5400,
+  "maximum_candidates_per_kickoff_day": 5,
+  "ordering": "kickoff_utc_then_id",
+  "hypothetical_stake_units": "1",
+  "stress_cost_bps_per_stake": 100,
+  "settlement": "official regulation-time 1X2 result; pending until recorded",
+  "quote_acceptance_verified": false,
+  "soft_quote_timestamp_available": false,
+  "execution_authorized": false,
+  "profitability_claim": false,
+  "earliest_quote_date": "2026-09-21",
+  "selection_rule": "highest_model_value_eligible_single_then_selection_id"
+}

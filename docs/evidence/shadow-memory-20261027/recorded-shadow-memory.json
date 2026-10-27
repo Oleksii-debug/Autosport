@@ -1,0 +1,60 @@
+{
+  "attribution": "TipsAudit (2026), https://tipsaudit.com/data, CC BY 4.0",
+  "capital_schedule_verified": false,
+  "config": {
+    "cost_bps_per_stake": 100,
+    "feedback_delay_hours": 48,
+    "minimum_mean_return": "0.02",
+    "minimum_observations": 30,
+    "split_date": "2026-09-21",
+    "window": 100
+  },
+  "config_sha256": "5dba9a9eaf62f8e72df6d5a45566b18bee0817e77b64a21031ab711eda0e42b1",
+  "decision_journal_sha256": "6b386580e534f8647d2ba35e5fb328b7480e3c25554b481d3abd9469ed5e46c6",
+  "evaluation_mode": "exploratory retrospective rolling learning; not pristine holdout",
+  "pending_feedback_count": 236,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "quote_timing_verified": false,
+  "real_money_execution": false,
+  "result_availability": "assumed kickoff plus configured delay, not verified publication time",
+  "schema": "autosport.recorded_shadow_memory_experiment",
+  "source": {
+    "eligible_rows": 7350,
+    "exclusions": {
+      "void_or_unsettled": 40
+    },
+    "source_rows": 7390,
+    "source_sha256": "c7964f06b9aa02800381c50aca4637ef8c1ad7e940855d3f9c3b5f1bd40e53c5"
+  },
+  "validation_matches": 2357,
+  "variants": {
+    "long_history_shadow": {
+      "result": {
+        "bets": 0,
+        "cost_bps_per_stake": 100,
+        "day_block_bootstrap_roi_95pct": null,
+        "max_drawdown_units": "0",
+        "net_units": "0",
+        "roi": null,
+        "wins": 0
+      },
+      "wait_count": 2357
+    },
+    "rolling_shadow": {
+      "result": {
+        "bets": 1194,
+        "cost_bps_per_stake": 100,
+        "day_block_bootstrap_roi_95pct": [
+          "-0.1146888612321095208462974487",
+          "0.03257824639289678135405105438"
+        ],
+        "max_drawdown_units": "87.781",
+        "net_units": "-69.055",
+        "roi": "-0.05783500837520938023450586265",
+        "wins": 596
+      },
+      "wait_count": 1163
+    }
+  }
+}

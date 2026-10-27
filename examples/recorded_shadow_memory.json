@@ -1,0 +1,8 @@
+{
+  "split_date": "2026-09-21",
+  "window": 100,
+  "minimum_observations": 30,
+  "minimum_mean_return": "0.02",
+  "feedback_delay_hours": 48,
+  "cost_bps_per_stake": 100
+}

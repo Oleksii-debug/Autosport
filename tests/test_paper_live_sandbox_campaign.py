@@ -358,9 +358,11 @@ def test_endurance_workflow_removes_transient_locks_before_manifest() -> None:
     upload = "path: account-c-paper-evidence"
     pull_request_trigger = "pull_request:"
     exact_base = "account-b/plan6-6a-packaged-lifecycle-smoke"
+    exact_checkout = "ref: ${{ github.event.pull_request.head.sha || github.sha }}"
     assert remove_locks in workflow
     assert manifest in workflow
     assert upload in workflow
     assert pull_request_trigger in workflow
     assert exact_base in workflow
+    assert exact_checkout in workflow
     assert workflow.index(remove_locks) < workflow.index(manifest) < workflow.index(upload)

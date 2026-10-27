@@ -72,3 +72,23 @@ def test_source_and_frozen_lock_controls_precede_the_primary_gui_audit():
     assert 'allowed = _family_ids(process.pid)' in native
     assert 'owner.value in allowed' in native
     assert '_run_probe(window_owner, handle)' in native
+
+
+def test_no_primary_uia_provider_is_entered_before_real_duplicate_refusal():
+    source = (ROOT / 'scripts/external_uia_audit.ps1').read_text(encoding='utf-8')
+    flow = source[source.index('$process = $null'):]
+    duplicate = flow.index("Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    first_primary = flow.index('$uiaRoot = Find-UiaRootForProcessFamily')
+    assert flow.index('$startupNativeObserved = $false') < duplicate < first_primary
+    assert 'VisibleTopLevelWindowsForProcess(' in flow[:duplicate]
+    assert '$preSemanticWitness = Join-Path (' in flow[:duplicate]
+    assert '.Current.' not in flow[:duplicate]
+    assert 'Find-UiaRootForProcessFamily' not in flow[:duplicate]
+    duplicate_pass = flow.index("$report.duplicate_launch_status = 'PASS'")
+    assert duplicate < duplicate_pass < first_primary
+    for required in ("$report.initial_window_observed = $true",
+                     "Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'",
+                     "Write-ExternalUiaProgress -Stage 'SEMANTIC_UIA_OBSERVED'",
+                     "$report.keyboard_shortcuts_status = 'PASS'",
+                     "$report.status = 'PASS'"):
+        assert flow.index(required) > duplicate_pass

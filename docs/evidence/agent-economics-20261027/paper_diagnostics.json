@@ -1,0 +1,45 @@
+{
+  "campaign_id": "account-c-sandbox-20261027T073653Z",
+  "cohorts": {
+    "PARLAY_2": {
+      "gross_payout": "8718.560000000000000000000001",
+      "gross_stake": "8991",
+      "lost": 40,
+      "net_reward": "-272.4400000000000000000000001",
+      "tickets": 184,
+      "void": 116,
+      "won": 28
+    },
+    "SINGLE": {
+      "gross_payout": "2215.4",
+      "gross_stake": "2244",
+      "lost": 3,
+      "net_reward": "-28.6",
+      "tickets": 46,
+      "void": 41,
+      "won": 2
+    }
+  },
+  "final_balance": "9698.96000000000000000000001",
+  "forward_evidence_eligible": false,
+  "gross_payout": "10933.96000000000000000000000",
+  "gross_stake": "11235",
+  "initial_bankroll": "10000",
+  "maximum_consecutive_negative_rewards": 5,
+  "maximum_drawdown": "433.38571428571428571428571",
+  "maximum_drawdown_peak": "10122.74571428571428571428572",
+  "negative_reward_count": 43,
+  "net_reward": "-301.03999999999999999999999",
+  "neutral_reward_count": 157,
+  "open_stake": "0",
+  "paper_only": true,
+  "positive_reward_count": 30,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.account_c.blind_paper_diagnostics",
+  "schema_version": 1,
+  "simulation_model_id": "parlayapi-sandbox-line-movement-v1",
+  "ticket_count": 230,
+  "truth": "simulated"
+}

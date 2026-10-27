@@ -200,6 +200,8 @@ class BlindPaperCampaignPlan:
     max_stake: Decimal = Decimal("50")
     curriculum_period: int = 10
     parlay_slots: int = 7
+    loss_guard_min_observations: int | None = None
+    loss_guard_retry_cycles: int = 5
 
     def __post_init__(self) -> None:
         _text(self.campaign_id, "campaign_id")
@@ -217,6 +219,13 @@ class BlindPaperCampaignPlan:
             raise SandboxCampaignError("development campaign bankroll must be 10000 UAH")
         if self.max_stake > self.initial_bankroll * Decimal("0.005"):
             raise SandboxCampaignError("max_stake cannot exceed 0.5% of bankroll")
+        if self.loss_guard_min_observations is not None and (
+            type(self.loss_guard_min_observations) is not int
+            or not 1 <= self.loss_guard_min_observations <= 10000
+        ):
+            raise SandboxCampaignError("loss guard observations must be in 1..10000")
+        if type(self.loss_guard_retry_cycles) is not int or not 2 <= self.loss_guard_retry_cycles <= 100:
+            raise SandboxCampaignError("loss guard retry cycles must be in 2..100")
         if (
             isinstance(self.curriculum_period, bool)
             or not isinstance(self.curriculum_period, int)
@@ -245,6 +254,11 @@ class BlindPaperCampaignPlan:
             "max_stake": str(self.max_stake),
             "curriculum_period": self.curriculum_period,
             "parlay_slots": self.parlay_slots,
+            # Preserve every existing unguarded plan hash and restart payload.
+            # An opt-in guard is part of the frozen plan, never mutable memory.
+            **({"loss_guard_min_observations": self.loss_guard_min_observations,
+                "loss_guard_retry_cycles": self.loss_guard_retry_cycles}
+               if self.loss_guard_min_observations is not None else {}),
             "truth": EvidenceTruth.SIMULATED.value,
             "simulation_model_id": SIMULATION_MODEL_ID,
             "paper_only": True,
@@ -478,6 +492,27 @@ class BlindPaperSandboxCampaign:
         self.last_snapshot_sha256 = last_snapshot_sha256
 
     def _admissible_actions(self, snapshot: SandboxLiveSnapshot) -> frozenset[str]:
+        actions = self._curriculum_actions(snapshot)
+        minimum = self.plan.loss_guard_min_observations
+        if minimum is None:
+            return actions
+        # A bounded retry curriculum prevents permanent blindness to recovery.
+        # The original risk cap still applies, and the retry schedule is frozen.
+        cycle = self.policy.generation // self.plan.curriculum_period
+        if cycle % self.plan.loss_guard_retry_cycles == 0:
+            return actions
+        estimates = {item.action_type: item for item in self.policy.estimates}
+        rejected = {
+            action for action in actions if action != "WAIT"
+            and estimates[action].observations >= minimum
+            and estimates[action].reward_sum < Decimal("0")
+        }
+        # Negative memory can veto a forced training bet; it cannot increase
+        # stake, authorize another market, or manufacture positive evidence.
+        # This is an experimental conservative rule, not statistical edge proof.
+        return frozenset((actions - rejected) | {"WAIT"}) if rejected else actions
+
+    def _curriculum_actions(self, snapshot: SandboxLiveSnapshot) -> frozenset[str]:
         distinct_events = len({quote.match_id for quote in snapshot.quotes})
         slot = self.policy.generation % self.plan.curriculum_period
         if slot < self.plan.parlay_slots:
@@ -906,6 +941,8 @@ class BlindPaperSandboxCampaign:
             max_stake=_finite_decimal(plan_raw["max_stake"], "max_stake"),
             curriculum_period=plan_raw["curriculum_period"],
             parlay_slots=plan_raw["parlay_slots"],
+            loss_guard_min_observations=plan_raw.get("loss_guard_min_observations"),
+            loss_guard_retry_cycles=plan_raw.get("loss_guard_retry_cycles", 5),
         )
         if plan.payload() != plan_raw:
             raise SandboxCampaignError("campaign plan payload is not canonical")

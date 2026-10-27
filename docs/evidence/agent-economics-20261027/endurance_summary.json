@@ -1,0 +1,58 @@
+{
+  "campaign_id": "account-c-sandbox-20261027T073653Z",
+  "counters": {
+    "DEDUP_SKIPS": 0,
+    "NEGATIVE": 43,
+    "NETWORK_FAILURES": 0,
+    "NETWORK_SNAPSHOTS": 232,
+    "PARLAY_2": 184,
+    "POSITIVE": 30,
+    "SINGLE": 46,
+    "WAIT": 0
+  },
+  "environment_checkpoint_id": "fb8692e91398ecd7f64e60610a510c3bf7be9c0a2195f64171bdff496e9019d5",
+  "estimates": {
+    "PARLAY_2_HIGH_ODDS": {
+      "mean_reward": "10.34630434782608695652173921",
+      "observations": 92,
+      "reward_sum": "951.860000000000000000000007"
+    },
+    "PARLAY_2_LOW_ODDS": {
+      "mean_reward": "-13.30760869565217391304347823",
+      "observations": 92,
+      "reward_sum": "-1224.299999999999999999999997"
+    },
+    "SINGLE_HIGH_ODDS": {
+      "mean_reward": "5.060869565217391304347826087",
+      "observations": 23,
+      "reward_sum": "116.400000000000000000000000"
+    },
+    "SINGLE_LOW_ODDS": {
+      "mean_reward": "-6.304347826086956521739130435",
+      "observations": 23,
+      "reward_sum": "-145.000000000000000000000000"
+    },
+    "WAIT": {
+      "mean_reward": "0",
+      "observations": 0,
+      "reward_sum": "0"
+    }
+  },
+  "final_balance": "9698.96000000000000000000001",
+  "forward_evidence_eligible": false,
+  "initial_bankroll": "10000",
+  "network_failures_segment": 0,
+  "network_snapshots_segment": 115,
+  "open_stake": "0",
+  "paper_only": true,
+  "plan_sha256": "38406ad04ad7c9bd76b44089177092a870d8af42afec2b286d5209602a2bd4a9",
+  "policy_generation": 230,
+  "policy_id": "f95735eaac2d168644ac8b218203714234589466db70cea36ae685258c815f2f",
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.account_c.blind_live_sandbox_campaign",
+  "schema_version": 2,
+  "simulation_model_id": "parlayapi-sandbox-line-movement-v1",
+  "truth": "simulated"
+}

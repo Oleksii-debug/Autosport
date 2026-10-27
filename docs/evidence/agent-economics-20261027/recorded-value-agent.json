@@ -1,0 +1,118 @@
+{
+  "config": {
+    "bins": 10,
+    "maximum_odds": "10",
+    "minimum_bin_observations": 100,
+    "minimum_expected_return": "0.05",
+    "prior_observations": 100,
+    "split_date": "2026-09-21"
+  },
+  "config_sha256": "f854cbe94618f52eea91640ee36e06e028d6e929a8cbc4c683e3b5fabc28f4df",
+  "decision_journal_location": "Full journal retained in the experiment evidence archive.",
+  "decisions_sha256": "048d1184d500c03e6a4da2219acde9a8d41d62b0c6c4621ac4eccdc23ce8131b",
+  "evaluation_mode": "exploratory retrospective; baseline validation aggregates already inspected",
+  "forward_evidence_eligible": false,
+  "limitations": [
+    "Opening prices may be backfilled; no executable availability proof.",
+    "Final results are provider records, not independently verified event-time settlement.",
+    "Three outcomes per match are correlated, not three independent matches.",
+    "Parameters were fixed for this run; this is not a pristine prospective holdout.",
+    "Costs are hypothetical; liquidity, limits and concurrent capital are not modelled.",
+    "Source coverage may be selected and differ from the agent's intended markets."
+  ],
+  "model": [
+    {
+      "expected_wins": "12.59457620445633789145926115",
+      "observations": 156,
+      "wins": 5
+    },
+    {
+      "expected_wins": "260.6880221482272577483218527",
+      "observations": 1597,
+      "wins": 260
+    },
+    {
+      "expected_wins": "1532.300474311175544146980366",
+      "observations": 6017,
+      "wins": 1506
+    },
+    {
+      "expected_wins": "1112.526304578351874724412731",
+      "observations": 3247,
+      "wins": 1099
+    },
+    {
+      "expected_wins": "871.8536820488949675481804463",
+      "observations": 1950,
+      "wins": 864
+    },
+    {
+      "expected_wins": "661.8870206794182134713308968",
+      "observations": 1214,
+      "wins": 689
+    },
+    {
+      "expected_wins": "352.6878142317257915166014268",
+      "observations": 548,
+      "wins": 356
+    },
+    {
+      "expected_wins": "158.2573260175289321338808999",
+      "observations": 214,
+      "wins": 182
+    },
+    {
+      "expected_wins": "28.36404110283343435052394274",
+      "observations": 34,
+      "wins": 30
+    },
+    {
+      "expected_wins": "1.840738677387646468308188307",
+      "observations": 2,
+      "wins": 2
+    }
+  ],
+  "outcome_availability_verified": false,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "quote_timing_verified": false,
+  "real_money_execution": false,
+  "schema": "autosport.recorded_value_agent_experiment",
+  "schema_version": 1,
+  "settlement_basis": "provider-recorded match result, hypothetical fixed one-unit single stakes",
+  "source": {
+    "attribution": "TipsAudit (2026), https://tipsaudit.com/data, CC BY 4.0",
+    "eligible_rows": 7350,
+    "exclusions": {
+      "void_or_unsettled": 40
+    },
+    "source_rows": 7390,
+    "source_sha256": "c7964f06b9aa02800381c50aca4637ef8c1ad7e940855d3f9c3b5f1bd40e53c5"
+  },
+  "training_matches": 4993,
+  "validation": {
+    "calibrated_brier_mean_per_outcome": "0.1977083873641093782699800966",
+    "coverage": "0",
+    "market_brier_mean_per_outcome": "0.1977331620166744448604235159",
+    "one_percent_stake_cost": {
+      "bets": 0,
+      "cost_bps_per_stake": 100,
+      "day_block_bootstrap_roi_95pct": null,
+      "max_drawdown_units": "0",
+      "net_units": "0",
+      "roi": null,
+      "wins": 0
+    },
+    "wait_count": 2357,
+    "zero_cost": {
+      "bets": 0,
+      "cost_bps_per_stake": 0,
+      "day_block_bootstrap_roi_95pct": null,
+      "max_drawdown_units": "0",
+      "net_units": "0",
+      "roi": null,
+      "wins": 0
+    }
+  },
+  "validation_matches": 2357
+}

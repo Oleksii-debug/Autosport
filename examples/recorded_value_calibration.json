@@ -1,0 +1,8 @@
+{
+  "split_date": "2026-09-21",
+  "bins": 10,
+  "prior_observations": 100,
+  "minimum_bin_observations": 100,
+  "minimum_expected_return": "0.05",
+  "maximum_odds": "10"
+}

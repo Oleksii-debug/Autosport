@@ -38,7 +38,7 @@ def test_failed_bytes_are_pinned_and_completely_verified_before_extraction():
 def test_replay_uses_the_existing_real_audit_and_preserves_failure():
     source = replay()
     assert "scripts/external_uia_audit.ps1" in source
-    assert '-Workspace $workspace -WorkingDirectory $hostile' in source
+    assert "-Workspace $env:AUTOSPORT_WORKSPACE -WorkingDirectory (Join-Path $env:SystemRoot 'System32')" in source
     assert '$audit.WaitForExit(180000)' in source
     assert '$audit.Kill($true)' in source
     assert 'REPLAY_WATCHDOG_TIMEOUT fixed_stage=$observedStage' in source

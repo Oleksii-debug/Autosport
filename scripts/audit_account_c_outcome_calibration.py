@@ -84,15 +84,15 @@ def predict_by_date(rows: list[dict]) -> tuple[list[dict], list[dict]]:
     return predictions, history
 
 
-def metrics(rows: list[dict]) -> dict:
+def metrics(rows: list[dict], arms: tuple[str, ...] = ARMS) -> dict:
     result = {"count": len(rows), "arms": {}}
-    for arm in ARMS:
+    for arm in arms:
         brier = math.fsum((r["predictions"][arm]-r["y"])**2 for r in rows)/len(rows)
         log_loss = -math.fsum(math.log(r["predictions"][arm] if r["y"] else
                                       1-r["predictions"][arm]) for r in rows)/len(rows)
         result["arms"][arm] = {"brier": brier, "log_loss": log_loss}
     baseline = result["arms"]["publisher"]["brier"]
-    for arm in ARMS:
+    for arm in arms:
         result["arms"][arm]["brier_delta_vs_publisher"] = (
             result["arms"][arm]["brier"] - baseline)
     return result

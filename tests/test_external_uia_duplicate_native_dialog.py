@@ -205,7 +205,7 @@ def test_real_product_lock_refusal_reaches_native_uia(tmp_path: Path, packaged: 
             child.wait(timeout=10)
 
 
-def _failure_stack_snapshot(primary, duplicate):
+def _failure_stack_snapshot(primary, duplicate, *, include_primary_root=False):
     """Reuse the redacting sampler from this already-running host; no new Python."""
     samples = []
     sampler = os.environ.get("AUTOSPORT_UIA_STACK_SAMPLER")
@@ -215,7 +215,10 @@ def _failure_stack_snapshot(primary, duplicate):
             for role, process in (("DUPLICATE", duplicate), ("PRIMARY", primary)):
                 if process is None or process.poll() is not None:
                     continue
-                for pid in sorted(_family_ids(process.pid) - {process.pid})[:8]:
+                owned = sorted(_family_ids(process.pid) - {process.pid})[:8]
+                if include_primary_root and role == "PRIMARY":
+                    owned.insert(0, process.pid)
+                for pid in owned:
                     value = capture(sampler, pid, SCRIPT.parents[1] / "src" / "autosport")
                     samples.append({"role": role, "sample": value})
                     if value.get("status") == "CAPTURED":
@@ -311,3 +314,70 @@ def test_packaged_primary_then_duplicate_without_primary_uia(tmp_path: Path, lau
                 subprocess.run(["taskkill", "/PID", str(process.pid), "/T", "/F"],
                                capture_output=True, timeout=10, check=False)
                 process.wait(timeout=10)
+
+
+def _run_primary_semantic_probe(owner: int, handle: int, family: set[int]) -> str:
+    """Reuse the real shipped native traversal, not a DOM/bridge diagnostic."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("function Find-UiaSemanticViaChildren {")
+    end = source.index("function Find-UiaRootForProcessFamily {", start)
+    command = (
+        "$ErrorActionPreference='Stop'\n"
+        "Add-Type -AssemblyName UIAutomationClient\n"
+        "Add-Type -AssemblyName UIAutomationTypes\n"
+        + source[start:end]
+        + f"\n$observed=Find-UiaSemanticViaChildren -AutomationId '330' "
+          f"-NativeWindowHandle ([IntPtr]::new({handle})) -ExpectedProcessId {owner} "
+          "-Deadline ([DateTime]::UtcNow.AddSeconds(20))\n"
+        + "$allowed=@(" + ",".join(str(pid) for pid in sorted(family)) + ")\n"
+          "if ($null -eq $observed -or "
+          "$observed.Element.Current.AutomationId -cne '330' -or "
+          "$allowed -notcontains [int]$observed.Element.Current.ProcessId) "
+          "{ throw 'Real source primary semantic witness unavailable' }\n"
+          "Write-Output 'SEMANTIC_ID_330'\n"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    result = subprocess.run(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-Mta", "-EncodedCommand", encoded],
+        capture_output=True, text=True, timeout=30, check=False,
+    )
+    assert result.returncode == 0, "Real source primary UIA traversal failed"
+    return result.stdout.strip()
+
+
+def test_real_source_primary_reaches_semantic_uia(tmp_path: Path):
+    """Component Windows source proof only; never frozen-release acceptance."""
+    if os.environ.get("AUTOSPORT_UIA_PRIMARY_SOURCE_CONTROL") != "1":
+        pytest.skip("Explicit real source GUI control was not requested")
+    workspace = tmp_path / "source-primary-workspace"
+    local_app_data = tmp_path / "source-primary-localappdata"
+    workspace.mkdir()
+    local_app_data.mkdir()
+    env = dict(os.environ, AUTOSPORT_WORKSPACE=str(workspace),
+               LOCALAPPDATA=str(local_app_data),
+               PYTHONPATH=str(SCRIPT.parents[1] / "src"))
+    primary = subprocess.Popen(
+        [sys.executable, "-c", "from autosport.windows_entry import main; raise SystemExit(main([]))"],
+        cwd=str(Path(os.environ["SystemRoot"]) / "System32"), env=env,
+    )
+    try:
+        deadline = time.monotonic() + 20
+        owner, handle = _visible_handle(primary, timeout=20, process_family=True, single=False)
+        witness = workspace / "webview2-runtime-witness.json"
+        while not witness.is_file() and time.monotonic() < deadline:
+            assert primary.poll() is None, "Source GUI exited before native runtime witness"
+            time.sleep(0.1)
+        assert witness.is_file(), "Source native runtime witness missing"
+        observed = json.loads(witness.read_text(encoding="utf-8"))
+        assert observed["observation_source"] == "native_core_webview2_environment"
+        assert observed["human_tested"] is False and observed["nvda_verified"] is False
+        assert _run_primary_semantic_probe(owner, handle, _family_ids(primary.pid)) == "SEMANTIC_ID_330"
+    except (AssertionError, pytest.fail.Exception, subprocess.SubprocessError):
+        _failure_stack_snapshot(primary, None, include_primary_root=True)
+        raise
+    finally:
+        # Force cleanup of our disposable root is not ordinary-close evidence.
+        if primary.poll() is None:
+            subprocess.run(["taskkill", "/PID", str(primary.pid), "/T", "/F"],
+                           capture_output=True, timeout=10, check=False)
+            primary.wait(timeout=10)

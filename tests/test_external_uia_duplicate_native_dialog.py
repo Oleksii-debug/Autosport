@@ -212,7 +212,7 @@ def _failure_stack_snapshot(primary, duplicate):
     if sampler:
         try:
             capture = runpy.run_path(str(SCRIPT.parent / "capture_duplicate_python_diagnostic.py"))["capture"]
-            for role, process in (("PRIMARY", primary), ("DUPLICATE", duplicate)):
+            for role, process in (("DUPLICATE", duplicate), ("PRIMARY", primary)):
                 if process is None or process.poll() is not None:
                     continue
                 for pid in sorted(_family_ids(process.pid) - {process.pid})[:8]:
@@ -231,7 +231,40 @@ def _failure_stack_snapshot(primary, duplicate):
     }, sort_keys=True))
 
 
-def test_packaged_primary_then_duplicate_without_primary_uia(tmp_path: Path):
+def _canonical_threadjob_launch(executable: str, env: dict, cwd: str):
+    """Execute the shipped launch block inside the same hidden job topology."""
+    source = SCRIPT.read_text(encoding="utf-8")
+    start = source.index("    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'")
+    end = source.index("    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'", start)
+    launch = source[start:end]
+    command = (
+        "$ErrorActionPreference='Stop'\n"
+        "$job = Start-Job -ScriptBlock {\n"
+        "param($exePath, $launchWorkingDirectory)\n"
+        "function Write-ExternalUiaProgress { param([string]$Stage) }\n"
+        "$report=@{duplicate_start_diagnostic='NOT_RUN';duplicate_start_worker_stage='NOT_RUN'}\n"
+        + launch
+        + "\nif (-not $duplicateProcess.WaitForExit(110000)) { "
+          "try {$duplicateProcess.Kill($true)} catch {}; throw 'Control child did not exit' }\n"
+          "[int]$duplicateProcess.ExitCode\n"
+          "} -ArgumentList @($env:AUTOSPORT_NATIVE_PRODUCT_EXE, $env:AUTOSPORT_CONTROL_CWD)\n"
+          "if ($null -eq (Wait-Job -Job $job -Timeout 125)) { throw 'Control launcher timed out' }\n"
+          "$value=@(Receive-Job -Job $job -ErrorAction Stop)\n"
+          "if ($value.Count -ne 1 -or $value[0] -isnot [int]) { throw 'Invalid control child exit receipt' }\n"
+          "exit ([int]$value[0])\n"
+    )
+    encoded = base64.b64encode(command.encode("utf-16-le")).decode("ascii")
+    return subprocess.Popen(
+        ["pwsh", "-NoProfile", "-NonInteractive", "-EncodedCommand", encoded],
+        cwd=cwd, env=dict(env, AUTOSPORT_CONTROL_CWD=cwd),
+        stdout=subprocess.PIPE, stderr=subprocess.PIPE,
+        creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+    )
+
+
+@pytest.mark.parametrize("launcher", ("python", "threadjob"), ids=("python", "threadjob"))
+def test_packaged_primary_then_duplicate_without_primary_uia(tmp_path: Path, launcher: str):
+
     """Two real frozen instances, no AutomationElement access to the primary."""
     executable = os.environ.get("AUTOSPORT_NATIVE_PRODUCT_EXE")
     if not executable:
@@ -262,7 +295,9 @@ def test_packaged_primary_then_duplicate_without_primary_uia(tmp_path: Path):
         # launch; do not query the primary provider or inject any product API.
         time.sleep(1)
         assert primary.poll() is None, "Primary exited before second launch"
-        duplicate = subprocess.Popen([executable], cwd=hostile, env=env)
+        duplicate = (_canonical_threadjob_launch(executable, env, hostile)
+                     if launcher == "threadjob" else
+                     subprocess.Popen([executable], cwd=hostile, env=env))
         owner, handle = _visible_handle(duplicate, timeout=90, process_family=True)
         assert _run_probe(owner, handle) == "DIALOG_CLOSED"
         assert duplicate.wait(timeout=10) == 2

@@ -94,3 +94,14 @@ def test_independent_controls_use_the_same_read_only_package_precondition():
     assert control.index('icacls $controlPackageRoot /deny') < control.index('python -m pytest -v')
     assert '} finally {' in control and 'icacls $controlPackageRoot /remove:d' in control
     assert '$testExit = $LASTEXITCODE' in control and 'exit $testExit' in control
+
+
+def test_canonical_launcher_control_reuses_the_actual_shipped_block():
+    native = (ROOT / 'tests/test_external_uia_duplicate_native_dialog.py').read_text(encoding='utf-8')
+    launcher = native.split('def _canonical_threadjob_launch(', 1)[1].split('@pytest.mark.parametrize("launcher"', 1)[0]
+    assert 'SCRIPT.read_text(encoding="utf-8")' in launcher
+    assert 'DUPLICATE_START_PROCESS_PROBE' in launcher and 'DUPLICATE_START_PROCESS_READY' in launcher
+    assert 'Start-Job -ScriptBlock' in launcher and '+ launch' in launcher
+    assert '$duplicateProcess.WaitForExit(110000)' in launcher
+    assert 'exit ([int]$value[0])' in launcher
+    assert 'creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0)' in launcher

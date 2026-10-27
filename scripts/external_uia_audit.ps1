@@ -52,6 +52,7 @@ $script:failureDiagnosticRendererHandle = [IntPtr]::Zero
 # Only fixed audit-owned stage codes are retained. Never persist a UIA provider
 # exception message, arbitrary COM property, user path, or window title.
 $script:lastDesktopWorkerStage = 'NOT_RUN'
+$script:lastNativeWorkerStage = 'NOT_RUN'
 # Fixed per-route diagnostics; never expose provider text, HWNDs, PIDs or paths.
 $script:lastDesktopWorkerRouteStages = [ordered]@{
     ROOT = 'NOT_RUN'
@@ -1092,6 +1093,16 @@ function Find-BoundedUiaSemanticViaChildren {
         while ($workerProgress.TryDequeue([ref]$workerStage)) {
             $lastWorkerStage = [string]$workerStage
         }
+        $allowedNativeStages = @(
+            'NOT_ENTERED','WORKER_ENTER','MTA_APARTMENT_CHECK',
+            'FROM_HANDLE_ENTER','FROM_HANDLE_RETURNED','NATIVE_PID_READ_ENTER',
+            'NATIVE_PID_VALIDATED','NODE_ID_READ_ENTER','NODE_ID_MATCH',
+            'FIRST_CHILD_ENTER','FIRST_CHILD_RETURNED',
+            'NEXT_SIBLING_ENTER','NEXT_SIBLING_RETURNED'
+        )
+        $script:lastNativeWorkerStage = if ($lastWorkerStage -cin $allowedNativeStages) {
+            $lastWorkerStage
+        } else { 'UNKNOWN_FIXED_STAGE' }
         Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_TIMEOUT_PROBE'
         # This is a proven provider stall, not a missing semantic node. Retrying
         # another HWND or entering the desktop fallback can reenter the same
@@ -3023,6 +3034,25 @@ try {
         $report.duplicate_python_stacks = Get-DuplicatePythonStackDiagnostics `
             -ProcessIds ([int[]]$duplicateFamilyIds) -RootProcessId ([int]$duplicateProcess.Id)
     }
+    # Failure-only owned primary census: reuse the existing redacting sampler,
+    # never sample unrelated processes or reenter a poisoned UIA provider.
+    if ($null -ne $process -and $script:semanticWorkerTimedOut) {
+        $ownedPrimaryPythonIds = @(
+            foreach ($familyId in $lastFamilyIds) {
+                if ([int]$familyId -eq [int]$process.Id) { continue }
+                try {
+                    $familyProcess = Get-Process -Id ([int]$familyId) -ErrorAction Stop
+                    if ([string]::Equals(
+                        [string]$familyProcess.ProcessName,
+                        [System.IO.Path]::GetFileNameWithoutExtension($exePath),
+                        [System.StringComparison]::OrdinalIgnoreCase
+                    )) { [int]$familyId }
+                } catch {}
+            }
+        )
+        $report.primary_python_stacks = Get-DuplicatePythonStackDiagnostics `
+            -ProcessIds ([int[]]$ownedPrimaryPythonIds) -RootProcessId ([int]$process.Id)
+    }
     # Optional independent diagnostics may inspect cached primitive HWNDs only
     # after acceptance has already failed. They cannot set status or bypass any
     # gate, and must not reenter even a separate provider after a native worker
@@ -3044,6 +3074,7 @@ try {
     $report.native_host_focus_status = $script:nativeHostFocusStatus
     $report.isolated_host_handle_status = $script:isolatedHostHandleStatus
     $report.isolated_renderer_handle_status = $script:isolatedRendererHandleStatus
+    $report.native_semantic_worker_last_stage = $script:lastNativeWorkerStage
     $report.semantic_desktop_worker_timeout = ($script:lastDesktopWorkerStage -ne 'NOT_RUN')
     $report.semantic_desktop_worker_last_stage = $script:lastDesktopWorkerStage
     $report.semantic_desktop_worker_route_stages = $script:lastDesktopWorkerRouteStages

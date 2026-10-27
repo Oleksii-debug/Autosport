@@ -225,6 +225,7 @@ jobs:
             $start.CreateNoWindow = $true
             $start.ArgumentList.Add('-NoProfile')
             $start.ArgumentList.Add('-NonInteractive')
+            $start.ArgumentList.Add('-Mta')
             $start.ArgumentList.Add('-EncodedCommand')
             $start.ArgumentList.Add([Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($childCommand)))
             $audit = [System.Diagnostics.Process]::Start($start)

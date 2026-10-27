@@ -188,3 +188,72 @@ unchanged predecessor and passed after the repair, including a fresh interpreter
 Parent #2585's CI/Windows were still running at publication preparation, so this
 follow-up is isolated on its own branch based on the exact parent tree; the
 parent run and #2583 head stay frozen. Hosted checks are not represented as PASS.
+
+## Team-specific learning candidate — continuation, 27 October
+
+The shadow selector mainly selected LOW_ODDS (875 of its 879 bets). It was
+learning which price proxy to use, not a match-specific probability signal.
+The next bounded candidate adds team context through `team_residual_model.py`.
+It learns home/away team corrections to the opening-market probability prior,
+using three-way cross-entropy updates. Weights are regularized and capped;
+unknown/sparsely observed teams fall back to the market prior and cannot trigger
+a research bet. No closing quote, current result or source prediction is a
+forecast input. The source parser obtains team context from the same original
+CSV byte read as prices and results.
+
+The model produces the existing `ForecastRecord` format, with explicit training
+cutoff, deterministic model/input hashes and uncalibrated uncertainty=1. It
+introduces no scheduler, journal, Factory or deployment path. The existing
+research critic rejects its uncalibrated forecasts. Checkpoint restore preserves
+weights, duplicate detection, training cutoff and future forecasts; the saved
+checkpoint is not independent proof of data truth or scientific qualification.
+
+One configuration was fixed before its numerical evaluation, without a parameter
+search: learning rate 0.02, regularization 0.01, maximum absolute team weight 0.5,
+minimum five prior observations per team, expected net return threshold 5%, odds
+cap 10, 1% stake cost and an assumed 48-hour result release lag. Configuration:
+`examples/recorded_team_residual.json`, SHA256
+`b984053e577a7c4357a946b57081e7eead93cc3f1a38cb2050bf3a8e8c68397e`.
+
+The frozen model learns only the **4,504** matches whose assumed result release
+strictly precedes the 21 September boundary. Another 489 earlier matches are
+not yet assumed available at that boundary. The online clone admits those and
+later validation matches only after the same strict lag. Both are scored on all
+**2,357** validation matches, with explicit market fallback for sparse teams.
+This is exploratory retrospective research: earlier validation experiments were
+already inspected, and actual quote/result availability remains unverified.
+
+| Variant | Bets | Net units after costs | Brier per outcome | Log loss per match |
+| --- | ---: | ---: | ---: | ---: |
+| Market probability control | 0 | 0 | 0.1977331620 | 0.9939313001 |
+| Frozen team model | 63 | -18.030 | 0.1977940905 | 0.9942271251 |
+| Delayed online team model | 109 | -25.380 | 0.1980376456 | 0.9951388357 |
+
+Both trained candidates are **REJECTED_ON_THIS_SAMPLE**: neither improves both
+forecast scores, and both lose after costs. This is a sample-specific research
+verdict, not a significance claim. More online updates did not improve this
+experiment. Even the hypothetical gross returns before the 1% cost are negative
+(-17.400 and -24.290). No threshold, sample or adverse result was removed to
+manufacture a winner. A future positive sample would still be research-only and
+require independent prospective evidence; this evaluator cannot grant promotion.
+
+Machine-readable results and hashes of the full decision/model exports are in
+`evidence/agent-economics-20261027/team-residual-experiment.json`.
+
+```bash
+python scripts/evaluate_recorded_team_agent.py --csv tipsaudit-predictions.csv --config examples/recorded_team_residual.json --output team-results.json
+```
+
+The public source permits attributed reuse, but documents potentially backfilled
+opening quotes: <https://tipsaudit.com/data>. Attribution: TipsAudit (2026),
+CC BY 4.0. The recorded source hash remains the one above. Additional limitations
+include incomplete team fixture histories, display-name identities and delayed
+or corrected results that could violate the assumed 48-hour availability.
+
+Executed qualification: **146 targeted tests passed** on Python 3.12/Linux,
+including the existing research pipeline, ForecastRecord, settlement learner and
+prior experiment suites. Tests show learned responses to past results, reaction
+to a revealed reversal, strict current/future/same-boundary isolation, bounded
+weights, sparse-team fallback, duplicate rejection, checkpoint/restart identity,
+and enforcement of the existing research critic. Source/fixture tests do not
+make these economically rejected candidates eligible for runtime deployment.

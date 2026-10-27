@@ -83,6 +83,7 @@ jobs:
           mkdir -p account-c-paper-evidence/independent-authority-export
           cp -R "$AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR"/. \
             account-c-paper-evidence/independent-authority-export/
+          find account-c-paper-evidence -type f -name '*.lock' -delete
           find account-c-paper-evidence -type f \
             ! -name artifact-sha256.txt -print0 \
             | sort -z \

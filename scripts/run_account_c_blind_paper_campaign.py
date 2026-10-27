@@ -7,6 +7,7 @@ import json
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from autosport.integrity import atomic_write_json
 from autosport.paper_live_sandbox_campaign import (
     BlindPaperCampaignPlan,
     BlindPaperSandboxCampaign,
@@ -91,7 +92,11 @@ def main() -> int:
                 "verified campaign lacks completed network learning evidence"
             )
         _validate_boundary(summary)
+        diagnostics = campaign.diagnostics()
+        _validate_boundary(diagnostics)
+        atomic_write_json(args.workspace / "paper_diagnostics.json", diagnostics)
         summary["independent_restart_verification"] = "PASS"
+        summary["paper_diagnostics"] = "paper_diagnostics.json"
         print(json.dumps(summary, ensure_ascii=False, sort_keys=True))
         return 0
 

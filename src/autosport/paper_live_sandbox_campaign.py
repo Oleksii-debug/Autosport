@@ -18,7 +18,7 @@ from pathlib import Path
 from typing import Callable, Final
 from urllib.request import Request, urlopen
 
-from .domain import TicketLeg
+from .domain import TicketLeg, TicketStatus
 from .integrity import atomic_write_json
 from .json_integrity import strict_json_loads
 from .learning_environment import (
@@ -40,8 +40,12 @@ SANDBOX_URL: Final = (
 )
 SIMULATION_MODEL_ID: Final = "parlayapi-sandbox-line-movement-v1"
 STATE_SCHEMA: Final = "autosport.account_c.blind_live_sandbox_campaign"
-STATE_VERSION: Final = 1
-ACTION_TYPES: Final = frozenset({"WAIT", "SINGLE", "PARLAY_2"})
+STATE_VERSION: Final = 2
+PARLAY_ACTIONS: Final = frozenset(
+    {"PARLAY_2_HIGH_ODDS", "PARLAY_2_LOW_ODDS"}
+)
+SINGLE_ACTIONS: Final = frozenset({"SINGLE_HIGH_ODDS", "SINGLE_LOW_ODDS"})
+ACTION_TYPES: Final = frozenset({"WAIT", *PARLAY_ACTIONS, *SINGLE_ACTIONS})
 
 
 class SandboxCampaignError(ValueError):
@@ -477,14 +481,28 @@ class BlindPaperSandboxCampaign:
         distinct_events = len({quote.match_id for quote in snapshot.quotes})
         slot = self.policy.generation % self.plan.curriculum_period
         if slot < self.plan.parlay_slots:
-            return frozenset({"PARLAY_2"}) if distinct_events >= 2 else frozenset({"WAIT"})
+            if distinct_events < 2:
+                return frozenset({"WAIT"})
+            strategy = (
+                "PARLAY_2_LOW_ODDS"
+                if slot % 2 == 0
+                else "PARLAY_2_HIGH_ODDS"
+            )
+            return frozenset({strategy})
         if slot < self.plan.curriculum_period - 1:
-            return frozenset({"SINGLE"}) if snapshot.quotes else frozenset({"WAIT"})
+            if not snapshot.quotes:
+                return frozenset({"WAIT"})
+            strategy = (
+                "SINGLE_LOW_ODDS"
+                if (slot - self.plan.parlay_slots) % 2 == 0
+                else "SINGLE_HIGH_ODDS"
+            )
+            return frozenset({strategy})
         actions = {"WAIT"}
         if snapshot.quotes:
-            actions.add("SINGLE")
+            actions.update(SINGLE_ACTIONS)
         if distinct_events >= 2:
-            actions.add("PARLAY_2")
+            actions.update(PARLAY_ACTIONS)
         return frozenset(actions)
 
     @staticmethod
@@ -494,10 +512,18 @@ class BlindPaperSandboxCampaign:
     ) -> tuple[SandboxLiveQuote, ...]:
         if action_type == "WAIT":
             return ()
+        if action_type not in PARLAY_ACTIONS | SINGLE_ACTIONS:
+            raise SandboxCampaignError("unsupported sandbox selection action")
         selected: list[SandboxLiveQuote] = []
         seen_events: set[str] = set()
-        wanted = 1 if action_type == "SINGLE" else 2
-        for quote in snapshot.quotes:
+        wanted = 1 if action_type in SINGLE_ACTIONS else 2
+        high_odds = action_type.endswith("HIGH_ODDS")
+        ranked = sorted(
+            snapshot.quotes,
+            key=lambda item: (item.decimal_odds, item.quote_identity),
+            reverse=high_odds,
+        )
+        for quote in ranked:
             if quote.match_id in seen_events:
                 continue
             selected.append(quote)
@@ -630,7 +656,12 @@ class BlindPaperSandboxCampaign:
             reward=reward,
             transition=transition,
         )
-        self.counters[action_type] += 1
+        if action_type in PARLAY_ACTIONS:
+            self.counters["PARLAY_2"] += 1
+        elif action_type in SINGLE_ACTIONS:
+            self.counters["SINGLE"] += 1
+        else:
+            self.counters["WAIT"] += 1
         if reward_value > 0:
             self.counters["POSITIVE"] += 1
         elif reward_value < 0:
@@ -667,6 +698,161 @@ class BlindPaperSandboxCampaign:
             "open_stake": str(self.book.committed_stake),
             "counters": dict(sorted(self.counters.items())),
             "estimates": estimates,
+        }
+
+    def diagnostics(self) -> dict[str, object]:
+        """Recompute bounded risk diagnostics from authoritative settled tickets.
+
+        This read-only projection never changes the policy and never upgrades
+        simulated evidence.  It reconstructs the bankroll chronology instead of
+        trusting aggregate counters, then cross-checks both authorities.
+        """
+
+        if self.book.committed_stake != Decimal("0"):
+            raise SandboxCampaignError(
+                "campaign diagnostics require zero open PAPER stake"
+            )
+
+        equity = self.book.initial_bankroll
+        peak_equity = equity
+        maximum_drawdown = Decimal("0")
+        maximum_drawdown_peak = equity
+        gross_stake = Decimal("0")
+        gross_payout = Decimal("0")
+        positive_count = 0
+        negative_count = 0
+        neutral_count = 0
+        current_negative_streak = 0
+        maximum_negative_streak = 0
+        previous_settled: datetime | None = None
+        cohorts = {
+            "SINGLE": {
+                "tickets": 0,
+                "won": 0,
+                "lost": 0,
+                "void": 0,
+                "gross_stake": Decimal("0"),
+                "gross_payout": Decimal("0"),
+                "net_reward": Decimal("0"),
+            },
+            "PARLAY_2": {
+                "tickets": 0,
+                "won": 0,
+                "lost": 0,
+                "void": 0,
+                "gross_stake": Decimal("0"),
+                "gross_payout": Decimal("0"),
+                "net_reward": Decimal("0"),
+            },
+        }
+
+        for ticket in self.book.tickets.values():
+            if ticket.status is TicketStatus.OPEN or ticket.settled_at is None:
+                raise SandboxCampaignError(
+                    "campaign diagnostics require fully settled PAPER tickets"
+                )
+            placed = _instant(ticket.placed_at, "ticket placed_at")
+            settled = _instant(ticket.settled_at, "ticket settled_at")
+            if settled <= placed:
+                raise SandboxCampaignError(
+                    "campaign diagnostics found non-causal ticket settlement"
+                )
+            if previous_settled is not None and placed <= previous_settled:
+                raise SandboxCampaignError(
+                    "campaign diagnostics found overlapping ticket chronology"
+                )
+            previous_settled = settled
+
+            cohort_name = "SINGLE" if len(ticket.legs) == 1 else "PARLAY_2"
+            if len(ticket.legs) not in {1, 2}:
+                raise SandboxCampaignError(
+                    "campaign diagnostics found unsupported ticket leg count"
+                )
+            cohort = cohorts[cohort_name]
+            reward = ticket.payout - ticket.stake
+            equity += reward
+            gross_stake += ticket.stake
+            gross_payout += ticket.payout
+            cohort["tickets"] += 1
+            cohort[ticket.status.value] += 1
+            cohort["gross_stake"] += ticket.stake
+            cohort["gross_payout"] += ticket.payout
+            cohort["net_reward"] += reward
+
+            if reward > 0:
+                positive_count += 1
+                current_negative_streak = 0
+            elif reward < 0:
+                negative_count += 1
+                current_negative_streak += 1
+                maximum_negative_streak = max(
+                    maximum_negative_streak, current_negative_streak
+                )
+            else:
+                neutral_count += 1
+
+            if equity > peak_equity:
+                peak_equity = equity
+            drawdown = peak_equity - equity
+            if drawdown > maximum_drawdown:
+                maximum_drawdown = drawdown
+                maximum_drawdown_peak = peak_equity
+
+        if equity != self.book.balance:
+            raise SandboxCampaignError(
+                "campaign diagnostics bankroll reconstruction mismatch"
+            )
+        if positive_count != self.counters["POSITIVE"]:
+            raise SandboxCampaignError(
+                "campaign diagnostics positive counter mismatch"
+            )
+        if negative_count != self.counters["NEGATIVE"]:
+            raise SandboxCampaignError(
+                "campaign diagnostics negative counter mismatch"
+            )
+        if cohorts["SINGLE"]["tickets"] != self.counters["SINGLE"]:
+            raise SandboxCampaignError(
+                "campaign diagnostics single counter mismatch"
+            )
+        if cohorts["PARLAY_2"]["tickets"] != self.counters["PARLAY_2"]:
+            raise SandboxCampaignError(
+                "campaign diagnostics parlay counter mismatch"
+            )
+
+        def _cohort_payload(value: dict[str, int | Decimal]) -> dict[str, object]:
+            return {
+                key: str(item) if type(item) is Decimal else item
+                for key, item in sorted(value.items())
+            }
+
+        return {
+            "schema": "autosport.account_c.blind_paper_diagnostics",
+            "schema_version": 1,
+            "campaign_id": self.plan.campaign_id,
+            "truth": EvidenceTruth.SIMULATED.value,
+            "simulation_model_id": SIMULATION_MODEL_ID,
+            "paper_only": True,
+            "real_money_execution": False,
+            "forward_evidence_eligible": False,
+            "promotion_authorized": False,
+            "profitability_claim": False,
+            "ticket_count": len(self.book.tickets),
+            "positive_reward_count": positive_count,
+            "negative_reward_count": negative_count,
+            "neutral_reward_count": neutral_count,
+            "maximum_consecutive_negative_rewards": maximum_negative_streak,
+            "initial_bankroll": str(self.book.initial_bankroll),
+            "final_balance": str(self.book.balance),
+            "gross_stake": str(gross_stake),
+            "gross_payout": str(gross_payout),
+            "net_reward": str(self.book.balance - self.book.initial_bankroll),
+            "maximum_drawdown": str(maximum_drawdown),
+            "maximum_drawdown_peak": str(maximum_drawdown_peak),
+            "open_stake": str(self.book.committed_stake),
+            "cohorts": {
+                name: _cohort_payload(value)
+                for name, value in sorted(cohorts.items())
+            },
         }
 
     def save(self, workspace: str | Path) -> None:

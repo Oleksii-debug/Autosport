@@ -22,6 +22,15 @@ append-only witness chain alongside the state and records SHA-256 for every expo
 file. The witness remains deliberately bound to its original absolute path; the
 export is audit evidence, not permission to transplant or rebind economic authority.
 
+That independent reload also writes `paper_diagnostics.json`. The diagnostics are a
+read-only reconstruction from authoritative settled PaperBook tickets: exact initial
+and final equity, gross stake/payout, net reward, maximum drawdown and its equity peak,
+maximum consecutive negative rewards, and separate SINGLE/PARLAY_2 settlement
+cohorts. Ticket chronology and every aggregate counter are recomputed and compared;
+any open stake, non-causal/overlapping settlement, unsupported leg count, balance
+mismatch or counter disagreement fails closed. These metrics retain the SIMULATED
+truth boundary and cannot authorize promotion or a profitability claim.
+
 No API model, Drive credential, real-money account, bookmaker login, bet-placement
 route, or user secret is used.
 
@@ -68,6 +77,9 @@ and the transparent policy state are uploaded for 14 days.
   more than 0.5% of current virtual balance.
 - Seven of every ten curriculum slots admit only two-event parlays when two distinct
   events exist; two slots admit singles; one slot lets the transparent policy choose.
+  Within the single and parlay families, the existing transparent bandit separately
+  learns HIGH_ODDS and LOW_ODDS selection strategies. Ranking uses only odds in the
+  decision snapshot; the future snapshot is unavailable until settlement.
 - Decision evidence contains no execution-mode or synthetic-truth feature. Audit,
   outcome, reward, and summary records always contain that truth.
 - The same decision snapshot cannot create a second action. A later snapshot and

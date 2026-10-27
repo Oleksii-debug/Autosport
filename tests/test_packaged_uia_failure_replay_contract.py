@@ -39,7 +39,10 @@ def test_replay_uses_the_existing_real_audit_and_preserves_failure():
     source = replay()
     assert "scripts/external_uia_audit.ps1" in source
     assert '-Workspace $workspace -WorkingDirectory $hostile' in source
-    assert 'Wait-Job -Job $audit -Timeout 180' in source
+    assert '$audit.WaitForExit(180000)' in source
+    assert '$audit.Kill($true)' in source
+    assert 'REPLAY_WATCHDOG_TIMEOUT fixed_stage=$observedStage' in source
+    assert 'Receive-Job -Job $audit' not in source
     assert "if ($result.status -cne 'PASS') { throw" in source
     assert 'Stop-Job -Job' not in source
     assert 'icacls $packageRoot /deny' in source

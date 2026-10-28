@@ -2783,9 +2783,31 @@ class AutosportWebBridge:
         missing = object()
         try:
             native = getattr(window, "native", None)
-            native_webview = getattr(native, "webview", None)
-            core_webview = getattr(native_webview, "CoreWebView2", None)
-            native_source = getattr(core_webview, "Source", missing)
+            observed = [missing]
+            inspected = [False]
+
+            def inspect_native_source() -> None:
+                # CoreWebView2 is a WinForms UI-thread authority. A bridge poll
+                # runs on a Python worker; direct CLR property access there
+                # stalled the real packaged host (Windows run 40430415803).
+                native_webview = getattr(native, "webview", None)
+                core_webview = getattr(native_webview, "CoreWebView2", None)
+                source = getattr(core_webview, "Source", missing)
+                # Do not return a native COM/CLR proxy across the thread seam.
+                observed[0] = source if source is missing or source is None else str(source)
+                inspected[0] = True
+
+            if bool(getattr(native, "InvokeRequired", False)):
+                from System import Func, Type
+
+                native.Invoke(Func[Type](inspect_native_source))
+            else:
+                inspect_native_source()
+            if not inspected[0]:
+                raise WindowsWebBridgeTrustError(
+                    "The native document URL inspection did not execute"
+                )
+            native_source = observed[0]
         except Exception as exc:
             raise WindowsWebBridgeTrustError(
                 "The WebView bridge could not inspect the native active document URL"

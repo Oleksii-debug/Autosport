@@ -1,0 +1,46 @@
+{
+  "candidate_training_brier": {
+    "0.0": 0.25,
+    "5.0": 0.24761568114908533,
+    "10.0": 0.24654688929840265,
+    "20.0": 0.24655573649838358,
+    "40.0": 0.2505557552283233,
+    "80.0": 0.26503608333220735
+  },
+  "cutoff_date": "2022-07-01",
+  "evaluation_count": 2080,
+  "evaluation_is_untouched_holdout": false,
+  "excluded_unresolved_identity_count": 1,
+  "excluded_unresolved_match_ids": [
+    "4376"
+  ],
+  "known_source_hash_match": true,
+  "model_sha256": "eb82535c2d5c5f5f0edff5a7fcb6121042c4d6e4a6380354a9fe8f009946f6a0",
+  "name_identity_independently_verified": false,
+  "odds_present": false,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "raw_date_interpretation": "month/day/year; timezone and source timing unverified",
+  "results": {
+    "constant_50": {
+      "accuracy": 0.5004807692307692,
+      "brier": 0.25
+    },
+    "fixed_k20": {
+      "accuracy": 0.5639423076923077,
+      "brier": 0.24289672440965349
+    },
+    "training_selected": {
+      "accuracy": 0.5639423076923077,
+      "brier": 0.24283418705711046
+    }
+  },
+  "schema": "autosport.setka_history.research.v1",
+  "script_sha256": "eadc0ee0c5d39e866b113e2e4c85cf08471c6c7ceb879b6165f4d1c5e17533de",
+  "selected_k": 10.0,
+  "source_page_month_conflicts_with_file": true,
+  "source_rights": "UNKNOWN",
+  "source_sha256": "d400562f49ced084133c8e926025efb6023dd62a8341fd4484864d567a4e392d",
+  "source_url": "https://github.com/SCOREnetworkorg/sports-data-repository/blob/66a314e63ca1ce649d24f4daf48b5564ead01e34/data/table_tennis-sept2022.csv",
+  "training_count": 5770
+}

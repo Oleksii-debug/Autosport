@@ -1,0 +1,400 @@
+{
+  "cases": [
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1211",
+          "net_reward": "828.54",
+          "post_readmission_tickets": 0,
+          "tickets": 49
+        },
+        "capped": {
+          "drawdown": "1211",
+          "net_reward": "1283.0226",
+          "post_readmission_tickets": 4,
+          "tickets": 32
+        }
+      },
+      "seed": 0,
+      "snapshot_sha256": "a263ff601d38f1a0a690c5726cae531ad0393780d82bdf8f47ada0d584d24310"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1211",
+          "net_reward": "-1195.08",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1211",
+          "net_reward": "2116.9876",
+          "post_readmission_tickets": 4,
+          "tickets": 32
+        }
+      },
+      "seed": 1,
+      "snapshot_sha256": "012d58671b3782028705c76d12ba6ceb1dd543239e7a793f57f209f481fea209"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1211",
+          "net_reward": "-1.27",
+          "post_readmission_tickets": 0,
+          "tickets": 49
+        },
+        "capped": {
+          "drawdown": "1211",
+          "net_reward": "522.4648",
+          "post_readmission_tickets": 4,
+          "tickets": 30
+        }
+      },
+      "seed": 2,
+      "snapshot_sha256": "0d7f72f68345cf749361b23aaf3f3b780d2e99c3325fe16a8439879894728e62"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1297",
+          "net_reward": "-800.31",
+          "post_readmission_tickets": 0,
+          "tickets": 35
+        },
+        "capped": {
+          "drawdown": "1297",
+          "net_reward": "2202.5406",
+          "post_readmission_tickets": 4,
+          "tickets": 34
+        }
+      },
+      "seed": 3,
+      "snapshot_sha256": "363136107ad16322e6cd8ba26973456c7567137990b9b5d090b57152a44b5106"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1426",
+          "net_reward": "-1426",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1426",
+          "net_reward": "1048.1564",
+          "post_readmission_tickets": 4,
+          "tickets": 36
+        }
+      },
+      "seed": 4,
+      "snapshot_sha256": "7bd36d4bb4c9e5a0f60ef549e55ba086513c22202cca45bbe3ccb60cf3d49383"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1426",
+          "net_reward": "-1426",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1426",
+          "net_reward": "355.0188",
+          "post_readmission_tickets": 4,
+          "tickets": 36
+        }
+      },
+      "seed": 5,
+      "snapshot_sha256": "2fba5e6180a50ddf19c7f085d850aaa5098b433aee57f034602839e4cb82aefe"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1297",
+          "net_reward": "-1077.41",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1297",
+          "net_reward": "1472.8922",
+          "post_readmission_tickets": 4,
+          "tickets": 34
+        }
+      },
+      "seed": 6,
+      "snapshot_sha256": "3cf4f5e99d7631d4a56fcd79e06fa030fadd8a7a34afc03c54e05489a1d3ef55"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1254",
+          "net_reward": "-1137.03",
+          "post_readmission_tickets": 0,
+          "tickets": 33
+        },
+        "capped": {
+          "drawdown": "1254",
+          "net_reward": "4131.7574",
+          "post_readmission_tickets": 4,
+          "tickets": 37
+        }
+      },
+      "seed": 7,
+      "snapshot_sha256": "4163e89a7f4623f8822028f1f92d1738059cc5581b8d9d58bb293b26936a7143"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1254",
+          "net_reward": "-825.32",
+          "post_readmission_tickets": 0,
+          "tickets": 35
+        },
+        "capped": {
+          "drawdown": "1254",
+          "net_reward": "2138.6244",
+          "post_readmission_tickets": 4,
+          "tickets": 32
+        }
+      },
+      "seed": 8,
+      "snapshot_sha256": "c424d72140f402ff23773c06ada0b6f0c8aec827460bb19bf12a4a709d310d29"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1297",
+          "net_reward": "-997.92",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1297",
+          "net_reward": "2325.3598",
+          "post_readmission_tickets": 4,
+          "tickets": 36
+        }
+      },
+      "seed": 9,
+      "snapshot_sha256": "c7023653a8bcb1d6fe3781e4456f47f46fa77987da1fcc1c4611778cb0f14bee"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1265.89",
+          "net_reward": "-1265.89",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1211",
+          "net_reward": "398.5228",
+          "post_readmission_tickets": 4,
+          "tickets": 30
+        }
+      },
+      "seed": 10,
+      "snapshot_sha256": "4a2c6ce10e9e8706cb120bb156a55cc2869fa6d5e0f2e881095d09dc638ffcd3"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1297",
+          "net_reward": "821.07",
+          "post_readmission_tickets": 0,
+          "tickets": 48
+        },
+        "capped": {
+          "drawdown": "1297",
+          "net_reward": "1021.8475",
+          "post_readmission_tickets": 4,
+          "tickets": 34
+        }
+      },
+      "seed": 11,
+      "snapshot_sha256": "93f30e487a676e6615cda8f392cd4ac525e95208bfba1ba599f712a20f90a237"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1426",
+          "net_reward": "-1426",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1468",
+          "net_reward": "-845.44",
+          "post_readmission_tickets": 4,
+          "tickets": 36
+        }
+      },
+      "seed": 12,
+      "snapshot_sha256": "362f879de33816efa6acbd403dc5858cbc7c7e25e7037f83b74f8c9c3fb1dca7"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1211",
+          "net_reward": "-930.07",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1211",
+          "net_reward": "515.9652",
+          "post_readmission_tickets": 4,
+          "tickets": 32
+        }
+      },
+      "seed": 13,
+      "snapshot_sha256": "687172c28de0670f862237a71d78b0dacc6a98bd60e71bc3203da851acced8c0"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1211",
+          "net_reward": "-1125.72",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1211",
+          "net_reward": "-947.72",
+          "post_readmission_tickets": 4,
+          "tickets": 30
+        }
+      },
+      "seed": 14,
+      "snapshot_sha256": "bdc6d8fe78321d2d679ac67356ce9e6f98f48f1a20b4d69281e73e845d9f2a92"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1211",
+          "net_reward": "-1118.75",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1211",
+          "net_reward": "2115.7092",
+          "post_readmission_tickets": 4,
+          "tickets": 32
+        }
+      },
+      "seed": 15,
+      "snapshot_sha256": "3c319a5829368aad9832ea6301d6fad258f8c58467e1da2ebc9a26ae49a2d8ef"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1340",
+          "net_reward": "447.63",
+          "post_readmission_tickets": 0,
+          "tickets": 48
+        },
+        "capped": {
+          "drawdown": "1340",
+          "net_reward": "3708.8650",
+          "post_readmission_tickets": 4,
+          "tickets": 40
+        }
+      },
+      "seed": 16,
+      "snapshot_sha256": "6808a31bf045c77114b55a7679c2bc8ea908835afa023f1f00c5a9b4e0badc4f"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1297",
+          "net_reward": "-914.55",
+          "post_readmission_tickets": 0,
+          "tickets": 32
+        },
+        "capped": {
+          "drawdown": "1297",
+          "net_reward": "-1048.55",
+          "post_readmission_tickets": 4,
+          "tickets": 36
+        }
+      },
+      "seed": 17,
+      "snapshot_sha256": "deabd01e47d8072a61b8c096c4a041da68ba16ce60bae2fc515f8bbae4b008d0"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1297",
+          "net_reward": "588.48",
+          "post_readmission_tickets": 0,
+          "tickets": 48
+        },
+        "capped": {
+          "drawdown": "1297",
+          "net_reward": "3029.4541",
+          "post_readmission_tickets": 4,
+          "tickets": 34
+        }
+      },
+      "seed": 18,
+      "snapshot_sha256": "7d63c6e62ad6c803dbcd7507b5ec38dab08b9893aaeda9378d46749b0d0ffb59"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1211",
+          "net_reward": "-810.57",
+          "post_readmission_tickets": 0,
+          "tickets": 33
+        },
+        "capped": {
+          "drawdown": "1211",
+          "net_reward": "1191.8705",
+          "post_readmission_tickets": 4,
+          "tickets": 32
+        }
+      },
+      "seed": 19,
+      "snapshot_sha256": "3f36e652eb4b566370143462610243d235ae5bbc15d63b0932439267197e6d08"
+    }
+  ],
+  "forward_evidence_eligible": false,
+  "higher_net_cases": 19,
+  "larger_drawdown_cases": 1,
+  "lower_net_cases": 1,
+  "maximum_additional_drawdown": "42",
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.account_c.shadow_random_regimes.research.v1",
+  "script_sha256": "8936506e0a75e23e2aa2df1774998edf78ac6dd40985b48eb3504c641ec7420f",
+  "seeds": [
+    0,
+    1,
+    2,
+    3,
+    4,
+    5,
+    6,
+    7,
+    8,
+    9,
+    10,
+    11,
+    12,
+    13,
+    14,
+    15,
+    16,
+    17,
+    18,
+    19
+  ],
+  "shadow_source_sha256": "60add5067b4c3fb4a9cb856d7cc902841b9fce3fb8309382efd8b606f0cc8833",
+  "steps": 120,
+  "truth": "simulated",
+  "unchanged_net_cases": 0
+}

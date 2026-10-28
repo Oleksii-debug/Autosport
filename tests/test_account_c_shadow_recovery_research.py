@@ -6,6 +6,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from compare_account_c_recovery_probe import START
 from compare_account_c_shadow_recovery import ShadowRecovery, ShadowRecoveryCapped, snapshots
+from evaluate_account_c_shadow_random_regimes import snapshots as random_snapshots
 from autosport.paper_live_sandbox_campaign import BlindPaperCampaignPlan
 
 
@@ -39,3 +40,11 @@ def test_capped_variant_never_exceeds_four_tickets_after_readmission():
         assert campaign.tickets_after_readmission <= 4
     assert campaign.shadow_admissions > 0
     assert campaign.tickets_after_readmission == 4
+
+
+def test_random_regimes_are_reproducible_and_timestamp_ordered():
+    first, replay = random_snapshots(7), random_snapshots(7)
+    other = random_snapshots(8)
+    assert [s.snapshot_sha256 for s in first] == [s.snapshot_sha256 for s in replay]
+    assert [s.snapshot_sha256 for s in first] != [s.snapshot_sha256 for s in other]
+    assert all(left.available_at < right.observed_at for left, right in zip(first, first[1:]))

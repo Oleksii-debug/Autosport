@@ -41,8 +41,13 @@ for m in matches:
   row.append('Коефіцієнти: '+odds(f.get('odds'))+'\n'+score(f.get('score')))
  result=m.get('result') or {}; period=result.get('periods') or []; final=result.get('final_score')
  if result:
-  summary=score(final); summary=summary.replace('\nОчки: немає поточного сету','')
-  row.append(summary+'\nПо сетах: '+', '.join(x.get('score','?') for x in period) if final else 'Завершення: немає рахунку')
+  set_scores=[str(x.get('score','')) for x in period if x.get('score')]
+  if set_scores:
+   summary=score(','.join(set_scores)).replace('\nОчки: немає поточного сету','')
+   row.append(summary+'\nПо сетах: '+', '.join(set_scores))
+  elif final:
+   row.append('Підсумковий рахунок: '+final+'\nРахунок окремих сетів: немає даних')
+  else:row.append('Завершення: немає рахунку')
  else:row.append('Матч ще не завершився')
  rows.append(row)
 out.write_text(json.dumps({'headers':headers,'rows':rows,'note':'Перші числа належать першому гравцю, другі — другому. Нульова хвилина: перше спостереження наживо. Зрізи можуть запізнюватися.'},ensure_ascii=False),'utf-8')

@@ -91,12 +91,16 @@ def fresh_arm() -> dict:
             "turnover": Decimal(0), "gross_profit": Decimal(0),
             "fees": Decimal(0), "net_profit": Decimal(0),
             "peak": Decimal(0), "equity": Decimal(0), "max_drawdown": Decimal(0),
-            "by_odds": {}, "by_favorite_status": {}}
+            "by_odds": {}, "by_favorite_status": {}, "by_month": {}}
 
 
 def record(arm: dict, selected: str | None, row: dict) -> None:
+    month = row["at"].strftime("%Y-%m")
+    month_row = arm["by_month"].setdefault(month, {"bets": 0, "wins": 0, "no_bets": 0,
+        "turnover": Decimal(0), "net_profit": Decimal(0)})
     if selected is None:
         arm["no_bets"] += 1
+        month_row["no_bets"] += 1
         return
     odds = row["odds_a"] if selected == row["a"] else row["odds_b"]
     won = selected == row["winner"]
@@ -122,6 +126,10 @@ def record(arm: dict, selected: str | None, row: dict) -> None:
         item["wins"] += int(won)
         item["turnover"] += STAKE
         item["net_profit"] += net
+    month_row["bets"] += 1
+    month_row["wins"] += int(won)
+    month_row["turnover"] += STAKE
+    month_row["net_profit"] += net
 
 
 def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1, 1),
@@ -188,8 +196,8 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
     for name, state in arms.items():
         output_arms[name] = {k: str(v) if isinstance(v, Decimal) else v
                              for k, v in state.items()
-                             if k not in ("peak", "equity", "by_odds", "by_favorite_status")}
-        for bucket in ("by_odds", "by_favorite_status"):
+                             if k not in ("peak", "equity", "by_odds", "by_favorite_status", "by_month")}
+        for bucket in ("by_odds", "by_favorite_status", "by_month"):
             output_arms[name][bucket] = {
                 label: {k: str(v) if isinstance(v, Decimal) else v for k, v in values.items()}
                 for label, values in sorted(state[bucket].items())}

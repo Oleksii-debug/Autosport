@@ -109,10 +109,11 @@ def test_history_guard_abstains_for_unseen_player_and_counts_full_population():
 def test_descriptive_odds_cohorts_reconcile_with_financial_totals():
     result = research.audit([("fixture.csv", encode(fixtures()))])
     for arm in result["arms"].values():
-        for grouping in ("by_odds", "by_favorite_status"):
+        for grouping in ("by_odds", "by_favorite_status", "by_month"):
             assert sum(x["bets"] for x in arm[grouping].values()) == arm["bets"]
             assert sum((Decimal(x["net_profit"]) for x in arm[grouping].values()),
                        Decimal(0)) == Decimal(arm["net_profit"])
+        assert sum(x["no_bets"] for x in arm["by_month"].values()) == arm["no_bets"]
 
 
 def test_market_anchoring_does_not_turn_weak_disagreement_into_a_ticket():

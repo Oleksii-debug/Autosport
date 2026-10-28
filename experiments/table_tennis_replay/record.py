@@ -121,7 +121,8 @@ def cycle(state, board, outcomes, *, now, board_sha):
         if target["result"]:
             continue
         result_matches = [row for row in outcomes.get("results", []) if same_names(target, row) and
-                          str(row.get("fixture_id")) in {target["id"], target.get("live_id")}]
+                          (str(row.get("fixture_id")) in {target["id"], target.get("live_id")} or
+                           target["id"] in links.get(str(row.get("fixture_id")), set()))]
         finished = len(result_matches) == 1 and result_matches[0].get("status") == "finished"
         linked = [item for item in candidates if same_names(target, item) and
                   (str(item["id"]) in {target["id"], target.get("live_id")} or target["id"] in links.get(str(item["id"]), set()))]

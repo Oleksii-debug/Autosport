@@ -72,3 +72,15 @@ def test_already_finished_match_does_not_gain_a_fabricated_live_start():
     assert s["matches"][0]["first_live_at"] is None
     assert not s["matches"][0]["frames"]
     assert s["coverage_complete"] is False
+
+
+def test_provider_linked_live_id_with_result_is_not_a_new_live_start(monkeypatch):
+    t = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    s = state()
+    live = item(t.isoformat())
+    live["id"] = "live-2"
+    result = {"fixture_id": "live-2", "home": "A", "away": "B", "league": "L", "status": "finished", "final_score": "3-1"}
+    monkeypatch.setattr(record, "related_ids", lambda _: {"1", "live-2"})
+    record.cycle(s, {"matches": [live]}, {"results": [result]}, now=t, board_sha="a"*64)
+    assert s["matches"][0]["first_live_at"] is None
+    assert s["matches"][0]["result"]["final_score"] == "3-1"

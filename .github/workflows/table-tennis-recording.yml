@@ -29,7 +29,7 @@ jobs:
       - name: Verify 3-minute samples and source identity rules
         run: |
           python -m pip install pytest
-          python -m pytest -q tests/test_table_tennis_recording.py
+          python -m pytest --noconftest -q tests/test_table_tennis_recording.py
       - name: Record and publish progress on the isolated data branch
         shell: bash
         run: |

@@ -1,0 +1,64 @@
+import hashlib
+import json
+import sys
+import zipfile
+from pathlib import Path
+
+import pytest
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from audit_account_c_artifact import audit
+
+
+def make_artifact(path, *, truth="simulated", alter=False, tickets=0):
+    summary = {"truth": truth, "paper_only": True, "real_money_execution": False,
+               "forward_evidence_eligible": False, "promotion_authorized": False,
+               "profitability_claim": False, "initial_bankroll": "10000", "final_balance": "10000",
+               "policy_generation": 1, "counters": {"SINGLE": 0, "PARLAY_2": 0, "WAIT": 1,
+                   "NETWORK_SNAPSHOTS": 2, "NETWORK_FAILURES": 0}}
+    files = {"endurance_summary.json": json.dumps(summary).encode(),
+             "campaign_state.json": json.dumps({"summary": summary}).encode(),
+             "paper_book.json": json.dumps({"initial_bankroll": "10000", "balance": "10000",
+                                             "tickets": [{}] * tickets}).encode()}
+    manifest = "".join(hashlib.sha256(body).hexdigest() + "  account-c-paper-evidence/" + name + "\n"
+                       for name, body in sorted(files.items()))
+    if alter:
+        files["paper_book.json"] += b" "
+    with zipfile.ZipFile(path, "w") as archive:
+        for name, body in files.items():
+            archive.writestr(name, body)
+        archive.writestr("artifact-sha256.txt", manifest)
+
+
+def test_simulated_result_is_checked_without_real_profit_claim(tmp_path):
+    path = tmp_path / "artifact.zip"
+    make_artifact(path)
+    result = audit(path)
+    assert result["manifest_files_verified"] == 3
+    assert result["wait_count"] == 1 and result["simulated_change"] == "0"
+    assert result["profitability_claim"] is False
+    assert result["manifest_checks_internal_consistency_only"] is True
+
+
+@pytest.mark.parametrize("options, message", [({"alter": True}, "digest"),
+                                               ({"truth": "observed"}, "truth"),
+                                               ({"tickets": 1}, "count mismatch")])
+def test_corrupt_or_mislabelled_artifacts_are_rejected(tmp_path, options, message):
+    path = tmp_path / "artifact.zip"
+    make_artifact(path, **options)
+    with pytest.raises(ValueError, match=message):
+        audit(path)
+
+
+def test_extra_unmanifested_member_and_parent_path_are_rejected(tmp_path):
+    path = tmp_path / "artifact.zip"
+    make_artifact(path)
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("extra.txt", "unaccounted")
+    with pytest.raises(ValueError, match="membership"):
+        audit(path)
+    make_artifact(path)
+    with zipfile.ZipFile(path, "a") as archive:
+        archive.writestr("../escape.txt", "untrusted")
+    with pytest.raises(ValueError, match="unsafe"):
+        audit(path)

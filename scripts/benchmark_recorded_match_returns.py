@@ -23,7 +23,7 @@ PICKS = {"1": {"1"}, "X": {"X"}, "2": {"2"}, "1X": {"1", "X"},
          "X2": {"X", "2"}, "12": {"1", "2"}}
 
 
-def parse_rows(path: Path):
+def parse_rows(path: Path, *, include_team_context: bool = False):
     rows, exclusions, seen = [], Counter(), set()
     raw = path.read_bytes()
     source_sha = hashlib.sha256(raw).hexdigest()
@@ -60,8 +60,13 @@ def parse_rows(path: Path):
         for name, pick in choices.items():
             price = source_odds if name == "SOURCE_PICK" else odds[pick]
             rewards[name] = price - 1 if item["result"] in PICKS[pick] else Decimal(-1)
-        rows.append({"id": identity, "kickoff": kickoff.astimezone(timezone.utc),
-                     "rewards": rewards, "odds": odds, "result": item["result"]})
+        row = {"id": identity, "kickoff": kickoff.astimezone(timezone.utc),
+               "rewards": rewards, "odds": odds, "result": item["result"]}
+        if include_team_context:
+            # Extract from the SAME byte snapshot as prices/results; no second
+            # file read can silently attach context from a different revision.
+            row["team_context"] = {key: item.get(key, "") for key in ("country", "home", "away")}
+        rows.append(row)
     rows.sort(key=lambda item: (item["kickoff"], item["id"]))
     return rows, {"source_sha256": source_sha, "source_rows": len(seen),
                   "eligible_rows": len(rows), "exclusions": dict(exclusions)}

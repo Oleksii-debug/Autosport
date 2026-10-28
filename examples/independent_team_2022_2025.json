@@ -1,0 +1,13 @@
+{
+  "split_date": "2023-08-01",
+  "outcome_lag_hours": 48,
+  "cost_bps_per_stake": 100,
+  "minimum_net_return": "0.05",
+  "maximum_odds": "10",
+  "model": {
+    "learning_rate": "0.02",
+    "regularization": "0.01",
+    "maximum_weight": "0.5",
+    "minimum_team_observations": 5
+  }
+}

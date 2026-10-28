@@ -8,19 +8,24 @@ seven favorable movements may trigger at most four shadow admissions. Only
 already revealed snapshots are used. The underlying model awards outcomes for
 quote changes rather than actual table-tennis results. It is entirely synthetic.
 
-| Simulated scenario | Baseline net / maximum drawdown (UAH) | Shadow net / maximum drawdown (UAH) | Baseline / shadow tickets |
+| Simulated scenario | Baseline net / drawdown | Shadow net / drawdown | Capped shadow net / drawdown |
 |---|---:|---:|---:|
-| Persistent loss | -1,468 / 1,468 | -1,468 / 1,468 | 32 / 32 |
-| Persistent favorable movement | 160,534.3200 / 0 | 160,534.3200 / 0 | 180 / 180 |
-| Persistent recovery | -1,468 / 1,468 | 44,976.8456 / 1,468 | 32 / 115 |
-| Short recovery followed by reversal | -1,468 / 1,468 | -858.7544 / 2,503 | 32 / 88 |
+| Persistent loss | -1,468 / 1,468 | -1,468 / 1,468 | -1,468 / 1,468 |
+| Persistent favorable movement | 160,534.3200 / 0 | 160,534.3200 / 0 | 160,534.3200 / 0 |
+| Persistent recovery | -1,468 / 1,468 | 44,976.8456 / 1,468 | 669.3256 / 1,468 |
+| Short recovery followed by reversal | -1,468 / 1,468 | -858.7544 / 2,503 | 669.3256 / 1,468 |
+| False signal, later reversal | -1,468 / 1,468 | -1,439.08 / 1,468 | -1,439.08 / 1,468 |
+| False signal, immediate reversal | -1,468 / 1,468 | -1,636 / 1,636 | -1,636 / 1,636 |
 
-The reversal scenario was added after inspecting the first three results; none
+The reversal scenarios and capped variant were added after inspecting prior results; none
 of these cases is independent validation. In the reversal, the drawdown grows
 by 1,035 simulated UAH despite a less negative final balance. The cap of four
 is only on shadow admissions, not on all later tickets: the underlying policy
 may continue exploiting a positive historical mean after an admission. Thus the
-experiment does not bound total subsequent exposure. Its positive figures are
+experiment does not bound total subsequent exposure. A separate post-hoc capped
+variant allows at most four tickets in total after the first shadow readmission.
+That reduces exposure in the constructed reversal but still loses an additional
+168 UAH in the immediate false-signal case. Its positive figures are
 artifacts of constructed price paths and synthetic settlement, not demonstrated
 profit on sporting outcomes or executable prices. Do not deploy or promote it.
 

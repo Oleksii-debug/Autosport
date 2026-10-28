@@ -68,13 +68,41 @@ class ShadowRecovery(BlindPaperSandboxCampaign):
         return True
 
 
+class ShadowRecoveryCapped(ShadowRecovery):
+    """Post-hoc comparison: at most four total tickets after first readmission."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.tickets_after_readmission = 0
+
+    def _admissible_actions(self, snapshot):
+        if self.shadow_admissions > 0 and self.tickets_after_readmission >= 4:
+            self._pending_shadow_admission = False
+            return frozenset({"WAIT"})
+        return super()._admissible_actions(snapshot)
+
+    def step(self, decision_snapshot, outcome_snapshot):
+        before_tickets = len(self.book.tickets)
+        already_readmitted = self.shadow_admissions > 0
+        advanced = super().step(decision_snapshot, outcome_snapshot)
+        if advanced and len(self.book.tickets) > before_tickets and (
+            already_readmitted or self.shadow_admissions > 0
+        ):
+            self.tickets_after_readmission += 1
+        return advanced
+
+
 def snapshots(scenario):
-    if scenario != "short_recovery_then_reversal":
+    if scenario not in {"short_recovery_then_reversal", "false_signal_reversal", "false_signal_immediate"}:
         return original_snapshots(scenario)
+    reversal = {"short_recovery_then_reversal": 102,
+                "false_signal_reversal": 98, "false_signal_immediate": 97}[scenario]
     data = []
     for i in range(STEPS + 1):
         # A temporary favorable period is followed by a renewed losing regime.
-        price = 150 + i * 2 if i <= 90 else 330 - (i - 90) * 2 if i <= 102 else 306 + (i - 102) * 3
+        price = (150 + i * 2 if i <= 90 else
+                 330 - (i - 90) * 2 if i <= reversal else
+                 330 - (reversal - 90) * 2 + (i - reversal) * 3)
         at = START + timedelta(seconds=i + 1)
         rows = [{"match_id": f"fixture-{j}", "sport_key": "table_tennis",
                  "source": "pinnacle", "period_key": "FT", "market": "h2h",
@@ -89,10 +117,11 @@ def snapshots(scenario):
 
 def compare():
     cases = []
-    for scenario in ("loss", "favorable", "recovery", "short_recovery_then_reversal"):
+    for scenario in ("loss", "favorable", "recovery", "short_recovery_then_reversal", "false_signal_reversal", "false_signal_immediate"):
         data = snapshots(scenario)
         results = {}
-        for name, cls in (("baseline", BlindPaperSandboxCampaign), ("shadow", ShadowRecovery)):
+        for name, cls in (("baseline", BlindPaperSandboxCampaign), ("shadow", ShadowRecovery),
+                          ("shadow_capped", ShadowRecoveryCapped)):
             plan = BlindPaperCampaignPlan(campaign_id=f"shadow-{scenario}",
                 started_at=START.isoformat(), cutoff_at=(START + timedelta(hours=1)).isoformat())
             campaign = cls(plan, seed=11)
@@ -102,13 +131,15 @@ def compare():
             results[name] = {"net_reward": diag["net_reward"],
                 "maximum_drawdown": diag["maximum_drawdown"],
                 "ticket_count": diag["ticket_count"], "wait_count": campaign.counters["WAIT"],
-                "shadow_admissions": getattr(campaign, "shadow_admissions", 0)}
+                "shadow_admissions": getattr(campaign, "shadow_admissions", 0),
+                "tickets_after_readmission": getattr(campaign, "tickets_after_readmission", None)}
         cases.append({"scenario": scenario, "snapshot_sha256": hashlib.sha256(
             "".join(snapshot.snapshot_sha256 for snapshot in data).encode()).hexdigest(),
             "results": results})
     return {"schema": "autosport.account_c.shadow_recovery.research.v1",
             "steps": STEPS, "shadow_window": 8, "minimum_positive": 7,
             "maximum_shadow_admissions": 4, "truth": "simulated",
+            "posthoc_capped_total_tickets_after_first_readmission": 4,
             "forward_evidence_eligible": False, "promotion_authorized": False,
             "profitability_claim": False, "real_money_execution": False,
             "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

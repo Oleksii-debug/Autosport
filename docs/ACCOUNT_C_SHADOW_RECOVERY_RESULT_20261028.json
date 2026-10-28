@@ -8,6 +8,7 @@
           "net_reward": "-1468",
           "shadow_admissions": 0,
           "ticket_count": 32,
+          "tickets_after_readmission": null,
           "wait_count": 148
         },
         "shadow": {
@@ -15,6 +16,15 @@
           "net_reward": "-1468",
           "shadow_admissions": 0,
           "ticket_count": 32,
+          "tickets_after_readmission": null,
+          "wait_count": 148
+        },
+        "shadow_capped": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "shadow_admissions": 0,
+          "ticket_count": 32,
+          "tickets_after_readmission": 0,
           "wait_count": 148
         }
       },
@@ -28,6 +38,7 @@
           "net_reward": "160534.3200",
           "shadow_admissions": 0,
           "ticket_count": 180,
+          "tickets_after_readmission": null,
           "wait_count": 0
         },
         "shadow": {
@@ -35,6 +46,15 @@
           "net_reward": "160534.3200",
           "shadow_admissions": 0,
           "ticket_count": 180,
+          "tickets_after_readmission": null,
+          "wait_count": 0
+        },
+        "shadow_capped": {
+          "maximum_drawdown": "0",
+          "net_reward": "160534.3200",
+          "shadow_admissions": 0,
+          "ticket_count": 180,
+          "tickets_after_readmission": 0,
           "wait_count": 0
         }
       },
@@ -48,6 +68,7 @@
           "net_reward": "-1468",
           "shadow_admissions": 0,
           "ticket_count": 32,
+          "tickets_after_readmission": null,
           "wait_count": 148
         },
         "shadow": {
@@ -55,7 +76,16 @@
           "net_reward": "44976.8456",
           "shadow_admissions": 4,
           "ticket_count": 115,
+          "tickets_after_readmission": null,
           "wait_count": 65
+        },
+        "shadow_capped": {
+          "maximum_drawdown": "1468",
+          "net_reward": "669.3256",
+          "shadow_admissions": 3,
+          "ticket_count": 36,
+          "tickets_after_readmission": 4,
+          "wait_count": 144
         }
       },
       "scenario": "recovery",
@@ -68,6 +98,7 @@
           "net_reward": "-1468",
           "shadow_admissions": 0,
           "ticket_count": 32,
+          "tickets_after_readmission": null,
           "wait_count": 148
         },
         "shadow": {
@@ -75,22 +106,92 @@
           "net_reward": "-858.7544",
           "shadow_admissions": 4,
           "ticket_count": 88,
+          "tickets_after_readmission": null,
           "wait_count": 92
+        },
+        "shadow_capped": {
+          "maximum_drawdown": "1468",
+          "net_reward": "669.3256",
+          "shadow_admissions": 3,
+          "ticket_count": 36,
+          "tickets_after_readmission": 4,
+          "wait_count": 144
         }
       },
       "scenario": "short_recovery_then_reversal",
       "snapshot_sha256": "8c4b46def40dabf030937e65fbb9f25a76b136e5ce76275b6fe68dbf16366258"
+    },
+    {
+      "results": {
+        "baseline": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "shadow_admissions": 0,
+          "ticket_count": 32,
+          "tickets_after_readmission": null,
+          "wait_count": 148
+        },
+        "shadow": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1439.08",
+          "shadow_admissions": 4,
+          "ticket_count": 36,
+          "tickets_after_readmission": null,
+          "wait_count": 144
+        },
+        "shadow_capped": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1439.08",
+          "shadow_admissions": 4,
+          "ticket_count": 36,
+          "tickets_after_readmission": 4,
+          "wait_count": 144
+        }
+      },
+      "scenario": "false_signal_reversal",
+      "snapshot_sha256": "e1f09deb334aaa690537401a865f01a5a0542481a2e3775a37035cb01bddca6a"
+    },
+    {
+      "results": {
+        "baseline": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "shadow_admissions": 0,
+          "ticket_count": 32,
+          "tickets_after_readmission": null,
+          "wait_count": 148
+        },
+        "shadow": {
+          "maximum_drawdown": "1636",
+          "net_reward": "-1636",
+          "shadow_admissions": 4,
+          "ticket_count": 36,
+          "tickets_after_readmission": null,
+          "wait_count": 144
+        },
+        "shadow_capped": {
+          "maximum_drawdown": "1636",
+          "net_reward": "-1636",
+          "shadow_admissions": 4,
+          "ticket_count": 36,
+          "tickets_after_readmission": 4,
+          "wait_count": 144
+        }
+      },
+      "scenario": "false_signal_immediate",
+      "snapshot_sha256": "25808c567ae8f985a6e845630287b5bd15752048f2a3f98bd50f2936fd673e8e"
     }
   ],
   "fixture_sha256": "7b351de0ccf2e073f0532745c730342f48d19ef0a75244c9719ce7fd8cfe17e7",
   "forward_evidence_eligible": false,
   "maximum_shadow_admissions": 4,
   "minimum_positive": 7,
+  "posthoc_capped_total_tickets_after_first_readmission": 4,
   "profitability_claim": false,
   "promotion_authorized": false,
   "real_money_execution": false,
   "schema": "autosport.account_c.shadow_recovery.research.v1",
-  "script_sha256": "e07906a143cf2cb7b6d7bc3abfd35c9518660cf52e9f30a0008e9644da1ef077",
+  "script_sha256": "60add5067b4c3fb4a9cb856d7cc902841b9fce3fb8309382efd8b606f0cc8833",
   "shadow_window": 8,
   "steps": 180,
   "truth": "simulated"

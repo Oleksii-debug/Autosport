@@ -1,4 +1,4 @@
-"""Resume the latest completed same-branch campaign; never silently start empty."""
+"""Resume the latest campaign checkpoint; never silently start empty."""
 from __future__ import annotations
 
 import argparse
@@ -31,7 +31,7 @@ def restore(raw: bytes, destination: Path, *, expected_sha256: str):
     try:
         with zipfile.ZipFile(io.BytesIO(raw)) as archive:
             entries = archive.infolist()
-            if len({entry.filename for entry in entries}) != len(entries) or sum(entry.file_size for entry in entries) > 500 * 1024 * 1024:
+            if len({entry.filename for entry in entries}) != len(entries) or sum(entry.file_size for entry in entries) > 1024 * 1024 * 1024:
                 raise ValueError("ambiguous or oversized campaign archive")
             for entry in entries:
                 path = PurePosixPath(entry.filename)
@@ -65,24 +65,73 @@ def restore(raw: bytes, destination: Path, *, expected_sha256: str):
             shutil.rmtree(temporary)
 
 
+def select_checkpoint(artifacts, *, run_id, attempt, segment=None):
+    prefix = f"prospective-shadow-{run_id}-attempt-{attempt}"
+    if segment is not None:
+        if not 1 <= segment <= 6:
+            raise ValueError("invalid previous campaign segment")
+        expected = prefix if segment == 6 else f"{prefix}-segment-{segment}"
+        eligible = [(segment, artifact) for artifact in artifacts
+                    if artifact["name"] == expected]
+    else:
+        eligible = []
+        for artifact in artifacts:
+            name = artifact["name"]
+            if name == prefix:
+                eligible.append((6, artifact))
+            elif name.startswith(prefix + "-segment-"):
+                suffix = name[len(prefix + "-segment-"):]
+                if suffix in {"1", "2", "3", "4", "5"}:
+                    eligible.append((int(suffix), artifact))
+    if not eligible:
+        raise ValueError("latest campaign checkpoint unavailable; refusing rollback")
+    latest = max(rank for rank, _ in eligible)
+    matches = [artifact for rank, artifact in eligible if rank == latest]
+    if len(matches) != 1:
+        raise ValueError("ambiguous campaign checkpoint")
+    if matches[0]["expired"]:
+        raise ValueError("latest campaign checkpoint expired; refusing rollback")
+    return matches[0]
+
+
+def latest_started_segment(jobs):
+    segments = []
+    for job in jobs:
+        name = job.get("name", "")
+        suffix = name.removeprefix("segment-")
+        if name.startswith("segment-") and suffix in {"1", "2", "3", "4", "5", "6"} and job.get("conclusion") != "skipped":
+            segments.append(int(suffix))
+    if segments:
+        return max(segments)
+    if any(job.get("name") == "public-shadow-learning" and job.get("conclusion") != "skipped" for job in jobs):
+        return 6  # legacy single-segment campaigns used the final artifact name
+    raise ValueError("previous campaign has no started learning segment")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--workspace", type=Path, required=True)
+    parser.add_argument("--previous-segment", type=int)
     args = parser.parse_args()
     repo = os.environ["GITHUB_REPOSITORY"]
     branch = "work/agent-shadow-learning-20261027"
-    runs = api(f"repos/{repo}/actions/workflows/prospective-shadow-observer.yml/runs?status=completed&per_page=30")["workflow_runs"]
-    eligible = [run for run in runs if run["head_branch"] == branch and run["event"] == "push"]
-    if not eligible:
-        raise ValueError("previous campaign not found; explicit recovery required")
-    run = max(eligible, key=lambda value: value["run_number"])
+    if args.previous_segment is not None:
+        run = api(f"repos/{repo}/actions/runs/{int(os.environ['GITHUB_RUN_ID'])}")
+        if run["head_branch"] != branch or run["event"] != "push":
+            raise ValueError("current campaign identity mismatch")
+    else:
+        runs = api(f"repos/{repo}/actions/workflows/prospective-shadow-observer.yml/runs?status=completed&per_page=30")["workflow_runs"]
+        eligible = [run for run in runs if run["head_branch"] == branch and run["event"] == "push"]
+        if not eligible:
+            raise ValueError("previous campaign not found; explicit recovery required")
+        run = max(eligible, key=lambda value: value["run_number"])
     artifacts = api(f"repos/{repo}/actions/runs/{run['id']}/artifacts?per_page=100")["artifacts"]
-    name = f"prospective-shadow-{run['id']}-attempt-{run['run_attempt']}"
-    matches = [artifact for artifact in artifacts if artifact["name"] == name and not artifact["expired"]]
-    if len(matches) != 1:
-        raise ValueError("latest completed campaign checkpoint unavailable; refusing rollback")
-    artifact = matches[0]
-    if artifact["size_in_bytes"] > 50 * 1024 * 1024 or not artifact.get("digest", "").startswith("sha256:"):
+    previous_segment = args.previous_segment
+    if previous_segment is None:
+        jobs = api(f"repos/{repo}/actions/runs/{run['id']}/jobs?per_page=100")["jobs"]
+        previous_segment = latest_started_segment(jobs)
+    artifact = select_checkpoint(artifacts, run_id=run["id"], attempt=run["run_attempt"], segment=previous_segment)
+    if artifact["size_in_bytes"] > 200 * 1024 * 1024 or not artifact.get("digest", "").startswith("sha256:"):
         raise ValueError("campaign archive lacks bounded digest evidence")
     raw = api(f"repos/{repo}/actions/artifacts/{artifact['id']}/zip", binary=True)
     restore(raw, args.workspace, expected_sha256=artifact["digest"][7:])

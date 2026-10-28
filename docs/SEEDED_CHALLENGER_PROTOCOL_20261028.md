@@ -30,3 +30,15 @@ proxy and its matching rules differ in timing and selection from the live API.
 Future recorded prices remain unverified as executable. This challenger has no
 real-money, promotion, bookmaker-order or production-risk authority. Do not count
 the seed's historic +7 units as money earned or as future experiment results.
+
+The actual seed was initialized at 2026-10-28T03:05:18.294158Z with 69 resolved
+historical records. The first separate live capture, at 03:05:32.232634Z, froze
+three PRICE_GAP preferences for future matches and no outcomes. The exact
+initial checkpoint ZIP has SHA-256
+`008bfce01d071322249467377f4a9967a220763e11cd41598c4ff53c6a4b2f5e`.
+It contains public source CSV, the captured source responses, seed manifest,
+memory and observer checkpoint, and is retained with attribution. A bounded
+six-segment campaign restores this exact state and continues it, rather than
+resetting the three recorded decisions or the 69 training observations.
+Each 4-hour segment stores a distinct verified checkpoint. This second research
+process does not cancel or mutate the independent unseeded campaign.

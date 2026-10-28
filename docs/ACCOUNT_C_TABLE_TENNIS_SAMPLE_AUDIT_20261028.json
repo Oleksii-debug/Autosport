@@ -1,0 +1,85 @@
+{
+  "analysis_sha256": "6b363fdd7008859146bdc2cf9fd52285bfa43d797b6f6494089a4f76b438c89b",
+  "cutoff_date": "2026-09-01",
+  "date_only": true,
+  "evaluation": {
+    "constant_50_percent": {
+      "accuracy": 0.48473748473748474,
+      "brier": 0.25,
+      "count": 819
+    },
+    "publisher": {
+      "accuracy": 0.5482295482295483,
+      "brier": 0.24467900023199024,
+      "count": 819
+    },
+    "train_fitted_shrink": {
+      "accuracy": 0.5482295482295483,
+      "brier": 0.2436342669544409,
+      "count": 819
+    }
+  },
+  "evaluation_count": 819,
+  "evaluation_is_untouched_holdout": false,
+  "league_groups": {
+    "Czech Liga Pro": {
+      "publisher": {
+        "accuracy": 0.5068493150684932,
+        "brier": 0.25096610842465755,
+        "count": 146
+      },
+      "shrunk": {
+        "accuracy": 0.5068493150684932,
+        "brier": 0.24976250780148296,
+        "count": 146
+      }
+    },
+    "Setka Cup": {
+      "publisher": {
+        "accuracy": 0.5261044176706827,
+        "brier": 0.2467724983935743,
+        "count": 249
+      },
+      "shrunk": {
+        "accuracy": 0.5261044176706827,
+        "brier": 0.24542707479390147,
+        "count": 249
+      }
+    },
+    "TT Cup": {
+      "publisher": {
+        "accuracy": 0.5217391304347826,
+        "brier": 0.2515820681884058,
+        "count": 138
+      },
+      "shrunk": {
+        "accuracy": 0.5217391304347826,
+        "brier": 0.24959735872739905,
+        "count": 138
+      }
+    },
+    "TT Elite Series": {
+      "publisher": {
+        "accuracy": 0.6023622047244095,
+        "brier": 0.23643269633858266,
+        "count": 254
+      },
+      "shrunk": {
+        "accuracy": 0.6023622047244095,
+        "brier": 0.2358581109341257,
+        "count": 254
+      }
+    }
+  },
+  "odds_present": false,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "publisher_times_independently_verified": false,
+  "schema": "autosport.table_tennis_probability_sample.research.v1",
+  "shrink_coefficient": 0.7268138189848039,
+  "source_license": "CC BY 4.0; sample only",
+  "source_repository": "https://github.com/lathise2025/table-tennis-elo-dataset",
+  "source_revision": "9eba2ade435ce27b4f3dcbd5aafc6bfbcd52d534",
+  "source_sha256": "bbb2ab531f269a1eafff89e240086a4d17999114b582825ba4338986c6770fde",
+  "training_count": 1181
+}

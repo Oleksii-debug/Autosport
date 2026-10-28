@@ -1,0 +1,97 @@
+{
+  "campaign_sha256": "cf72a40a48f461196703664016f0628233dd8693519185e66170d757f2e9c508",
+  "cases": [
+    {
+      "results": {
+        "baseline": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "shadow_admissions": 0,
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "shadow": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "shadow_admissions": 0,
+          "ticket_count": 32,
+          "wait_count": 148
+        }
+      },
+      "scenario": "loss",
+      "snapshot_sha256": "b3ec92f73f39f9ce453b50b872b8cfc8b9c566b442fb1df11618cb47722a86c0"
+    },
+    {
+      "results": {
+        "baseline": {
+          "maximum_drawdown": "0",
+          "net_reward": "160534.3200",
+          "shadow_admissions": 0,
+          "ticket_count": 180,
+          "wait_count": 0
+        },
+        "shadow": {
+          "maximum_drawdown": "0",
+          "net_reward": "160534.3200",
+          "shadow_admissions": 0,
+          "ticket_count": 180,
+          "wait_count": 0
+        }
+      },
+      "scenario": "favorable",
+      "snapshot_sha256": "cac0a2992a74b872dd2148ea1c3de7123abadf979c6b3f31869188591421cf25"
+    },
+    {
+      "results": {
+        "baseline": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "shadow_admissions": 0,
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "shadow": {
+          "maximum_drawdown": "1468",
+          "net_reward": "44976.8456",
+          "shadow_admissions": 4,
+          "ticket_count": 115,
+          "wait_count": 65
+        }
+      },
+      "scenario": "recovery",
+      "snapshot_sha256": "1abe65dec6b6c3042f1aa1cb490a34160a2321b7585c3fe441d036ed4a99891f"
+    },
+    {
+      "results": {
+        "baseline": {
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "shadow_admissions": 0,
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "shadow": {
+          "maximum_drawdown": "2503.0000",
+          "net_reward": "-858.7544",
+          "shadow_admissions": 4,
+          "ticket_count": 88,
+          "wait_count": 92
+        }
+      },
+      "scenario": "short_recovery_then_reversal",
+      "snapshot_sha256": "8c4b46def40dabf030937e65fbb9f25a76b136e5ce76275b6fe68dbf16366258"
+    }
+  ],
+  "fixture_sha256": "7b351de0ccf2e073f0532745c730342f48d19ef0a75244c9719ce7fd8cfe17e7",
+  "forward_evidence_eligible": false,
+  "maximum_shadow_admissions": 4,
+  "minimum_positive": 7,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.account_c.shadow_recovery.research.v1",
+  "script_sha256": "e07906a143cf2cb7b6d7bc3abfd35c9518660cf52e9f30a0008e9644da1ef077",
+  "shadow_window": 8,
+  "steps": 180,
+  "truth": "simulated"
+}

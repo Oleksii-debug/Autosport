@@ -1,0 +1,29 @@
+"""Research experiment only; no product policy or profitability assertion."""
+import sys
+from datetime import timedelta
+from pathlib import Path
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
+from compare_account_c_recovery_probe import START
+from compare_account_c_shadow_recovery import ShadowRecovery, snapshots
+from autosport.paper_live_sandbox_campaign import BlindPaperCampaignPlan
+
+
+def test_shadow_history_appears_only_after_wait_outcome_without_ticket():
+    plan = BlindPaperCampaignPlan(campaign_id="shadow-test", started_at=START.isoformat(),
+                                 cutoff_at=(START + timedelta(hours=1)).isoformat())
+    campaign = ShadowRecovery(plan, seed=11)
+    data = snapshots("loss")
+    saw_shadow = False
+    for decision, outcome in zip(data, data[1:]):
+        before_wait, before_tickets = campaign.counters["WAIT"], len(campaign.book.tickets)
+        before_history = sum(len(values) for values in campaign.shadow.values())
+        campaign._admissible_actions(decision)
+        assert sum(len(values) for values in campaign.shadow.values()) == before_history
+        campaign.step(decision, outcome)
+        if campaign.counters["WAIT"] > before_wait:
+            assert len(campaign.book.tickets) == before_tickets
+            assert sum(len(values) for values in campaign.shadow.values()) >= before_history
+            saw_shadow = True
+    assert saw_shadow
+    assert campaign.shadow_admissions == 0

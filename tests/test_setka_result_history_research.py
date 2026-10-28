@@ -4,7 +4,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from audit_setka_result_history import audit, load_history
+from audit_setka_result_history import audit, load_history, pre_day_minimum_history
 
 
 def test_unresolved_self_match_is_excluded_and_recorded(tmp_path):
@@ -32,3 +32,12 @@ def test_duplicate_or_contradictory_result_fails_closed(tmp_path):
     path.write_text(header + "1,6/20/2022,A,B,3,1,0\n", encoding="utf-8")
     with pytest.raises(ValueError, match="disagree"):
         load_history(path)
+
+
+def test_support_counts_only_previous_days():
+    from datetime import date
+    day1, day2 = date(2022, 6, 20), date(2022, 6, 21)
+    rows = [("1", day1, "A", "B", 1), ("2", day1, "A", "B", 0),
+            ("3", day2, "A", "B", 1)]
+    assert pre_day_minimum_history(rows) == {"1": 0, "2": 0, "3": 2}
+    assert pre_day_minimum_history(list(reversed(rows))) == {"1": 0, "2": 0, "3": 2}

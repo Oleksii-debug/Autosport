@@ -18,6 +18,38 @@
   "model_sha256": "eb82535c2d5c5f5f0edff5a7fcb6121042c4d6e4a6380354a9fe8f009946f6a0",
   "name_identity_independently_verified": false,
   "odds_present": false,
+  "posthoc_minimum_prior_matches": {
+    "0": {
+      "constant_brier": 0.25,
+      "count": 2080,
+      "elo_accuracy": 0.5639423076923077,
+      "elo_brier": 0.24283418705711046
+    },
+    "10": {
+      "constant_brier": 0.25,
+      "count": 1652,
+      "elo_accuracy": 0.5780871670702179,
+      "elo_brier": 0.24167043080960887
+    },
+    "20": {
+      "constant_brier": 0.25,
+      "count": 1282,
+      "elo_accuracy": 0.5897035881435257,
+      "elo_brier": 0.24018821651771063
+    },
+    "3": {
+      "constant_brier": 0.25,
+      "count": 1921,
+      "elo_accuracy": 0.5715773034877668,
+      "elo_brier": 0.24235454001066678
+    },
+    "5": {
+      "constant_brier": 0.25,
+      "count": 1839,
+      "elo_accuracy": 0.5764002175095161,
+      "elo_brier": 0.2421096154956578
+    }
+  },
   "profitability_claim": false,
   "promotion_authorized": false,
   "raw_date_interpretation": "month/day/year; timezone and source timing unverified",
@@ -36,7 +68,7 @@
     }
   },
   "schema": "autosport.setka_history.research.v1",
-  "script_sha256": "eadc0ee0c5d39e866b113e2e4c85cf08471c6c7ceb879b6165f4d1c5e17533de",
+  "script_sha256": "beb3107362e23331a70ca201e665d8d8ba18f1ba0580a62000fea1f4f78be828",
   "selected_k": 10.0,
   "source_page_month_conflicts_with_file": true,
   "source_rights": "UNKNOWN",

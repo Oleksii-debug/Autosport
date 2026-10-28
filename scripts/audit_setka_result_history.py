@@ -5,6 +5,7 @@ import argparse
 import csv
 import hashlib
 import json
+from collections import Counter, defaultdict
 from datetime import date, datetime
 from pathlib import Path
 
@@ -47,6 +48,22 @@ def brier(rows, prediction):
     return sum((prediction[r[0]] - r[4]) ** 2 for r in rows) / len(rows)
 
 
+def pre_day_minimum_history(rows):
+    """Count appearances strictly before each day; do not order same-day matches."""
+    days = defaultdict(list)
+    for row in rows:
+        days[row[1]].append(row)
+    counts = Counter()
+    prior = {}
+    for day in sorted(days):
+        for match_id, _, a, b, _ in days[day]:
+            prior[match_id] = min(counts[a], counts[b])
+        for _, _, a, b, _ in days[day]:
+            counts[a] += 1
+            counts[b] += 1
+    return prior
+
+
 def audit(path):
     rows, unresolved = load_history(path)
     source_hash = hashlib.sha256(path.read_bytes()).hexdigest()
@@ -62,6 +79,15 @@ def audit(path):
         prediction = predict_day_batched(rows, k=k)
         result[name] = {"brier": brier(evaluation, prediction),
                         "accuracy": sum((prediction[r[0]] >= .5) == bool(r[4]) for r in evaluation) / len(evaluation)}
+    support = pre_day_minimum_history(rows)
+    selected_prediction = predict_day_batched(rows, k=chosen)
+    groups = {}
+    for threshold in (0, 3, 5, 10, 20):
+        subset = [r for r in evaluation if support[r[0]] >= threshold]
+        if subset:
+            groups[str(threshold)] = {"count": len(subset), "elo_brier": brier(subset, selected_prediction),
+                "elo_accuracy": sum((selected_prediction[r[0]] >= .5) == bool(r[4]) for r in subset) / len(subset),
+                "constant_brier": 0.25}
     return {"schema": "autosport.setka_history.research.v1",
             "source_url": ("https://github.com/SCOREnetworkorg/sports-data-repository/blob/66a314e63ca1ce649d24f4daf48b5564ead01e34/data/table_tennis-sept2022.csv" if known_source else None),
             "source_sha256": source_hash, "known_source_hash_match": known_source,
@@ -74,6 +100,7 @@ def audit(path):
             "excluded_unresolved_identity_count": len(unresolved),
             "excluded_unresolved_match_ids": unresolved,
             "selected_k": chosen, "results": result,
+            "posthoc_minimum_prior_matches": groups,
             "name_identity_independently_verified": False,
             "evaluation_is_untouched_holdout": False, "odds_present": False,
             "profitability_claim": False, "promotion_authorized": False}

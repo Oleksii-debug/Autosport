@@ -43,6 +43,14 @@ the first named player. This file has no bookmaker quotes, execution, costs or
 market settlement, so there is no profitability or financial-edge claim. The
 experiment is not promoted to agents.
 
+As a post-hoc exploration, requiring **each** player to have at least 5, 10 or
+20 earlier-day appearances left 1,839, 1,652 or 1,282 later matches,
+respectively. Their Brier scores were 0.242110, 0.241670 and 0.240188, versus
+0.250000 for constant 50% on each subset. These are different populations,
+and the thresholds were examined after the data; selection and match difficulty
+may explain differences. Same-day matches never count as prior appearances.
+No threshold has been validated for a production or betting decision.
+
 Reproduce, after separately obtaining the exact file and resolving appropriate
 rights, with `PYTHONPATH=src python scripts/audit_setka_result_history.py --csv PATH`.
 The companion JSON binds source, model and script hashes; tests cover duplicate

@@ -120,9 +120,12 @@ def cycle(state, board, outcomes, *, now, board_sha):
     for target in state["matches"]:
         if target["result"]:
             continue
+        result_matches = [row for row in outcomes.get("results", []) if same_names(target, row) and
+                          str(row.get("fixture_id")) in {target["id"], target.get("live_id")}]
+        finished = len(result_matches) == 1 and result_matches[0].get("status") == "finished"
         linked = [item for item in candidates if same_names(target, item) and
                   (str(item["id"]) in {target["id"], target.get("live_id")} or target["id"] in links.get(str(item["id"]), set()))]
-        if len(linked) == 1:
+        if len(linked) == 1 and not finished:
             item = linked[0]
             last_seen = item.get("last_live_seen")
             try:
@@ -146,9 +149,7 @@ def cycle(state, board, outcomes, *, now, board_sha):
                         else:
                             target["frames"].append(frame(item, now, next_offset, board_sha))
                         next_offset += 180
-        result_matches = [row for row in outcomes.get("results", []) if same_names(target, row) and
-                          str(row.get("fixture_id")) in {target["id"], target.get("live_id")}]
-        if len(result_matches) == 1 and result_matches[0].get("status") == "finished":
+        if finished:
             row = result_matches[0]
             target["status"] = "Завершено" if target["first_live_at"] else "Завершено; початок не записано"
             target["result"] = {"observed_at": now.isoformat(), "source_finished_at": row.get("finished_at"),

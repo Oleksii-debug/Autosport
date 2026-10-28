@@ -62,3 +62,13 @@ def test_finished_without_capture_does_not_claim_complete_recording():
     assert s["recording_complete"] is True
     assert s["coverage_complete"] is False
     assert not s["matches"][0]["frames"]
+
+
+def test_already_finished_match_does_not_gain_a_fabricated_live_start():
+    t = datetime(2026, 10, 28, tzinfo=timezone.utc)
+    s = state()
+    result = {"fixture_id": "1", "home": "A", "away": "B", "league": "L", "status": "finished", "final_score": "3-1"}
+    record.cycle(s, {"matches": [item(t.isoformat(), "11-9,11-7,9-11,11-6")]}, {"results": [result]}, now=t, board_sha="a"*64)
+    assert s["matches"][0]["first_live_at"] is None
+    assert not s["matches"][0]["frames"]
+    assert s["coverage_complete"] is False

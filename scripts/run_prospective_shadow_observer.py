@@ -10,10 +10,24 @@ from urllib.request import Request, urlopen
 
 from autosport.prospective_shadow_observer import ObserverPlan, observe_cycle
 from autosport.prospective_forecast_learning import forecast_learning_cycle
+from autosport.recorded_paper_projection import project
+from autosport.integrity import atomic_write_json
 
 
 SOURCES = {"predictions": "https://tipsaudit.com/api/v1/predictions",
            "results": "https://tipsaudit.com/track-record.csv"}
+
+
+def save_paper_projection(workspace):
+    try:
+        report = {"status": "OK", **project(workspace)}
+    except Exception as exc:
+        # A corrupt or corrected research source holds the derived portfolio but
+        # must not cancel continued public observation or overwrite old evidence.
+        report = {"status": "HELD", "reason_type": type(exc).__name__,
+                  "profit_earned": None, "real_money_execution": False}
+    atomic_write_json(workspace / "paper-projection.json", report)
+    return {key: value for key, value in report.items() if key != "events"}
 
 
 def fetch(url):
@@ -46,6 +60,8 @@ def main():
             learned = forecast_learning_cycle(args.workspace, predictions=predictions, results=results,
                                               received_at=datetime.now(timezone.utc).isoformat())
             print(json.dumps({"event": "public_forecast_learning", **learned}), flush=True)
+            projected = save_paper_projection(args.workspace)
+            print(json.dumps({"event": "recorded_paper_projection", **projected}), flush=True)
             failures = 0
         except (OSError, TimeoutError) as exc:
             failures += 1

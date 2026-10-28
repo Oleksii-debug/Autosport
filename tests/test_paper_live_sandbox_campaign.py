@@ -350,6 +350,29 @@ def test_restart_rejects_attempt_to_relabel_simulation_as_observed(tmp_path) -> 
         BlindPaperSandboxCampaign.load(tmp_path)
 
 
+def test_restart_rejects_torn_checkpoint_even_when_void_keeps_balance(tmp_path) -> None:
+    campaign = BlindPaperSandboxCampaign(_plan())
+    campaign.save(tmp_path)
+    campaign.step(_snapshot(1), _snapshot(3))
+    assert len(campaign.book.tickets) == 1
+    assert campaign.book.balance == campaign.book.initial_bankroll
+    # Simulate interruption after the new book, before its policy checkpoint.
+    campaign.book.save(tmp_path / "paper_book.json")
+    with pytest.raises(SandboxCampaignError, match="action counts mismatch"):
+        BlindPaperSandboxCampaign.load(tmp_path)
+
+
+def test_restart_rejects_checkpoint_with_missing_void_ticket(tmp_path) -> None:
+    campaign = BlindPaperSandboxCampaign(_plan())
+    campaign.save(tmp_path)
+    old_book = (tmp_path / "paper_book.json").read_bytes()
+    campaign.step(_snapshot(1), _snapshot(3))
+    campaign.save(tmp_path)
+    (tmp_path / "paper_book.json").write_bytes(old_book)
+    with pytest.raises(ValueError, match="action counts mismatch|durable opening witness"):
+        BlindPaperSandboxCampaign.load(tmp_path)
+
+
 def test_outcome_must_be_strictly_after_decision_snapshot() -> None:
     campaign = BlindPaperSandboxCampaign(_plan())
     same_time = _snapshot(1)

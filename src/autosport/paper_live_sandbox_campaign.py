@@ -944,6 +944,13 @@ class BlindPaperSandboxCampaign:
             counters=raw["counters"],
             last_snapshot_sha256=raw["last_snapshot_sha256"],
         )
+        # PaperBook and the campaign checkpoint are published separately. A
+        # crash between those writes can leave a later settled ticket paired
+        # with an older policy. In particular a VOID ticket leaves the balance
+        # unchanged, so comparing summary balances alone cannot detect it.
+        ticket_actions = campaign.counters["SINGLE"] + campaign.counters["PARLAY_2"]
+        if len(campaign.book.tickets) != ticket_actions:
+            raise SandboxCampaignError("paper book and campaign action counts mismatch")
         if campaign.summary() != raw["summary"]:
             raise SandboxCampaignError("campaign summary does not match canonical state")
         return campaign

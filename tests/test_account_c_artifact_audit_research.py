@@ -10,7 +10,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
 from audit_account_c_artifact import audit
 
 
-def make_artifact(path, *, truth="simulated", alter=False, tickets=0):
+def make_artifact(path, *, truth="simulated", alter=False, tickets=0, diagnostic_net=None):
     summary = {"truth": truth, "paper_only": True, "real_money_execution": False,
                "forward_evidence_eligible": False, "promotion_authorized": False,
                "profitability_claim": False, "initial_bankroll": "10000", "final_balance": "10000",
@@ -20,6 +20,11 @@ def make_artifact(path, *, truth="simulated", alter=False, tickets=0):
              "campaign_state.json": json.dumps({"summary": summary}).encode(),
              "paper_book.json": json.dumps({"initial_bankroll": "10000", "balance": "10000",
                                              "tickets": [{}] * tickets}).encode()}
+    if diagnostic_net is not None:
+        files["paper_diagnostics.json"] = json.dumps({"truth": "simulated", "paper_only": True,
+            "profitability_claim": False, "ticket_count": tickets, "initial_bankroll": "10000",
+            "final_balance": "10000", "net_reward": diagnostic_net, "maximum_drawdown": "0",
+            "gross_stake": "0"}).encode()
     manifest = "".join(hashlib.sha256(body).hexdigest() + "  account-c-paper-evidence/" + name + "\n"
                        for name, body in sorted(files.items()))
     if alter:
@@ -62,3 +67,12 @@ def test_extra_unmanifested_member_and_parent_path_are_rejected(tmp_path):
         archive.writestr("../escape.txt", "untrusted")
     with pytest.raises(ValueError, match="unsafe"):
         audit(path)
+
+
+def test_diagnostic_net_must_match_balances(tmp_path):
+    path = tmp_path / "artifact.zip"
+    make_artifact(path, diagnostic_net="5")
+    with pytest.raises(ValueError, match="diagnostic economics"):
+        audit(path)
+    make_artifact(path, diagnostic_net="0")
+    assert audit(path)["simulated_diagnostics"]["net_over_stake"] is None

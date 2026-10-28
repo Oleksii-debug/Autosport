@@ -76,6 +76,22 @@ def audit(path: Path):
         initial, final = Decimal(summary["initial_bankroll"]), Decimal(summary["final_balance"])
         if not initial.is_finite() or not final.is_finite() or str(initial) != summary["initial_bankroll"] or str(final) != summary["final_balance"]:
             raise ValueError("non-finite balance")
+        diagnostic_summary = None
+        if "paper_diagnostics.json" in expected:
+            diagnostics = strict_json_loads(archive.read("paper_diagnostics.json").decode("utf-8"))
+            if (type(diagnostics) is not dict or diagnostics.get("truth") != "simulated"
+                or diagnostics.get("paper_only") is not True or diagnostics.get("profitability_claim") is not False
+                or diagnostics.get("ticket_count") != len(tickets)
+                or diagnostics.get("initial_bankroll") != summary["initial_bankroll"]
+                or diagnostics.get("final_balance") != summary["final_balance"]):
+                raise ValueError("diagnostic and campaign mismatch")
+            net = Decimal(diagnostics["net_reward"])
+            drawdown = Decimal(diagnostics["maximum_drawdown"])
+            stake = Decimal(diagnostics["gross_stake"])
+            if not all(x.is_finite() for x in (net, drawdown, stake)) or net != final-initial or drawdown < 0 or stake < 0:
+                raise ValueError("invalid diagnostic economics")
+            diagnostic_summary = {"maximum_drawdown": str(drawdown), "gross_stake": str(stake),
+                                  "net_over_stake": None if stake == 0 else str(net / stake)}
         return {"artifact_sha256": hashlib.sha256(path.read_bytes()).hexdigest(),
                 "manifest_files_verified": len(expected), "truth": "simulated",
                 "initial_balance": str(initial), "final_balance": str(final),
@@ -84,7 +100,8 @@ def audit(path: Path):
                 "network_snapshots": counters.get("NETWORK_SNAPSHOTS"),
                 "network_failures": counters.get("NETWORK_FAILURES"),
                 "profitability_claim": False, "independent_provider_truth_verified": False,
-                "manifest_checks_internal_consistency_only": True}
+                "manifest_checks_internal_consistency_only": True,
+                "simulated_diagnostics": diagnostic_summary}
 
 
 if __name__ == "__main__":

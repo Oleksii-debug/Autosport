@@ -1,0 +1,620 @@
+{
+  "config": {
+    "cost_bps_per_stake": 100,
+    "maximum_odds": "10",
+    "minimum_net_return": "0.05",
+    "model": {
+      "learning_rate": "0.02",
+      "maximum_weight": "0.5",
+      "minimum_team_observations": 5,
+      "regularization": "0.01"
+    },
+    "outcome_lag_hours": 48,
+    "split_date": "2023-08-01"
+  },
+  "config_sha256": "8bd8eedce05f51ba4992dbaea8cab26c62f59dd855b1e98f17f1bd641681847a",
+  "decision_journal_sha256": "9a1a56fb480495be52f04f3bd55e60351fcc5aea5e80e53910da057c504c9819",
+  "evaluation": {
+    "2324": {
+      "matches": 380,
+      "variants": {
+        "frozen_team": {
+          "bets": 92,
+          "brier_mean": "0.1793616682787236052150972684",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.4480487804878048780487804878",
+            "0.2715957446808510638297872340"
+          ],
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 92,
+                "max_drawdown_units": "22.55",
+                "net_units": "-10.41",
+                "roi": "-0.1131521739130434782608695652"
+              },
+              "100": {
+                "bets": 92,
+                "max_drawdown_units": "22.7700",
+                "net_units": "-10.9851",
+                "roi": "-0.1194032608695652173913043478"
+              },
+              "1000": {
+                "bets": 92,
+                "max_drawdown_units": "24.750",
+                "net_units": "-16.161",
+                "roi": "-0.1756630434782608695652173913"
+              },
+              "500": {
+                "bets": 92,
+                "max_drawdown_units": "23.6500",
+                "net_units": "-13.2855",
+                "roi": "-0.1444076086956521739130434783"
+              }
+            }
+          },
+          "logloss_mean": "0.9148683251176141432535487895",
+          "max_drawdown_units": "22.55",
+          "net_units": "-10.41",
+          "roi": "-0.1131521739130434782608695652",
+          "wait": 288,
+          "wins": 25
+        },
+        "market": {
+          "bets": 0,
+          "brier_mean": "0.1777077910054642853000011456",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": null,
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "100": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "1000": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "500": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              }
+            }
+          },
+          "logloss_mean": "0.9092124760895898693682944389",
+          "max_drawdown_units": "0",
+          "net_units": "0",
+          "roi": null,
+          "wait": 380,
+          "wins": 0
+        },
+        "online_team": {
+          "bets": 83,
+          "brier_mean": "0.1799803187791452054471255180",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.5417391304347826086956521739",
+            "0.15125"
+          ],
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 83,
+                "max_drawdown_units": "26.41",
+                "net_units": "-17.39",
+                "roi": "-0.2095180722891566265060240964"
+              },
+              "100": {
+                "bets": 83,
+                "max_drawdown_units": "26.5001",
+                "net_units": "-17.8444",
+                "roi": "-0.2149927710843373493975903614"
+              },
+              "1000": {
+                "bets": 83,
+                "max_drawdown_units": "27.311",
+                "net_units": "-21.934",
+                "roi": "-0.2642650602409638554216867470"
+              },
+              "500": {
+                "bets": 83,
+                "max_drawdown_units": "26.8605",
+                "net_units": "-19.6620",
+                "roi": "-0.2368915662650602409638554217"
+              }
+            }
+          },
+          "logloss_mean": "0.9176698808400568283451332934",
+          "max_drawdown_units": "26.41",
+          "net_units": "-17.39",
+          "roi": "-0.2095180722891566265060240964",
+          "wait": 297,
+          "wins": 21
+        }
+      }
+    },
+    "2425": {
+      "matches": 380,
+      "variants": {
+        "frozen_team": {
+          "bets": 104,
+          "brier_mean": "0.1915956890085770393993040029",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.3775",
+            "0.1622916666666666666666666667"
+          ],
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 104,
+                "max_drawdown_units": "27.53",
+                "net_units": "-13.51",
+                "roi": "-0.1299038461538461538461538462"
+              },
+              "100": {
+                "bets": 104,
+                "max_drawdown_units": "27.6090",
+                "net_units": "-14.0553",
+                "roi": "-0.1351471153846153846153846154"
+              },
+              "1000": {
+                "bets": 104,
+                "max_drawdown_units": "28.320",
+                "net_units": "-18.963",
+                "roi": "-0.1823365384615384615384615385"
+              },
+              "500": {
+                "bets": 104,
+                "max_drawdown_units": "27.9250",
+                "net_units": "-16.2365",
+                "roi": "-0.1561201923076923076923076923"
+              }
+            }
+          },
+          "logloss_mean": "0.9657145296728123018071099539",
+          "max_drawdown_units": "27.53",
+          "net_units": "-13.51",
+          "roi": "-0.1299038461538461538461538462",
+          "wait": 276,
+          "wins": 37
+        },
+        "market": {
+          "bets": 0,
+          "brier_mean": "0.1928879342196102840551664677",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": null,
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "100": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "1000": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "500": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              }
+            }
+          },
+          "logloss_mean": "0.9707576734366714244152609579",
+          "max_drawdown_units": "0",
+          "net_units": "0",
+          "roi": null,
+          "wait": 380,
+          "wins": 0
+        },
+        "online_team": {
+          "bets": 98,
+          "brier_mean": "0.19210630681084837187473394",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.188",
+            "0.34"
+          ],
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 98,
+                "max_drawdown_units": "8.08",
+                "net_units": "7.49",
+                "roi": "0.07642857142857142857142857143"
+              },
+              "100": {
+                "bets": 98,
+                "max_drawdown_units": "8.0800",
+                "net_units": "6.9053",
+                "roi": "0.07046224489795918367346938776"
+              },
+              "1000": {
+                "bets": 98,
+                "max_drawdown_units": "8.273",
+                "net_units": "1.643",
+                "roi": "0.01676530612244897959183673469"
+              },
+              "500": {
+                "bets": 98,
+                "max_drawdown_units": "8.0800",
+                "net_units": "4.5665",
+                "roi": "0.04659693877551020408163265306"
+              }
+            }
+          },
+          "logloss_mean": "0.966092854870751197396211175",
+          "max_drawdown_units": "8.08",
+          "net_units": "7.49",
+          "roi": "0.07642857142857142857142857143",
+          "wait": 282,
+          "wins": 48
+        }
+      }
+    },
+    "2526": {
+      "matches": 380,
+      "variants": {
+        "frozen_team": {
+          "bets": 99,
+          "brier_mean": "0.2035973335437029123555452076",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.1552525252525252525252525253",
+            "0.5525510204081632653061224490"
+          ],
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 99,
+                "max_drawdown_units": "10.34",
+                "net_units": "18.24",
+                "roi": "0.1842424242424242424242424242"
+              },
+              "100": {
+                "bets": 99,
+                "max_drawdown_units": "10.3580",
+                "net_units": "17.4277",
+                "roi": "0.1760373737373737373737373737"
+              },
+              "1000": {
+                "bets": 99,
+                "max_drawdown_units": "10.617",
+                "net_units": "10.117",
+                "roi": "0.1021919191919191919191919192"
+              },
+              "500": {
+                "bets": 99,
+                "max_drawdown_units": "10.4300",
+                "net_units": "14.1785",
+                "roi": "0.1432171717171717171717171717"
+              }
+            }
+          },
+          "logloss_mean": "1.015992018882286168804766307",
+          "max_drawdown_units": "10.34",
+          "net_units": "18.24",
+          "roi": "0.1842424242424242424242424242",
+          "wait": 281,
+          "wins": 37
+        },
+        "market": {
+          "bets": 0,
+          "brier_mean": "0.2038374025737792826256826656",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": null,
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "100": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "1000": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "500": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              }
+            }
+          },
+          "logloss_mean": "1.018547433594444050213833689",
+          "max_drawdown_units": "0",
+          "net_units": "0",
+          "roi": null,
+          "wait": 380,
+          "wins": 0
+        },
+        "online_team": {
+          "bets": 157,
+          "brier_mean": "0.2042244337167192674874197557",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.1226950354609929078014184397",
+            "0.4208522727272727272727272727"
+          ],
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 157,
+                "max_drawdown_units": "17.55",
+                "net_units": "24.33",
+                "roi": "0.1549681528662420382165605096"
+              },
+              "100": {
+                "bets": 157,
+                "max_drawdown_units": "17.6988",
+                "net_units": "23.1210",
+                "roi": "0.1472675159235668789808917197"
+              },
+              "1000": {
+                "bets": 157,
+                "max_drawdown_units": "19.038",
+                "net_units": "12.240",
+                "roi": "0.07796178343949044585987261146"
+              },
+              "500": {
+                "bets": 157,
+                "max_drawdown_units": "18.2940",
+                "net_units": "18.2850",
+                "roi": "0.1164649681528662420382165605"
+              }
+            }
+          },
+          "logloss_mean": "1.018171590601716079487316098",
+          "max_drawdown_units": "17.55",
+          "net_units": "24.33",
+          "roi": "0.1549681528662420382165605096",
+          "wait": 223,
+          "wins": 62
+        }
+      }
+    },
+    "2627": {
+      "matches": 80,
+      "variants": {
+        "frozen_team": {
+          "bets": 23,
+          "brier_mean": "0.2054366387425100898735909852",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.7156521739130434782608695652",
+            "0.8508695652173913043478260870"
+          ],
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 23,
+                "max_drawdown_units": "8.37",
+                "net_units": "-0.51",
+                "roi": "-0.02217391304347826086956521739"
+              },
+              "100": {
+                "bets": 23,
+                "max_drawdown_units": "8.4382",
+                "net_units": "-0.6672",
+                "roi": "-0.02900869565217391304347826087"
+              },
+              "1000": {
+                "bets": 23,
+                "max_drawdown_units": "9.052",
+                "net_units": "-2.082",
+                "roi": "-0.09052173913043478260869565217"
+              },
+              "500": {
+                "bets": 23,
+                "max_drawdown_units": "8.7110",
+                "net_units": "-1.2960",
+                "roi": "-0.05634782608695652173913043478"
+              }
+            }
+          },
+          "logloss_mean": "1.025840491737468981739820804",
+          "max_drawdown_units": "8.37",
+          "net_units": "-0.51",
+          "roi": "-0.02217391304347826086956521739",
+          "wait": 57,
+          "wins": 7
+        },
+        "market": {
+          "bets": 0,
+          "brier_mean": "0.2034802626276866841787089211",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": null,
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "100": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "1000": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              },
+              "500": {
+                "bets": 0,
+                "max_drawdown_units": "0",
+                "net_units": "0",
+                "roi": null
+              }
+            }
+          },
+          "logloss_mean": "1.018383619495352363164075062",
+          "max_drawdown_units": "0",
+          "net_units": "0",
+          "roi": null,
+          "wait": 80,
+          "wins": 0
+        },
+        "online_team": {
+          "bets": 29,
+          "brier_mean": "0.2067364388884832802166468351",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.611",
+            "0.2765625"
+          ],
+          "execution_sensitivity": {
+            "actual_fills_verified": false,
+            "basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "haircut_bps": {
+              "0": {
+                "bets": 29,
+                "max_drawdown_units": "8.24",
+                "net_units": "-5.62",
+                "roi": "-0.1937931034482758620689655172"
+              },
+              "100": {
+                "bets": 29,
+                "max_drawdown_units": "8.3502",
+                "net_units": "-5.7667",
+                "roi": "-0.1988517241379310344827586207"
+              },
+              "1000": {
+                "bets": 29,
+                "max_drawdown_units": "9.342",
+                "net_units": "-7.087",
+                "roi": "-0.2443793103448275862068965517"
+              },
+              "500": {
+                "bets": 29,
+                "max_drawdown_units": "8.7910",
+                "net_units": "-6.3535",
+                "roi": "-0.2190862068965517241379310345"
+              }
+            }
+          },
+          "logloss_mean": "1.032290231949271020281383729",
+          "max_drawdown_units": "8.24",
+          "net_units": "-5.62",
+          "roi": "-0.1937931034482758620689655172",
+          "wait": 51,
+          "wins": 9
+        }
+      }
+    }
+  },
+  "evaluation_seasons": [
+    "2324",
+    "2425",
+    "2526",
+    "2627"
+  ],
+  "forward_evidence_eligible": false,
+  "limits": [
+    "No independently verified quote availability, fills or result publication times.",
+    "The 48-hour result lag and Europe/London kickoff timezone are assumptions.",
+    "Online evaluation consumes earlier results; later seasons are prequential, not frozen holdout.",
+    "Retrospective prices and small samples cannot establish prospective profitability."
+  ],
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "protocol_sha256": "f4469d0bff1b566196439338945fbcb3479d7648d680ac0aa38f38a4009e9634",
+  "real_money_execution": false,
+  "schema": "autosport.independent_team_agent_research",
+  "schema_version": 1,
+  "source": {
+    "attribution": "Football-Data.co.uk, https://www.football-data.co.uk/downloadm.php",
+    "eligible_rows": 1600,
+    "eligible_rows_by_season": {
+      "2223": 380,
+      "2324": 380,
+      "2425": 380,
+      "2526": 380,
+      "2627": 80
+    },
+    "exclusions": {},
+    "file_sha256": {
+      "2223": "8442792d3b614c94ea3cf381bd2736805889cc1713169035368fff19c3d02380",
+      "2324": "b2e057b0ed959f198b0f63d2391c01239f3608e6de5db68edab3f88e04d07ff3",
+      "2425": "d0c8ce4a96d886cf60cf101f570f4a3893844226f91c7bd769eb568c49edbfa4",
+      "2526": "3e3a8352f9ada6789c508d6ca184424421fed56a30400904a4a327c583407e62",
+      "2627": "4cd9d41c75bdaafce0657cb97ce76438f8016605957af80896b60a0f21955ab2"
+    },
+    "fixed_price_source": "bet365",
+    "price_columns": [
+      "B365H",
+      "B365D",
+      "B365A"
+    ],
+    "source_rows_by_season": {
+      "2223": 380,
+      "2324": 380,
+      "2425": 380,
+      "2526": 380,
+      "2627": 80
+    },
+    "source_sha256": "309b5388e50b793f948afbfdd5a58eabc4392ef90903eae271150ca1967afd38"
+  },
+  "training_matches": 380
+}

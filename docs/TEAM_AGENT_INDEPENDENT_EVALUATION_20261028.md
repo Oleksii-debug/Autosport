@@ -98,3 +98,16 @@ Source hash, fixed-source protocol identity, complete metrics and uncertainty:
 `evidence/agent-economics-20261027/independent-team-bet365-2026-2027-to-oct25.json`.
 The active live-observation campaign and already running qualification checks
 were not interrupted by this separate follow-up evidence branch.
+
+## Execution price stress (28 October 2026)
+
+The independent evaluator now replays the same selected actions at four fixed
+scenarios: zero, 1%, 5%, and 10% reductions to the **profit portion** of winning
+prices, with the original 1% stake cost charged on all picks. These are artificial
+stress scenarios, not evidence that these quotes were obtainable or that any
+bet was filled. Selection and learning remain unchanged. Results and input
+hashes are in `docs/evidence/agent-economics-20261027/independent-team-bet365-price-stress-2022-2027.json`.
+The bookmaker and study were selected after prior results were viewed, and
+online learning uses assumed result delays. The partial 2026/27 sample contains
+29 hypothetical online selections; its net changes from -5.62 units at zero
+haircut to -6.3535 at 5%. This does not establish prospective edge or profit.

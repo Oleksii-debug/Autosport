@@ -1,5 +1,6 @@
 import csv
 from datetime import datetime, timezone
+from decimal import Decimal
 from pathlib import Path
 import sys
 
@@ -90,3 +91,23 @@ def test_protocol_hash_binds_fixed_bookmaker(tmp_path):
     alternative = experiment.evaluate(files, config(), ("2324",), "bet365")
     assert pinnacle["config_sha256"] == alternative["config_sha256"]
     assert pinnacle["protocol_sha256"] != alternative["protocol_sha256"]
+
+
+def test_execution_stress_keeps_decisions_and_applies_cost_to_every_bet():
+    now = datetime(2023, 8, 1, tzinfo=timezone.utc)
+    selections = [{"kickoff": now, "rewards": {"agent": Decimal("2")}},
+                  {"kickoff": now, "rewards": {"agent": Decimal("-1")}}]
+    result = experiment.execution_sensitivity(selections, "agent", 100)
+    scenarios = result["haircut_bps"]
+    assert result["actual_fills_verified"] is False
+    assert scenarios["0"]["net_units"] == "0.98"
+    assert scenarios["500"]["net_units"] == "0.88"
+    assert scenarios["1000"]["net_units"] == "0.78"
+    assert all(item["bets"] == 2 for item in scenarios.values())
+    assert selections[0]["rewards"]["agent"] == Decimal("2")
+
+
+def test_execution_stress_handles_abstention():
+    result = experiment.execution_sensitivity([], "agent", 100)
+    assert all(item["bets"] == 0 and item["roi"] is None
+               for item in result["haircut_bps"].values())

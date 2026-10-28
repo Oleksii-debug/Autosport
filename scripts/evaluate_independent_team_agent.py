@@ -37,6 +37,25 @@ def assumed_london_kickoff(raw_date: str, raw_time: str) -> datetime:
     return (local - timedelta(hours=int(summer))).replace(tzinfo=timezone.utc)
 
 
+def execution_sensitivity(selected, variant, cost_bps):
+    """Stress the *same* selections; this is not evidence of actual fills.
+
+    Haircuts apply to the profit portion of a winning decimal price. Decisions
+    are held fixed, including losing picks, so no later outcome selects a bet.
+    """
+    scenarios = {}
+    for haircut_bps in (0, 100, 500, 1000):
+        factor = Decimal(1) - Decimal(haircut_bps) / 10000
+        stressed = [{"kickoff": row["kickoff"], "rewards": {
+            variant: reward * factor if reward > 0 else reward}}
+            for row in selected for reward in (row["rewards"][variant],)]
+        summary = summarize(stressed, variant, cost_bps)
+        scenarios[str(haircut_bps)] = {key: summary[key] for key in
+            ("bets", "net_units", "roi", "max_drawdown_units")}
+    return {"basis": "same decisions; reduction of winning price profit, not decimal odds",
+            "actual_fills_verified": False, "haircut_bps": scenarios}
+
+
 def load_seasons(files: dict[str, Path], price_source: str = "pinnacle"):
     if type(files) is not dict or not files:
         raise ValueError("season files must be a non-empty mapping")
@@ -110,7 +129,9 @@ def evaluate(files: dict[str, Path], config: dict, evaluation_seasons: tuple[str
             variants[variant] = {**summarize(selected, variant, config["cost_bps_per_stake"]),
                                  "wait": len(decisions) - len(selected),
                                  "brier_mean": str(brier / (3 * len(decisions))),
-                                 "logloss_mean": str(logloss / len(decisions))}
+                                 "logloss_mean": str(logloss / len(decisions)),
+                                 "execution_sensitivity": execution_sensitivity(
+                                     selected, variant, config["cost_bps_per_stake"])}
         seasons[season] = {"matches": len(decisions), "variants": variants}
     return {"schema": "autosport.independent_team_agent_research", "schema_version": 1,
             "config": config, "config_sha256": digest(config), "source": source,

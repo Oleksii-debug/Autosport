@@ -125,6 +125,7 @@ def _bare_controller(tmp_path: Path) -> AutosportWebController:
     controller.update_diagnostic_worker = _IdleWorker()
     controller.update_diagnostic_status = ""
     controller.learning_status_worker = _IdleWorker()
+    controller.sandbox_learning_worker = _IdleWorker()
     controller.learning_status_lines = []
     controller.product_worker = _FakeProductWorker()
     controller.product_runtime_status = "Тривала PAPER-робота не запущена."

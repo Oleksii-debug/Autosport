@@ -1,0 +1,110 @@
+{
+  "attribution": "TipsAudit (2026), https://tipsaudit.com/data, CC BY 4.0",
+  "config": {
+    "earliest_quote_date": "2026-09-21",
+    "execution_authorized": false,
+    "hypothetical_stake_units": "1",
+    "maximum_benchmark_age_seconds": 5400,
+    "maximum_candidates_per_kickoff_day": 5,
+    "maximum_model_value": "0.12",
+    "maximum_odds": "3.5",
+    "minimum_model_value": "0.05",
+    "minimum_probability": "0.30",
+    "ordering": "kickoff_utc_then_id",
+    "profitability_claim": false,
+    "protocol_id": "autosport-recorded-price-gap-shadow-20261027-v1",
+    "quote_acceptance_verified": false,
+    "selection_rule": "highest_model_value_eligible_single_then_selection_id",
+    "settlement": "official regulation-time 1X2 result; pending until recorded",
+    "soft_quote_timestamp_available": false,
+    "stress_cost_bps_per_stake": 100
+  },
+  "config_sha256": "4c62e34bc22a1938195e13d4743dc510c50c97c30c4f8939dd87680b452f3e3a",
+  "decision_journal_sha256": "8dbcb9674672d3f04a9bc4da01b52386709d70c0c41264bec7293642ad32c114",
+  "evaluation_mode": "exploratory retrospective, assumed 48h label delay, not untouched holdout",
+  "exclusions": {},
+  "full_report_sha256": "3b3773ad33a4d59d268c3f930545dd923d9cd85b50ae474ba3f0f7d1991bf288",
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "protocol": {
+    "bins": 10,
+    "maximum_age_seconds": 5400,
+    "minimum_bin_observations": 100,
+    "prior_weight": "100",
+    "result_delay_seconds": 7200,
+    "version": 1
+  },
+  "quote_acceptance_verified": false,
+  "quote_timing_verified": false,
+  "real_money_execution": false,
+  "schema": "autosport.calibration_economics.v1",
+  "selection_overlap": {
+    "baseline_only": 58,
+    "calibrated_only": 102,
+    "different_selection": 1,
+    "same_selection": 30
+  },
+  "source_rows": 7390,
+  "source_sha256": "c7964f06b9aa02800381c50aca4637ef8c1ad7e940855d3f9c3b5f1bd40e53c5",
+  "valid_rows": 7390,
+  "variants": {
+    "baseline": {
+      "brier": 0.1975982082522174,
+      "candidates_including_void_and_pending": 89,
+      "one_percent_cost": {
+        "bets": 88,
+        "cost_bps_per_stake": 100,
+        "day_block_bootstrap_roi_95pct": [
+          "-0.3866265060240963855421686747",
+          "0.221625"
+        ],
+        "max_drawdown_units": "11.850",
+        "net_units": "-8.170",
+        "roi": "-0.09284090909090909090909090909",
+        "wins": 33
+      },
+      "scored_matches": 2357,
+      "zero_cost": {
+        "bets": 88,
+        "cost_bps_per_stake": 0,
+        "day_block_bootstrap_roi_95pct": [
+          "-0.3766265060240963855421686747",
+          "0.231625"
+        ],
+        "max_drawdown_units": "11.650",
+        "net_units": "-7.290",
+        "roi": "-0.08284090909090909090909090909",
+        "wins": 33
+      }
+    },
+    "calibrated": {
+      "brier": 0.19816480689030228,
+      "candidates_including_void_and_pending": 133,
+      "one_percent_cost": {
+        "bets": 131,
+        "cost_bps_per_stake": 100,
+        "day_block_bootstrap_roi_95pct": [
+          "-0.3127272727272727272727272727",
+          "0.08583333333333333333333333333"
+        ],
+        "max_drawdown_units": "17.170",
+        "net_units": "-14.770",
+        "roi": "-0.1127480916030534351145038168",
+        "wins": 47
+      },
+      "scored_matches": 2357,
+      "zero_cost": {
+        "bets": 131,
+        "cost_bps_per_stake": 0,
+        "day_block_bootstrap_roi_95pct": [
+          "-0.3027272727272727272727272727",
+          "0.09583333333333333333333333333"
+        ],
+        "max_drawdown_units": "15.880",
+        "net_units": "-13.460",
+        "roi": "-0.1027480916030534351145038168",
+        "wins": 47
+      }
+    }
+  }
+}

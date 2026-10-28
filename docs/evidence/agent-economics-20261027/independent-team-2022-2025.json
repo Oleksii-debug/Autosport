@@ -1,0 +1,137 @@
+{
+  "config": {
+    "cost_bps_per_stake": 100,
+    "maximum_odds": "10",
+    "minimum_net_return": "0.05",
+    "model": {
+      "learning_rate": "0.02",
+      "maximum_weight": "0.5",
+      "minimum_team_observations": 5,
+      "regularization": "0.01"
+    },
+    "outcome_lag_hours": 48,
+    "split_date": "2023-08-01"
+  },
+  "config_sha256": "8bd8eedce05f51ba4992dbaea8cab26c62f59dd855b1e98f17f1bd641681847a",
+  "decision_journal_sha256": "65028259956c6a5a961c8a1b2cb0050eb6600f277c5434e90afc4d9b3b3245c6",
+  "evaluation": {
+    "2324": {
+      "matches": 380,
+      "variants": {
+        "frozen_team": {
+          "bets": 113,
+          "brier_mean": "0.1792067786756595794871102746",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.5009259259259259259259259259",
+            "0.1371681415929203539823008850"
+          ],
+          "logloss_mean": "0.9143197922457691547447093961",
+          "max_drawdown_units": "26.21",
+          "net_units": "-20.32",
+          "roi": "-0.1798230088495575221238938053",
+          "wait": 267,
+          "wins": 30
+        },
+        "market": {
+          "bets": 0,
+          "brier_mean": "0.1775332978501393457887557976",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": null,
+          "logloss_mean": "0.9085207591180259134553742734",
+          "max_drawdown_units": "0",
+          "net_units": "0",
+          "roi": null,
+          "wait": 380,
+          "wins": 0
+        },
+        "online_team": {
+          "bets": 106,
+          "brier_mean": "0.1798440059416151498879738889",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.3881730769230769230769230769",
+            "0.2085294117647058823529411765"
+          ],
+          "logloss_mean": "0.9173033170976276672872868558",
+          "max_drawdown_units": "23.36",
+          "net_units": "-11.68",
+          "roi": "-0.1101886792452830188679245283",
+          "wait": 274,
+          "wins": 33
+        }
+      }
+    },
+    "2425": {
+      "matches": 380,
+      "variants": {
+        "frozen_team": {
+          "bets": 130,
+          "brier_mean": "0.1916266913368438242975974852",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.2619841269841269841269841270",
+            "0.2067424242424242424242424242"
+          ],
+          "logloss_mean": "0.9653890615533917845171681753",
+          "max_drawdown_units": "25.73",
+          "net_units": "-5.92",
+          "roi": "-0.04553846153846153846153846154",
+          "wait": 250,
+          "wins": 50
+        },
+        "market": {
+          "bets": 0,
+          "brier_mean": "0.1929236913057506728532548032",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": null,
+          "logloss_mean": "0.9703039994694265479692421903",
+          "max_drawdown_units": "0",
+          "net_units": "0",
+          "roi": null,
+          "wait": 380,
+          "wins": 0
+        },
+        "online_team": {
+          "bets": 136,
+          "brier_mean": "0.1921525182371115472761367223",
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.14976",
+            "0.2420143884892086330935251799"
+          ],
+          "logloss_mean": "0.9659271505076936368006474821",
+          "max_drawdown_units": "13.49",
+          "net_units": "4.66",
+          "roi": "0.03426470588235294117647058824",
+          "wait": 244,
+          "wins": 64
+        }
+      }
+    }
+  },
+  "forward_evidence_eligible": false,
+  "limits": [
+    "No independently verified quote availability, fills or result publication times.",
+    "The 48-hour result lag and Europe/London kickoff timezone are assumptions.",
+    "Online evaluation consumes earlier results; later seasons are prequential, not frozen holdout.",
+    "Retrospective prices and small samples cannot establish prospective profitability."
+  ],
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.independent_team_agent_research",
+  "schema_version": 1,
+  "source": {
+    "attribution": "Football-Data.co.uk, https://www.football-data.co.uk/downloadm.php",
+    "eligible_rows": 1140,
+    "exclusions": {},
+    "file_sha256": {
+      "2223": "8442792d3b614c94ea3cf381bd2736805889cc1713169035368fff19c3d02380",
+      "2324": "b2e057b0ed959f198b0f63d2391c01239f3608e6de5db68edab3f88e04d07ff3",
+      "2425": "d0c8ce4a96d886cf60cf101f570f4a3893844226f91c7bd769eb568c49edbfa4"
+    },
+    "source_sha256": "bc8a57b171d84cbfb561a9a6341953210c1b0723a8697c6f4c43f7cf8a7fcd6e"
+  },
+  "training_matches": 380
+}

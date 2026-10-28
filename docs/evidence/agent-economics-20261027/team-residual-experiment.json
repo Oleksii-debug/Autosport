@@ -1,0 +1,116 @@
+{
+  "candidate_assessments": {
+    "frozen_team": {
+      "promotion_authorized": false,
+      "reasons": [
+        "forecast scores do not both improve on the same-cohort market baseline",
+        "no positive chosen-action return after configured costs"
+      ],
+      "research_verdict": "REJECTED_ON_THIS_SAMPLE"
+    },
+    "online_team": {
+      "promotion_authorized": false,
+      "reasons": [
+        "forecast scores do not both improve on the same-cohort market baseline",
+        "no positive chosen-action return after configured costs"
+      ],
+      "research_verdict": "REJECTED_ON_THIS_SAMPLE"
+    }
+  },
+  "canonical_forecast_examples_sha256": "f5c6b8351f5ebcd36013b1f95f00d8c030e4acc58bf97f1d46cfaddd3d2abbbc",
+  "complete_report_sha256": "e42141946d23cc14a0b38dc36e05e47e5172266168b88210f5aa0f86e2815a32",
+  "config": {
+    "cost_bps_per_stake": 100,
+    "maximum_odds": "10",
+    "minimum_net_return": "0.05",
+    "model": {
+      "learning_rate": "0.02",
+      "maximum_weight": "0.5",
+      "minimum_team_observations": 5,
+      "regularization": "0.01"
+    },
+    "outcome_lag_hours": 48,
+    "split_date": "2026-09-21"
+  },
+  "config_sha256": "b984053e577a7c4357a946b57081e7eead93cc3f1a38cb2050bf3a8e8c68397e",
+  "decisions_sha256": "deb30e52d08b597ce804b19b1887a58725cf91f961039a0ead42ca7997e88d28",
+  "evaluation_mode": "exploratory retrospective; frozen model and delayed online model reported separately",
+  "forward_evidence_eligible": false,
+  "limitations": [
+    "48-hour/default configured outcome lag is assumed, not provider availability proof.",
+    "Opening prices may be backfilled; liquidity, limits and capital concurrency are unverified.",
+    "Country/name team identity can split renamed clubs or conflate namesakes.",
+    "No complete team fixture history: selected-source sampling and sparse support remain.",
+    "Previous validation experiments were inspected; this is not pristine holdout evidence.",
+    "Uncertainty is uncalibrated; model/checkpoint/forecast objects authorize no deployment."
+  ],
+  "online_final_checkpoint_sha256": "7e47582687e91e05d35f9ddd26cdff173c00935df6f5bdf9197827fe2a27605c",
+  "outcome_availability_verified": false,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "quote_timing_verified": false,
+  "real_money_execution": false,
+  "schema": "autosport.recorded_team_agent_experiment",
+  "schema_version": 1,
+  "settlement_basis": "provider-recorded final results; hypothetical fixed one-unit single stakes",
+  "source": {
+    "attribution": "TipsAudit (2026), https://tipsaudit.com/data, CC BY 4.0",
+    "eligible_rows": 7350,
+    "exclusions": {
+      "void_or_unsettled": 40
+    },
+    "rejected_team_context": 0,
+    "source_rows": 7390,
+    "source_sha256": "c7964f06b9aa02800381c50aca4637ef8c1ad7e940855d3f9c3b5f1bd40e53c5"
+  },
+  "training_checkpoint_sha256": "c740409ba1e171eeeb7b89aff2d3e2a041bc8d511b5059bf69a1c5648f4c5a82",
+  "training_matches": 4504,
+  "validation": {
+    "frozen_team": {
+      "bets": 63,
+      "brier_mean_per_outcome": "0.1977940904977636684406760849",
+      "cost_bps_per_stake": 100,
+      "day_block_bootstrap_roi_95pct": [
+        "-0.6666",
+        "0.1733870967741935483870967742"
+      ],
+      "log_loss_mean": "0.9942271250678834630043497437",
+      "max_drawdown_units": "19.910",
+      "net_units": "-18.030",
+      "roi": "-0.2861904761904761904761904762",
+      "supported_matches": 1521,
+      "wait_count": 2294,
+      "wins": 13
+    },
+    "market": {
+      "bets": 0,
+      "brier_mean_per_outcome": "0.1977331620166744448604235159",
+      "cost_bps_per_stake": 100,
+      "day_block_bootstrap_roi_95pct": null,
+      "log_loss_mean": "0.9939313001309953513829929181",
+      "max_drawdown_units": "0",
+      "net_units": "0",
+      "roi": null,
+      "supported_matches": 2357,
+      "wait_count": 2357,
+      "wins": 0
+    },
+    "online_team": {
+      "bets": 109,
+      "brier_mean_per_outcome": "0.1980376456250845900270608128",
+      "cost_bps_per_stake": 100,
+      "day_block_bootstrap_roi_95pct": [
+        "-0.546",
+        "0.05229885057471264367816091954"
+      ],
+      "log_loss_mean": "0.9951388356644324734980681583",
+      "max_drawdown_units": "30.760",
+      "net_units": "-25.380",
+      "roi": "-0.2328440366972477064220183486",
+      "supported_matches": 2000,
+      "wait_count": 2248,
+      "wins": 24
+    }
+  },
+  "validation_matches": 2357
+}

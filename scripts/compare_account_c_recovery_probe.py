@@ -18,10 +18,12 @@ INTERVAL = 40
 
 
 class BoundedRecoveryProbe(BlindPaperSandboxCampaign):
+    PROBE_INTERVAL = INTERVAL
+
     def _admissible_actions(self, snapshot):
         base = super()._admissible_actions(snapshot)
         generation = self.policy.generation
-        if base != frozenset({"WAIT"}) or generation == 0 or generation % INTERVAL:
+        if base != frozenset({"WAIT"}) or generation == 0 or generation % self.PROBE_INTERVAL:
             return base
         slot = generation % self.plan.curriculum_period
         events = len({q.match_id for q in snapshot.quotes})

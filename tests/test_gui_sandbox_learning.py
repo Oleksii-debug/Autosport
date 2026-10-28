@@ -1,9 +1,18 @@
 import threading
 import time
+from pathlib import Path
 
 from autosport.gui_sandbox_learning import SandboxLearningWorker
 from autosport.paper_live_sandbox_campaign import BlindPaperSandboxCampaign
 from autosport.windows_webview_shell import AutosportWebController
+
+
+def test_desktop_copy_discloses_new_session_and_simulated_outcomes():
+    html = (Path(__file__).resolve().parents[1] / "src/autosport/windows_web/index.html").read_text(encoding="utf-8")
+    assert "Кожен запуск починає нову симуляцію" in html
+    assert "не відновлюється через ці кнопки" in html
+    assert "не фактичні результати матчів" in html
+    assert "не доводить прибутковості" in html
 
 
 def test_desktop_simulation_is_single_flight_and_checkpoints_on_stop(tmp_path, monkeypatch):

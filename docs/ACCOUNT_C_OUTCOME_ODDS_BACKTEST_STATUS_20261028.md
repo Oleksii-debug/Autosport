@@ -11,7 +11,7 @@ missing/invalid odds are counted as exclusions; conflicting IDs fail closed.
 Reports include source and evaluator SHA-256, null ROI for no bets, disclosed
 drawdown ordering assumptions and explicit false forward/profit/promotion flags.
 
-Five local fixture tests passed for payout/fees, denominator/exclusions, same-day
+Six local fixture tests passed for payout/fees, denominator/exclusions, same-day
 causality, input-order invariance, duplicate/winner rejection and nonfinite odds.
 They are tests of code behavior, **not** evidence of observed profit.
 

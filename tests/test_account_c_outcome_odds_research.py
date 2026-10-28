@@ -78,6 +78,21 @@ def test_input_order_does_not_change_outcome():
     assert before["arms"] == after["arms"]
 
 
+def test_elo_challenger_books_assumed_costs_for_its_own_decisions():
+    rows = fixtures()
+    rows[1]["cote1_ouverture"] = "3"
+    rows[1]["cote2_ouverture"] = "1.3"
+    result = research.audit([("fixture.csv", encode(rows))])
+    challenger = result["arms"]["elo_threshold"]
+    assert challenger["bets"] == 2 and challenger["wins"] == 2
+    assert challenger["turnover"] == "2"
+    assert challenger["gross_profit"] == "4"
+    assert challenger["fees"] == "0.08"
+    assert challenger["net_profit"] == "3.92"
+    assert challenger["roi"] == "1.96"
+    assert result["truth"]["actual_price_fills_verified"] is False
+
+
 def test_duplicate_match_or_invalid_winner_fails_closed():
     rows = fixtures()
     with pytest.raises(ValueError, match="duplicate"):

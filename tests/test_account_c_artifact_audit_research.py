@@ -21,7 +21,7 @@ def make_artifact(path, *, truth="simulated", alter=False, tickets=0, diagnostic
                "profitability_claim": False, "initial_bankroll": "10000", "final_balance": "10000",
                "policy_generation": 1, "counters": {"SINGLE": 0, "PARLAY_2": 0, "WAIT": 1,
                    "NETWORK_SNAPSHOTS": 2, "NETWORK_FAILURES": 0}}
-    summary["estimates"] = {e["action_type"]: {"observations": e["observations"], "reward_sum": "0"} for e in estimates}
+    summary["estimates"] = {e["action_type"]: {"observations": e["observations"], "reward_sum": "0", "mean_reward": "0"} for e in estimates}
     files = {"endurance_summary.json": json.dumps(summary).encode(),
              "campaign_state.json": json.dumps({"summary": summary, "policy": {"estimates": estimates}}).encode(),
              "paper_book.json": json.dumps({"initial_bankroll": "10000", "balance": "10000",

@@ -94,7 +94,14 @@ def audit(path: Path):
                 raise ValueError("invalid action reward")
             if displayed[name].get("observations") != count or displayed[name].get("reward_sum") != reward:
                 raise ValueError("action estimate and summary mismatch")
-            by_action[name] = {"observations": count, "simulated_reward": reward}
+            if count == 0 and value != 0:
+                raise ValueError("unobserved action has a reward")
+            mean = value / count if count else Decimal("0")
+            raw_mean = displayed[name].get("mean_reward")
+            if type(raw_mean) is not str or not Decimal(raw_mean).is_finite() or Decimal(raw_mean) != mean:
+                raise ValueError("action mean reward mismatch")
+            by_action[name] = {"observations": count, "simulated_reward": reward,
+                               "simulated_mean_reward": str(mean)}
         if set(by_action) != actions or sum(v["observations"] for v in by_action.values()) != summary["policy_generation"]:
             raise ValueError("policy estimate counts mismatch")
         if (by_action["WAIT"]["observations"] != counters["WAIT"]

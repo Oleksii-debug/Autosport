@@ -359,7 +359,7 @@ def test_external_uia_audit_rejects_second_real_packaged_launch() -> None:
         "-WorkingDirectory $launchWorkingDirectory -PassThru"
     )
     second_launch = "$duplicateProcess.Start()"
-    assert "$startInfo.UseShellExecute = $false" in audit
+    assert "$startInfo.UseShellExecute = $true" in audit
     assert "$startInfo.WorkingDirectory = $launchWorkingDirectory" in audit
     assert first_launch in audit
     assert second_launch in audit

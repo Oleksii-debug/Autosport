@@ -3,6 +3,12 @@
   "chosen_margin_weight": 1.0,
   "cutoff_date": "2022-07-01",
   "date_source_conflict": true,
+  "day_bootstrap_95_percent_interval": [
+    0.0003033320825744631,
+    0.003405567816272837
+  ],
+  "day_bootstrap_draws": 2000,
+  "day_bootstrap_seed": 19,
   "evaluation_constant_brier": 0.25,
   "evaluation_count": 2080,
   "evaluation_is_untouched_holdout": false,
@@ -51,7 +57,7 @@
   "profitability_claim": false,
   "promotion_authorized": false,
   "schema": "autosport.setka_margin_rating.research.v1",
-  "script_sha256": "fe47e4a2d9a5c90017d76d9b0259e2e3e356e572c16a3f3f97776b3409382066",
+  "script_sha256": "d6f85d3a2a4cc2f4a98e4d0cee0306b8042396430a656390917307dc8e09fd77",
   "source_rights": "UNKNOWN",
   "source_sha256": "d400562f49ced084133c8e926025efb6023dd62a8341fd4484864d567a4e392d",
   "train_selected_brier": 0.24535427308616006,

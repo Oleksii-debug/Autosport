@@ -14,7 +14,7 @@
   "evaluation_count": 819,
   "evaluation_is_untouched_holdout": false,
   "margin_k20_brier": 0.24909353215304567,
-  "margin_model_sha256": "fe47e4a2d9a5c90017d76d9b0259e2e3e356e572c16a3f3f97776b3409382066",
+  "margin_model_sha256": "d6f85d3a2a4cc2f4a98e4d0cee0306b8042396430a656390917307dc8e09fd77",
   "match_only_k10_brier": 0.2497875642790416,
   "odds_present": false,
   "per_day_brier_difference": {

@@ -5,6 +5,7 @@ import argparse
 import csv
 import hashlib
 import json
+import random
 from collections import defaultdict
 from pathlib import Path
 
@@ -68,6 +69,12 @@ def audit(path):
         subset = [r for r in later if r[1] == day]
         by_day[day.isoformat()] = {"count": len(subset),
             "match_minus_margin_brier": brier(subset, baseline) - brier(subset, selected)}
+    keys, rng, boot = sorted(by_day), random.Random(19), []
+    for _ in range(2000):
+        chosen_days = rng.choices(keys, k=len(keys))
+        boot.append(sum(by_day[d]["count"] * by_day[d]["match_minus_margin_brier"] for d in chosen_days) /
+                    sum(by_day[d]["count"] for d in chosen_days))
+    boot.sort()
     sha = hashlib.sha256(path.read_bytes()).hexdigest()
     return {"schema": "autosport.setka_margin_rating.research.v1", "source_sha256": sha,
             "known_source_hash_match": sha == SOURCE_SHA256, "source_rights": "UNKNOWN",
@@ -79,6 +86,8 @@ def audit(path):
             "evaluation_selected_brier": brier(later, selected),
             "evaluation_match_elo_k10_brier": brier(later, baseline),
             "per_day_brier_differences": by_day,
+            "day_bootstrap_95_percent_interval": [boot[49], boot[1949]],
+            "day_bootstrap_draws": 2000, "day_bootstrap_seed": 19,
             "evaluation_constant_brier": 0.25, "date_source_conflict": True if sha == SOURCE_SHA256 else None,
             "identity_independently_verified": False, "evaluation_is_untouched_holdout": False,
             "odds_present": False, "profitability_claim": False, "promotion_authorized": False}

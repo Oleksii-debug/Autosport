@@ -17,6 +17,13 @@ the eight interpreted dates and worse on two. These dates and this experiment
 were already inspected, the period is short, and selection has been explored;
 the difference is not independently validated or promotion-ready.
 
+A 2,000-draw day-block bootstrap of match-only minus margin Brier gives about
+0.00030 to 0.00341. Only eight days are available, dates conflict with the
+source description, days may be dependent, and this was an already inspected
+post-hoc comparison; that interval cannot establish future performance. The
+separate 2026 sample's corresponding interval includes zero, as described in
+`ACCOUNT_C_TABLE_TENNIS_MARGIN_TRANSFER_20261028.md`.
+
 The script `scripts/audit_setka_margin_rating.py --csv PATH` takes a separately
 obtained input; the companion JSON binds source and script hashes and lists
 per-day differences. Tests verify that changing a same-day set margin cannot

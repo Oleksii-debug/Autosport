@@ -1,0 +1,7 @@
+# Desktop sandbox candidate: local test evidence
+
+The local source tree `b4775a29a30448c622ecb7b694951366886c3464`, tree `9baf7332862fd6140779e82d848c6fc241023855`, was tested on Linux. The previously published research branch commit `44f40484efe15d195c41caacc0bfc245afe8ab9f` has the same source tree; the commit IDs differ because the GitHub connector created the remote commit. This desktop sandbox candidate is not the independently frozen Windows packaging candidate and is not a released build.
+
+The complete `tests` suite ran with Python from the isolated `/workspace/scratch/adbc115a56de/qa-clean-env` environment, which has the candidate source on its import path. The `PYTHONPATH`, lower- and upper-case proxy environment variables were unset. Result: **12174 passed, 83 skipped in 2205.41 seconds**, process exit 0. The local captured output has SHA-256 `a212c4492b3ad53db75009886106956bde38306c6f73b245f42763679638f03b`. The run generated untracked `unused/` test data; tracked source remained unchanged. Skips mean this is not evidence of all platform-specific behavior.
+
+This is source-level Linux test evidence only. It is not a Windows compilation, installer lifecycle, external UI Automation, NVDA acceptance, proof of settled sporting outcomes, evidence of real profit, or authorization to ship. The frozen Windows candidate and its checks must complete separately, then the intended final integration must be tested at its exact source revision before distribution.

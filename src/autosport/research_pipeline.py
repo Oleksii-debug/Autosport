@@ -19,6 +19,7 @@ from .decision_ledger import (
 )
 from .domain import MarketEvent, PaperTicket, TicketLeg
 from .forecasting import ForecastRecord, parse_iso_timestamp
+from .learning_environment import Observation
 from .paper import PaperBook
 from .price_truth import paper_quote_rejection_reason
 from .risk import (
@@ -166,6 +167,23 @@ def _risk_of_ruin_evidence_payload(
     }
 
 
+def _causal_observation_payload(
+    observation: Observation | None,
+) -> dict[str, object] | None:
+    if observation is None:
+        return None
+    if type(observation) is not Observation:
+        raise TypeError("causal_observation must use the exact Observation type")
+    Observation.__post_init__(observation)
+    return {
+        "environment_id": observation.environment_id,
+        "observation_id": observation.observation_id,
+        "observed_at": observation.observed_at,
+        "available_at": observation.available_at,
+        "evidence": [list(item) for item in observation.evidence],
+    }
+
+
 def _research_material_action_intent_sha256(
     *,
     replay_run_id: str,
@@ -177,6 +195,7 @@ def _research_material_action_intent_sha256(
     evidence: tuple[ResearchEvidence, ...],
     provider_accounts: tuple[tuple[str, str], ...] = (),
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
+    causal_observation: Observation | None = None,
 ) -> str:
     """Bind one caller idempotence key to the immutable research decision intent."""
 
@@ -237,6 +256,9 @@ def _research_material_action_intent_sha256(
             )
         ],
     }
+    causal_payload = _causal_observation_payload(causal_observation)
+    if causal_payload is not None:
+        payload["causal_observation"] = causal_payload
     if risk_of_ruin_evidence is not None:
         payload["risk_of_ruin_evidence"] = _risk_of_ruin_evidence_payload(
             risk_of_ruin_evidence
@@ -760,10 +782,18 @@ class ResearchDecisionPipeline:
         decision_ledger: JsonlDecisionLedger,
         replay_run_id: str,
         material_action_id: str | None = None,
+        causal_observation: Observation | None = None,
     ) -> ResearchDecision:
         _validate_canonical_string(replay_run_id, "replay_run_id")
         _validate_canonical_string(decision_ts, "decision_ts")
         decision_time = parse_iso_timestamp(decision_ts)
+        causal_observation_payload = _causal_observation_payload(causal_observation)
+        if causal_observation is not None and parse_iso_timestamp(
+            causal_observation.available_at
+        ) > decision_time:
+            raise ValueError(
+                "causal_observation must be available no later than decision_ts"
+            )
         evidence_items = tuple(evidence)
         for item in evidence_items:
             _validate_research_evidence_causal_use(
@@ -805,6 +835,7 @@ class ResearchDecisionPipeline:
                     evidence=evidence_items,
                     provider_accounts=proposal_context.provider_accounts,
                     risk_of_ruin_evidence=risk_of_ruin_evidence,
+                    causal_observation=causal_observation,
                 )
             )
             _reconcile_existing_economic_action(
@@ -977,6 +1008,7 @@ class ResearchDecisionPipeline:
                     else ()
                 ),
                 risk_of_ruin_evidence=risk_of_ruin_evidence,
+                causal_observation=causal_observation_payload,
             )
             if approved and resolved_material_action_id is not None:
                 assert resolved_material_action_intent_sha256 is not None
@@ -1089,6 +1121,7 @@ def _audit_payload(
     evidence: tuple[ResearchEvidence, ...],
     provider_accounts: tuple[tuple[str, str], ...] = (),
     risk_of_ruin_evidence: RiskOfRuinEvidence | None = None,
+    causal_observation: dict[str, object] | None = None,
 ) -> dict:
     candidate_keys = {leg.quote_key for leg in candidate.legs}
     relevant_evidence = sorted(
@@ -1184,6 +1217,8 @@ def _audit_payload(
         payload["risk_of_ruin_evidence"] = _risk_of_ruin_evidence_payload(
             risk_of_ruin_evidence
         )
+    if causal_observation is not None:
+        payload["causal_observation"] = causal_observation
     return payload
 
 

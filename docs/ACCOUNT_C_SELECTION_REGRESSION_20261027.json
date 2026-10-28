@@ -1,0 +1,929 @@
+{
+  "baseline_source": "2c3cb80c348dd5328668cae042b4b2507baab0f8",
+  "campaign_source_sha256": "cf72a40a48f461196703664016f0628233dd8693519185e66170d757f2e9c508",
+  "cases": [
+    {
+      "results": {
+        "adaptive_abstention": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "0",
+              "gross_stake": "757",
+              "lost": 16,
+              "net_reward": "-757",
+              "tickets": 16,
+              "void": 0,
+              "won": 0
+            },
+            "SINGLE": {
+              "gross_payout": "0",
+              "gross_stake": "711",
+              "lost": 16,
+              "net_reward": "-711",
+              "tickets": 16,
+              "void": 0,
+              "won": 0
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "-47.5",
+              "observations": 8,
+              "reward_sum": "-380"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-47.125",
+              "observations": 8,
+              "reward_sum": "-377"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "-44.625",
+              "observations": 8,
+              "reward_sum": "-357"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-44.25",
+              "observations": 8,
+              "reward_sum": "-354"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 88,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "ticket_count": 32,
+          "wait_count": 88
+        },
+        "fixed_alternation": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "0",
+              "gross_stake": "3235",
+              "lost": 84,
+              "net_reward": "-3235",
+              "tickets": 84,
+              "void": 0,
+              "won": 0
+            },
+            "SINGLE": {
+              "gross_payout": "0",
+              "gross_stake": "904",
+              "lost": 24,
+              "net_reward": "-904",
+              "tickets": 24,
+              "void": 0,
+              "won": 0
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "-38.52777777777777777777777778",
+              "observations": 36,
+              "reward_sum": "-1387"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-38.5",
+              "observations": 48,
+              "reward_sum": "-1848"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "-37.58333333333333333333333333",
+              "observations": 12,
+              "reward_sum": "-451"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-37.75",
+              "observations": 12,
+              "reward_sum": "-453"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 12,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "4139",
+          "net_reward": "-4139",
+          "ticket_count": 108,
+          "wait_count": 12
+        }
+      },
+      "reward_delta": "2671",
+      "scenario": "rising",
+      "seed": 11,
+      "snapshots_sha256": "34ae477844339d8d08a36d6e4dbfa0b344dcb85ecc01709040b3947626e6f833"
+    },
+    {
+      "results": {
+        "adaptive_abstention": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "132885.6800",
+              "gross_stake": "4800",
+              "lost": 0,
+              "net_reward": "128085.6800",
+              "tickets": 96,
+              "void": 0,
+              "won": 96
+            },
+            "SINGLE": {
+              "gross_payout": "6180.00",
+              "gross_stake": "1200",
+              "lost": 0,
+              "net_reward": "4980.00",
+              "tickets": 24,
+              "void": 0,
+              "won": 24
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "1338.584102564102564102564103",
+              "observations": 78,
+              "reward_sum": "104409.5600"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "1315.3400",
+              "observations": 18,
+              "reward_sum": "23676.1200"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "207.7500",
+              "observations": 16,
+              "reward_sum": "3324.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "207.0000",
+              "observations": 8,
+              "reward_sum": "1656.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "0",
+          "net_reward": "133065.6800",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "fixed_alternation": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "128355.6800",
+              "gross_stake": "4800",
+              "lost": 0,
+              "net_reward": "123555.6800",
+              "tickets": 96,
+              "void": 0,
+              "won": 96
+            },
+            "SINGLE": {
+              "gross_payout": "6060.00",
+              "gross_stake": "1200",
+              "lost": 0,
+              "net_reward": "4860.00",
+              "tickets": 24,
+              "void": 0,
+              "won": 24
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "1356.263333333333333333333333",
+              "observations": 48,
+              "reward_sum": "65100.6400"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "1217.813333333333333333333333",
+              "observations": 48,
+              "reward_sum": "58455.0400"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "217.0000",
+              "observations": 12,
+              "reward_sum": "2604.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "188.0000",
+              "observations": 12,
+              "reward_sum": "2256.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "0",
+          "net_reward": "128415.6800",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "reward_delta": "4650.0000",
+      "scenario": "falling",
+      "seed": 11,
+      "snapshots_sha256": "ae7135ed2b166572b6daff0ec376f131675ee7ad62da5938e3245d7edef6fb4c"
+    },
+    {
+      "results": {
+        "adaptive_abstention": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "800",
+              "gross_stake": "800",
+              "lost": 0,
+              "net_reward": "0",
+              "tickets": 16,
+              "void": 16,
+              "won": 0
+            },
+            "SINGLE": {
+              "gross_payout": "800",
+              "gross_stake": "800",
+              "lost": 0,
+              "net_reward": "0",
+              "tickets": 16,
+              "void": 16,
+              "won": 0
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "0",
+              "observations": 8,
+              "reward_sum": "0"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "0",
+              "observations": 8,
+              "reward_sum": "0"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "0",
+              "observations": 8,
+              "reward_sum": "0"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "0",
+              "observations": 8,
+              "reward_sum": "0"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 88,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "0",
+          "net_reward": "0",
+          "ticket_count": 32,
+          "wait_count": 88
+        },
+        "fixed_alternation": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "4800",
+              "gross_stake": "4800",
+              "lost": 0,
+              "net_reward": "0",
+              "tickets": 96,
+              "void": 96,
+              "won": 0
+            },
+            "SINGLE": {
+              "gross_payout": "1200",
+              "gross_stake": "1200",
+              "lost": 0,
+              "net_reward": "0",
+              "tickets": 24,
+              "void": 24,
+              "won": 0
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "0",
+              "observations": 48,
+              "reward_sum": "0"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "0",
+              "observations": 48,
+              "reward_sum": "0"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "0",
+              "observations": 12,
+              "reward_sum": "0"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "0",
+              "observations": 12,
+              "reward_sum": "0"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "0",
+          "net_reward": "0",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "reward_delta": "0",
+      "scenario": "flat",
+      "seed": 11,
+      "snapshots_sha256": "898d41cfa52cfd5ac43739b93ac3e0e2c43e5a016acd881b684f11255acc391d"
+    },
+    {
+      "results": {
+        "adaptive_abstention": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "23166.92",
+              "gross_stake": "4739",
+              "lost": 51,
+              "net_reward": "18427.92",
+              "tickets": 95,
+              "void": 0,
+              "won": 44
+            },
+            "SINGLE": {
+              "gross_payout": "2793.90",
+              "gross_stake": "1244",
+              "lost": 8,
+              "net_reward": "1549.90",
+              "tickets": 25,
+              "void": 0,
+              "won": 17
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "216.3554022988505747126436782",
+              "observations": 87,
+              "reward_sum": "18822.92"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-49.375",
+              "observations": 8,
+              "reward_sum": "-395.00"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "114.5823529411764705882352941",
+              "observations": 17,
+              "reward_sum": "1947.90"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-49.75",
+              "observations": 8,
+              "reward_sum": "-398.00"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "342",
+          "net_reward": "19977.82",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "fixed_alternation": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "25285.46",
+              "gross_stake": "4799",
+              "lost": 48,
+              "net_reward": "20486.46",
+              "tickets": 96,
+              "void": 0,
+              "won": 48
+            },
+            "SINGLE": {
+              "gross_payout": "1950.00",
+              "gross_stake": "1200",
+              "lost": 12,
+              "net_reward": "750.00",
+              "tickets": 24,
+              "void": 0,
+              "won": 12
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "476.80125",
+              "observations": 48,
+              "reward_sum": "22886.46"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-50.00",
+              "observations": 48,
+              "reward_sum": "-2400.00"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "112.50",
+              "observations": 12,
+              "reward_sum": "1350.00"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-50.00",
+              "observations": 12,
+              "reward_sum": "-600.00"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "100.00",
+          "net_reward": "21236.46",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "reward_delta": "-1258.64",
+      "scenario": "alternating",
+      "seed": 11,
+      "snapshots_sha256": "bcb7bb4cb193946377754b47638f931ddf87fc80ecd8173f53a4b0f4d5a76139"
+    },
+    {
+      "results": {
+        "adaptive_abstention": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "44835.0400",
+              "gross_stake": "4800",
+              "lost": 48,
+              "net_reward": "40035.0400",
+              "tickets": 96,
+              "void": 0,
+              "won": 48
+            },
+            "SINGLE": {
+              "gross_payout": "2490.00",
+              "gross_stake": "1200",
+              "lost": 12,
+              "net_reward": "1290.00",
+              "tickets": 24,
+              "void": 0,
+              "won": 12
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "417.5884210526315789473684211",
+              "observations": 76,
+              "reward_sum": "31736.7200"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "414.9160",
+              "observations": 20,
+              "reward_sum": "8298.3200"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "52.92307692307692307692307692",
+              "observations": 13,
+              "reward_sum": "688.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "54.72727272727272727272727273",
+              "observations": 11,
+              "reward_sum": "602.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "3000.0000",
+          "net_reward": "41325.0400",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "fixed_alternation": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "43117.8400",
+              "gross_stake": "4800",
+              "lost": 48,
+              "net_reward": "38317.8400",
+              "tickets": 96,
+              "void": 0,
+              "won": 48
+            },
+            "SINGLE": {
+              "gross_payout": "2490.00",
+              "gross_stake": "1200",
+              "lost": 12,
+              "net_reward": "1290.00",
+              "tickets": 24,
+              "void": 0,
+              "won": 12
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "427.6816666666666666666666667",
+              "observations": 48,
+              "reward_sum": "20528.7200"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "370.6066666666666666666666667",
+              "observations": 48,
+              "reward_sum": "17789.1200"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "61.0000",
+              "observations": 12,
+              "reward_sum": "732.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "46.5000",
+              "observations": 12,
+              "reward_sum": "558.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "3000.0000",
+          "net_reward": "39607.8400",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "reward_delta": "1717.2000",
+      "scenario": "regime_change",
+      "seed": 11,
+      "snapshots_sha256": "57d4bf597955713cdf3c0cb7742ea2abd453cade104c8349c85fe08f075790a2"
+    },
+    {
+      "results": {
+        "adaptive_abstention": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "13619.7120",
+              "gross_stake": "4799",
+              "lost": 41,
+              "net_reward": "8820.7120",
+              "tickets": 96,
+              "void": 13,
+              "won": 42
+            },
+            "SINGLE": {
+              "gross_payout": "1458.00",
+              "gross_stake": "1200",
+              "lost": 11,
+              "net_reward": "258.00",
+              "tickets": 24,
+              "void": 6,
+              "won": 7
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "96.00676056338028169014084507",
+              "observations": 71,
+              "reward_sum": "6816.4800"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "80.16928",
+              "observations": 25,
+              "reward_sum": "2004.2320"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "20.30769230769230769230769231",
+              "observations": 13,
+              "reward_sum": "264.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-0.5454545454545454545454545455",
+              "observations": 11,
+              "reward_sum": "-6.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "258.0000",
+          "net_reward": "9078.7120",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "fixed_alternation": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "9484.7600",
+              "gross_stake": "4746",
+              "lost": 46,
+              "net_reward": "4738.7600",
+              "tickets": 95,
+              "void": 10,
+              "won": 39
+            },
+            "SINGLE": {
+              "gross_payout": "1286.00",
+              "gross_stake": "1250",
+              "lost": 11,
+              "net_reward": "36.00",
+              "tickets": 25,
+              "void": 9,
+              "won": 5
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "78.70956521739130434782608696",
+              "observations": 46,
+              "reward_sum": "3620.6400"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "22.81877551020408163265306122",
+              "observations": 49,
+              "reward_sum": "1118.1200"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "7.076923076923076923076923077",
+              "observations": 13,
+              "reward_sum": "92.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-4.666666666666666666666666667",
+              "observations": 12,
+              "reward_sum": "-56.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "250.000",
+          "net_reward": "4774.7600",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "reward_delta": "4303.9520",
+      "scenario": "random_walk",
+      "seed": 11,
+      "snapshots_sha256": "88f8c9ce0a5d7b2cb90f7fc0c73689cf069a8ce929dcdde51aedab821fa08f68"
+    },
+    {
+      "results": {
+        "adaptive_abstention": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "10275.5200",
+              "gross_stake": "4698",
+              "lost": 50,
+              "net_reward": "5577.5200",
+              "tickets": 94,
+              "void": 8,
+              "won": 36
+            },
+            "SINGLE": {
+              "gross_payout": "2352.00",
+              "gross_stake": "1300",
+              "lost": 6,
+              "net_reward": "1052.00",
+              "tickets": 26,
+              "void": 10,
+              "won": 10
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "26.6250",
+              "observations": 8,
+              "reward_sum": "213.0000"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "62.37813953488372093023255814",
+              "observations": 86,
+              "reward_sum": "5364.5200"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "45.69230769230769230769230769",
+              "observations": 13,
+              "reward_sum": "594.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "35.23076923076923076923076923",
+              "observations": 13,
+              "reward_sum": "458.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "506.0000",
+          "net_reward": "6629.5200",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "fixed_alternation": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "9916.9232",
+              "gross_stake": "4640",
+              "lost": 56,
+              "net_reward": "5276.9232",
+              "tickets": 94,
+              "void": 9,
+              "won": 29
+            },
+            "SINGLE": {
+              "gross_payout": "1607.00",
+              "gross_stake": "1277",
+              "lost": 7,
+              "net_reward": "330.00",
+              "tickets": 26,
+              "void": 13,
+              "won": 6
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "77.06633043478260869565217391",
+              "observations": 46,
+              "reward_sum": "3545.0512"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "36.08066666666666666666666667",
+              "observations": 48,
+              "reward_sum": "1731.8720"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "21.14285714285714285714285714",
+              "observations": 14,
+              "reward_sum": "296.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "2.833333333333333333333333333",
+              "observations": 12,
+              "reward_sum": "34.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "706.44",
+          "net_reward": "5606.9232",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "reward_delta": "1022.5968",
+      "scenario": "random_walk",
+      "seed": 29,
+      "snapshots_sha256": "c832f47e53af23b641955eeb739d1cb4114c35b3312c6cec91c77c3b43b1f1b6"
+    },
+    {
+      "results": {
+        "adaptive_abstention": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "13053.0400",
+              "gross_stake": "4747",
+              "lost": 56,
+              "net_reward": "8306.0400",
+              "tickets": 95,
+              "void": 13,
+              "won": 26
+            },
+            "SINGLE": {
+              "gross_payout": "2012.00",
+              "gross_stake": "1250",
+              "lost": 6,
+              "net_reward": "762.00",
+              "tickets": 25,
+              "void": 14,
+              "won": 5
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "97.03862068965517241379310345",
+              "observations": 87,
+              "reward_sum": "8442.3600"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-17.0400",
+              "observations": 8,
+              "reward_sum": "-136.3200"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "53.64705882352941176470588235",
+              "observations": 17,
+              "reward_sum": "912.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-18.7500",
+              "observations": 8,
+              "reward_sum": "-150.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "950.0000",
+          "net_reward": "9068.0400",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "fixed_alternation": {
+          "cohorts": {
+            "PARLAY_2": {
+              "gross_payout": "11046.5840",
+              "gross_stake": "4794",
+              "lost": 57,
+              "net_reward": "6252.5840",
+              "tickets": 96,
+              "void": 14,
+              "won": 25
+            },
+            "SINGLE": {
+              "gross_payout": "1261.00",
+              "gross_stake": "1198",
+              "lost": 10,
+              "net_reward": "63.00",
+              "tickets": 24,
+              "void": 11,
+              "won": 3
+            }
+          },
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "119.3753191489361702127659574",
+              "observations": 47,
+              "reward_sum": "5610.6400"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "13.10089795918367346938775510",
+              "observations": 49,
+              "reward_sum": "641.9440"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "22.0000",
+              "observations": 12,
+              "reward_sum": "264.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-16.7500",
+              "observations": 12,
+              "reward_sum": "-201.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "805.000",
+          "net_reward": "6315.5840",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "reward_delta": "2752.4560",
+      "scenario": "random_walk",
+      "seed": 47,
+      "snapshots_sha256": "25134b21d994c4f8a06722d1db790f6eb3c4ffa190e9f84a561bcd2f0c2ae8c4"
+    }
+  ],
+  "forward_evidence_eligible": false,
+  "limitation": "Development fixtures using line-movement settlement; no authoritative match outcomes, holdout, statistical significance or economic edge is established.",
+  "paper_only": true,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.account_c.paired_selection_regression",
+  "schema_version": 1,
+  "source_sha256": "9656cfe52e9707f49337d1a0345062732a664d7b999fcf73ddec58635f4dcf92",
+  "steps_per_case": 120,
+  "truth": "simulated"
+}

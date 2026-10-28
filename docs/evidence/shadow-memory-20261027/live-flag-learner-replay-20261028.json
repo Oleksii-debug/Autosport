@@ -1,0 +1,620 @@
+{
+  "all_source_signals": {
+    "one_percent_cost": {
+      "bets": 69,
+      "cost_bps_per_stake": 100,
+      "day_block_bootstrap_roi_95pct": [
+        "-0.1396153846153846153846153846",
+        "0.3835"
+      ],
+      "max_drawdown_units": "7.100",
+      "net_units": "7.000",
+      "roi": "0.1014492753623188405797101449",
+      "wins": 29
+    },
+    "zero_cost": {
+      "bets": 69,
+      "cost_bps_per_stake": 0,
+      "day_block_bootstrap_roi_95pct": [
+        "-0.1296153846153846153846153846",
+        "0.3935"
+      ],
+      "max_drawdown_units": "6.990",
+      "net_units": "7.690",
+      "roi": "0.1114492753623188405797101449",
+      "wins": 29
+    }
+  },
+  "attribution": "TipsAudit (2026), https://tipsaudit.com/data, CC BY 4.0",
+  "decisions": [
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-09-30T19:30:02+00:00",
+      "id": "5614",
+      "previous_outcomes": 0,
+      "reward": "1.180",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-01T09:30:03+00:00",
+      "id": "7870",
+      "previous_outcomes": 0,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T03:30:04+00:00",
+      "id": "8057",
+      "previous_outcomes": 1,
+      "reward": "2.250",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T09:30:05+00:00",
+      "id": "8188",
+      "previous_outcomes": 1,
+      "reward": "2.300",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T10:00:01+00:00",
+      "id": "7718",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T10:00:02+00:00",
+      "id": "7856",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T12:30:04+00:00",
+      "id": "8124",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T15:30:03+00:00",
+      "id": "8006",
+      "previous_outcomes": 1,
+      "reward": "1.450",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T15:30:04+00:00",
+      "id": "8107",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T15:30:05+00:00",
+      "id": "8218",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-03T15:30:05+00:00",
+      "id": "8219",
+      "previous_outcomes": 1,
+      "reward": "1.280",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-04T09:30:07+00:00",
+      "id": "8570",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-04T15:30:08+00:00",
+      "id": "8517",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-04T17:00:01+00:00",
+      "id": "7783",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-04T17:30:01+00:00",
+      "id": "7764",
+      "previous_outcomes": 1,
+      "reward": "2.180",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-04T17:30:01+00:00",
+      "id": "7774",
+      "previous_outcomes": 1,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-05T12:30:08+00:00",
+      "id": "8582",
+      "previous_outcomes": 1,
+      "reward": "0.660",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-05T15:30:08+00:00",
+      "id": "8673",
+      "previous_outcomes": 2,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-05T17:00:08+00:00",
+      "id": "8675",
+      "previous_outcomes": 2,
+      "reward": "2.300",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-05T21:30:01+00:00",
+      "id": "7766",
+      "previous_outcomes": 2,
+      "reward": "1.800",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-05T23:00:07+00:00",
+      "id": "8611",
+      "previous_outcomes": 2,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-06T06:30:09+00:00",
+      "id": "8610",
+      "previous_outcomes": 2,
+      "reward": "1.330",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-06T07:00:02+00:00",
+      "id": "7917",
+      "previous_outcomes": 2,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-08T00:30:06+00:00",
+      "id": "8342",
+      "previous_outcomes": 8,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-08T03:30:10+00:00",
+      "id": "8707",
+      "previous_outcomes": 8,
+      "reward": "1.050",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-10T04:00:10+00:00",
+      "id": "8886",
+      "previous_outcomes": 9,
+      "reward": "2.400",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-10T14:00:17+00:00",
+      "id": "9126",
+      "previous_outcomes": 9,
+      "reward": "0.470",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-10T15:00:13+00:00",
+      "id": "8736",
+      "previous_outcomes": 9,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-10T15:00:18+00:00",
+      "id": "9188",
+      "previous_outcomes": 9,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-10T16:00:14+00:00",
+      "id": "9038",
+      "previous_outcomes": 9,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-10T16:00:18+00:00",
+      "id": "9174",
+      "previous_outcomes": 9,
+      "reward": "1.600",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-10T17:00:17+00:00",
+      "id": "9215",
+      "previous_outcomes": 9,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T00:30:12+00:00",
+      "id": "8795",
+      "previous_outcomes": 10,
+      "reward": "1.170",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T00:30:12+00:00",
+      "id": "8796",
+      "previous_outcomes": 10,
+      "reward": "2.200",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T08:00:12+00:00",
+      "id": "8733",
+      "previous_outcomes": 10,
+      "reward": "1.920",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T11:30:21+00:00",
+      "id": "9612",
+      "previous_outcomes": 10,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T12:30:16+00:00",
+      "id": "8912",
+      "previous_outcomes": 10,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T14:30:20+00:00",
+      "id": "9623",
+      "previous_outcomes": 10,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T15:30:15+00:00",
+      "id": "8938",
+      "previous_outcomes": 10,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T16:00:20+00:00",
+      "id": "9695",
+      "previous_outcomes": 10,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T17:00:20+00:00",
+      "id": "9703",
+      "previous_outcomes": 10,
+      "reward": "0.880",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T17:00:20+00:00",
+      "id": "9712",
+      "previous_outcomes": 10,
+      "reward": "1.300",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T19:00:08+00:00",
+      "id": "8778",
+      "previous_outcomes": 11,
+      "reward": "1.500",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T22:30:09+00:00",
+      "id": "8809",
+      "previous_outcomes": 11,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T23:00:04+00:00",
+      "id": "8696",
+      "previous_outcomes": 11,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-11T23:30:10+00:00",
+      "id": "8947",
+      "previous_outcomes": 11,
+      "reward": "2.000",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-12T04:00:09+00:00",
+      "id": "8804",
+      "previous_outcomes": 11,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-12T05:30:24+00:00",
+      "id": "9959",
+      "previous_outcomes": 11,
+      "reward": "2.260",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-12T12:00:21+00:00",
+      "id": "9950",
+      "previous_outcomes": 13,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-12T14:00:23+00:00",
+      "id": "9957",
+      "previous_outcomes": 16,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-13T19:00:08+00:00",
+      "id": "9043",
+      "previous_outcomes": 20,
+      "reward": "2.200",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-15T22:00:22+00:00",
+      "id": "9940",
+      "previous_outcomes": 29,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "WAIT",
+      "decision_at": "2026-10-16T05:00:04+00:00",
+      "id": "8910",
+      "previous_outcomes": 29,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-17T05:30:42+00:00",
+      "id": "10615",
+      "previous_outcomes": 34,
+      "reward": "1.650",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-17T05:30:43+00:00",
+      "id": "10704",
+      "previous_outcomes": 34,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-17T05:30:44+00:00",
+      "id": "10816",
+      "previous_outcomes": 34,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-17T12:00:30+00:00",
+      "id": "10426",
+      "previous_outcomes": 34,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-17T12:00:31+00:00",
+      "id": "10644",
+      "previous_outcomes": 34,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-17T20:00:27+00:00",
+      "id": "10759",
+      "previous_outcomes": 35,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-18T01:30:31+00:00",
+      "id": "10933",
+      "previous_outcomes": 35,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-18T04:00:27+00:00",
+      "id": "10940",
+      "previous_outcomes": 35,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-18T05:30:45+00:00",
+      "id": "11398",
+      "previous_outcomes": 35,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-18T07:00:29+00:00",
+      "id": "10931",
+      "previous_outcomes": 35,
+      "reward": "1.950",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-18T10:00:22+00:00",
+      "id": "10132",
+      "previous_outcomes": 35,
+      "reward": "2.000",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-18T10:00:30+00:00",
+      "id": "11406",
+      "previous_outcomes": 35,
+      "reward": "2.250",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-18T14:00:17+00:00",
+      "id": "10420",
+      "previous_outcomes": 35,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-18T16:00:14+00:00",
+      "id": "8838",
+      "previous_outcomes": 35,
+      "reward": "1.800",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-19T04:00:10+00:00",
+      "id": "10401",
+      "previous_outcomes": 40,
+      "reward": "-1",
+      "state": "SETTLED"
+    },
+    {
+      "choice": "PRICE_GAP",
+      "decision_at": "2026-10-23T13:30:03+00:00",
+      "id": "10416",
+      "previous_outcomes": 54,
+      "reward": "0.360",
+      "state": "SETTLED"
+    }
+  ],
+  "evaluation_mode": "exploratory previously-inspected recorded source; 48-hour assumed delay",
+  "full_report_sha256": "02edf63365a4a3e1ed1258048abb0d6ab9a2bf165bf7b5947bf936f049d0e117",
+  "learner_selected": {
+    "one_percent_cost": {
+      "bets": 16,
+      "cost_bps_per_stake": 100,
+      "day_block_bootstrap_roi_95pct": [
+        "-0.4088888888888888888888888889",
+        "0.635"
+      ],
+      "max_drawdown_units": "7.100",
+      "net_units": "-0.150",
+      "roi": "-0.009375",
+      "wins": 6
+    },
+    "zero_cost": {
+      "bets": 16,
+      "cost_bps_per_stake": 0,
+      "day_block_bootstrap_roi_95pct": [
+        "-0.3988888888888888888888888889",
+        "0.645"
+      ],
+      "max_drawdown_units": "6.990",
+      "net_units": "0.010",
+      "roi": "0.000625",
+      "wins": 6
+    }
+  },
+  "outcomes_pending_at_last_decision": 15,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "quote_acceptance_verified": false,
+  "real_money_execution": false,
+  "schema": "autosport.live_flag_learner_replay.v1",
+  "selected": 16,
+  "source_sha256": "dd733c32609cd5f5bc4c2d6975a7ab2dca89559e965780e3fea90a0c24567d6e",
+  "waits": 53
+}

@@ -1,0 +1,60 @@
+name: Complete fifty usable tennis recordings
+on:
+  push:
+    branches: [research/table-tennis-replay-20261028]
+    paths:
+      - .github/workflows/table-tennis-completion.yml
+      - experiments/table_tennis_replay/completion_capture.py
+permissions:
+  contents: write
+concurrency:
+  group: table-tennis-completion-three-20261028
+  cancel-in-progress: false
+jobs:
+  capture:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Verify selection and evidence preservation
+        run: python -m unittest discover -s experiments/table_tennis_replay -p 'test_*.py' -v
+      - name: Record supplementary matches
+        shell: bash
+        run: |
+          git config user.name 'Autosport research recorder'
+          git config user.email 'autosport-research@users.noreply.github.com'
+          git checkout -b data/table-tennis-completion-20261028
+          python -u experiments/table_tennis_replay/completion_capture.py &
+          recorder_pid=$!
+          publish_recording() {
+            if [ -s experiments/table_tennis_replay/completion-recording.json ]; then
+              git add experiments/table_tennis_replay/completion-selection.json experiments/table_tennis_replay/completion-recording.json
+              if ! git diff --cached --quiet; then
+                git commit -m 'data: retain supplementary tennis recordings' || return 1
+              fi
+              git push origin HEAD:refs/heads/data/table-tennis-completion-20261028 || return 1
+            fi
+          }
+          while kill -0 "$recorder_pid" 2>/dev/null; do
+            publish_recording || echo 'Publication unavailable; recording continues.'
+            sleep 60
+          done
+          status=0
+          wait "$recorder_pid" || status=$?
+          publish_recording || echo 'Final publication unavailable; retain artifact.'
+          exit "$status"
+      - name: Preserve recorded evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: table-tennis-completion-${{ github.run_id }}
+          path: |
+            experiments/table_tennis_replay/completion-selection.json
+            experiments/table_tennis_replay/completion-recording.json
+          retention-days: 30
+          if-no-files-found: warn

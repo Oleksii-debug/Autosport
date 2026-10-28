@@ -68,6 +68,29 @@
         }
       },
       "scenario": "recovery"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "604.0000",
+          "net_reward": "169186.3250",
+          "tickets": 180,
+          "waits": 0
+        },
+        "prior_rank": {
+          "drawdown": "963.0000",
+          "net_reward": "167249.0550",
+          "tickets": 180,
+          "waits": 0
+        },
+        "rank_no_prior": {
+          "drawdown": "604.0000",
+          "net_reward": "169186.3250",
+          "tickets": 180,
+          "waits": 0
+        }
+      },
+      "scenario": "prior_adverse"
     }
   ],
   "desktop_import_performed": false,
@@ -79,7 +102,7 @@
   "real_money_execution": false,
   "scenario_start": "2026-10-28T06:00:00+00:00",
   "schema": "autosport.sandbox_prior_rank.research.v1",
-  "script_sha256": "327d262c3ac04aa3d6213760d6746054b0cde798afbef673070cef451010bb90",
+  "script_sha256": "6f8588440d7a6705b064de92b6a638c062376b070c196311788dcb4ecbc5d7e5",
   "source_artifact_created_at": "2026-10-28T04:42:57Z",
   "truth": "simulated"
 }

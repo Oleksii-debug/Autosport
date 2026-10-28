@@ -33,8 +33,9 @@ def test_prior_cannot_override_wait_or_admit_a_negative_action():
     assert campaign._explore_then_admit_family(PARLAY_ACTIONS) == frozenset({"PARLAY_2_LOW_ODDS"})
 
 
-def test_snapshots_begin_after_source_artifact_and_remain_ordered():
-    data = later_snapshots("loss")
+@pytest.mark.parametrize("scenario", ["loss", "prior_adverse"])
+def test_snapshots_begin_after_source_artifact_and_remain_ordered(scenario):
+    data = later_snapshots(scenario)
     assert data[0].observed_at > "2026-10-28T04:42:57"
     assert all(a.observed_at < b.observed_at for a, b in zip(data, data[1:]))
     assert len({s.snapshot_sha256 for s in data}) == len(data)

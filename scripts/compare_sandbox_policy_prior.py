@@ -9,7 +9,8 @@ from decimal import Decimal
 from pathlib import Path
 
 from compare_account_c_recovery_probe import snapshots
-from autosport.paper_live_sandbox_campaign import BlindPaperCampaignPlan, BlindPaperSandboxCampaign
+from autosport.paper_live_sandbox_campaign import (BlindPaperCampaignPlan, BlindPaperSandboxCampaign,
+                                                   parse_sandbox_live_payload)
 
 ROOT = Path(__file__).resolve().parents[1]
 PRIOR = ROOT / "docs/ACCOUNT_C_POLICY_PRIOR_INSPECTION_20261028.json"
@@ -58,6 +59,22 @@ def later_snapshots(scenario):
     shift = timedelta(hours=6)
     def stamp(value):
         return (datetime.fromisoformat(value.replace("Z", "+00:00")) + shift).isoformat(timespec="microseconds")
+    if scenario == "prior_adverse":
+        # A deliberately hostile regime switch: the highest-odds quote starts
+        # improving, then moves against its earlier positive signal.
+        result = []
+        for i in range(181):
+            at = START + timedelta(seconds=i + 1)
+            prices = (450 - i, 550 - i, 800 - i if i <= 45 else 755 + (i - 45))
+            rows = [{"match_id": f"fixture-{j}", "sport_key": "table_tennis",
+                     "source": "pinnacle", "period_key": "FT", "market": "h2h",
+                     "line": 0, "side": "home", "price": price,
+                     "timestamp_ms": int(at.timestamp() * 1000), "age_seconds": 0}
+                    for j, price in enumerate(prices)]
+            result.append(parse_sandbox_live_payload(
+                {"sport_key": "table_tennis", "period": "FT", "count": 3, "results": rows},
+                available_at=(at + timedelta(microseconds=500000)).isoformat()))
+        return result
     return [replace(s, observed_at=stamp(s.observed_at), available_at=stamp(s.available_at),
                     quotes=tuple(replace(q, source_timestamp_ms=q.source_timestamp_ms + 6*3600*1000)
                                  for q in s.quotes)) for s in snapshots(scenario)]
@@ -66,7 +83,7 @@ def later_snapshots(scenario):
 def compare():
     prior = load_prior()
     cases = []
-    for scenario in ("loss", "favorable", "recovery"):
+    for scenario in ("loss", "favorable", "recovery", "prior_adverse"):
         data = later_snapshots(scenario)
         outcomes = {}
         for name, cls in (("baseline", BlindPaperSandboxCampaign),

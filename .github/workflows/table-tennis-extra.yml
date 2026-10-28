@@ -1,0 +1,75 @@
+name: Expand table-tennis recording to fifty matches
+on:
+  push:
+    branches:
+      - research/table-tennis-replay-20261028
+    paths:
+      - experiments/table_tennis_replay/additional_capture.py
+      - experiments/table_tennis_replay/combine_recordings.py
+      - .github/workflows/table-tennis-extra.yml
+permissions:
+  contents: write
+concurrency:
+  group: table-tennis-additional-thirty-20261028
+  cancel-in-progress: false
+jobs:
+  record-extra:
+    runs-on: ubuntu-latest
+    timeout-minutes: 300
+    steps:
+      - name: Checkout exact research source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.sha }}
+          persist-credentials: true
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Verify expansion preserves original evidence
+        run: python -m unittest discover -s experiments/table_tennis_replay -p test_expansion.py -v
+      - name: Select thirty future matches and record independently
+        shell: bash
+        run: |
+          git config user.name 'Autosport research recorder'
+          git config user.email 'autosport-research@users.noreply.github.com'
+          git checkout -b data/table-tennis-capture-50-20261028
+          python -u experiments/table_tennis_replay/additional_capture.py \
+            --original-selection experiments/table_tennis_replay/initial-selection.json \
+            --selection-output experiments/table_tennis_replay/additional-selection.json \
+            --output experiments/table_tennis_replay/additional-recording.json &
+          recorder_pid=$!
+          publish_recording() {
+            if [ -s experiments/table_tennis_replay/additional-recording.json ]; then
+              python experiments/table_tennis_replay/combine_recordings.py \
+                --extra experiments/table_tennis_replay/additional-recording.json \
+                --output experiments/table_tennis_replay/combined-recording.json || echo 'Original feed unavailable; extra evidence retained.'
+              git add experiments/table_tennis_replay/additional-selection.json experiments/table_tennis_replay/additional-recording.json
+              if [ -s experiments/table_tennis_replay/combined-recording.json ]; then
+                git add experiments/table_tennis_replay/combined-recording.json
+              fi
+              if ! git diff --cached --quiet; then
+                git commit -m 'data: preserve additional thirty and combined fifty match progress' || return 1
+              fi
+              git push origin HEAD:refs/heads/data/table-tennis-capture-50-20261028 || return 1
+            fi
+          }
+          while kill -0 "$recorder_pid" 2>/dev/null; do
+            publish_recording || echo 'Progress push unavailable; capture continues.'
+            sleep 180
+          done
+          recorder_status=0
+          wait "$recorder_pid" || recorder_status=$?
+          publish_recording || echo 'Final publication unavailable; artifact retained.'
+          exit "$recorder_status"
+      - name: Retain actual captured evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: table-tennis-fifty-${{ github.run_id }}-attempt-${{ github.run_attempt }}
+          path: |
+            experiments/table_tennis_replay/additional-selection.json
+            experiments/table_tennis_replay/additional-recording.json
+            experiments/table_tennis_replay/combined-recording.json
+          retention-days: 30
+          if-no-files-found: warn

@@ -76,6 +76,34 @@ def audit(path: Path):
         initial, final = Decimal(summary["initial_bankroll"]), Decimal(summary["final_balance"])
         if not initial.is_finite() or not final.is_finite() or str(initial) != summary["initial_bankroll"] or str(final) != summary["final_balance"]:
             raise ValueError("non-finite balance")
+        policy = state.get("policy")
+        estimates = policy.get("estimates") if type(policy) is dict else None
+        displayed = summary.get("estimates")
+        actions = {"PARLAY_2_HIGH_ODDS", "PARLAY_2_LOW_ODDS", "SINGLE_HIGH_ODDS", "SINGLE_LOW_ODDS", "WAIT"}
+        if type(estimates) is not list or type(displayed) is not dict or set(displayed) != actions:
+            raise ValueError("missing action estimates")
+        by_action = {}
+        for item in estimates:
+            if type(item) is not dict or set(item) != {"action_type", "observations", "reward_sum"}:
+                raise ValueError("invalid action estimate")
+            name, count, reward = item["action_type"], item["observations"], item["reward_sum"]
+            if name not in actions or name in by_action or type(count) is not int or count < 0 or type(reward) is not str:
+                raise ValueError("invalid action identity or reward")
+            value = Decimal(reward)
+            if not value.is_finite() or str(value) != reward or type(displayed[name]) is not dict:
+                raise ValueError("invalid action reward")
+            if displayed[name].get("observations") != count or displayed[name].get("reward_sum") != reward:
+                raise ValueError("action estimate and summary mismatch")
+            by_action[name] = {"observations": count, "simulated_reward": reward}
+        if set(by_action) != actions or sum(v["observations"] for v in by_action.values()) != summary["policy_generation"]:
+            raise ValueError("policy estimate counts mismatch")
+        if (by_action["WAIT"]["observations"] != counters["WAIT"]
+            or Decimal(by_action["WAIT"]["simulated_reward"]) != 0
+            or sum(by_action[n]["observations"] for n in actions if n.startswith("SINGLE_")) != counters["SINGLE"]
+            or sum(by_action[n]["observations"] for n in actions if n.startswith("PARLAY_")) != counters["PARLAY_2"]):
+            raise ValueError("policy and action-family counters mismatch")
+        if sum((Decimal(v["simulated_reward"]) for v in by_action.values()), Decimal("0")) != final-initial:
+            raise ValueError("policy reward and balance mismatch")
         diagnostic_summary = None
         if "paper_diagnostics.json" in expected:
             diagnostics = strict_json_loads(archive.read("paper_diagnostics.json").decode("utf-8"))
@@ -101,7 +129,7 @@ def audit(path: Path):
                 "network_failures": counters.get("NETWORK_FAILURES"),
                 "profitability_claim": False, "independent_provider_truth_verified": False,
                 "manifest_checks_internal_consistency_only": True,
-                "simulated_diagnostics": diagnostic_summary}
+                "simulated_diagnostics": diagnostic_summary, "action_estimates": by_action}
 
 
 if __name__ == "__main__":

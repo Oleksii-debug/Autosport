@@ -1,0 +1,229 @@
+{
+  "campaign_sha256": "cf72a40a48f461196703664016f0628233dd8693519185e66170d757f2e9c508",
+  "cases": [
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "1123",
+          "net_reward": "-1123",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe_37": {
+          "maximum_drawdown": "1167",
+          "net_reward": "-1167",
+          "ticket_count": 35,
+          "wait_count": 145
+        },
+        "probe_40": {
+          "maximum_drawdown": "1254",
+          "net_reward": "-1254",
+          "ticket_count": 36,
+          "wait_count": 144
+        }
+      },
+      "regime": "continuing_loss",
+      "seed": 211,
+      "snapshots_sha256": "9fe270d49e9b04f30c1271677bcb3cf947683f5dbf6c992ace0a816f67376537",
+      "switch_step": 85
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "1123",
+          "net_reward": "-1123",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe_37": {
+          "maximum_drawdown": "1254",
+          "net_reward": "-1254",
+          "ticket_count": 35,
+          "wait_count": 145
+        },
+        "probe_40": {
+          "maximum_drawdown": "1297",
+          "net_reward": "-1297",
+          "ticket_count": 36,
+          "wait_count": 144
+        }
+      },
+      "regime": "continuing_loss",
+      "seed": 223,
+      "snapshots_sha256": "1c3c0a429c99bcd14847f6ace5688b98ed41a97e461cadfd5f614bb35d309fcb",
+      "switch_step": 66
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "1167",
+          "net_reward": "-1167",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe_37": {
+          "maximum_drawdown": "1254",
+          "net_reward": "-1254",
+          "ticket_count": 35,
+          "wait_count": 145
+        },
+        "probe_40": {
+          "maximum_drawdown": "1340",
+          "net_reward": "-1340",
+          "ticket_count": 36,
+          "wait_count": 144
+        }
+      },
+      "regime": "continuing_loss",
+      "seed": 227,
+      "snapshots_sha256": "4f4a737717a8510badbebe469d8025c80b4f4ba2d0047e0a839638af632fa0f0",
+      "switch_step": 70
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "1123",
+          "net_reward": "-1123",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe_37": {
+          "maximum_drawdown": "1211",
+          "net_reward": "-1211",
+          "ticket_count": 35,
+          "wait_count": 145
+        },
+        "probe_40": {
+          "maximum_drawdown": "1211",
+          "net_reward": "-1211",
+          "ticket_count": 36,
+          "wait_count": 144
+        }
+      },
+      "regime": "continuing_loss",
+      "seed": 229,
+      "snapshots_sha256": "d95425036ca568820b15141aa00a4521bb9c98cea265f64baadca2427759bde0",
+      "switch_step": 72
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "1123",
+          "net_reward": "-1123",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe_37": {
+          "maximum_drawdown": "1167",
+          "net_reward": "-1167",
+          "ticket_count": 35,
+          "wait_count": 145
+        },
+        "probe_40": {
+          "maximum_drawdown": "1211",
+          "net_reward": "16626.1241",
+          "ticket_count": 82,
+          "wait_count": 98
+        }
+      },
+      "regime": "recovery",
+      "seed": 211,
+      "snapshots_sha256": "713ae5c4fca39e03f94ad6ef6f469e20a81e3ee5a13de001f0426ac81e13fc2b",
+      "switch_step": 85
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "945",
+          "net_reward": "802.45",
+          "ticket_count": 63,
+          "wait_count": 117
+        },
+        "probe_37": {
+          "maximum_drawdown": "945",
+          "net_reward": "22492.3733",
+          "ticket_count": 136,
+          "wait_count": 44
+        },
+        "probe_40": {
+          "maximum_drawdown": "990",
+          "net_reward": "16492.9037",
+          "ticket_count": 134,
+          "wait_count": 46
+        }
+      },
+      "regime": "recovery",
+      "seed": 223,
+      "snapshots_sha256": "efbdf73c70e986463455facea636857b253ab1e2a7e0b7a614fff8f71511cb0a",
+      "switch_step": 66
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "1167",
+          "net_reward": "-1167",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe_37": {
+          "maximum_drawdown": "1167",
+          "net_reward": "28412.9389",
+          "ticket_count": 117,
+          "wait_count": 63
+        },
+        "probe_40": {
+          "maximum_drawdown": "1211",
+          "net_reward": "20121.3458",
+          "ticket_count": 113,
+          "wait_count": 67
+        }
+      },
+      "regime": "recovery",
+      "seed": 227,
+      "snapshots_sha256": "9471b1b535be659f7b91af9d1bab45f0ca1183deadb244ac1c66013cdcc6357f",
+      "switch_step": 70
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "1123",
+          "net_reward": "-1123",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe_37": {
+          "maximum_drawdown": "1123",
+          "net_reward": "12622.2342",
+          "ticket_count": 89,
+          "wait_count": 91
+        },
+        "probe_40": {
+          "maximum_drawdown": "1123",
+          "net_reward": "23293.1617",
+          "ticket_count": 113,
+          "wait_count": 67
+        }
+      },
+      "regime": "recovery",
+      "seed": 229,
+      "snapshots_sha256": "360a79041bd4d4b09726ed4af024f66c7400d624f0c30d4da4b7029aebbc4965",
+      "switch_step": 72
+    }
+  ],
+  "family_sha256": "a773338fd576dcdba5341b15117e07ba3a5915ff57b4a2e76c2a2d63feeb0820",
+  "forward_evidence_eligible": false,
+  "probe_sha256": "7b351de0ccf2e073f0532745c730342f48d19ef0a75244c9719ce7fd8cfe17e7",
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.account_c.recovery_regimes.development.v1",
+  "script_sha256": "2404a184682ff4c08118fb0c200df78705686e0b859de5318ccc612d2e182312",
+  "seeds": [
+    211,
+    223,
+    227,
+    229
+  ],
+  "steps": 180,
+  "truth": "simulated"
+}

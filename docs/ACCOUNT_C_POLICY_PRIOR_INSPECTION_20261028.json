@@ -1,0 +1,46 @@
+{
+  "action_estimates": {
+    "PARLAY_2_HIGH_ODDS": {
+      "observations": 175,
+      "simulated_mean_reward": "11.48285714285714285714285714",
+      "simulated_reward": "2009.50000000000000000000000"
+    },
+    "PARLAY_2_LOW_ODDS": {
+      "observations": 8,
+      "simulated_mean_reward": "-0.29761904761904761904761875",
+      "simulated_reward": "-2.38095238095238095238095"
+    },
+    "SINGLE_HIGH_ODDS": {
+      "observations": 8,
+      "simulated_mean_reward": "-6.25000000000000000000000",
+      "simulated_reward": "-50.00000000000000000000000"
+    },
+    "SINGLE_LOW_ODDS": {
+      "observations": 8,
+      "simulated_mean_reward": "-6.25000000000000000000000",
+      "simulated_reward": "-50.00000000000000000000000"
+    },
+    "WAIT": {
+      "observations": 31,
+      "simulated_mean_reward": "0",
+      "simulated_reward": "0"
+    }
+  },
+  "desktop_import_performed": false,
+  "forward_evidence_eligible": false,
+  "inspection_sha256": "2d173992622ef43b3c15174e10055b008aaaea27c4512130ebecc99638962615",
+  "new_policy_created": false,
+  "paper_only": true,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.sandbox_policy_prior.inspection.v1",
+  "simulation_model_id": "parlayapi-sandbox-line-movement-v1",
+  "source_artifact_sha256": "6480ef8cf18a5cfef7a15524bad7f12327e52a4807b1212980605465f212e541",
+  "source_authentication_independently_verified": false,
+  "source_environment_id": "f3a8b9dd31117a3154b8ad40bd007a91f642dc9df603e052e5010b3ccd00d736",
+  "source_generation": 230,
+  "source_plan_sha256": "c077823b14f5c632962ee4eac049e0a2546733ff5b9f63315316443b9a3e9d1f",
+  "source_policy_id": "7da328cbb758fabeaf5d461703f8771dbd7a7e2f5c05a2b5ba18bcf268c4e5bd",
+  "truth": "simulated"
+}

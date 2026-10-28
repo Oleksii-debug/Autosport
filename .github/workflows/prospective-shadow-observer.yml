@@ -8,6 +8,7 @@ on:
       - src/autosport/shadow_strategy_memory.py
       - src/autosport/prospective_shadow_observer.py
       - src/autosport/prospective_forecast_learning.py
+      - src/autosport/recorded_paper_projection.py
       - scripts/run_prospective_shadow_observer.py
       - scripts/restore_prospective_shadow.py
       - examples/prospective_shadow_observer.json
@@ -43,6 +44,7 @@ jobs:
           tests/test_prospective_shadow_observer.py tests/test_recorded_shadow_memory.py
           tests/test_recorded_cross_book_value.py
           tests/test_prospective_forecast_learning.py tests/test_restore_prospective_shadow.py
+          tests/test_recorded_paper_projection.py
       - name: Restore previous learning state
         env:
           GH_TOKEN: ${{ github.token }}

@@ -1,0 +1,218 @@
+{
+  "campaign_sha256": "cf72a40a48f461196703664016f0628233dd8693519185e66170d757f2e9c508",
+  "cases": [
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "350.0000",
+          "net_reward": "6628.4000",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_37": {
+          "maximum_drawdown": "350.0000",
+          "net_reward": "6628.4000",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_40": {
+          "maximum_drawdown": "350.0000",
+          "net_reward": "6628.4000",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "seed": 101,
+      "snapshots_sha256": "2dce958ff4e5509d10f292dd3e9bb7f09ecfa3ecc1d31453a816387e1ce59e70"
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "394.000",
+          "net_reward": "5554.5520",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_37": {
+          "maximum_drawdown": "394.000",
+          "net_reward": "5554.5520",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_40": {
+          "maximum_drawdown": "394.000",
+          "net_reward": "5554.5520",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "seed": 103,
+      "snapshots_sha256": "9c70f39efc723c2cbfc074b8295f192ed15f131f5bb9034e68d397909e05beb9"
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "458.00",
+          "net_reward": "2085.1200",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_37": {
+          "maximum_drawdown": "458.00",
+          "net_reward": "2085.1200",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_40": {
+          "maximum_drawdown": "458.00",
+          "net_reward": "2085.1200",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "seed": 107,
+      "snapshots_sha256": "60e3d206f7984062311565d37f7556a26368cfc657114794bc39a5f9acbba3e5"
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "448.0000",
+          "net_reward": "5632.3600",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_37": {
+          "maximum_drawdown": "448.0000",
+          "net_reward": "5632.3600",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_40": {
+          "maximum_drawdown": "448.0000",
+          "net_reward": "5632.3600",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "seed": 109,
+      "snapshots_sha256": "9bebe7d797b8c06741389fa2c81c558604818bc03ca4dc7378e03b7fe96b18cd"
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "300.0000",
+          "net_reward": "7011.6000",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_37": {
+          "maximum_drawdown": "300.0000",
+          "net_reward": "7011.6000",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_40": {
+          "maximum_drawdown": "300.0000",
+          "net_reward": "7011.6000",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "seed": 113,
+      "snapshots_sha256": "ae71b53b450447f8c8dbe45eb68048a0c9273090299efcee403ca641094e948e"
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "300.0000",
+          "net_reward": "10515.9200",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_37": {
+          "maximum_drawdown": "300.0000",
+          "net_reward": "10515.9200",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_40": {
+          "maximum_drawdown": "300.0000",
+          "net_reward": "10515.9200",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "seed": 127,
+      "snapshots_sha256": "41d186e16549cd2324f174f290bdc2d3380dbc3f92c1c7d6a02596bcbf696ec9"
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "406.72",
+          "net_reward": "10406.9056",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_37": {
+          "maximum_drawdown": "406.72",
+          "net_reward": "10406.9056",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_40": {
+          "maximum_drawdown": "406.72",
+          "net_reward": "10406.9056",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "seed": 131,
+      "snapshots_sha256": "a95665fa943f0dd85560acf24045345885a625deab31a4bf6b910bcea559718d"
+    },
+    {
+      "arms": {
+        "baseline": {
+          "maximum_drawdown": "300.00",
+          "net_reward": "8678.6400",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_37": {
+          "maximum_drawdown": "300.00",
+          "net_reward": "8678.6400",
+          "ticket_count": 120,
+          "wait_count": 0
+        },
+        "probe_40": {
+          "maximum_drawdown": "300.00",
+          "net_reward": "8678.6400",
+          "ticket_count": 120,
+          "wait_count": 0
+        }
+      },
+      "seed": 137,
+      "snapshots_sha256": "71dd47e684808df9a317c6da6c779898a1f26b6c347f6a800355c3e3d4e1256b"
+    }
+  ],
+  "family_sha256": "a773338fd576dcdba5341b15117e07ba3a5915ff57b4a2e76c2a2d63feeb0820",
+  "forward_evidence_eligible": false,
+  "generator_sha256": "9656cfe52e9707f49337d1a0345062732a664d7b999fcf73ddec58635f4dcf92",
+  "probe_sha256": "7b351de0ccf2e073f0532745c730342f48d19ef0a75244c9719ce7fd8cfe17e7",
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.account_c.recovery_random.development.v1",
+  "script_sha256": "04f11173de4b29f99353b23044cb1da9cc94d33fc83a70d675ee5486ba610762",
+  "seeds": [
+    101,
+    103,
+    107,
+    109,
+    113,
+    127,
+    131,
+    137
+  ],
+  "steps": 120,
+  "truth": "simulated"
+}

@@ -408,6 +408,51 @@ def test_network_runner_checkpoints_and_emits_sanitized_progress(
     assert (tmp_path / "campaign_state.json").is_file()
 
 
+def test_network_runner_stop_preserves_restartable_checkpoint(tmp_path, monkeypatch):
+    import threading
+
+    stop = threading.Event()
+    campaign = BlindPaperSandboxCampaign(_plan())
+    snapshots = iter((_snapshot(1), _snapshot(2)))
+    monkeypatch.setattr(
+        "autosport.paper_live_sandbox_campaign.fetch_sandbox_live_snapshot",
+        lambda: next(snapshots),
+    )
+    events = []
+
+    def progress(event):
+        events.append(event)
+        if len(events) == 2:
+            stop.set()
+
+    summary = run_network_endurance(
+        campaign, workspace=tmp_path, duration_seconds=60,
+        poll_interval_seconds=5, progress=progress, stop_event=stop,
+    )
+    restored = BlindPaperSandboxCampaign.load(tmp_path)
+    assert summary["policy_generation"] == 1
+    assert restored.summary()["environment_checkpoint_id"] == summary["environment_checkpoint_id"]
+    assert summary["truth"] == "simulated"
+    assert summary["profitability_claim"] is False
+
+
+def test_network_runner_already_stopped_never_fetches(tmp_path, monkeypatch):
+    import threading
+
+    stop = threading.Event()
+    stop.set()
+    monkeypatch.setattr(
+        "autosport.paper_live_sandbox_campaign.fetch_sandbox_live_snapshot",
+        lambda: pytest.fail("stopped runner must not fetch"),
+    )
+    summary = run_network_endurance(
+        BlindPaperSandboxCampaign(_plan()), workspace=tmp_path,
+        duration_seconds=60, poll_interval_seconds=5, stop_event=stop,
+    )
+    assert summary["network_snapshots_segment"] == 0
+    assert BlindPaperSandboxCampaign.load(tmp_path).summary()["truth"] == "simulated"
+
+
 def test_endurance_workflow_removes_transient_locks_before_manifest() -> None:
     workflow = (
         Path(__file__).parents[1]

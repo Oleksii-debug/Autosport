@@ -37,11 +37,12 @@ def _bare_controller(tmp_path: Path) -> AutosportWebController:
     controller.live_worker = _IdleWorker()
     controller.recovery_worker = _IdleWorker()
     controller.evidence_export_worker = _IdleWorker()
-    # Mirror both non-daemon workers added to the real controller initializer.
+    # Mirror the non-daemon workers added to the real controller initializer.
     # Never weaken production close() to skip absent workers: an active worker
     # must remain a mandatory shutdown barrier.
     controller.update_diagnostic_worker = _IdleWorker()
     controller.learning_status_worker = _IdleWorker()
+    controller.sandbox_learning_worker = _IdleProductWorker()
     controller.product_worker = _IdleProductWorker()
     return controller
 

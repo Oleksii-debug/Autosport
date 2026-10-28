@@ -17,6 +17,7 @@ from .dataset_worker import OneShotDatasetValidationWorker
 from .gui_evidence_export import OneShotEvidenceExportWorker, resolve_evidence_output_destination
 from .gui_update_diagnostic import OneShotUpdateDiagnosticWorker
 from .gui_learning_status import OneShotLearningStatusWorker
+from .gui_sandbox_learning import SandboxLearningWorker
 from .live_observation import OneShotObservationWorker, observe_workspace_once
 from .localization import text
 from .operator_source_config import OperatorSourceSelection, OperatorSourceSelectionState
@@ -482,6 +483,7 @@ class AutosportWebController:
         self.update_diagnostic_worker = OneShotUpdateDiagnosticWorker()
         self.update_diagnostic_status = "Підписане оновлення ще не перевірялось."
         self.learning_status_worker = OneShotLearningStatusWorker()
+        self.sandbox_learning_worker = SandboxLearningWorker()
         self.learning_status_lines = ["Перевірку перевірених фактів про навчання не запускали."]
         self.product_worker = ProductGuiWorker()
         self.product_runtime_status = "Тривалий імітаційний режим не запущено."
@@ -1322,6 +1324,8 @@ class AutosportWebController:
         if learning_message is not None:
             self.learning_status_lines = list(learning_message.lines)
 
+        self.sandbox_learning_worker.poll()
+
         # Drain the current product queue before deriving actionability in state().
         # ProductGuiWorker publishes the terminal message immediately before clearing
         # busy; consuming only one message could therefore re-enable START while a
@@ -1506,6 +1510,8 @@ class AutosportWebController:
                 "strategy_id": self.strategy_id,
                 "agent_learning_evidence": list(self.learning_status_lines),
                 "agent_learning_busy": self.learning_status_worker.busy,
+                "sandbox_learning_busy": self.sandbox_learning_worker.busy,
+                "sandbox_learning_status": self.sandbox_learning_worker.status,
                 "agent_overview": [
                     "Активна стратегія: " + spec.strategy_id,
                     "Зареєстровані ролі агентів: " + (
@@ -1866,6 +1872,17 @@ class AutosportWebController:
             "Оновлюються підтверджені факти агентів.",
             focus_id="agent-learning-status",
         )
+
+    def _action_sandbox_learning_start(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.sandbox_learning_worker.start(self.workspace.absolute()):
+            return self._fail("Симуляцію вже запущено або не вдалося запустити.")
+        return self._ok("Запускається симуляція зміни котирувань.", focus_id="sandbox-learning-status")
+
+    def _action_sandbox_learning_stop(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.sandbox_learning_worker.busy:
+            return self._fail("Симуляція не виконується.")
+        self.sandbox_learning_worker.request_stop()
+        return self._ok("Завершуємо симуляцію та зберігаємо стан.", focus_id="sandbox-learning-status")
 
     def _action_update_diagnostic(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Invoke only canonical read-only, fail-closed signed-update diagnostic."""
@@ -2243,6 +2260,8 @@ class AutosportWebController:
             "evidence.export": self._action_evidence_export,
             "update.diagnose": self._action_update_diagnostic,
             "agents.status": self._action_agent_learning_refresh,
+            "agents.sandbox_start": self._action_sandbox_learning_start,
+            "agents.sandbox_stop": self._action_sandbox_learning_stop,
             "product_source.configure": self._action_product_source_configure,
             "product_runtime.start": self._action_product_runtime_start,
             "product_runtime.stop": self._action_product_runtime_stop,
@@ -2354,6 +2373,7 @@ class AutosportWebController:
             # Request cooperative STOP first so the long-running product runtime can
             # wind down while one-shot economic workers finish their committed tasks.
             self.product_worker.request_stop("app_close")
+            self.sandbox_learning_worker.request_stop()
 
             # These workers deliberately use daemon=False because replay/live/recovery
             # can cross durable economic boundaries.  The only operator surface must
@@ -2365,6 +2385,7 @@ class AutosportWebController:
                 self.evidence_export_worker,
                 self.update_diagnostic_worker,
                 self.learning_status_worker,
+                self.sandbox_learning_worker,
             ):
                 self._wait_for_terminal_worker(worker)
 

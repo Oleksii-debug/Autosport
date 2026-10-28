@@ -612,6 +612,9 @@
     setDisabledWithFocusFallback(
       byId("agent-learning-refresh"), state.agent_learning_busy === true,
     );
+    setTextIfChanged(byId("sandbox-learning-status"), state.sandbox_learning_status || "Симуляція недоступна.");
+    setDisabledWithFocusFallback(byId("sandbox-learning-start"), state.sandbox_learning_busy === true);
+    setDisabledWithFocusFallback(byId("sandbox-learning-stop"), state.sandbox_learning_busy !== true);
     const updateInfo = state.update_diagnostic || {};
     setTextIfChanged(
       byId("update-diagnostic-status"),
@@ -862,6 +865,8 @@
   byId("agent-learning-refresh").addEventListener("click", () => {
     dispatch("agents.status");
   });
+  byId("sandbox-learning-start").addEventListener("click", () => dispatch("agents.sandbox_start"));
+  byId("sandbox-learning-stop").addEventListener("click", () => dispatch("agents.sandbox_stop"));
   byId("update-diagnostic-button").addEventListener("click", () => {
     dispatch("update.diagnose", {
       request_path: byId("update-request-path").value,

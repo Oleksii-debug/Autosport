@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import hashlib
 import json
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
@@ -956,6 +957,7 @@ def run_network_endurance(
     duration_seconds: int,
     poll_interval_seconds: int = 30,
     progress: Callable[[dict[str, object]], None] | None = None,
+    stop_event: threading.Event | None = None,
 ) -> dict[str, object]:
     """Run a bounded sandbox diagnostic; network failure never creates evidence."""
 
@@ -977,7 +979,7 @@ def run_network_endurance(
     previous: SandboxLiveSnapshot | None = None
     fetch_failures = 0
     fetched = 0
-    while time.monotonic() < deadline:
+    while time.monotonic() < deadline and not (stop_event and stop_event.is_set()):
         try:
             current = fetch_sandbox_live_snapshot()
         except Exception as exc:
@@ -1016,7 +1018,11 @@ def run_network_endurance(
         remaining = deadline - time.monotonic()
         if remaining <= 0:
             break
-        time.sleep(min(float(poll_interval_seconds), remaining))
+        delay = min(float(poll_interval_seconds), remaining)
+        if stop_event is None:
+            time.sleep(delay)
+        elif stop_event.wait(delay):
+            break
     campaign.save(workspace)
     summary = campaign.summary()
     summary["network_snapshots_segment"] = fetched

@@ -56,6 +56,12 @@
           aria-label="Перевірені відомості про наукові записи та агенти"></ul>
       <p>Цей перелік відображає тільки канонічну конфігурацію,
         а не факт навчання або підтверджену перевагу стратегії.</p>
+      <h3>Навчальна симуляція</h3>
+      <p>Цикл використовує тестові котирування та умовний результат їх зміни,
+        а не фактичні результати матчів. Він не доводить прибутковості.</p>
+      <button id="sandbox-learning-start" type="button" aria-describedby="sandbox-learning-status">Запустити симуляцію на 10 хвилин</button>
+      <button id="sandbox-learning-stop" type="button" aria-describedby="sandbox-learning-status">Завершити симуляцію та зберегти стан</button>
+      <p id="sandbox-learning-status" role="status" aria-live="polite" aria-atomic="true">Симуляцію навчання ще не запускали.</p>
 
       <label for="research-plan-path">Шлях до JSON-плану дослідження</label>
       <input id="research-plan-path" type="text" autocomplete="off" aria-describedby="research-plan-summary">

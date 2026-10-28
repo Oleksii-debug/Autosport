@@ -1,7 +1,14 @@
 {
-  "analysis_sha256": "6b363fdd7008859146bdc2cf9fd52285bfa43d797b6f6494089a4f76b438c89b",
+  "analysis_sha256": "25e1da12d4b72da916d577b5466643e0f4de1f9f4733d7ae58d3109f3fe74aee",
   "cutoff_date": "2026-09-01",
   "date_only": true,
+  "day_cluster_bootstrap_brier_difference": {
+    "days": 50,
+    "draws": 2000,
+    "lower_2_5_percent": -0.0007962998698091734,
+    "seed": 19,
+    "upper_97_5_percent": 0.0029959469398223846
+  },
   "evaluation": {
     "constant_50_percent": {
       "accuracy": 0.48473748473748474,

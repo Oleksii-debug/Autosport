@@ -6,7 +6,7 @@ from pathlib import Path
 import pytest
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1] / "scripts"))
-from audit_table_tennis_probability_sample import audit, fit_shrink, load_rows
+from audit_table_tennis_probability_sample import audit, bootstrap_day_difference, fit_shrink, load_rows
 
 
 def test_later_labels_do_not_change_train_only_shrink():
@@ -24,6 +24,14 @@ def test_sample_audit_disclaims_financial_evidence_and_has_fixed_identity():
     assert result["odds_present"] is False
     assert result["profitability_claim"] is False
     assert result["evaluation_is_untouched_holdout"] is False
+
+
+def test_identical_forecasts_have_zero_bootstrap_difference():
+    rows = [("a", date(2026, 9, 1), "test", .7, 1),
+            ("b", date(2026, 9, 2), "test", .6, 0)]
+    result = bootstrap_day_difference(rows, 1.0, draws=10)
+    assert result["days"] == 2
+    assert result["lower_2_5_percent"] == result["upper_97_5_percent"] == 0
 
 
 @pytest.mark.parametrize("probability,winner,sets", [("nan", "A", "3,1"),

@@ -9,6 +9,7 @@ import csv
 import hashlib
 import json
 import math
+import random
 from datetime import date
 from pathlib import Path
 
@@ -65,6 +66,27 @@ def metrics(rows, alpha):
             "accuracy": sum((p >= 0.5) == bool(r[4]) for p, r in zip(probs, rows)) / len(rows)}
 
 
+def bootstrap_day_difference(rows, alpha, *, draws=2000, seed=19):
+    """Resample whole days for publisher Brier minus shrunk Brier."""
+    grouped = {}
+    for _, day, _, p, outcome in rows:
+        adjusted = 0.5 + alpha * (p - 0.5)
+        total, count = grouped.get(day, (0.0, 0))
+        grouped[day] = (total + (p - outcome) ** 2 - (adjusted - outcome) ** 2, count + 1)
+    days = sorted(grouped)
+    if not days or draws < 2:
+        raise ValueError("insufficient days or bootstrap draws")
+    rng = random.Random(seed)
+    values = []
+    for _ in range(draws):
+        selected = rng.choices(days, k=len(days))
+        values.append(sum(grouped[d][0] for d in selected) / sum(grouped[d][1] for d in selected))
+    values.sort()
+    return {"days": len(days), "draws": draws, "seed": seed,
+            "lower_2_5_percent": values[int(.025 * (draws - 1))],
+            "upper_97_5_percent": values[int(.975 * (draws - 1))]}
+
+
 def audit(path=DATA):
     rows = load_rows(path)
     training = [r for r in rows if r[1] < CUTOFF]
@@ -89,6 +111,7 @@ def audit(path=DATA):
             "evaluation": {"publisher": metrics(evaluation, 1.0),
                            "train_fitted_shrink": metrics(evaluation, alpha),
                            "constant_50_percent": metrics(evaluation, 0.0)},
+            "day_cluster_bootstrap_brier_difference": bootstrap_day_difference(evaluation, alpha),
             "league_groups": groups}
 
 

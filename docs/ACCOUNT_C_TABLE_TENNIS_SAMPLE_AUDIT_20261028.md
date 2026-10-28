@@ -34,6 +34,11 @@ no later labels enter its calculation. Brier score measures probability error
 
 The differences are descriptive and small. The same shrink factor preserves
 the predicted side, hence identical accuracy to the supplied forecast. The
+publisher-minus-shrunk Brier difference is about 0.00104. A seeded exploratory
+bootstrap that resamples the 50 evaluation days as blocks gives a 95% percentile
+interval of approximately -0.00080 to 0.00300, which includes zero. Days may
+still be dependent and this reused sample is not a confirmatory holdout, so
+the interval is a diagnostic rather than proof of improvement. The
 four larger league groups vary: publisher Brier is 0.2364 for TT Elite Series,
 0.2468 for Setka Cup, 0.2510 for Czech Liga Pro and 0.2516 for TT Cup. Small
 groups and selection effects limit inference; these are not validated league

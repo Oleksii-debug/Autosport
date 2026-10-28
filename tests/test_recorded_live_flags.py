@@ -76,3 +76,17 @@ def test_late_or_changed_commitment_cannot_enter_candidate():
     altered["value_preimage"] += "x"
     with pytest.raises(ValueError, match="commitment"):
         read_candidate(altered)
+
+
+def test_ordered_source_time_sensitivity_still_rejects_future_or_stale():
+    item = row(1)
+    item["value_recorded_at_utc"] = "2026-10-01T00:00:30+00:00"
+    with pytest.raises(ValueError, match="preimage_field_mismatch"):
+        read_candidate(item)
+    assert read_candidate(item, ordered_source_times=True)["id"] == "1"
+    item["value_recorded_at_utc"] = "2026-09-30T23:59:59+00:00"
+    with pytest.raises(ValueError, match="preimage_field_mismatch"):
+        read_candidate(item, ordered_source_times=True)
+    item["value_recorded_at_utc"] = "2026-10-01T02:00:00+00:00"
+    with pytest.raises(ValueError, match="preimage_field_mismatch"):
+        read_candidate(item, ordered_source_times=True)

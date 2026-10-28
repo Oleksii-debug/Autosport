@@ -24,7 +24,7 @@ def instant(value):
     return stamp.astimezone(timezone.utc)
 
 
-def read_candidate(row):
+def read_candidate(row, *, ordered_source_times=False):
     if row.get("value_origin") != "live" or row.get("value_sealed_before_kickoff") != "1":
         raise ValueError("not_source_sealed_live")
     recorded, kickoff = instant(row["value_recorded_at_utc"]), instant(row["kickoff_utc"])
@@ -42,7 +42,12 @@ def read_candidate(row):
     odds, fair = Decimal(parts[2]), Decimal(parts[4])
     if not odds.is_finite() or not fair.is_finite() or odds <= 1 or fair <= 1:
         raise ValueError("invalid_odds")
-    if parts[1] != OUTCOMES[selection] or parts[3] != book or odds != Decimal(row["value_odds_taken"]) or instant(parts[5]) != recorded:
+    preimage_time = instant(parts[5])
+    matching_times = preimage_time == recorded
+    if ordered_source_times:
+        lag = (recorded - preimage_time).total_seconds()
+        matching_times = preimage_time >= CUTOFF and 0 <= lag <= 5400
+    if parts[1] != OUTCOMES[selection] or parts[3] != book or odds != Decimal(row["value_odds_taken"]) or not matching_times:
         raise ValueError("preimage_field_mismatch")
     probability, gap = Decimal(1)/fair, odds/fair - 1
     if probability < Decimal(".30") or not Decimal(".005") <= gap <= Decimal(".12"):
@@ -70,7 +75,7 @@ def report(rows):
     return {str(cost): summarize(rows, "CHOSEN", cost) for cost in (0, 50, 100, 200)}
 
 
-def evaluate(path):
+def evaluate(path, *, ordered_source_times=False):
     raw = Path(path).read_bytes()
     source = list(csv.DictReader(raw.decode("utf-8-sig").splitlines()))
     seen, candidates, excluded = set(), [], Counter()
@@ -80,7 +85,7 @@ def evaluate(path):
             raise ValueError("duplicate or missing identity")
         seen.add(identity)
         try:
-            candidates.append(read_candidate(row))
+            candidates.append(read_candidate(row, ordered_source_times=ordered_source_times))
         except (KeyError, ValueError, InvalidOperation, ArithmeticError) as exc:
             reason = str(exc) if str(exc) in {"not_source_sealed_live", "outside_live_v2_or_late", "unsupported_selection_or_book", "commitment_mismatch", "invalid_preimage", "invalid_odds", "preimage_field_mismatch", "outside_provider_v2_rule"} else "invalid_source_fields"
             excluded[reason] += 1
@@ -130,6 +135,7 @@ def evaluate(path):
                                                         "later_prices": report(records(conditional, "later_reward"))}},
             "attribution": "TipsAudit (2026), https://tipsaudit.com/data, CC BY 4.0",
             "evaluation_mode": "exploratory source-recorded flags; not untouched holdout",
+            "source_time_rule": "ordered_with_90min_limit_posthoc" if ordered_source_times else "strict_equal",
             "source_seal_independently_timestamped": False, "quote_acceptance_verified": False,
             "requote_subgroup_future_conditioned": True, "profitability_claim": False,
             "promotion_authorized": False, "real_money_execution": False}
@@ -139,8 +145,9 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--csv", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--ordered-source-times", action="store_true")
     args = parser.parse_args()
-    result = evaluate(args.csv)
+    result = evaluate(args.csv, ordered_source_times=args.ordered_source_times)
     with args.output.open("x", encoding="utf-8") as stream:
         json.dump(result, stream, sort_keys=True, indent=2)
         stream.write("\n")

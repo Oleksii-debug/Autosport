@@ -1,0 +1,59 @@
+{
+  "chosen_k": 20.0,
+  "chosen_margin_weight": 1.0,
+  "cutoff_date": "2022-07-01",
+  "date_source_conflict": true,
+  "evaluation_constant_brier": 0.25,
+  "evaluation_count": 2080,
+  "evaluation_is_untouched_holdout": false,
+  "evaluation_match_elo_k10_brier": 0.24283418705711046,
+  "evaluation_selected_brier": 0.2410705813439039,
+  "excluded_unresolved_ids": [
+    "4376"
+  ],
+  "identity_independently_verified": false,
+  "known_source_hash_match": true,
+  "odds_present": false,
+  "per_day_brier_differences": {
+    "2022-07-01": {
+      "count": 247,
+      "match_minus_margin_brier": 0.0051629807890375135
+    },
+    "2022-07-02": {
+      "count": 232,
+      "match_minus_margin_brier": 0.0037102299618351764
+    },
+    "2022-07-03": {
+      "count": 242,
+      "match_minus_margin_brier": 0.001676888576181118
+    },
+    "2022-07-04": {
+      "count": 303,
+      "match_minus_margin_brier": -0.00044461285447619514
+    },
+    "2022-07-05": {
+      "count": 299,
+      "match_minus_margin_brier": 0.001892963776018608
+    },
+    "2022-07-06": {
+      "count": 294,
+      "match_minus_margin_brier": 0.0012995734319266317
+    },
+    "2022-07-07": {
+      "count": 307,
+      "match_minus_margin_brier": -0.0014625054984995778
+    },
+    "2022-07-08": {
+      "count": 156,
+      "match_minus_margin_brier": 0.004885252352086172
+    }
+  },
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "schema": "autosport.setka_margin_rating.research.v1",
+  "script_sha256": "fe47e4a2d9a5c90017d76d9b0259e2e3e356e572c16a3f3f97776b3409382066",
+  "source_rights": "UNKNOWN",
+  "source_sha256": "d400562f49ced084133c8e926025efb6023dd62a8341fd4484864d567a4e392d",
+  "train_selected_brier": 0.24535427308616006,
+  "training_count": 5770
+}

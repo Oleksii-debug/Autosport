@@ -1,0 +1,85 @@
+{
+  "cases": [
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1468",
+          "net_reward": "-1468",
+          "tickets": 32,
+          "waits": 148
+        },
+        "prior_rank": {
+          "drawdown": "1468",
+          "net_reward": "-1468",
+          "tickets": 32,
+          "waits": 148
+        },
+        "rank_no_prior": {
+          "drawdown": "1468",
+          "net_reward": "-1468",
+          "tickets": 32,
+          "waits": 148
+        }
+      },
+      "scenario": "loss"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "0",
+          "net_reward": "160534.3200",
+          "tickets": 180,
+          "waits": 0
+        },
+        "prior_rank": {
+          "drawdown": "0",
+          "net_reward": "162033.1200",
+          "tickets": 180,
+          "waits": 0
+        },
+        "rank_no_prior": {
+          "drawdown": "0",
+          "net_reward": "160534.3200",
+          "tickets": 180,
+          "waits": 0
+        }
+      },
+      "scenario": "favorable"
+    },
+    {
+      "outcomes": {
+        "baseline": {
+          "drawdown": "1468",
+          "net_reward": "-1468",
+          "tickets": 32,
+          "waits": 148
+        },
+        "prior_rank": {
+          "drawdown": "1468",
+          "net_reward": "-1468",
+          "tickets": 32,
+          "waits": 148
+        },
+        "rank_no_prior": {
+          "drawdown": "1468",
+          "net_reward": "-1468",
+          "tickets": 32,
+          "waits": 148
+        }
+      },
+      "scenario": "recovery"
+    }
+  ],
+  "desktop_import_performed": false,
+  "forward_evidence_eligible": false,
+  "prior_inspection_sha256": "d9077b784b12d5d91ceaa38dc05743732fcc6ecc4ae5dad0bdecdabd43fa89fb",
+  "prior_strength": 2,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "scenario_start": "2026-10-28T06:00:00+00:00",
+  "schema": "autosport.sandbox_prior_rank.research.v1",
+  "script_sha256": "327d262c3ac04aa3d6213760d6746054b0cde798afbef673070cef451010bb90",
+  "source_artifact_created_at": "2026-10-28T04:42:57Z",
+  "truth": "simulated"
+}

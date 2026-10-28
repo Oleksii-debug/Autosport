@@ -1,0 +1,9 @@
+{
+  "minimum_probability": "0.30",
+  "minimum_model_value": "0.05",
+  "maximum_model_value": "0.12",
+  "maximum_odds": "3.5",
+  "maximum_age_seconds": 5400,
+  "daily_cap": 5,
+  "cost_bps": 100
+}

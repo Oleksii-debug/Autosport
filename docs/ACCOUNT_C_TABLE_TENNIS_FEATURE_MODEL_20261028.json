@@ -1,0 +1,42 @@
+{
+  "bootstrap_days": 50,
+  "bootstrap_draws": 2000,
+  "bootstrap_seed": 19,
+  "cutoff_date": "2026-09-01",
+  "evaluation_count": 819,
+  "evaluation_is_untouched_holdout": false,
+  "iterations": 600,
+  "learning_rate": 0.1,
+  "odds_present": false,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "publisher_features_point_in_time_independently_verified": false,
+  "publisher_minus_feature_brier_day_bootstrap_95_percent": [
+    -0.003126900323125954,
+    0.003362673779529024
+  ],
+  "results": {
+    "constant_50": {
+      "accuracy": 0.48473748473748474,
+      "brier": 0.25
+    },
+    "publisher": {
+      "accuracy": 0.5482295482295483,
+      "brier": 0.24467900023199024
+    },
+    "trained_features": {
+      "accuracy": 0.557997557997558,
+      "brier": 0.2446327636372754
+    }
+  },
+  "ridge": 0.01,
+  "schema": "autosport.table_tennis_feature_model.research.v1",
+  "script_sha256": "cb3e948ae84c2540eacebdf2afd42362cc4af1d210353f34998eb085eb183ced",
+  "source_sha256": "bbb2ab531f269a1eafff89e240086a4d17999114b582825ba4338986c6770fde",
+  "training_count": 1181,
+  "weights": [
+    0.06792180443603194,
+    0.5471071625685544,
+    0.08170881560659837
+  ]
+}

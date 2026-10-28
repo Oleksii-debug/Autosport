@@ -126,8 +126,10 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
         if warmup_start <= row["at"].date() < evaluation_end:
             grouped[row["at"].date()].append(row)
     ratings = defaultdict(lambda: 1500.0)
-    arms = {name: fresh_arm() for name in ("no_bet", "market_favorite", "elo_threshold")}
+    previous_games = defaultdict(int)
+    arms = {name: fresh_arm() for name in ("no_bet", "market_favorite", "elo_threshold", "elo_history_guarded")}
     excluded = Counter()
+    history_counts = Counter()
     eval_count, warmup_count = 0, 0
     for day, batch in sorted(grouped.items()):
         changes = defaultdict(list)
@@ -149,6 +151,10 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
                     selected = (row["a"] if edge_a >= EDGE and edge_a >= edge_b else
                                 row["b"] if edge_b >= EDGE else None)
                     record(arms["elo_threshold"], selected, row)
+                    history_a, history_b = previous_games[row["a"]], previous_games[row["b"]]
+                    history_counts["both_seen" if history_a and history_b else
+                                   "one_seen" if history_a or history_b else "none_seen"] += 1
+                    record(arms["elo_history_guarded"], selected if history_a and history_b else None, row)
             elif row["score_ok"]:
                 warmup_count += 1
             if row["score_ok"]:
@@ -157,6 +163,7 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
                 changes[row["b"]].append(-delta)
         for player, deltas in sorted(changes.items()):
             ratings[player] += math.fsum(deltas)
+            previous_games[player] += len(deltas)
     if not warmup_count or not eval_count:
         raise ValueError("need usable warmup and evaluation events")
     output_arms = {}
@@ -183,7 +190,8 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
                       "forward_evidence_eligible": False, "promotion_authorized": False,
                       "profitability_claim": False, "real_money_execution": False},
             "counts": {"all_input": len(rows), "warmup_usable": warmup_count,
-                       "evaluation_eligible": eval_count, "evaluation_exclusions": dict(excluded)},
+                       "evaluation_eligible": eval_count, "evaluation_exclusions": dict(excluded),
+                       "prior_player_history": dict(history_counts)},
             "arms": output_arms}
 
 

@@ -94,6 +94,17 @@ def test_elo_challenger_books_assumed_costs_for_its_own_decisions():
     assert result["truth"]["actual_price_fills_verified"] is False
 
 
+def test_history_guard_abstains_for_unseen_player_and_counts_full_population():
+    rows = fixtures()
+    rows[1]["cote1_ouverture"] = "3"
+    rows[1]["cote2_ouverture"] = "1.3"
+    result = research.audit([("fixture.csv", encode(rows))])
+    guard = result["arms"]["elo_history_guarded"]
+    assert guard["bets"] == 1 and guard["no_bets"] == 1
+    assert guard["net_profit"] == "1.96"
+    assert result["counts"]["prior_player_history"] == {"both_seen": 1, "one_seen": 1}
+
+
 def test_duplicate_match_or_invalid_winner_fails_closed():
     rows = fixtures()
     with pytest.raises(ValueError, match="duplicate"):

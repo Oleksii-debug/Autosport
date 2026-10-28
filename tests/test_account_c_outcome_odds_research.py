@@ -128,6 +128,15 @@ def test_market_anchoring_does_not_turn_weak_disagreement_into_a_ticket():
     assert result["truth"]["promotion_authorized"] is False
 
 
+def test_probability_scores_cover_all_eligible_events_including_no_bets():
+    result = research.audit([("fixture.csv", encode(fixtures()))])
+    assert result["counts"]["evaluation_eligible"] == 2
+    assert result["arms"]["no_bet"]["no_bets"] == 2
+    assert result["probability_scores"]["market_proxy"]["brier"] == pytest.approx(
+        ((0.5 - 1) ** 2 + (2 / 3) ** 2) / 2)
+    assert result["probability_scores"]["market_proxy"]["log_loss"] > 0
+
+
 def test_duplicate_match_or_invalid_winner_fails_closed():
     rows = fixtures()
     with pytest.raises(ValueError, match="duplicate"):

@@ -149,6 +149,8 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
     arms = {name: fresh_arm() for name in ("no_bet", "market_favorite", "elo_threshold", "elo_history_guarded", "market_blend_guarded")}
     excluded = Counter()
     history_counts = Counter()
+    probability_scores = {name: {"brier": [], "log_loss": []}
+                          for name in ("elo", "market_proxy", "market_blend")}
     eval_count, warmup_count = 0, 0
     for day, batch in sorted(grouped.items()):
         changes = defaultdict(list)
@@ -177,6 +179,12 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
                     inverse_a, inverse_b = Decimal(1) / row["odds_a"], Decimal(1) / row["odds_b"]
                     market_probability = inverse_a / (inverse_a + inverse_b)
                     blended = Decimal("0.75") * market_probability + Decimal("0.25") * probability
+                    outcome_a = 1 if row["winner"] == row["a"] else 0
+                    for name, forecast in (("elo", p), ("market_proxy", float(market_probability)),
+                                           ("market_blend", float(blended))):
+                        probability_scores[name]["brier"].append((forecast - outcome_a) ** 2)
+                        probability_scores[name]["log_loss"].append(
+                            -math.log(forecast if outcome_a else 1.0 - forecast))
                     blend_edge_a, blend_edge_b = blended - inverse_a, (Decimal(1)-blended) - inverse_b
                     blend_selected = (row["a"] if blend_edge_a >= EDGE and blend_edge_a >= blend_edge_b else
                                       row["b"] if blend_edge_b >= EDGE else None)
@@ -223,6 +231,8 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
             "counts": {"all_input": len(rows), "warmup_usable": warmup_count,
                        "evaluation_eligible": eval_count, "evaluation_exclusions": dict(excluded),
                        "prior_player_history": dict(history_counts)},
+            "probability_scores": {name: {metric: math.fsum(values) / len(values)
+                for metric, values in scores.items()} for name, scores in probability_scores.items()},
             "arms": output_arms}
 
 

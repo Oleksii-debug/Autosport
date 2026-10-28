@@ -4,6 +4,7 @@ import csv
 import io
 import sys
 from datetime import date
+from decimal import Decimal
 from pathlib import Path
 
 import pytest
@@ -103,6 +104,27 @@ def test_history_guard_abstains_for_unseen_player_and_counts_full_population():
     assert guard["bets"] == 1 and guard["no_bets"] == 1
     assert guard["net_profit"] == "1.96"
     assert result["counts"]["prior_player_history"] == {"both_seen": 1, "one_seen": 1}
+
+
+def test_descriptive_odds_cohorts_reconcile_with_financial_totals():
+    result = research.audit([("fixture.csv", encode(fixtures()))])
+    for arm in result["arms"].values():
+        for grouping in ("by_odds", "by_favorite_status"):
+            assert sum(x["bets"] for x in arm[grouping].values()) == arm["bets"]
+            assert sum((Decimal(x["net_profit"]) for x in arm[grouping].values()),
+                       Decimal(0)) == Decimal(arm["net_profit"])
+
+
+def test_market_anchoring_does_not_turn_weak_disagreement_into_a_ticket():
+    rows = fixtures()
+    rows[1]["cote1_ouverture"] = "3"
+    rows[1]["cote2_ouverture"] = "1.3"
+    result = research.audit([("fixture.csv", encode(rows))])
+    assert result["arms"]["elo_history_guarded"]["bets"] == 1
+    blend = result["arms"]["market_blend_guarded"]
+    assert blend["bets"] == 0 and blend["no_bets"] == 2
+    assert blend["roi"] is None
+    assert result["truth"]["promotion_authorized"] is False
 
 
 def test_duplicate_match_or_invalid_winner_fails_closed():

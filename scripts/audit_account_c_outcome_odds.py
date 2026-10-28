@@ -90,7 +90,8 @@ def fresh_arm() -> dict:
     return {"bets": 0, "no_bets": 0, "wins": 0, "losses": 0,
             "turnover": Decimal(0), "gross_profit": Decimal(0),
             "fees": Decimal(0), "net_profit": Decimal(0),
-            "peak": Decimal(0), "equity": Decimal(0), "max_drawdown": Decimal(0)}
+            "peak": Decimal(0), "equity": Decimal(0), "max_drawdown": Decimal(0),
+            "by_odds": {}, "by_favorite_status": {}}
 
 
 def record(arm: dict, selected: str | None, row: dict) -> None:
@@ -111,6 +112,16 @@ def record(arm: dict, selected: str | None, row: dict) -> None:
     arm["equity"] += net
     arm["peak"] = max(arm["peak"], arm["equity"])
     arm["max_drawdown"] = max(arm["max_drawdown"], arm["peak"] - arm["equity"])
+    group = "1_to_under_2" if odds < 2 else "2_to_under_4" if odds < 4 else "4_and_above"
+    other_odds = row["odds_b"] if selected == row["a"] else row["odds_a"]
+    status = "favorite_or_tie" if odds <= other_odds else "underdog"
+    for bucket, key in (("by_odds", group), ("by_favorite_status", status)):
+        item = arm[bucket].setdefault(key, {"bets": 0, "wins": 0,
+                                            "turnover": Decimal(0), "net_profit": Decimal(0)})
+        item["bets"] += 1
+        item["wins"] += int(won)
+        item["turnover"] += STAKE
+        item["net_profit"] += net
 
 
 def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1, 1),
@@ -127,7 +138,7 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
             grouped[row["at"].date()].append(row)
     ratings = defaultdict(lambda: 1500.0)
     previous_games = defaultdict(int)
-    arms = {name: fresh_arm() for name in ("no_bet", "market_favorite", "elo_threshold", "elo_history_guarded")}
+    arms = {name: fresh_arm() for name in ("no_bet", "market_favorite", "elo_threshold", "elo_history_guarded", "market_blend_guarded")}
     excluded = Counter()
     history_counts = Counter()
     eval_count, warmup_count = 0, 0
@@ -155,6 +166,13 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
                     history_counts["both_seen" if history_a and history_b else
                                    "one_seen" if history_a or history_b else "none_seen"] += 1
                     record(arms["elo_history_guarded"], selected if history_a and history_b else None, row)
+                    inverse_a, inverse_b = Decimal(1) / row["odds_a"], Decimal(1) / row["odds_b"]
+                    market_probability = inverse_a / (inverse_a + inverse_b)
+                    blended = Decimal("0.75") * market_probability + Decimal("0.25") * probability
+                    blend_edge_a, blend_edge_b = blended - inverse_a, (Decimal(1)-blended) - inverse_b
+                    blend_selected = (row["a"] if blend_edge_a >= EDGE and blend_edge_a >= blend_edge_b else
+                                      row["b"] if blend_edge_b >= EDGE else None)
+                    record(arms["market_blend_guarded"], blend_selected if history_a and history_b else None, row)
             elif row["score_ok"]:
                 warmup_count += 1
             if row["score_ok"]:
@@ -169,7 +187,12 @@ def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1,
     output_arms = {}
     for name, state in arms.items():
         output_arms[name] = {k: str(v) if isinstance(v, Decimal) else v
-                             for k, v in state.items() if k not in ("peak", "equity")}
+                             for k, v in state.items()
+                             if k not in ("peak", "equity", "by_odds", "by_favorite_status")}
+        for bucket in ("by_odds", "by_favorite_status"):
+            output_arms[name][bucket] = {
+                label: {k: str(v) if isinstance(v, Decimal) else v for k, v in values.items()}
+                for label, values in sorted(state[bucket].items())}
         output_arms[name]["roi"] = (str(state["net_profit"] / state["turnover"])
                                      if state["turnover"] else None)
     return {"schema": "autosport.account_c.historical_odds_research.v1",

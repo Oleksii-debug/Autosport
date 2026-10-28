@@ -110,9 +110,12 @@ class SandboxLearningWorker:
                 )
             prefix = "Симуляцію зупинено" if self._stop.is_set() else "Симуляцію завершено"
             change = Decimal(str(summary["final_balance"])) - Decimal(str(summary["initial_bankroll"]))
+            counters = summary["counters"]
+            actions = counters["SINGLE"] + counters["PARLAY_2"]
             status = (
                 prefix + "; знімків: " + str(summary["network_snapshots_segment"])
                 + ", помилок джерела: " + str(summary["network_failures_segment"])
+                + "; умовних дій: " + str(actions) + ", очікувань: " + str(counters["WAIT"])
                 + "; умовна зміна балансу: " + str(change) + " грн. "
                 + "Дані віртуальні, прибуток не підтверджено."
             )

@@ -24,8 +24,9 @@ def test_desktop_simulation_is_single_flight_and_checkpoints_on_stop(tmp_path, m
         assert stop_event.wait(2)
         campaign.save(workspace)
         saved.append(workspace)
-        return {"network_snapshots_segment": 0, "network_failures_segment": 0,
-                "initial_bankroll": "10000", "final_balance": "10000"}
+        summary = campaign.summary()
+        summary.update(network_snapshots_segment=0, network_failures_segment=0)
+        return summary
 
     monkeypatch.setattr("autosport.gui_sandbox_learning.run_network_endurance", runner)
     worker = SandboxLearningWorker()
@@ -40,6 +41,7 @@ def test_desktop_simulation_is_single_flight_and_checkpoints_on_stop(tmp_path, m
         time.sleep(0.005)
     assert not worker.busy
     assert "віртуальні" in result and "не підтверджено" in result
+    assert "умовних дій: 0, очікувань: 0" in result
     assert len(saved) == 1 and saved[0].parent == tmp_path / "sandbox-learning"
     assert BlindPaperSandboxCampaign.load(saved[0]).summary()["truth"] == "simulated"
 
@@ -140,8 +142,9 @@ def test_controller_close_requests_stop_and_waits_for_checkpoint(tmp_path, monke
         assert stop_event.wait(2)
         campaign.save(workspace)
         saved.append(workspace)
-        return {"network_snapshots_segment": 0, "network_failures_segment": 0,
-                "initial_bankroll": "10000", "final_balance": "10000"}
+        summary = campaign.summary()
+        summary.update(network_snapshots_segment=0, network_failures_segment=0)
+        return summary
 
     monkeypatch.setattr("autosport.gui_sandbox_learning.run_network_endurance", runner)
     controller = AutosportWebController(tmp_path)

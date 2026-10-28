@@ -1884,6 +1884,11 @@ class AutosportWebController:
         self.sandbox_learning_worker.request_stop()
         return self._ok("Завершуємо симуляцію та зберігаємо стан.", focus_id="sandbox-learning-status")
 
+    def _action_sandbox_learning_resume(self, payload: Mapping[str, Any]) -> dict[str, Any]:
+        if not self.sandbox_learning_worker.start(self.workspace.absolute(), resume=True):
+            return self._fail("Симуляцію вже запущено або не вдалося запустити відновлення.")
+        return self._ok("Відновлюється остання симуляція.", focus_id="sandbox-learning-status")
+
     def _action_update_diagnostic(self, payload: Mapping[str, Any]) -> dict[str, Any]:
         """Invoke only canonical read-only, fail-closed signed-update diagnostic."""
         raw = payload.get("request_path")
@@ -2262,6 +2267,7 @@ class AutosportWebController:
             "agents.status": self._action_agent_learning_refresh,
             "agents.sandbox_start": self._action_sandbox_learning_start,
             "agents.sandbox_stop": self._action_sandbox_learning_stop,
+            "agents.sandbox_resume": self._action_sandbox_learning_resume,
             "product_source.configure": self._action_product_source_configure,
             "product_runtime.start": self._action_product_runtime_start,
             "product_runtime.stop": self._action_product_runtime_stop,

@@ -19,6 +19,12 @@
           "net_reward": "-1468",
           "tickets": 32,
           "waits": 148
+        },
+        "weak_prior_rank": {
+          "drawdown": "1468",
+          "net_reward": "-1468",
+          "tickets": 32,
+          "waits": 148
         }
       },
       "scenario": "loss"
@@ -42,6 +48,12 @@
           "net_reward": "160534.3200",
           "tickets": 180,
           "waits": 0
+        },
+        "weak_prior_rank": {
+          "drawdown": "0",
+          "net_reward": "161070.7200",
+          "tickets": 180,
+          "waits": 0
         }
       },
       "scenario": "favorable"
@@ -61,6 +73,12 @@
           "waits": 148
         },
         "rank_no_prior": {
+          "drawdown": "1468",
+          "net_reward": "-1468",
+          "tickets": 32,
+          "waits": 148
+        },
+        "weak_prior_rank": {
           "drawdown": "1468",
           "net_reward": "-1468",
           "tickets": 32,
@@ -88,6 +106,12 @@
           "net_reward": "169186.3250",
           "tickets": 180,
           "waits": 0
+        },
+        "weak_prior_rank": {
+          "drawdown": "704.0000",
+          "net_reward": "168941.4500",
+          "tickets": 180,
+          "waits": 0
         }
       },
       "scenario": "prior_adverse"
@@ -102,7 +126,7 @@
   "real_money_execution": false,
   "scenario_start": "2026-10-28T06:00:00+00:00",
   "schema": "autosport.sandbox_prior_rank.research.v1",
-  "script_sha256": "6f8588440d7a6705b064de92b6a638c062376b070c196311788dcb4ecbc5d7e5",
+  "script_sha256": "a48f0f03b97189726f409fb768d6e88416dab14f65173b0c8f61594fc6de5eab",
   "source_artifact_created_at": "2026-10-28T04:42:57Z",
   "truth": "simulated"
 }

@@ -88,10 +88,13 @@ def compare():
         outcomes = {}
         for name, cls in (("baseline", BlindPaperSandboxCampaign),
                           ("rank_no_prior", PriorRankCampaign),
+                          ("weak_prior_rank", PriorRankCampaign),
                           ("prior_rank", PriorRankCampaign)):
             plan = BlindPaperCampaignPlan(campaign_id=f"prior-{scenario}", started_at=START.isoformat(),
                                           cutoff_at=(START + timedelta(hours=1)).isoformat())
-            kwargs = ({"prior": prior, "prior_strength": 0 if name == "rank_no_prior" else PRIOR_STRENGTH}
+            strength = {"rank_no_prior": 0, "weak_prior_rank": Decimal("0.5"),
+                        "prior_rank": PRIOR_STRENGTH}.get(name)
+            kwargs = ({"prior": prior, "prior_strength": strength}
                       if cls is PriorRankCampaign else {})
             campaign = cls(plan, seed=11, **kwargs)
             for before, after in zip(data, data[1:]):

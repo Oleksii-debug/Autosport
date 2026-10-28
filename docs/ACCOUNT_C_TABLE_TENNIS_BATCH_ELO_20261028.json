@@ -21,9 +21,22 @@
     "sample_only_elo": {
       "accuracy": 0.5262515262515263,
       "brier": 0.2500648405146629
+    },
+    "training_selected_elo": {
+      "accuracy": 0.5262515262515263,
+      "brier": 0.2500648405146629
     }
   },
   "sample_is_incomplete": true,
   "schema": "autosport.table_tennis_day_batch_elo.research.v1",
-  "script_sha256": "cabc1f4003aa9d55ad1c49935499b2d9e27ed2f625fcebf98926e28b4fed30d4"
+  "script_sha256": "eb82535c2d5c5f5f0edff5a7fcb6121042c4d6e4a6380354a9fe8f009946f6a0",
+  "training_candidate_brier": {
+    "0.0": 0.25,
+    "5.0": 0.24975819066086186,
+    "10.0": 0.24960152967455482,
+    "20.0": 0.24952000996380838,
+    "40.0": 0.25013106907768207,
+    "80.0": 0.25351009316204415
+  },
+  "training_selected_k": 20.0
 }

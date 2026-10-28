@@ -14,6 +14,13 @@ publisher's supplied probability. Lower is better. Accuracy was 52.63%,
 48.47% and 54.82%, respectively; exact 50% ties select player A. Accuracy alone
 does not prove better calibrated probabilities or expected returns.
 
+As an additional post-hoc research check, six K values from 0 to 80 were
+compared using only the pre-September matches. That training-only selection
+also chose K=20, giving the same later-sample result above. Later match labels
+cannot affect the selected K in the included causality test. Since the sample
+and its results were already inspected before this additional test, it is not
+an independent confirmation.
+
 This is an already inspected, non-confirmatory sample. The sample is only 2,000
 of a much larger underlying population, so most intervening matches and player
 histories are missing. The publisher's model may use a much fuller history and

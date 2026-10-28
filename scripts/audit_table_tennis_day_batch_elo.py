@@ -12,10 +12,13 @@ from audit_table_tennis_probability_sample import DATA, CUTOFF, load_rows
 
 K = 20.0
 INITIAL = 1500.0
+K_CANDIDATES = (0.0, 5.0, 10.0, 20.0, 40.0, 80.0)
 
 
-def predict_day_batched(rows):
+def predict_day_batched(rows, *, k=K):
     """Use each day's pre-day ratings for every match, update only after the day."""
+    if k not in K_CANDIDATES:
+        raise ValueError("unsupported research K")
     days = defaultdict(list)
     seen = set()
     for row in rows:
@@ -33,12 +36,24 @@ def predict_day_batched(rows):
         for match_id, _, a, b, outcome in sorted(days[day]):
             p = 1 / (1 + 10 ** ((ratings[b] - ratings[a]) / 400.0))
             predictions[match_id] = p
-            change = K * (outcome - p)
+            change = k * (outcome - p)
             increments[a] += change
             increments[b] -= change
         for player, change in increments.items():
             ratings[player] += change
     return predictions
+
+
+def fit_k_before_cutoff(rows):
+    """Choose K using only pre-cutoff day-batched predictions and outcomes."""
+    training = [row for row in rows if row[1] < CUTOFF]
+    if not training:
+        raise ValueError("no pre-cutoff rows")
+    losses = {}
+    for k in K_CANDIDATES:
+        predictions = predict_day_batched(training, k=k)
+        losses[k] = sum((predictions[row[0]] - row[4]) ** 2 for row in training) / len(training)
+    return min(K_CANDIDATES, key=lambda candidate: (losses[candidate], candidate)), losses
 
 
 def audit():
@@ -50,9 +65,12 @@ def audit():
     rows = [(r["match_id"], indexed[r["match_id"]][1], r["player_a"], r["player_b"],
              indexed[r["match_id"]][4]) for r in source]
     predictions = predict_day_batched(rows)
+    selected_k, training_losses = fit_k_before_cutoff(rows)
+    fitted_predictions = predict_day_batched(rows, k=selected_k)
     evaluation = [r for r in validated if r[1] >= CUTOFF]
     results = {}
     for name, predictor in (("sample_only_elo", lambda r: predictions[r[0]]),
+                            ("training_selected_elo", lambda r: fitted_predictions[r[0]]),
                             ("publisher", lambda r: r[3]),
                             ("constant_50", lambda r: 0.5)):
         results[name] = {
@@ -60,6 +78,7 @@ def audit():
             "accuracy": sum((predictor(r) >= 0.5) == bool(r[4]) for r in evaluation) / len(evaluation),
         }
     return {"schema": "autosport.table_tennis_day_batch_elo.research.v1", "k": K,
+            "training_selected_k": selected_k, "training_candidate_brier": training_losses,
             "initial_rating": INITIAL, "cutoff_date": CUTOFF.isoformat(),
             "data_sha256": hashlib.sha256(DATA.read_bytes()).hexdigest(),
             "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),

@@ -2196,35 +2196,23 @@ try {
     $report.launcher_process_id = $process.Id
     Write-ExternalUiaProgress -Stage 'WINDOW_LAUNCHED'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    # Wait for the OS window without touching its UIA provider.  The frozen
+    # duplicate-launch control passed when no primary COM access preceded it.
+    $startupNativeObserved = $false
     while ([DateTime]::UtcNow -lt $deadline) {
         $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
-        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
-        if ($null -ne $uiaRoot) { break }
+        foreach ($startupFamilyId in $lastFamilyIds) {
+            $startupWindows = @([AutosportNativeWindows]::VisibleTopLevelWindowsForProcess([int]$startupFamilyId))
+            if ($startupWindows.Count -gt 0) {
+                $startupNativeObserved = $true
+                break
+            }
+        }
+        if ($startupNativeObserved) { break }
         Start-Sleep -Milliseconds 250
     }
-    if ($null -eq $uiaRoot) {
-        throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
-    }
-    $report.initial_window_observed = $true
-    Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'
-
-    # Record the exact last bounded diagnostic before a potentially blocking
-    # native UIA provider property read. Native emergency/startup dialogs must
-    # fail closed here, not be misinterpreted as missing semantic WebView DOM.
-    # UIA window names never enter the progress file or the error text.
-    Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'
-    $initialNativeName = ''
-    try { $initialNativeName = [string]$uiaRoot.Current.Name } catch {}
-    if ([string]::Equals($initialNativeName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
-        throw 'Packaged native emergency window is not semantic WebView2 readiness'
-    }
-    if ([string]::Equals($initialNativeName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
-        throw 'Packaged native startup-error window is not semantic WebView2 readiness'
-    }
-    if ([string]::Equals($initialNativeName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
+    if (-not $startupNativeObserved) {
+        throw 'Timed out waiting for a real OS-visible primary product window'
     }
 
     # Native host visibility is not semantic readiness. The local native HWND
@@ -2254,6 +2242,221 @@ try {
             throw "Packaged WebView2 runtime witness unavailable before semantic UIA probe"
         }
     }
+
+    # Launch and fully verify the mandatory second normal instance before the
+    # deep semantic COM/UIA traversal. Exact Windows Candidate evidence showed
+    # that launching it after the traversal produced a live two-process
+    # PyInstaller family with no Python/native dialog surface for 90 seconds.
+    # The product-owned runtime witness above can only be published from inside
+    # _run_owned_interactive_gui, while both interactive locks are held. It is
+    # therefore the earliest safe ordering point for the real duplicate launch.
+    # The dialog copy/dismissal, absence of a second semantic surface and exact
+    # exit code remain mandatory; this reordering grants no acceptance by itself.
+    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'
+    $duplicateStartResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $duplicateStartOutcomes = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $duplicateStartStages = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $duplicateStartCompleted = [System.Threading.ManualResetEventSlim]::new($false)
+    # PowerShell enumerates empty queues in @(); preserve six exact object slots.
+    $duplicateStartArguments = [object[]]::new(6)
+    $duplicateStartArguments[0] = $exePath
+    $duplicateStartArguments[1] = $launchWorkingDirectory
+    $duplicateStartArguments[2] = $duplicateStartResults
+    $duplicateStartArguments[3] = $duplicateStartOutcomes
+    $duplicateStartArguments[4] = $duplicateStartCompleted
+    $duplicateStartArguments[5] = $duplicateStartStages
+    try {
+        $duplicateStartWorker = Start-ThreadJob -ScriptBlock {
+            param(
+                [string]$exePath, [string]$launchWorkingDirectory,
+                [object]$Results, [object]$Outcomes, [object]$Completion,
+                [object]$Stages
+            )
+            try {
+                $Stages.Enqueue('WORKER_ENTER')
+                # Bypass Start-Process/ShellExecute's synchronous Windows
+                # invocation path. The worker is bounded by the independent
+                # completion event and runs before deep semantic COM traversal.
+                $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+                $startInfo.FileName = $exePath
+                $startInfo.WorkingDirectory = $launchWorkingDirectory
+                $startInfo.UseShellExecute = $true
+                $startInfo.CreateNoWindow = $false
+                $duplicateProcess = [System.Diagnostics.Process]::new()
+                $duplicateProcess.StartInfo = $startInfo
+                $Stages.Enqueue('PROCESS_START_PROBE')
+                if (-not $duplicateProcess.Start()) {
+                    $Outcomes.Enqueue('INVALID_PROCESS')
+                    $Stages.Enqueue('INVALID_PROCESS')
+                    $duplicateProcess.Dispose()
+                } elseif ([int]$duplicateProcess.Id -gt 0) {
+                    $Results.Enqueue($duplicateProcess)
+                    $Outcomes.Enqueue('RETURNED')
+                    $Stages.Enqueue('PROCESS_RETURNED')
+                } else {
+                    $Outcomes.Enqueue('INVALID_PROCESS')
+                    $Stages.Enqueue('INVALID_PROCESS')
+                    $duplicateProcess.Dispose()
+                }
+            } catch {
+                # Never publish exception text, executable path, PID or command line.
+                $Outcomes.Enqueue('LAUNCH_FAILED')
+                $Stages.Enqueue('PROCESS_EXCEPTION')
+            } finally {
+                $Completion.Set()
+            }
+        } -ArgumentList $duplicateStartArguments -ThrottleLimit 16
+    } catch {
+        $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
+        $report.duplicate_start_worker_stage = 'WORKER_LAUNCH_FAILED'
+        throw 'Second packaged launch worker could not start'
+    }
+    # Read only fixed, non-sensitive worker stages; no ThreadJob State/Receive-Job
+    # or Stop-Job call may reenter a blocked UIA/PowerShell provider.
+    $duplicateStartTerminal = $duplicateStartCompleted.Wait(6000)
+    $report.duplicate_start_worker_stage = 'NOT_ENTERED'
+    [string]$duplicateWorkerStage = $null
+    while ($duplicateStartStages.TryDequeue([ref]$duplicateWorkerStage)) {
+        $report.duplicate_start_worker_stage = [string]$duplicateWorkerStage
+    }
+    if (-not $duplicateStartTerminal) {
+        $report.duplicate_start_diagnostic = 'TIMED_OUT'
+        throw 'Second packaged launch bounded process creation timed out'
+    }
+    [string]$duplicateStartOutcome = $null
+    if (-not $duplicateStartOutcomes.TryDequeue([ref]$duplicateStartOutcome)) {
+        $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
+        throw 'Second packaged launch worker returned no outcome'
+    }
+    if ($duplicateStartOutcome -ne 'RETURNED') {
+        if ($duplicateStartOutcome -eq 'INVALID_PROCESS') {
+            $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
+        } else {
+            $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
+        }
+        throw 'Second packaged launch did not return a valid process'
+    }
+    [object]$duplicateStarted = $null
+    if (-not $duplicateStartResults.TryDequeue([ref]$duplicateStarted) -or
+        $null -eq $duplicateStarted) {
+        $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
+        throw 'Second packaged launch did not return a valid process'
+    }
+    try {
+        $duplicateProcess = [System.Diagnostics.Process]$duplicateStarted
+        if ($null -eq $duplicateProcess -or [int]$duplicateProcess.Id -le 0) {
+            throw 'Invalid process receipt'
+        }
+    } catch {
+        $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
+        throw 'Second packaged launch returned invalid process receipt'
+    }
+    $report.duplicate_start_diagnostic = 'RETURNED'
+    $duplicateStartCompleted.Dispose()
+    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'
+    # The one-file duplicate still receives a bounded startup allowance. This
+    # budget is independent of, and precedes, the semantic UIA budget below.
+    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds(
+        [Math]::Max(90, $TimeoutSeconds)
+    )
+    $report.duplicate_dialog_probe_diagnostic = 'NOT_RUN'
+    $duplicateDialogObserved = $false
+    $duplicateFamilyIds = @([int]$duplicateProcess.Id)
+    $nextDuplicateFamilyProbe = [DateTime]::MinValue
+    while ([DateTime]::UtcNow -lt $duplicateDeadline) {
+        if ([DateTime]::UtcNow -ge $nextDuplicateFamilyProbe) {
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_PROBE'
+            $duplicateFamilyIds = @(
+                Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id
+            )
+            $report.duplicate_process_family_count = [int]$duplicateFamilyIds.Count
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_READY'
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'
+            $duplicateNativeHandles = @(
+                foreach ($duplicateFamilyId in $duplicateFamilyIds) {
+                    [AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(
+                        [int]$duplicateFamilyId
+                    )
+                }
+            )
+            if ($duplicateNativeHandles.Count -gt 4096) {
+                throw 'Second packaged launch native dialog census exceeded limit'
+            }
+            $report.duplicate_visible_window_count = [int]$duplicateNativeHandles.Count
+            $duplicateProbe = Invoke-IsolatedDuplicateDialogProbe `
+                -ProcessIds $duplicateFamilyIds `
+                -WindowHandles ([IntPtr[]]$duplicateNativeHandles)
+            $report.duplicate_dialog_probe_diagnostic = [string]$duplicateProbe
+            if ($duplicateProbe -ceq 'DIALOG_CLOSED') {
+                $duplicateDialogObserved = $true
+                $report.duplicate_launch_dialog_title = 'Автоспорт — помилка запуску'
+                break
+            }
+            if ($duplicateProbe -cin @(
+                'SECOND_SEMANTIC_SURFACE', 'AMBIGUOUS_DIALOG', 'COPY_MISMATCH',
+                'APARTMENT_ERROR', 'NO_PROCESS_FAMILY', 'PROVIDER_ERROR',
+                'INVALID_RESULT', 'LAUNCH_ERROR', 'UNAVAILABLE'
+            )) {
+                throw "Second packaged launch duplicate-dialog probe failed closed; fixed_code=$duplicateProbe"
+            }
+            $nextDuplicateFamilyProbe = [DateTime]::UtcNow.AddMilliseconds(1000)
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $duplicateDialogObserved) {
+        $duplicateExitState = 'unavailable'
+        try {
+            $duplicateProcess.Refresh()
+            if ($duplicateProcess.HasExited) {
+                $duplicateExitState = "exited:$([int]$duplicateProcess.ExitCode)"
+            } else {
+                $duplicateExitState = 'running'
+            }
+        } catch {
+            $duplicateExitState = 'unavailable'
+        }
+        $duplicateObservedFamilyCount = @($duplicateFamilyIds).Count
+        throw "Second packaged launch did not expose the bounded duplicate-instance dialog (process=$duplicateExitState; family_count=$duplicateObservedFamilyCount; fixed_code=$($report.duplicate_dialog_probe_diagnostic))"
+    }
+
+    if (-not $duplicateProcess.WaitForExit(5000)) {
+        throw "Second packaged launch did not terminate after duplicate-instance dialog dismissal"
+    }
+    if ($duplicateProcess.ExitCode -ne 2) {
+        throw "Second packaged launch returned unexpected exit code $($duplicateProcess.ExitCode)"
+    }
+    $report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode
+    $report.duplicate_launch_status = 'PASS'
+
+    # The real primary UIA root and startup-error checks remain mandatory after
+    # the duplicate process has displayed its dialog and exited with code 2.
+    $primaryUiaDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $primaryUiaDeadline) {
+        $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
+        if ($null -ne $uiaRoot) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($null -eq $uiaRoot) {
+        throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
+    }
+    $report.initial_window_observed = $true
+    Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'
+    Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'
+    $initialNativeName = ''
+    try { $initialNativeName = [string]$uiaRoot.Current.Name } catch {}
+    if ([string]::Equals($initialNativeName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
+        throw 'Packaged native emergency window is not semantic WebView2 readiness'
+    }
+    if ([string]::Equals($initialNativeName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
+        throw 'Packaged native startup-error window is not semantic WebView2 readiness'
+    }
+    if ([string]::Equals($initialNativeName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
+    }
+
     # Startup and semantic provider readiness are two independent bounded
     # phases. Windows Candidate 40032504012 published the genuine runtime
     # witness near the end of the launch budget, leaving zero time for the
@@ -2431,199 +2634,6 @@ try {
         $report.runtime_witness_status = 'PASS'
         Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'
     }
-
-    # While the real packaged semantic shell is alive, a second normal launch must
-    # fail at the product-owned interactive lock boundary rather than opening a
-    # second WebView2/operator instance against either shared mutable root.
-    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'
-    # The primary UIA provider has already been queried. A synchronous second
-    # Start-Process on this audit runspace stalled for the full 120s watchdog.
-    # Launch from an independent runspace and wait only for process creation,
-    # not for the duplicate app to exit or for its UIA dialog to appear.
-    $duplicateStartResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
-    $duplicateStartOutcomes = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-    $duplicateStartStages = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
-    $duplicateStartCompleted = [System.Threading.ManualResetEventSlim]::new($false)
-    # PowerShell enumerates empty queues in @(); preserve six exact object slots.
-    $duplicateStartArguments = [object[]]::new(6)
-    $duplicateStartArguments[0] = $exePath
-    $duplicateStartArguments[1] = $launchWorkingDirectory
-    $duplicateStartArguments[2] = $duplicateStartResults
-    $duplicateStartArguments[3] = $duplicateStartOutcomes
-    $duplicateStartArguments[4] = $duplicateStartCompleted
-    $duplicateStartArguments[5] = $duplicateStartStages
-    try {
-        $duplicateStartWorker = Start-ThreadJob -ScriptBlock {
-            param(
-                [string]$exePath, [string]$launchWorkingDirectory,
-                [object]$Results, [object]$Outcomes, [object]$Completion,
-                [object]$Stages
-            )
-            try {
-                $Stages.Enqueue('WORKER_ENTER')
-                # Bypass Start-Process/ShellExecute's synchronous Windows
-                # invocation path after a UIA provider has been queried.
-                # The worker is bounded by the independent completion event.
-                $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
-                $startInfo.FileName = $exePath
-                $startInfo.WorkingDirectory = $launchWorkingDirectory
-                $startInfo.UseShellExecute = $false
-                $startInfo.CreateNoWindow = $false
-                $duplicateProcess = [System.Diagnostics.Process]::new()
-                $duplicateProcess.StartInfo = $startInfo
-                $Stages.Enqueue('PROCESS_START_PROBE')
-                if (-not $duplicateProcess.Start()) {
-                    $Outcomes.Enqueue('INVALID_PROCESS')
-                    $Stages.Enqueue('INVALID_PROCESS')
-                    $duplicateProcess.Dispose()
-                } elseif ([int]$duplicateProcess.Id -gt 0) {
-                    $Results.Enqueue($duplicateProcess)
-                    $Outcomes.Enqueue('RETURNED')
-                    $Stages.Enqueue('PROCESS_RETURNED')
-                } else {
-                    $Outcomes.Enqueue('INVALID_PROCESS')
-                    $Stages.Enqueue('INVALID_PROCESS')
-                    $duplicateProcess.Dispose()
-                }
-            } catch {
-                # Never publish exception text, executable path, PID or command line.
-                $Outcomes.Enqueue('LAUNCH_FAILED')
-                $Stages.Enqueue('PROCESS_EXCEPTION')
-            } finally {
-                $Completion.Set()
-            }
-        } -ArgumentList $duplicateStartArguments -ThrottleLimit 16
-    } catch {
-        $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
-        $report.duplicate_start_worker_stage = 'WORKER_LAUNCH_FAILED'
-        throw 'Second packaged launch worker could not start'
-    }
-    # Read only fixed, non-sensitive worker stages; no ThreadJob State/Receive-Job
-    # or Stop-Job call may reenter a blocked UIA/PowerShell provider.
-    $duplicateStartTerminal = $duplicateStartCompleted.Wait(6000)
-    $report.duplicate_start_worker_stage = 'NOT_ENTERED'
-    [string]$duplicateWorkerStage = $null
-    while ($duplicateStartStages.TryDequeue([ref]$duplicateWorkerStage)) {
-        $report.duplicate_start_worker_stage = [string]$duplicateWorkerStage
-    }
-    if (-not $duplicateStartTerminal) {
-        $report.duplicate_start_diagnostic = 'TIMED_OUT'
-        throw 'Second packaged launch bounded process creation timed out'
-    }
-    [string]$duplicateStartOutcome = $null
-    if (-not $duplicateStartOutcomes.TryDequeue([ref]$duplicateStartOutcome)) {
-        $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
-        throw 'Second packaged launch worker returned no outcome'
-    }
-    if ($duplicateStartOutcome -ne 'RETURNED') {
-        if ($duplicateStartOutcome -eq 'INVALID_PROCESS') {
-            $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
-        } else {
-            $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
-        }
-        throw 'Second packaged launch did not return a valid process'
-    }
-    [object]$duplicateStarted = $null
-    if (-not $duplicateStartResults.TryDequeue([ref]$duplicateStarted) -or
-        $null -eq $duplicateStarted) {
-        $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
-        throw 'Second packaged launch did not return a valid process'
-    }
-    try {
-        $duplicateProcess = [System.Diagnostics.Process]$duplicateStarted
-        if ($null -eq $duplicateProcess -or [int]$duplicateProcess.Id -le 0) {
-            throw 'Invalid process receipt'
-        }
-    } catch {
-        $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
-        throw 'Second packaged launch returned invalid process receipt'
-    }
-    $report.duplicate_start_diagnostic = 'RETURNED'
-    $duplicateStartCompleted.Dispose()
-    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'
-    # The packaged second process must be given the caller's actual bounded
-    # startup allowance. Ten seconds proved insufficient on the Windows candidate
-    # while the launcher was still running; the UIA gate remains fail-closed.
-    # A PyInstaller one-file duplicate must unpack before Python can acquire the
-    # existing workspace lock and display the native refusal dialog. Hosted
-    # Windows under load exceeded the ordinary 20-second UIA phase budget.
-    # Keep this phase bounded inside the independent 120-second workflow
-    # watchdog without weakening any semantic dialog/exit requirement.
-    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds(
-        [Math]::Max(40, $TimeoutSeconds)
-    )
-    $report.duplicate_dialog_probe_diagnostic = 'NOT_RUN'
-    $duplicateDialogObserved = $false
-    $duplicateFamilyIds = @([int]$duplicateProcess.Id)
-    $nextDuplicateFamilyProbe = [DateTime]::MinValue
-    while ([DateTime]::UtcNow -lt $duplicateDeadline) {
-        if ([DateTime]::UtcNow -ge $nextDuplicateFamilyProbe) {
-            Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_PROBE'
-            $duplicateFamilyIds = @(
-                Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id
-            )
-            $report.duplicate_process_family_count = [int]$duplicateFamilyIds.Count
-            Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_READY'
-            Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'
-            # Process.MainWindowHandle can select a hidden bootloader owner
-            # instead of the ownerless MessageBox. Reuse the bounded Win32
-            # visible top-level census; never query desktop-wide UIA or child
-            # HWNDs whose provider can alias the same dialog multiple times.
-            $duplicateNativeHandles = @(
-                foreach ($duplicateFamilyId in $duplicateFamilyIds) {
-                    [AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(
-                        [int]$duplicateFamilyId
-                    )
-                }
-            )
-            if ($duplicateNativeHandles.Count -gt 4096) {
-                throw 'Second packaged launch native dialog census exceeded limit'
-            }
-            $report.duplicate_visible_window_count = [int]$duplicateNativeHandles.Count
-            $duplicateProbe = Invoke-IsolatedDuplicateDialogProbe `
-                -ProcessIds $duplicateFamilyIds `
-                -WindowHandles ([IntPtr[]]$duplicateNativeHandles)
-            $report.duplicate_dialog_probe_diagnostic = [string]$duplicateProbe
-            if ($duplicateProbe -ceq 'DIALOG_CLOSED') {
-                $duplicateDialogObserved = $true
-                $report.duplicate_launch_dialog_title = 'Автоспорт — помилка запуску'
-                break
-            }
-            if ($duplicateProbe -cin @(
-                'SECOND_SEMANTIC_SURFACE', 'AMBIGUOUS_DIALOG', 'COPY_MISMATCH',
-                'APARTMENT_ERROR', 'NO_PROCESS_FAMILY', 'PROVIDER_ERROR',
-                'INVALID_RESULT', 'LAUNCH_ERROR', 'UNAVAILABLE'
-            )) {
-                throw "Second packaged launch duplicate-dialog probe failed closed; fixed_code=$duplicateProbe"
-            }
-            $nextDuplicateFamilyProbe = [DateTime]::UtcNow.AddMilliseconds(1000)
-        }
-        Start-Sleep -Milliseconds 250
-    }
-    if (-not $duplicateDialogObserved) {
-        $duplicateExitState = 'unavailable'
-        try {
-            $duplicateProcess.Refresh()
-            if ($duplicateProcess.HasExited) {
-                $duplicateExitState = "exited:$([int]$duplicateProcess.ExitCode)"
-            } else {
-                $duplicateExitState = 'running'
-            }
-        } catch {
-            $duplicateExitState = 'unavailable'
-        }
-        $duplicateObservedFamilyCount = @($duplicateFamilyIds).Count
-        throw "Second packaged launch did not expose the bounded duplicate-instance dialog (process=$duplicateExitState; family_count=$duplicateObservedFamilyCount; fixed_code=$($report.duplicate_dialog_probe_diagnostic))"
-    }
-
-    if (-not $duplicateProcess.WaitForExit(5000)) {
-        throw "Second packaged launch did not terminate after duplicate-instance dialog dismissal"
-    }
-    if ($duplicateProcess.ExitCode -ne 2) {
-        throw "Second packaged launch returned unexpected exit code $($duplicateProcess.ExitCode)"
-    }
-    $report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode
-    $report.duplicate_launch_status = 'PASS'
 
     $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
     $report.process_id = [int]$uiaRoot.Current.ProcessId

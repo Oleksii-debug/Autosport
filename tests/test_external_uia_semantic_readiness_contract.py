@@ -8,6 +8,20 @@ def _audit_script_text() -> str:
     return _AUDIT_SCRIPT.read_text(encoding="utf-8")
 
 
+def test_duplicate_launch_precedes_primary_uia_without_skipping_gates() -> None:
+    script = _audit_script_text()
+    launch = script.index("$process = Start-Process -FilePath $exePath")
+    duplicate = script.index("$duplicateProcess.Start()", launch)
+    duplicate_pass = script.index("$report.duplicate_launch_status = 'PASS'", duplicate)
+    primary_uia = script.index("$uiaRoot = Find-UiaRootForProcessFamily", duplicate_pass)
+    assert "VisibleTopLevelWindowsForProcess" in script[launch:duplicate]
+    assert "Find-UiaRootForProcessFamily" not in script[launch:duplicate]
+    assert "$uiaRoot.Current" not in script[launch:duplicate]
+    assert "$startInfo.UseShellExecute = $true" in script[launch:duplicate]
+    assert "duplicateProcess.ExitCode -ne 2" in script[duplicate:duplicate_pass]
+    assert primary_uia < script.index("$semanticReady = $null", primary_uia)
+
+
 def test_external_uia_waits_for_webview_semantics_before_panel_activation_and_snapshot() -> None:
     script = _audit_script_text()
 

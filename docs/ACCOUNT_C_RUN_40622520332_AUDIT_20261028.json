@@ -1,0 +1,53 @@
+{
+  "action_estimates": {
+    "PARLAY_2_HIGH_ODDS": {
+      "observations": 175,
+      "simulated_mean_reward": "11.48285714285714285714285714",
+      "simulated_reward": "2009.50000000000000000000000"
+    },
+    "PARLAY_2_LOW_ODDS": {
+      "observations": 8,
+      "simulated_mean_reward": "-0.29761904761904761904761875",
+      "simulated_reward": "-2.38095238095238095238095"
+    },
+    "SINGLE_HIGH_ODDS": {
+      "observations": 8,
+      "simulated_mean_reward": "-6.25000000000000000000000",
+      "simulated_reward": "-50.00000000000000000000000"
+    },
+    "SINGLE_LOW_ODDS": {
+      "observations": 8,
+      "simulated_mean_reward": "-6.25000000000000000000000",
+      "simulated_reward": "-50.00000000000000000000000"
+    },
+    "WAIT": {
+      "observations": 31,
+      "simulated_mean_reward": "0",
+      "simulated_reward": "0"
+    }
+  },
+  "artifact_id": 12792792552,
+  "artifact_sha256": "6480ef8cf18a5cfef7a15524bad7f12327e52a4807b1212980605465f212e541",
+  "audit_script_sha256": "4f1fd79310e11effb2d409e5f6807a232036fcebf18a6da8c3b05483ae094cce",
+  "final_balance": "11907.11904761904761904761905",
+  "independent_provider_truth_verified": false,
+  "initial_balance": "10000",
+  "manifest_checks_internal_consistency_only": true,
+  "manifest_files_verified": 10,
+  "network_failures": 0,
+  "network_snapshots": 232,
+  "policy_generation": 230,
+  "profitability_claim": false,
+  "run_id": 40622520332,
+  "schema": "autosport.account_c.run_review.research.v1",
+  "simulated_change": "1907.11904761904761904761905",
+  "simulated_diagnostics": {
+    "gross_stake": "9941",
+    "maximum_drawdown": "100.00000000000000000000000",
+    "net_over_stake": "0.1918437830820890875211366110"
+  },
+  "source_sha": "03d23f398d11f2f9e050108cf6fb7a627c1b8b0f",
+  "ticket_count": 199,
+  "truth": "simulated",
+  "wait_count": 31
+}

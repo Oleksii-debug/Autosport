@@ -81,3 +81,20 @@ and uncertainty. No calibration, execution or promotion authority is granted.
 ```
 python scripts/evaluate_independent_team_agent.py --season 2223 2223.csv --season 2324 2324.csv --season 2425 2425.csv --season 2526 2526.csv --evaluation-season 2324 --evaluation-season 2425 --evaluation-season 2526 --price-source bet365 --config examples/independent_team_2022_2025.json --output independent-bet365.json
 ```
+
+## Current-season continuation, same frozen parameters
+
+The same Bet365 method was extended without retuning to the 80 recorded matches
+in the 2026/27 season through 25 October. The frozen model recorded -0.51 units
+after costs on 23 hypothetical bets; the delayed-online model recorded -5.62 on
+29. Online Brier per side was 0.206736 versus the market baseline 0.203480.
+The online agent updates from older recorded results after the assumed 48-hour
+delay. Selection of Bet365 followed inspection of the missing Pinnacle quotes
+and earlier results, and source prices/results are not independently timed or
+executable. This is exploratory and small, not a prospective performance or
+profitability claim. No parameter was changed after inspecting this sample.
+
+Source hash, fixed-source protocol identity, complete metrics and uncertainty:
+`evidence/agent-economics-20261027/independent-team-bet365-2026-2027-to-oct25.json`.
+The active live-observation campaign and already running qualification checks
+were not interrupted by this separate follow-up evidence branch.

@@ -62,3 +62,31 @@ def test_missing_quotes_are_explicit_exclusions(tmp_path):
     rows, metadata = experiment.load_seasons({"2223": a})
     assert len(rows) == 1
     assert metadata["exclusions"] == {"2223": 1}
+    assert metadata["source_rows_by_season"] == {"2223": 2}
+    assert metadata["eligible_rows_by_season"] == {"2223": 1}
+
+
+def test_fixed_bookmaker_is_explicit_and_never_falls_back(tmp_path):
+    path = tmp_path / "prices.csv"
+    values = [{**row("01/01/2023"), "PSH": "", "B365H": "2", "B365D": "4", "B365A": "5"}]
+    write(path, values)
+    pinnacle, original = experiment.load_seasons({"2223": path}, "pinnacle")
+    bet365, alternative = experiment.load_seasons({"2223": path}, "bet365")
+    assert not pinnacle and original["exclusions"] == {"2223": 1}
+    assert len(bet365) == 1 and str(bet365[0]["odds"]["1"]) == "2"
+    assert alternative["fixed_price_source"] == "bet365"
+    assert alternative["price_columns"] == ["B365H", "B365D", "B365A"]
+    with pytest.raises(ValueError, match="source"):
+        experiment.load_seasons({"2223": path}, "unknown")
+
+
+def test_protocol_hash_binds_fixed_bookmaker(tmp_path):
+    train, evaluation = tmp_path / "train.csv", tmp_path / "evaluation.csv"
+    extra = {"B365H": "2.5", "B365D": "5", "B365A": "2.5"}
+    write(train, [{**row(d), **extra} for d in ("01/01/2023", "04/01/2023", "07/01/2023")])
+    write(evaluation, [{**row(d), **extra} for d in ("01/08/2023", "02/08/2023", "04/08/2023")])
+    files = {"2223": train, "2324": evaluation}
+    pinnacle = experiment.evaluate(files, config(), ("2324",), "pinnacle")
+    alternative = experiment.evaluate(files, config(), ("2324",), "bet365")
+    assert pinnacle["config_sha256"] == alternative["config_sha256"]
+    assert pinnacle["protocol_sha256"] != alternative["protocol_sha256"]

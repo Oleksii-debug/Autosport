@@ -1,9 +1,9 @@
 """Research replay on separate Football-Data league seasons.
 
 Source files are supplied by the caller; this module grants no source rights.
-Only pre-closing PSH/PSD/PSA prices are read. Actual quote availability and
-result publication times remain unverified. The shared team evaluator supplies
-the original causal checks, strategy, cost and WAIT handling.
+Only one explicitly selected bookmaker's pre-closing prices are read. Actual
+quote availability and result publication times remain unverified. The shared
+team evaluator supplies the original causal checks, strategy, cost and WAIT.
 """
 from __future__ import annotations
 
@@ -37,22 +37,27 @@ def assumed_london_kickoff(raw_date: str, raw_time: str) -> datetime:
     return (local - timedelta(hours=int(summer))).replace(tzinfo=timezone.utc)
 
 
-def load_seasons(files: dict[str, Path]):
+def load_seasons(files: dict[str, Path], price_source: str = "pinnacle"):
     if type(files) is not dict or not files:
         raise ValueError("season files must be a non-empty mapping")
+    columns = {"pinnacle": ("PSH", "PSD", "PSA"), "bet365": ("B365H", "B365D", "B365A")}
+    if type(price_source) is not str or price_source not in columns:
+        raise ValueError("unsupported fixed price source")
     rows, matches, exclusions, source_hashes = [], set(), Counter(), {}
+    source_rows, eligible_rows = Counter(), Counter()
     for season, path in sorted(files.items()):
         if type(season) is not str or len(season) != 4 or not season.isascii() or not season.isdigit():
             raise ValueError("season must be four ASCII digits")
         raw = Path(path).read_bytes()
         source_hashes[season] = hashlib.sha256(raw).hexdigest()
         for item in csv.DictReader(raw.decode("utf-8-sig").splitlines()):
+            source_rows[season] += 1
             try:
                 kickoff = assumed_london_kickoff(item["Date"], item["Time"])
                 home, away = item["HomeTeam"].strip(), item["AwayTeam"].strip()
                 if not home or not away or home == away or item["Div"] != "E0":
                     raise ValueError("invalid teams or league")
-                odds = {key: Decimal(item[column]) for key, column in (("1", "PSH"), ("X", "PSD"), ("2", "PSA"))}
+                odds = {key: Decimal(item[column]) for key, column in zip(("1", "X", "2"), columns[price_source], strict=True)}
                 if any(not p.is_finite() or p <= 1 for p in odds.values()):
                     raise ValueError("invalid prices")
                 result = {"H": "1", "D": "X", "A": "2"}[item["FTR"]]
@@ -63,20 +68,24 @@ def load_seasons(files: dict[str, Path]):
             if match_key in matches:
                 raise ValueError("duplicate match across source files")
             matches.add(match_key)
+            eligible_rows[season] += 1
             identity = season + ":" + ":".join(match_key)
             rows.append({"id": identity, "kickoff": kickoff, "odds": odds, "result": result,
                          "team_context": {"country": "England", "home": home, "away": away}})
     rows.sort(key=lambda row: (row["kickoff"], row["id"]))
     return rows, {"source_sha256": digest(source_hashes), "file_sha256": source_hashes,
                   "exclusions": dict(exclusions), "eligible_rows": len(rows),
+                  "source_rows_by_season": dict(source_rows), "eligible_rows_by_season": dict(eligible_rows),
+                  "fixed_price_source": price_source, "price_columns": list(columns[price_source]),
                   "attribution": "Football-Data.co.uk, https://www.football-data.co.uk/downloadm.php"}
 
 
-def evaluate(files: dict[str, Path], config: dict, evaluation_seasons: tuple[str, ...]):
+def evaluate(files: dict[str, Path], config: dict, evaluation_seasons: tuple[str, ...],
+             price_source: str = "pinnacle"):
     validate_config(config)
     if type(evaluation_seasons) is not tuple or not evaluation_seasons or len(set(evaluation_seasons)) != len(evaluation_seasons):
         raise ValueError("distinct evaluation seasons are required")
-    rows, source = load_seasons(files)
+    rows, source = load_seasons(files, price_source)
     by_id = {row["id"]: row for row in rows}
     report = evaluate_rows(rows, source, config)
     seasons = {}
@@ -105,6 +114,9 @@ def evaluate(files: dict[str, Path], config: dict, evaluation_seasons: tuple[str
         seasons[season] = {"matches": len(decisions), "variants": variants}
     return {"schema": "autosport.independent_team_agent_research", "schema_version": 1,
             "config": config, "config_sha256": digest(config), "source": source,
+            "protocol_sha256": digest({"model_config": config, "fixed_price_source": price_source,
+                                       "evaluation_seasons": list(evaluation_seasons)}),
+            "evaluation_seasons": list(evaluation_seasons),
             "training_matches": report["training_matches"], "evaluation": seasons,
             "decision_journal_sha256": digest(report["decisions"]),
             "forward_evidence_eligible": False, "real_money_execution": False,
@@ -119,6 +131,7 @@ if __name__ == "__main__":
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--season", nargs=2, action="append", required=True, metavar=("ID", "CSV"))
     parser.add_argument("--evaluation-season", action="append", required=True)
+    parser.add_argument("--price-source", choices=("pinnacle", "bet365"), default="pinnacle")
     parser.add_argument("--config", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args()
@@ -126,7 +139,7 @@ if __name__ == "__main__":
     if len(files) != len(args.season):
         parser.error("duplicate season ID")
     with localcontext(Context(prec=28)):
-        report = evaluate(files, strict_json_loads(args.config.read_text("utf-8")), tuple(args.evaluation_season))
+        report = evaluate(files, strict_json_loads(args.config.read_text("utf-8")), tuple(args.evaluation_season), args.price_source)
     with args.output.open("x", encoding="utf-8") as stream:
         json.dump(report, stream, ensure_ascii=False, indent=2, sort_keys=True)
         stream.write("\n")

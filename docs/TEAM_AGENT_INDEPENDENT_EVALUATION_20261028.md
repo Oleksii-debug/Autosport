@@ -50,3 +50,34 @@ python scripts/evaluate_independent_team_agent.py --season 2223 2223.csv --seaso
 ```
 
 This is progress toward the owner's earning-program goal, not completion of it.
+
+## Fixed price source and incomplete-season diagnosis
+
+A further 2025/26 source check found Pinnacle pre-closing prices on only
+210 of 380 league rows, with 170 excluded. The missing quotes are concentrated
+from January onwards. A positive result on the available subset must never be
+described as the result for the entire season.
+
+The evaluator now requires an explicit, fixed price source (`pinnacle` by
+default, or `bet365`), reports input/eligible counts for each season and never
+falls back from a missing quote to another bookmaker. The protocol digest binds
+the selected bookmaker and season list, in addition to the original model
+configuration. Source CSV files are read once, and their original hashes are
+retained. This remains research-only; price availability is not verified.
+
+The same fixed model, threshold and cost were replayed for 2022/23–2025/26 using
+only the Bet365 columns. Each season has 380 eligible rows. Online hypothetical
+net units after 1% cost: 2023/24 **-17.39** (83 bets), 2024/25 **+7.49**
+(98 bets), 2025/26 **+24.33** (157 bets). The frozen model records **-10.41**,
+**-13.51**, **+18.24**, respectively. Per-season bootstrap intervals include
+negative outcomes. Bookmaker selection was made after observing the incomplete
+Pinnacle dataset and prior results, so this is exploratory, not a pristine
+holdout or evidence of executable profitability. Earlier results are retained.
+
+The raw-source reports identify both source price sets, input denominators,
+source hashes, protocol hashes, missing rows, decisions digest, costs, drawdown
+and uncertainty. No calibration, execution or promotion authority is granted.
+
+```
+python scripts/evaluate_independent_team_agent.py --season 2223 2223.csv --season 2324 2324.csv --season 2425 2425.csv --season 2526 2526.csv --evaluation-season 2324 --evaluation-season 2425 --evaluation-season 2526 --price-source bet365 --config examples/independent_team_2022_2025.json --output independent-bet365.json
+```

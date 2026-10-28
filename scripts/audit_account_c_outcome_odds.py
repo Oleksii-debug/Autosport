@@ -9,7 +9,7 @@ import json
 import math
 import re
 from collections import Counter, defaultdict
-from datetime import datetime, timezone
+from datetime import date, datetime, timezone
 from decimal import Decimal, InvalidOperation
 from pathlib import Path
 
@@ -113,11 +113,17 @@ def record(arm: dict, selected: str | None, row: dict) -> None:
     arm["max_drawdown"] = max(arm["max_drawdown"], arm["peak"] - arm["equity"])
 
 
-def audit(inputs: list[tuple[str, bytes]]) -> dict:
+def audit(inputs: list[tuple[str, bytes]], *, warmup_start: date = date(2021, 1, 1),
+          evaluation_start: date = date(2022, 1, 1),
+          evaluation_end: date = date(2023, 1, 1), source: str = SOURCE,
+          attribution: str = "Valuebetennis, Tennis results and odds since 2021",
+          price_description: str = "publisher_reported_opening_odds") -> dict:
+    if not warmup_start < evaluation_start < evaluation_end:
+        raise ValueError("warmup and evaluation dates must be strictly ordered")
     rows, provenance = load_data(inputs)
     grouped = defaultdict(list)
     for row in rows:
-        if row["at"].year <= 2022:
+        if warmup_start <= row["at"].date() < evaluation_end:
             grouped[row["at"].date()].append(row)
     ratings = defaultdict(lambda: 1500.0)
     arms = {name: fresh_arm() for name in ("no_bet", "market_favorite", "elo_threshold")}
@@ -127,7 +133,7 @@ def audit(inputs: list[tuple[str, bytes]]) -> dict:
         changes = defaultdict(list)
         for row in batch:
             p = 1.0 / (1.0 + 10.0 ** ((ratings[row["b"]] - ratings[row["a"]]) / 400.0))
-            if day.year == 2022:
+            if day >= evaluation_start:
                 if not row["score_ok"]:
                     excluded["incomplete_or_ambiguous_score"] += 1
                 elif row["odds_a"] is None:
@@ -143,7 +149,7 @@ def audit(inputs: list[tuple[str, bytes]]) -> dict:
                     selected = (row["a"] if edge_a >= EDGE and edge_a >= edge_b else
                                 row["b"] if edge_b >= EDGE else None)
                     record(arms["elo_threshold"], selected, row)
-            elif day.year == 2021 and row["score_ok"]:
+            elif row["score_ok"]:
                 warmup_count += 1
             if row["score_ok"]:
                 delta = 16.0 * ((1.0 if row["winner"] == row["a"] else 0.0) - p)
@@ -152,7 +158,7 @@ def audit(inputs: list[tuple[str, bytes]]) -> dict:
         for player, deltas in sorted(changes.items()):
             ratings[player] += math.fsum(deltas)
     if not warmup_count or not eval_count:
-        raise ValueError("need usable 2021 warmup and 2022 evaluation events")
+        raise ValueError("need usable warmup and evaluation events")
     output_arms = {}
     for name, state in arms.items():
         output_arms[name] = {k: str(v) if isinstance(v, Decimal) else v
@@ -160,11 +166,14 @@ def audit(inputs: list[tuple[str, bytes]]) -> dict:
         output_arms[name]["roi"] = (str(state["net_profit"] / state["turnover"])
                                      if state["turnover"] else None)
     return {"schema": "autosport.account_c.historical_odds_research.v1",
-            "source": {"attribution": "Valuebetennis, Tennis results and odds since 2021",
-                       "url": SOURCE, "license": "CC BY 4.0", "inputs": provenance,
+            "source": {"attribution": attribution,
+                       "url": source, "license": "CC BY 4.0", "inputs": provenance,
                        "source_and_rights_independently_verified": False},
             "evaluator_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
-            "protocol": {"warmup_year": 2021, "evaluation_year": 2022,
+            "protocol": {"warmup_start": warmup_start.isoformat(),
+                         "evaluation_start": evaluation_start.isoformat(),
+                         "evaluation_end_exclusive": evaluation_end.isoformat(),
+                         "price_description": price_description,
                          "elo_k": 16, "initial_elo": 1500, "edge_threshold": str(EDGE),
                          "stake_units": str(STAKE), "winning_profit_fee": str(FEE),
                          "same_day_outcomes_available": False,

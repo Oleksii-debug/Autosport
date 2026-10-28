@@ -3,6 +3,7 @@ from __future__ import annotations
 import csv
 import io
 import sys
+from datetime import date
 from pathlib import Path
 
 import pytest
@@ -108,3 +109,17 @@ def test_nonfinite_odds_are_excluded_not_claimed_as_profit():
     result = research.audit([("fixture.csv", encode(rows))])
     assert result["counts"]["evaluation_eligible"] == 1
     assert result["counts"]["evaluation_exclusions"]["missing_or_invalid_opening_odds"] == 2
+
+
+def test_custom_date_window_does_not_admit_later_data():
+    rows = fixtures()
+    later = dict(rows[1], match_id="later", date="2023-01-01 12:00:00")
+    result = research.audit([("fixture.csv", encode(rows + [later]))],
+                            warmup_start=date(2021, 1, 1),
+                            evaluation_start=date(2022, 1, 1),
+                            evaluation_end=date(2023, 1, 1))
+    assert result["counts"]["all_input"] == 6
+    assert result["counts"]["evaluation_eligible"] == 2
+    with pytest.raises(ValueError, match="dates"):
+        research.audit([("fixture.csv", encode(rows))],
+                       warmup_start=date(2022, 1, 1), evaluation_start=date(2022, 1, 1))

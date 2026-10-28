@@ -1,0 +1,91 @@
+{
+  "arms": {
+    "elo_threshold": {
+      "bets": 58,
+      "fees": "0.4302",
+      "gross_profit": "-27.49",
+      "losses": 49,
+      "max_drawdown": "32.3282",
+      "net_profit": "-27.9202",
+      "no_bets": 7,
+      "roi": "-0.4813827586206896551724137931",
+      "turnover": "58",
+      "wins": 9
+    },
+    "market_favorite": {
+      "bets": 65,
+      "fees": "0.6572",
+      "gross_profit": "18.86",
+      "losses": 14,
+      "max_drawdown": "2.9314",
+      "net_profit": "18.2028",
+      "no_bets": 0,
+      "roi": "0.2800430769230769230769230769",
+      "turnover": "65",
+      "wins": 51
+    },
+    "no_bet": {
+      "bets": 0,
+      "fees": "0",
+      "gross_profit": "0",
+      "losses": 0,
+      "max_drawdown": "0",
+      "net_profit": "0",
+      "no_bets": 65,
+      "roi": null,
+      "turnover": "0",
+      "wins": 0
+    }
+  },
+  "counts": {
+    "all_input": 100,
+    "evaluation_eligible": 65,
+    "evaluation_exclusions": {
+      "incomplete_or_ambiguous_score": 3
+    },
+    "warmup_usable": 32
+  },
+  "evaluator_sha256": "a90b566028ffd80b1716ebc4052ef34ec1cea150bb465517efb3ac0d612f059e",
+  "preview_limits": {
+    "only_first_100_viewer_rows": true,
+    "postselected": true,
+    "provider_claimed_license": "CC BY 4.0",
+    "same_market_prices_simultaneously_available": false,
+    "sport": "tennis_not_table_tennis"
+  },
+  "protocol": {
+    "drawdown_order_assumption": "match_start_time_then_match_id",
+    "edge_threshold": "0.05",
+    "elo_k": 16,
+    "evaluation_end_exclusive": "2025-01-01",
+    "evaluation_start": "2024-12-30",
+    "initial_elo": 1500,
+    "price_description": "publisher_best_closing_odds_unverified_not_accepted_fills",
+    "same_day_outcomes_available": false,
+    "stake_units": "1",
+    "warmup_start": "2024-12-27",
+    "winning_profit_fee": "0.02"
+  },
+  "schema": "autosport.account_c.historical_odds_research.v1",
+  "source": {
+    "attribution": "minmaxxxer, ATP/WTA closing odds 2025, public viewer preview",
+    "inputs": [
+      {
+        "name": "tennis_preview_202412_ccby.csv",
+        "sha256": "99f74d0c86d7556c5448b7cc80d6c75327bd39827174b8e50ea47147bcc7300c"
+      }
+    ],
+    "license": "CC BY 4.0",
+    "source_and_rights_independently_verified": false,
+    "url": "https://huggingface.co/datasets/minmaxxxer/atp-wta-closing-odds-2025"
+  },
+  "truth": {
+    "actual_price_fills_verified": false,
+    "forward_evidence_eligible": false,
+    "profitability_claim": false,
+    "promotion_authorized": false,
+    "real_money_execution": false,
+    "untouched_holdout": false,
+    "upstream_point_in_time_verified": false
+  }
+}

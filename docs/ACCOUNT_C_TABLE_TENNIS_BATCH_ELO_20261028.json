@@ -1,0 +1,29 @@
+{
+  "cutoff_date": "2026-09-01",
+  "data_sha256": "bbb2ab531f269a1eafff89e240086a4d17999114b582825ba4338986c6770fde",
+  "date_only": true,
+  "evaluation_count": 819,
+  "evaluation_is_untouched_holdout": false,
+  "initial_rating": 1500.0,
+  "k": 20.0,
+  "odds_present": false,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "results": {
+    "constant_50": {
+      "accuracy": 0.48473748473748474,
+      "brier": 0.25
+    },
+    "publisher": {
+      "accuracy": 0.5482295482295483,
+      "brier": 0.24467900023199024
+    },
+    "sample_only_elo": {
+      "accuracy": 0.5262515262515263,
+      "brier": 0.2500648405146629
+    }
+  },
+  "sample_is_incomplete": true,
+  "schema": "autosport.table_tennis_day_batch_elo.research.v1",
+  "script_sha256": "cabc1f4003aa9d55ad1c49935499b2d9e27ed2f625fcebf98926e28b4fed30d4"
+}

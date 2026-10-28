@@ -6,12 +6,14 @@
           "drawdown": "1211",
           "net_reward": "828.54",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "785.8692",
           "tickets": 49
         },
         "capped": {
           "drawdown": "1211",
           "net_reward": "1283.0226",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "1232.262148",
           "tickets": 32
         }
       },
@@ -24,12 +26,14 @@
           "drawdown": "1211",
           "net_reward": "-1195.08",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1198.0384",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1211",
           "net_reward": "2116.9876",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "2050.427848",
           "tickets": 32
         }
       },
@@ -42,12 +46,14 @@
           "drawdown": "1211",
           "net_reward": "-1.27",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-33.1846",
           "tickets": 49
         },
         "capped": {
           "drawdown": "1211",
           "net_reward": "522.4648",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "487.795504",
           "tickets": 30
         }
       },
@@ -60,12 +66,14 @@
           "drawdown": "1297",
           "net_reward": "-800.31",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-813.0038",
           "tickets": 35
         },
         "capped": {
           "drawdown": "1297",
           "net_reward": "2202.5406",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "2132.549788",
           "tickets": 34
         }
       },
@@ -78,12 +86,14 @@
           "drawdown": "1426",
           "net_reward": "-1426",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1426.00",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1426",
           "net_reward": "1048.1564",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "998.673272",
           "tickets": 36
         }
       },
@@ -96,12 +106,14 @@
           "drawdown": "1426",
           "net_reward": "-1426",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1426.00",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1426",
           "net_reward": "355.0188",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "319.398424",
           "tickets": 36
         }
       },
@@ -114,12 +126,14 @@
           "drawdown": "1297",
           "net_reward": "-1077.41",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1082.6818",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1297",
           "net_reward": "1472.8922",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "1417.494356",
           "tickets": 34
         }
       },
@@ -132,12 +146,14 @@
           "drawdown": "1254",
           "net_reward": "-1137.03",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1142.8694",
           "tickets": 33
         },
         "capped": {
           "drawdown": "1254",
           "net_reward": "4131.7574",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "4020.542252",
           "tickets": 37
         }
       },
@@ -150,12 +166,14 @@
           "drawdown": "1254",
           "net_reward": "-825.32",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-835.7336",
           "tickets": 35
         },
         "capped": {
           "drawdown": "1254",
           "net_reward": "2138.6244",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "2070.771912",
           "tickets": 32
         }
       },
@@ -168,12 +186,14 @@
           "drawdown": "1297",
           "net_reward": "-997.92",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1003.9016",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1297",
           "net_reward": "2325.3598",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "2252.912604",
           "tickets": 36
         }
       },
@@ -186,12 +206,14 @@
           "drawdown": "1265.89",
           "net_reward": "-1265.89",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1268.2722",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1211",
           "net_reward": "398.5228",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "365.392344",
           "tickets": 30
         }
       },
@@ -204,12 +226,14 @@
           "drawdown": "1297",
           "net_reward": "821.07",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "775.7086",
           "tickets": 48
         },
         "capped": {
           "drawdown": "1297",
           "net_reward": "1021.8475",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "975.470550",
           "tickets": 34
         }
       },
@@ -222,12 +246,14 @@
           "drawdown": "1426",
           "net_reward": "-1426",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1426.00",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1468",
           "net_reward": "-845.44",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "-857.8912",
           "tickets": 36
         }
       },
@@ -240,12 +266,14 @@
           "drawdown": "1211",
           "net_reward": "-930.07",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-938.3686",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1211",
           "net_reward": "515.9652",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "479.525896",
           "tickets": 32
         }
       },
@@ -258,12 +286,14 @@
           "drawdown": "1211",
           "net_reward": "-1125.72",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1130.9856",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1211",
           "net_reward": "-947.72",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "-952.9856",
           "tickets": 30
         }
       },
@@ -276,12 +306,14 @@
           "drawdown": "1211",
           "net_reward": "-1118.75",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-1124.1550",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1211",
           "net_reward": "2115.7092",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "2049.175016",
           "tickets": 32
         }
       },
@@ -294,12 +326,14 @@
           "drawdown": "1340",
           "net_reward": "447.63",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "406.3174",
           "tickets": 48
         },
         "capped": {
           "drawdown": "1340",
           "net_reward": "3708.8650",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "3607.007700",
           "tickets": 40
         }
       },
@@ -312,12 +346,14 @@
           "drawdown": "1297",
           "net_reward": "-914.55",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-923.0990",
           "tickets": 32
         },
         "capped": {
           "drawdown": "1297",
           "net_reward": "-1048.55",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "-1057.0990",
           "tickets": 36
         }
       },
@@ -330,12 +366,14 @@
           "drawdown": "1297",
           "net_reward": "588.48",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "547.9104",
           "tickets": 48
         },
         "capped": {
           "drawdown": "1297",
           "net_reward": "3029.4541",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "2942.925018",
           "tickets": 34
         }
       },
@@ -348,12 +386,14 @@
           "drawdown": "1211",
           "net_reward": "-810.57",
           "post_readmission_tickets": 0,
+          "posthoc_fee_adjusted_net": "-821.3186",
           "tickets": 33
         },
         "capped": {
           "drawdown": "1211",
           "net_reward": "1191.8705",
           "post_readmission_tickets": 4,
+          "posthoc_fee_adjusted_net": "1142.853090",
           "tickets": 32
         }
       },
@@ -362,15 +402,18 @@
     }
   ],
   "forward_evidence_eligible": false,
+  "higher_net_after_posthoc_fee_cases": 19,
   "higher_net_cases": 19,
   "larger_drawdown_cases": 1,
+  "lower_net_after_posthoc_fee_cases": 1,
   "lower_net_cases": 1,
   "maximum_additional_drawdown": "42",
+  "posthoc_fee_rate_on_positive_ticket_reward": "0.02",
   "profitability_claim": false,
   "promotion_authorized": false,
   "real_money_execution": false,
   "schema": "autosport.account_c.shadow_random_regimes.research.v1",
-  "script_sha256": "8936506e0a75e23e2aa2df1774998edf78ac6dd40985b48eb3504c641ec7420f",
+  "script_sha256": "e90bfa465de34e2f50745a65903af5e52cbf7dd76b5b57ba59847beca5c17d49",
   "seeds": [
     0,
     1,

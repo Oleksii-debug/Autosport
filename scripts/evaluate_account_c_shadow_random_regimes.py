@@ -16,6 +16,15 @@ from autosport.paper_live_sandbox_campaign import (
 
 SEEDS = tuple(range(20))
 STEPS = 120
+ASSUMED_WIN_FEE = Decimal("0.02")
+
+
+def fee_adjusted_net(book):
+    """Reprice the existing ticket path only; do not claim a fee-aware rerun."""
+    net = book.balance - book.initial_bankroll
+    fees = sum((max(Decimal("0"), ticket.payout - ticket.stake) * ASSUMED_WIN_FEE
+                for ticket in book.tickets.values()), Decimal("0"))
+    return net - fees
 
 
 def snapshots(seed: int):
@@ -57,6 +66,7 @@ def compare():
                 campaign.step(decision, outcome)
             diagnostic = campaign.diagnostics()
             outcomes[name] = {"net_reward": diagnostic["net_reward"],
+                              "posthoc_fee_adjusted_net": str(fee_adjusted_net(campaign.book)),
                               "drawdown": diagnostic["maximum_drawdown"],
                               "tickets": diagnostic["ticket_count"],
                               "post_readmission_tickets": getattr(campaign, "tickets_after_readmission", 0)}
@@ -67,6 +77,8 @@ def compare():
               Decimal(c["outcomes"]["baseline"]["net_reward"]) for c in cases]
     risks = [Decimal(c["outcomes"]["capped"]["drawdown"]) -
              Decimal(c["outcomes"]["baseline"]["drawdown"]) for c in cases]
+    fee_deltas = [Decimal(c["outcomes"]["capped"]["posthoc_fee_adjusted_net"]) -
+                  Decimal(c["outcomes"]["baseline"]["posthoc_fee_adjusted_net"]) for c in cases]
     return {"schema": "autosport.account_c.shadow_random_regimes.research.v1",
             "seeds": list(SEEDS), "steps": STEPS, "truth": "simulated",
             "profitability_claim": False, "promotion_authorized": False,
@@ -76,6 +88,9 @@ def compare():
             "unchanged_net_cases": sum(x == 0 for x in deltas),
             "larger_drawdown_cases": sum(x > 0 for x in risks),
             "maximum_additional_drawdown": str(max(risks)),
+            "posthoc_fee_rate_on_positive_ticket_reward": str(ASSUMED_WIN_FEE),
+            "higher_net_after_posthoc_fee_cases": sum(x > 0 for x in fee_deltas),
+            "lower_net_after_posthoc_fee_cases": sum(x < 0 for x in fee_deltas),
             "script_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
             "shadow_source_sha256": hashlib.sha256((Path(__file__).resolve().parent /
                 "compare_account_c_shadow_recovery.py").read_bytes()).hexdigest(),

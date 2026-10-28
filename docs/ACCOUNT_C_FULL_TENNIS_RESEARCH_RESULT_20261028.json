@@ -1,0 +1,116 @@
+{
+  "adapter_counts": {
+    "adapted_rows": 5791,
+    "adapter_exclusions": {},
+    "source_rows": 5791
+  },
+  "arms": {
+    "elo_history_guarded": {
+      "bets": 1616,
+      "fees": "21.5490",
+      "gross_profit": "-91.55",
+      "losses": 1169,
+      "max_drawdown": "157.5060",
+      "net_profit": "-113.0990",
+      "no_bets": 640,
+      "roi": "-0.06998700495049504950495049505",
+      "turnover": "1616",
+      "wins": 447
+    },
+    "elo_threshold": {
+      "bets": 1770,
+      "fees": "23.7376",
+      "gross_profit": "-102.12",
+      "losses": 1289,
+      "max_drawdown": "170.8736",
+      "net_profit": "-125.8576",
+      "no_bets": 486,
+      "roi": "-0.07110598870056497175141242938",
+      "turnover": "1770",
+      "wins": 481
+    },
+    "market_favorite": {
+      "bets": 2256,
+      "fees": "14.3740",
+      "gross_profit": "27.70",
+      "losses": 691,
+      "max_drawdown": "37.2392",
+      "net_profit": "13.3260",
+      "no_bets": 0,
+      "roi": "0.005906914893617021276595744681",
+      "turnover": "2256",
+      "wins": 1565
+    },
+    "no_bet": {
+      "bets": 0,
+      "fees": "0",
+      "gross_profit": "0",
+      "losses": 0,
+      "max_drawdown": "0",
+      "net_profit": "0",
+      "no_bets": 2256,
+      "roi": null,
+      "turnover": "0",
+      "wins": 0
+    }
+  },
+  "counts": {
+    "all_input": 5791,
+    "evaluation_eligible": 2256,
+    "evaluation_exclusions": {
+      "incomplete_or_ambiguous_score": 99
+    },
+    "prior_player_history": {
+      "both_seen": 2088,
+      "none_seen": 18,
+      "one_seen": 150
+    },
+    "warmup_usable": 3297
+  },
+  "evaluator_sha256": "599aad7cd8f2ac6ff36f149c033b4c48fed7170d148579efc95d023e211bc4f0",
+  "limitations": {
+    "already_published": true,
+    "full_public_dataset": true,
+    "match_result_publication_time_verified": false,
+    "price_simultaneity_or_execution_verified": false,
+    "source_retrieval": "public_text_snapshot",
+    "sport": "tennis_not_table_tennis"
+  },
+  "protocol": {
+    "drawdown_order_assumption": "match_start_time_then_match_id",
+    "edge_threshold": "0.05",
+    "elo_k": 16,
+    "evaluation_end_exclusive": "2026-01-01",
+    "evaluation_start": "2025-07-01",
+    "initial_elo": 1500,
+    "price_description": "publisher_best_closing_odds_unverified_not_accepted_fills",
+    "same_day_outcomes_available": false,
+    "stake_units": "1",
+    "warmup_start": "2024-12-27",
+    "winning_profit_fee": "0.02"
+  },
+  "schema": "autosport.account_c.historical_odds_research.v1",
+  "source": {
+    "adapter_sha256": "dda1dfaed7c060d42ef864909fd7a93b4f88ce4dac1a3896180c9bf428380e97",
+    "attribution": "minmaxxxer, ATP/WTA closing odds 2025, CC BY 4.0",
+    "inputs": [
+      {
+        "name": "adapted_tennis_closing_odds.csv",
+        "sha256": "e70914994a9d4daade2d0b894d30310c15b99ee04af66987350dde47908b18bb"
+      }
+    ],
+    "license": "CC BY 4.0",
+    "raw_sha256": "05ad12b646e55eba9b626b2860cfb98dd6fc869c173e3b9d7dec2016bfb58c20",
+    "source_and_rights_independently_verified": false,
+    "url": "https://huggingface.co/datasets/minmaxxxer/atp-wta-closing-odds-2025"
+  },
+  "truth": {
+    "actual_price_fills_verified": false,
+    "forward_evidence_eligible": false,
+    "profitability_claim": false,
+    "promotion_authorized": false,
+    "real_money_execution": false,
+    "untouched_holdout": false,
+    "upstream_point_in_time_verified": false
+  }
+}

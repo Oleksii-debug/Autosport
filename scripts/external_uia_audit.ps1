@@ -10,11 +10,17 @@ param(
 )
 
 $ErrorActionPreference = 'Stop'
+# Start-Job launches a clean PowerShell process.  Hosted Windows run
+# 40171001725 completed the real audit but could not publish its final report
+# because that worker did not auto-load ConvertTo-Json.  Load the built-in
+# utility module before any UIA work so PASS and FAIL evidence always retain
+# the same fail-closed JSON publication path.
+Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
 # This file is a bounded diagnostic of the real external audit, NOT audit PASS.
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
     param(
-        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')]
+        [ValidateSet('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_POINT_PROBE','SEMANTIC_DESKTOP_POINT_READY','SEMANTIC_DESKTOP_POINT_ID_PROBE','SEMANTIC_DESKTOP_POINT_PARENT_PROBE','SEMANTIC_DESKTOP_POINT_CHILD_PROBE','SEMANTIC_DESKTOP_RENDERER_PROBE','SEMANTIC_DESKTOP_RENDERER_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','DUPLICATE_START_PROCESS_PROBE','DUPLICATE_START_PROCESS_READY','DUPLICATE_PROCESS_FAMILY_PROBE','DUPLICATE_PROCESS_FAMILY_READY','DUPLICATE_UIA_ROOT_PROBE','AUDIT_COMPLETE')]
         [string]$Stage
     )
     if ([string]::IsNullOrWhiteSpace($ProgressOutput)) { return }
@@ -35,9 +41,26 @@ Write-ExternalUiaProgress -Stage 'START'
 # A timed-out UIA COM worker poisons this audit process for further provider
 # probes. Never retry another HWND or query the stalled provider in cleanup.
 $script:semanticWorkerTimedOut = $false
+$script:nativeRendererAccessibilityMessageStatus = 'NOT_ATTEMPTED'
+$script:nativeRendererAccessibilityRequestAttempted = $false
+$script:nativeHostMessageStatus = 'NOT_ATTEMPTED'
+$script:nativeHostFocusStatus = 'NOT_ATTEMPTED'
+$script:isolatedHostHandleStatus = 'NOT_ATTEMPTED'
+$script:isolatedRendererHandleStatus = 'NOT_ATTEMPTED'
+$script:failureDiagnosticHostHandle = [IntPtr]::Zero
+$script:failureDiagnosticRendererHandle = [IntPtr]::Zero
 # Only fixed audit-owned stage codes are retained. Never persist a UIA provider
 # exception message, arbitrary COM property, user path, or window title.
 $script:lastDesktopWorkerStage = 'NOT_RUN'
+# Fixed per-route diagnostics; never expose provider text, HWNDs, PIDs or paths.
+$script:lastDesktopWorkerRouteStages = [ordered]@{
+    ROOT = 'NOT_RUN'
+    POINT = 'NOT_RUN'
+    FOCUS = 'NOT_RUN'
+    RENDERER = 'NOT_RUN'
+}
+# Audit-owned fixed failure classification only; never serialize provider text.
+$script:semanticFailureClass = 'NOT_OBSERVED'
 # Fixed OS-only class-bucket counts reveal whether a provider-backed render
 # HWND was even available. These are diagnostic counts, never UIA proof.
 $script:nativeSemanticCandidateBuckets = [ordered]@{
@@ -52,6 +75,7 @@ $script:nativeSemanticCandidateBuckets = [ordered]@{
 Add-Type -AssemblyName UIAutomationClient
 Add-Type -AssemblyName UIAutomationTypes
 Add-Type -AssemblyName System.Windows.Forms
+Add-Type -AssemblyName WindowsBase
 
 # PowerShell 7 Add-Type replaces default .NET references with explicit ones.
 # The live-region probe resolves runtime Monitor Enter/Exit once via delegates:
@@ -105,11 +129,138 @@ public static class AutosportNativeWindows
     private static extern int GetClassName(IntPtr window, System.Text.StringBuilder className, int maxCount);
     [DllImport("user32.dll")]
     private static extern uint GetWindowThreadProcessId(IntPtr window, out uint processId);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct NativeRect
+    {
+        public int Left, Top, Right, Bottom;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetWindowRect(IntPtr window, out NativeRect rectangle);
+    // A Win32-only candidate point, never a UIA witness. Do not serialize
+    // screen coordinates or inspect a foreign-process UIA subtree.
+    public static int[] VisibleScreenCenterForHandle(IntPtr window)
+    {
+        if (window == IntPtr.Zero || !IsWindowVisible(window)) return Array.Empty<int>();
+        NativeRect rectangle;
+        if (!GetWindowRect(window, out rectangle) ||
+            rectangle.Right <= rectangle.Left || rectangle.Bottom <= rectangle.Top)
+            return Array.Empty<int>();
+        long x = (long)rectangle.Left + ((long)rectangle.Right - rectangle.Left) / 2;
+        long y = (long)rectangle.Top + ((long)rectangle.Bottom - rectangle.Top) / 2;
+        return new[] { (int)x, (int)y };
+    }
     public static int ProcessIdForHandle(IntPtr window)
     {
         uint processId;
         return GetWindowThreadProcessId(window, out processId) == 0 || processId > (uint)int.MaxValue
             ? 0 : (int)processId;
+    }
+    // The independent WinForms UIA control explicitly activates its window
+    // before reading UIA. Make the same bounded OS-only attempt for the real
+    // packaged host; foreground ownership is NEVER semantic accessibility.
+    [DllImport("user32.dll")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool SetForegroundWindow(IntPtr window);
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetForegroundWindow();
+    public static bool TryClaimForegroundForProcess(IntPtr window, int expectedProcessId)
+    {
+        if (window == IntPtr.Zero || expectedProcessId <= 0 || !IsWindowVisible(window))
+            return false;
+        uint ownerPid;
+        if (GetWindowThreadProcessId(window, out ownerPid) == 0 ||
+            ownerPid != (uint)expectedProcessId)
+            return false;
+        if (GetForegroundWindow() == window) return true;
+        if (!SetForegroundWindow(window)) return false;
+        return GetForegroundWindow() == window;
+    }
+    // Diagnostic only: the real packaged host may accept native Win32 messages
+    // while its UIA provider blocks. Query only in-family visible top-level
+    // non-Chromium hosts; no HWND, PID, coordinates or user text are persisted.
+    private const uint GA_ROOT = 2;
+    private const uint WM_NULL = 0;
+    [DllImport("user32.dll")]
+    private static extern IntPtr GetAncestor(IntPtr window, uint flags);
+    [StructLayout(LayoutKind.Sequential)]
+    private struct GuiThreadInfo
+    {
+        public uint cbSize, flags;
+        public IntPtr hwndActive, hwndFocus, hwndCapture, hwndMenuOwner, hwndMoveSize, hwndCaret;
+        public NativeRect rcCaret;
+    }
+    [DllImport("user32.dll", SetLastError = true)]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static extern bool GetGUIThreadInfo(uint threadId, ref GuiThreadInfo info);
+    public static bool IsVisibleFamilyHost(IntPtr window, int[] familyIds)
+    {
+        return window != IntPtr.Zero && familyIds != null &&
+            GetAncestor(window, GA_ROOT) == window &&
+            DiagnosticClassBucket(window) == "OTHER_VISIBLE" &&
+            Array.IndexOf(familyIds, ProcessIdForHandle(window)) >= 0;
+    }
+    // Both outputs use fixed vocabulary and are OS-only forensic hints.
+    // WM_NULL is bounded; a reply cannot satisfy AutomationId or focus gates.
+    public static string[] ProbeVisibleFamilyHost(IntPtr window, int[] familyIds)
+    {
+        if (!IsVisibleFamilyHost(window, familyIds))
+            return new[] { "NOT_ATTEMPTED", "NOT_ATTEMPTED" };
+        var owner = ProcessIdForHandle(window);
+        IntPtr ignoredReply;
+        var dispatched = SendMessageTimeout(
+            window, WM_NULL, IntPtr.Zero, IntPtr.Zero,
+            SMTO_ABORTIFHUNG, 250, out ignoredReply);
+        if (ProcessIdForHandle(window) != owner ||
+            !IsVisibleFamilyHost(window, familyIds))
+            return new[] { "STALE", "STALE" };
+        var messageStatus = dispatched == IntPtr.Zero ? "NO_REPLY" : "RESPONSIVE";
+        if (GetForegroundWindow() != window)
+            return new[] { messageStatus, "NOT_FOREGROUND" };
+        uint currentPid;
+        var threadId = GetWindowThreadProcessId(window, out currentPid);
+        if (threadId == 0 || currentPid != (uint)owner)
+            return new[] { messageStatus, "STALE" };
+        var info = new GuiThreadInfo();
+        info.cbSize = (uint)Marshal.SizeOf(typeof(GuiThreadInfo));
+        if (!GetGUIThreadInfo(threadId, ref info))
+            return new[] { messageStatus, "GUI_INFO_UNAVAILABLE" };
+        if (info.hwndFocus == IntPtr.Zero)
+            return new[] { messageStatus, "FOCUS_NOT_SET" };
+        var focusPid = ProcessIdForHandle(info.hwndFocus);
+        return new[] { messageStatus,
+            Array.IndexOf(familyIds, focusPid) >= 0
+                ? "FOCUS_IN_FAMILY" : "FOCUS_FOREIGN" };
+    }
+    // WebView2 can defer renderer accessibility until a client requests it.
+    // Request the standard Win32 OBJID_CLIENT object once on a genuine, visible
+    // render widget, before entering a UIA COM provider known to stall on CI.
+    // SendMessageTimeout is bounded; the OS reply is NEVER a UIA/ARIA witness.
+    private const uint WM_GETOBJECT = 0x003D;
+    private const int OBJID_CLIENT = -4;
+    private const uint SMTO_ABORTIFHUNG = 0x0002;
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern IntPtr SendMessageTimeout(
+        IntPtr window, uint message, IntPtr wParam, IntPtr lParam,
+        uint flags, uint timeoutMs, out IntPtr reply);
+    public static string RequestRendererAccessibility(IntPtr window, int[] familyIds)
+    {
+        if (window == IntPtr.Zero || familyIds == null || familyIds.Length == 0)
+            return "NOT_ATTEMPTED";
+        var owner = ProcessIdForHandle(window);
+        if (owner <= 0 || Array.IndexOf(familyIds, owner) < 0 ||
+            DiagnosticClassBucket(window) != "RENDER_WIDGET_VISIBLE")
+            return "NOT_ATTEMPTED";
+        IntPtr ignoredReply;
+        var dispatched = SendMessageTimeout(
+            window, WM_GETOBJECT, IntPtr.Zero, new IntPtr(OBJID_CLIENT),
+            SMTO_ABORTIFHUNG, 500, out ignoredReply);
+        // HWND ownership/class may change while the OS message is in flight.
+        // Never retain or expose the returned object token or HWND/PID.
+        if (ProcessIdForHandle(window) != owner ||
+            DiagnosticClassBucket(window) != "RENDER_WIDGET_VISIBLE")
+            return "STALE";
+        return dispatched == IntPtr.Zero ? "NO_REPLY" : "DELIVERED";
     }
     // Privacy-bounded OS-only classification BEFORE any UIA COM provider call.
     // Never persist HWND, PID, raw class/title, executable path or user data.
@@ -126,6 +277,94 @@ public static class AutosportNativeWindows
             : name.StartsWith("Chrome_WidgetWin_", StringComparison.Ordinal)
                 ? "CHROME_WIDGET" : "OTHER";
         return kind + (IsWindowVisible(window) ? "_VISIBLE" : "_HIDDEN");
+    }
+    // OS-only top-level HWND census: never enumerate UIA/COM, window titles,
+    // command lines or foreign-process descendants. Counts are fixed categories.
+    public static int[] TopLevelProcessOwnershipCounts(int launcherId, int[] familyIds)
+    {
+        if (launcherId <= 0 || familyIds == null ||
+            Array.IndexOf(familyIds, launcherId) < 0)
+            throw new ArgumentException("Invalid launched process family");
+        var counts = new int[4]; // launcher visible/hidden, child visible/hidden
+        var matched = 0;
+        EnumWindowsCallback callback = (window, state) =>
+        {
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) == 0 ||
+                owner > (uint)int.MaxValue ||
+                Array.IndexOf(familyIds, (int)owner) < 0)
+                return true;
+            if (++matched > 4096) return false;
+            var offset = owner == (uint)launcherId ? 0 : 2;
+            counts[offset + (IsWindowVisible(window) ? 0 : 1)]++;
+            return true;
+        };
+        if (!EnumWindows(callback, IntPtr.Zero))
+            throw new InvalidOperationException("Top-level HWND census failed or exceeded bound");
+        return counts;
+    }
+    // SetForegroundWindow accepts top-level windows; do not retry child HWNDs
+    // from ForProcessFamily, even if those child HWNDs share the launcher PID.
+    public static IntPtr[] VisibleTopLevelWindowsForProcess(int launcherId)
+    {
+        if (launcherId <= 0) return Array.Empty<IntPtr>();
+        var windows = new IntPtr[256];
+        var count = 0;
+        EnumWindowsCallback callback = (window, state) =>
+        {
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) == 0 ||
+                owner != (uint)launcherId || !IsWindowVisible(window))
+                return true;
+            if (count >= windows.Length) return false;
+            windows[count++] = window;
+            return true;
+        };
+        if (!EnumWindows(callback, IntPtr.Zero))
+            throw new InvalidOperationException("Top-level launcher HWND limit exceeded");
+        var result = new IntPtr[count];
+        Array.Copy(windows, result, count);
+        return result;
+    }
+    // A packaged WebView2 host can be owned by a launched family process,
+    // while the launcher has no visible top-level HWND. Activate only a
+    // *top-level* non-Chromium host of that exact family, never a renderer
+    // widget or a descendant HWND. Native foreground is NOT UIA evidence.
+    public static bool TryClaimForegroundForVisibleFamilyHost(int launcherId, int[] familyIds)
+    {
+        if (launcherId <= 0 || familyIds == null ||
+            Array.IndexOf(familyIds, launcherId) < 0)
+            return false;
+        var windows = new IntPtr[256];
+        var count = 0;
+        EnumWindowsCallback callback = (window, state) =>
+        {
+            uint owner;
+            if (GetWindowThreadProcessId(window, out owner) == 0 ||
+                owner > (uint)int.MaxValue || owner == (uint)launcherId ||
+                Array.IndexOf(familyIds, (int)owner) < 0 || !IsWindowVisible(window))
+                return true;
+            // Exclude Chrome_WidgetWin_ and Chrome_RenderWidgetHostHWND,
+            // including any renderer-owned top-level window.
+            if (DiagnosticClassBucket(window) != "OTHER_VISIBLE") return true;
+            if (count >= windows.Length) return false;
+            windows[count++] = window;
+            return true;
+        };
+        if (!EnumWindows(callback, IntPtr.Zero)) return false;
+        for (var index = 0; index < count; index++)
+        {
+            // PID/visibility/class can change after enumeration. Recheck at
+            // use; a stale or foreign HWND must never be activated.
+            var owner = ProcessIdForHandle(windows[index]);
+            if (owner <= 0 || owner == launcherId ||
+                Array.IndexOf(familyIds, owner) < 0 ||
+                DiagnosticClassBucket(windows[index]) != "OTHER_VISIBLE")
+                continue;
+            if (TryClaimForegroundForProcess(windows[index], owner))
+                return true;
+        }
+        return false;
     }
     public static IntPtr[] ForProcessFamily(int[] allowedIds)
     {
@@ -589,6 +828,48 @@ function Get-ProcessFamilyIds {
     return @($seen | ForEach-Object { [int]$_ })
 }
 
+# The duplicate-instance process census is a separate OS/CIM provider call.
+# A CIM connection may outlive OperationTimeoutSec, so the real census runs
+# in an independently bounded ThreadJob. A timeout or missing family fails
+# closed: it can never count as the required native duplicate-dialog witness.
+function Get-BoundedDuplicateProcessFamilyIds {
+    param([int]$RootProcessId)
+
+    if ($RootProcessId -le 0) {
+        throw 'Invalid duplicate-instance process identifier'
+    }
+    $results = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $completed = [System.Threading.ManualResetEventSlim]::new($false)
+    $familyFinder = ${function:Get-ProcessFamilyIds}
+    $worker = Start-ThreadJob -ScriptBlock {
+        param([int]$ProcessIdValue, [scriptblock]$FindFamily, [object]$Results, [object]$Completion)
+        try {
+            [int[]]$ids = @(& $FindFamily -RootProcessId $ProcessIdValue)
+            $Results.Enqueue([object]$ids)
+        } catch {
+            # Do not publish CIM/provider errors or partial process inventories.
+        } finally {
+            $Completion.Set()
+        }
+    } -ArgumentList @($RootProcessId, $familyFinder, $results, $completed) -ThrottleLimit 16
+    if (-not $completed.Wait(6000)) {
+        # Stop-Job can block on a stuck provider. The enclosing audit process
+        # is independently killed by the real Windows gate watchdog.
+        throw 'Second packaged launch bounded process-family probe timed out'
+    }
+    [object]$observedFamily = $null
+    if (-not $results.TryDequeue([ref]$observedFamily)) {
+        $completed.Dispose()
+        throw 'Second packaged launch process-family probe returned no trusted inventory'
+    }
+    $completed.Dispose()
+    [int[]]$familyIds = [int[]]$observedFamily
+    if ($familyIds.Count -eq 0 -or -not ($familyIds -contains $RootProcessId)) {
+        throw 'Second packaged launch process-family identity is incomplete'
+    }
+    return $familyIds
+}
+
 # Traverse one UIA children level per provider call. A single recursive Descendants
 # FindFirst on the packaged native host blocked the real Windows CI provider for
 # >120 seconds (run 38216324196); it must not be used for semantic readiness.
@@ -796,7 +1077,7 @@ function Find-BoundedUiaSemanticViaChildren {
     $job = Start-ThreadJob -ScriptBlock ${function:Find-UiaSemanticViaChildren} -ErrorAction Stop -ArgumentList @(
         $workerRoot, $AutomationId, $Deadline, $NativeWindowHandle, $ExpectedProcessId,
         $workerResults, $workerCompleted, $workerProgress
-    )
+    ) -ThrottleLimit 16
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_WAIT_PROBE'
     # The kernel completion event never queries the ThreadJob state or
     # synchronously cancels a possibly blocked COM provider. A timed-out worker
@@ -818,6 +1099,7 @@ function Find-BoundedUiaSemanticViaChildren {
         # Keep the hung ThreadJob owned by the isolated audit process; do not
         # synchronously Stop-Job/Remove-Job or treat the timeout as PASS.
         $script:semanticWorkerTimedOut = $true
+        $script:semanticFailureClass = 'NATIVE_WORKER_TIMEOUT'
         throw "External UIA semantic worker timed out without a real AutomationId witness; last_worker_stage=$lastWorkerStage; native_class_bucket=$nativeCandidateBucket"
     }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_WORKER_RESULT_PROBE'
@@ -841,6 +1123,451 @@ function Find-BoundedUiaSemanticViaChildren {
     # The worker itself still reads the real AutomationId and native PID.
     # Keyboard, live-region, STOP and runtime-witness gates remain mandatory.
     return $result
+}
+
+# Differential only: the minimal packaged WebView2 control returned an exact UIA
+# AutomationId from a separate pwsh -Mta process while the production
+# Start-ThreadJob hung at FocusedElement. Probe the REAL launched product in a
+# separately killable MTA process, but never treat this result as audit PASS.
+# Only fixed codes cross the boundary; no names, HWNDs, PIDs or provider text.
+function Get-IsolatedMtaFocusDiagnostic {
+    param([int[]]$ProcessIds)
+
+    if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) { return 'NO_PROCESS_FAMILY' }
+    $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -eq $pwshCommand) { return 'UNAVAILABLE' }
+    $probe = @'
+$ErrorActionPreference = 'Stop'
+try {
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+        Write-Output 'APARTMENT_ERROR'; exit 1
+    }
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $allowed = [int[]]@($env:AUTOSPORT_UIA_DIAGNOSTIC_PIDS.Split(',') | ForEach-Object {
+        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+    })
+    $focused = [System.Windows.Automation.AutomationElement]::FocusedElement
+    if ($null -eq $focused) { Write-Output 'NO_FOCUS'; exit 0 }
+    $actualPid = [int]$focused.Current.ProcessId
+    if ($allowed -notcontains $actualPid) { Write-Output 'FOREIGN_FOCUS'; exit 0 }
+    if ([string]$focused.Current.AutomationId -ceq '330') {
+        Write-Output 'EXACT_ID_330'; exit 0
+    }
+    Write-Output 'IN_FAMILY_OTHER_ID'; exit 0
+} catch {
+    Write-Output 'PROVIDER_ERROR'; exit 1
+}
+'@
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = [string]$pwshCommand.Source
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta',
+        '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+    )) {
+        [void]$start.ArgumentList.Add($argument)
+    }
+    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@($ProcessIds | Sort-Object -Unique) -join ',')
+    $child = [System.Diagnostics.Process]::new()
+    $child.StartInfo = $start
+    $started = $false
+    try {
+        $started = $child.Start()
+        if (-not $started) { return 'LAUNCH_ERROR' }
+        if (-not $child.WaitForExit(6000)) {
+            try { $child.Kill($true) } catch {}
+            return 'TIMEOUT'
+        }
+        $code = [string]$child.StandardOutput.ReadToEnd().Trim()
+        # A nonzero child exit is never an exact semantic witness.
+        if ($child.ExitCode -ne 0) {
+            if ($code -cin @('APARTMENT_ERROR', 'PROVIDER_ERROR')) { return $code }
+            return 'INVALID_RESULT'
+        }
+        if ($code -cin @('NO_FOCUS', 'FOREIGN_FOCUS', 'EXACT_ID_330', 'IN_FAMILY_OTHER_ID')) {
+            return $code
+        }
+        return 'INVALID_RESULT'
+    } catch {
+        return 'LAUNCH_ERROR'
+    } finally {
+        if ($started) {
+            try {
+                if (-not $child.HasExited) { $child.Kill($true) }
+            } catch {}
+        }
+        $child.Dispose()
+    }
+}
+
+# Failure-only stack capture in a bounded independent runspace. Never expose raw
+# sampler JSON/stderr, command lines, local variables or arbitrary filenames.
+function Get-DuplicatePythonStackDiagnostics {
+    param(
+        [int[]]$ProcessIds, [int]$RootProcessId,
+        [string]$CaptureScript = '', [string]$SourceRoot = ''
+    )
+    $python = $env:AUTOSPORT_UIA_STACK_PYTHON
+    $sampler = $env:AUTOSPORT_UIA_STACK_SAMPLER
+    if ([string]::IsNullOrWhiteSpace($CaptureScript)) {
+        $CaptureScript = Join-Path $PSScriptRoot 'capture_duplicate_python_diagnostic.py'
+    }
+    if ([string]::IsNullOrWhiteSpace($SourceRoot)) {
+        $SourceRoot = Join-Path $PSScriptRoot '../src/autosport'
+    }
+    if (
+        [string]::IsNullOrWhiteSpace($python) -or
+        [string]::IsNullOrWhiteSpace($sampler) -or
+        -not (Test-Path -LiteralPath $CaptureScript -PathType Leaf) -or
+        -not (Test-Path -LiteralPath $SourceRoot -PathType Container)
+    ) {
+        return [pscustomobject]@{ status = 'NOT_CONFIGURED'; samples = @() }
+    }
+    $samples = [System.Collections.Generic.List[object]]::new()
+    foreach ($targetId in @($ProcessIds | Where-Object { $_ -ne $RootProcessId } | Sort-Object -Unique | Select-Object -First 2)) {
+        $results = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+        $completion = [System.Threading.ManualResetEventSlim]::new($false)
+        $arguments = [object[]]::new(7)
+        $arguments[0] = $python
+        $arguments[1] = $CaptureScript
+        $arguments[2] = $sampler
+        $arguments[3] = $SourceRoot
+        $arguments[4] = [int]$targetId
+        $arguments[5] = $results
+        $arguments[6] = $completion
+        $job = Start-ThreadJob -ScriptBlock {
+            param($Python, $Script, $Sampler, $SourceRoot, [int]$TargetId, $Results, $Completion)
+            $capture = $null
+            try {
+                Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+                $start = [System.Diagnostics.ProcessStartInfo]::new()
+                $start.FileName = $Python
+                $start.UseShellExecute = $false
+                $start.CreateNoWindow = $true
+                $start.RedirectStandardOutput = $true
+                $start.RedirectStandardError = $true
+                foreach ($argument in @($Script, '--sampler', $Sampler, '--pid', [string]$TargetId, '--source-root', $SourceRoot)) {
+                    [void]$start.ArgumentList.Add($argument)
+                }
+                $capture = [System.Diagnostics.Process]::new()
+                $capture.StartInfo = $start
+                if (-not $capture.Start()) { throw 'Sampler launch unavailable' }
+                $outputTask = $capture.StandardOutput.ReadToEndAsync()
+                $errorTask = $capture.StandardError.ReadToEndAsync()
+                if (-not $capture.WaitForExit(6000)) {
+                    try { $capture.Kill($true) } catch {}
+                    $Results.Enqueue([object]([pscustomobject]@{ status = 'CAPTURE_TIMEOUT' }))
+                    return
+                }
+                $raw = [string]$outputTask.GetAwaiter().GetResult()
+                [void]$errorTask.GetAwaiter().GetResult()
+                if ($capture.ExitCode -ne 0 -or $raw.Length -gt 16384) {
+                    throw 'Sampler capture unavailable'
+                }
+                $value = ConvertFrom-Json -InputObject $raw -ErrorAction Stop
+                if (
+                    $value.evidence_class -cne 'FAILURE_ONLY_PYTHON_STACK_LOCATIONS_NOT_ACCEPTANCE' -or
+                    $value.status -cnotin @('CAPTURED','SAMPLER_ERROR','SAMPLER_TIMEOUT','INVALID_PAYLOAD','PAYLOAD_LIMIT','UNAVAILABLE') -or
+                    $value.human_tested -ne $false -or
+                    $value.nvda_verified -ne $false -or
+                    $value.real_money_execution -ne $false
+                ) { throw 'Sampler schema unavailable' }
+                $Results.Enqueue([object]$value)
+            } catch {
+                $Results.Enqueue([object]([pscustomobject]@{ status = 'CAPTURE_ERROR' }))
+            } finally {
+                if ($null -ne $capture) {
+                    try { if (-not $capture.HasExited) { $capture.Kill($true) } } catch {}
+                    $capture.Dispose()
+                }
+                $Completion.Set()
+            }
+        } -ArgumentList $arguments -ThrottleLimit 16
+        if (-not $completion.Wait(8000)) {
+            [void]$samples.Add([pscustomobject]@{ status = 'WORKER_TIMEOUT' })
+            # Do not inspect ThreadJob.State or synchronously stop a stuck worker.
+            continue
+        }
+        [object]$sample = $null
+        if ($results.TryDequeue([ref]$sample)) {
+            [void]$samples.Add($sample)
+        } else {
+            [void]$samples.Add([pscustomobject]@{ status = 'EMPTY_CAPTURE' })
+        }
+        $completion.Dispose()
+    }
+    return [pscustomobject]@{ status = 'FAILURE_ONLY'; samples = @($samples.ToArray()) }
+}
+
+# Diagnostic only: isolate FromHandle in a separately killable MTA process.
+# An exact ID here is not a UIA witness for the packaged audit and cannot
+# replace the real keyboard, STOP, LiveRegion or runtime gates.
+function Get-IsolatedMtaHandleDiagnostic {
+    param([IntPtr]$Window, [int[]]$ProcessIds)
+
+    if ($Window -eq [IntPtr]::Zero) { return 'NOT_ATTEMPTED' }
+    if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) { return 'NO_PROCESS_FAMILY' }
+    if ($ProcessIds -notcontains [AutosportNativeWindows]::ProcessIdForHandle($Window)) {
+        return 'STALE'
+    }
+    $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -eq $pwshCommand) { return 'UNAVAILABLE' }
+    $probe = @'
+$ErrorActionPreference = 'Stop'
+try {
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+        Write-Output 'APARTMENT_ERROR'; exit 1
+    }
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    $allowed = [int[]]@($env:AUTOSPORT_UIA_DIAGNOSTIC_PIDS.Split(',') | ForEach-Object {
+        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+    })
+    $handleValue = [long]::Parse(
+        $env:AUTOSPORT_UIA_DIAGNOSTIC_HANDLE,
+        [System.Globalization.CultureInfo]::InvariantCulture
+    )
+    $element = [System.Windows.Automation.AutomationElement]::FromHandle([IntPtr]::new($handleValue))
+    if ($null -eq $element) { Write-Output 'NO_ELEMENT'; exit 0 }
+    if ($allowed -notcontains [int]$element.Current.ProcessId) {
+        Write-Output 'FOREIGN_ELEMENT'; exit 0
+    }
+    if ([string]$element.Current.AutomationId -ceq '330') {
+        Write-Output 'EXACT_ID_330'; exit 0
+    }
+    Write-Output 'IN_FAMILY_OTHER_ID'; exit 0
+} catch {
+    Write-Output 'PROVIDER_ERROR'; exit 1
+}
+'@
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = [string]$pwshCommand.Source
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta',
+        '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+    )) { [void]$start.ArgumentList.Add($argument) }
+    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@($ProcessIds | Sort-Object -Unique) -join ',')
+    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_HANDLE'] = [string]$Window.ToInt64()
+    $child = [System.Diagnostics.Process]::new()
+    $child.StartInfo = $start
+    $started = $false
+    try {
+        $started = $child.Start()
+        if (-not $started) { return 'LAUNCH_ERROR' }
+        if (-not $child.WaitForExit(2500)) {
+            try { $child.Kill($true) } catch {}
+            return 'TIMEOUT'
+        }
+        $code = [string]$child.StandardOutput.ReadToEnd().Trim()
+        if ($child.ExitCode -ne 0) {
+            if ($code -cin @('APARTMENT_ERROR', 'PROVIDER_ERROR')) { return $code }
+            return 'INVALID_RESULT'
+        }
+        if ($code -cin @('NO_ELEMENT', 'FOREIGN_ELEMENT', 'EXACT_ID_330', 'IN_FAMILY_OTHER_ID')) {
+            return $code
+        }
+        return 'INVALID_RESULT'
+    } catch {
+        return 'LAUNCH_ERROR'
+    } finally {
+        if ($started) {
+            try { if (-not $child.HasExited) { $child.Kill($true) } } catch {}
+        }
+        $child.Dispose()
+    }
+}
+
+
+# The duplicate-instance dialog is mandatory real UIA evidence, but its provider
+# blocked an in-process ThreadJob on Windows Candidate 40172891373.  Probe and
+# dismiss that exact native dialog in a separately killable MTA PowerShell
+# process.  Only fixed audit-owned codes cross the boundary; process existence,
+# HWND discovery, timeout, or any provider exception can never produce PASS.
+function Invoke-IsolatedDuplicateDialogProbe {
+    param([int[]]$ProcessIds, [IntPtr[]]$WindowHandles = @())
+
+    if ($null -eq $ProcessIds -or $ProcessIds.Count -eq 0) {
+        return 'NO_PROCESS_FAMILY'
+    }
+    $pwshCommand = Get-Command pwsh -ErrorAction SilentlyContinue
+    if ($null -eq $pwshCommand) { return 'UNAVAILABLE' }
+    $probe = @'
+$ErrorActionPreference = 'Stop'
+try {
+    if ([System.Threading.Thread]::CurrentThread.GetApartmentState() -ne [System.Threading.ApartmentState]::MTA) {
+        Write-Output 'APARTMENT_ERROR'; exit 1
+    }
+    Add-Type -AssemblyName UIAutomationClient
+    Add-Type -AssemblyName UIAutomationTypes
+    Add-Type -AssemblyName System.Windows.Forms
+    $allowed = [int[]]@($env:AUTOSPORT_UIA_DUPLICATE_PIDS.Split(',') | ForEach-Object {
+        [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
+    })
+    if ($allowed.Count -eq 0) {
+        Write-Output 'NO_PROCESS_FAMILY'; exit 1
+    }
+    $automationIdCondition = New-Object System.Windows.Automation.PropertyCondition(
+        [System.Windows.Automation.AutomationElement]::AutomationIdProperty,
+        '330'
+    )
+    # The duplicate process family and its top-level HWNDs were already captured
+    # by the parent through bounded OS/CIM census. Reacquire those real windows
+    # directly and retain Process.MainWindowHandle as a racing-window fallback.
+    # A desktop-wide RootElement.FindAll call blocked beyond this probe's
+    # six-second fail-closed budget on hosted Windows even though an HWND existed.
+    $nativeHandles = [System.Collections.Generic.HashSet[long]]::new()
+    if (-not [string]::IsNullOrWhiteSpace($env:AUTOSPORT_UIA_DUPLICATE_HANDLES)) {
+        foreach ($rawHandle in $env:AUTOSPORT_UIA_DUPLICATE_HANDLES.Split(',')) {
+            [void]$nativeHandles.Add([long]::Parse(
+                $rawHandle, [System.Globalization.CultureInfo]::InvariantCulture
+            ))
+        }
+    }
+    foreach ($candidateId in $allowed) {
+        try {
+            $candidateProcess = Get-Process -Id $candidateId -ErrorAction Stop
+            $candidateProcess.Refresh()
+            $handle = [IntPtr]$candidateProcess.MainWindowHandle
+            if ($handle -ne [IntPtr]::Zero) {
+                [void]$nativeHandles.Add($handle.ToInt64())
+            }
+        } catch {
+            # A racing/stale family member is not dialog evidence. The caller
+            # retries until the existing outer duplicate deadline expires.
+        }
+    }
+    $windows = New-Object 'System.Collections.Generic.List[object]'
+    foreach ($handleValue in $nativeHandles) {
+        try {
+            $window = [System.Windows.Automation.AutomationElement]::FromHandle(
+                [IntPtr]::new($handleValue)
+            )
+            if (
+                $null -ne $window -and
+                $allowed -contains [int]$window.Current.ProcessId
+            ) {
+                [void]$windows.Add($window)
+            }
+        } catch {}
+    }
+    $dialog = $null
+    foreach ($window in $windows) {
+        if ($allowed -notcontains [int]$window.Current.ProcessId) { continue }
+        if ([string]$window.Current.AutomationId -ceq '330') {
+            Write-Output 'SECOND_SEMANTIC_SURFACE'; exit 1
+        }
+        $semanticDescendant = $window.FindFirst(
+            [System.Windows.Automation.TreeScope]::Descendants,
+            $automationIdCondition
+        )
+        if ($null -ne $semanticDescendant) {
+            Write-Output 'SECOND_SEMANTIC_SURFACE'; exit 1
+        }
+        if (
+            [string]$window.Current.Name -ceq
+            'Автоспорт — помилка запуску'
+        ) {
+            if ($null -ne $dialog) {
+                Write-Output 'AMBIGUOUS_DIALOG'; exit 1
+            }
+            $dialog = $window
+        }
+    }
+    if ($null -eq $dialog) {
+        Write-Output 'NO_DIALOG'; exit 0
+    }
+    $names = @()
+    $descendants = $dialog.FindAll(
+        [System.Windows.Automation.TreeScope]::Descendants,
+        [System.Windows.Automation.Condition]::TrueCondition
+    )
+    foreach ($item in $descendants) {
+        $name = [string]$item.Current.Name
+        if (-not [string]::IsNullOrWhiteSpace($name)) { $names += $name }
+    }
+    $copy = $names -join ' '
+    if (
+        $copy -notmatch 'уже відкритий' -or
+        $copy -notmatch 'Economic і live state не змінено'
+    ) {
+        Write-Output 'COPY_MISMATCH'; exit 1
+    }
+    $windowPattern = $null
+    if (
+        $dialog.TryGetCurrentPattern(
+            [System.Windows.Automation.WindowPattern]::Pattern,
+            [ref]$windowPattern
+        ) -and $null -ne $windowPattern
+    ) {
+        ([System.Windows.Automation.WindowPattern]$windowPattern).Close()
+    } else {
+        $dialog.SetFocus()
+        [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
+    }
+    Write-Output 'DIALOG_CLOSED'; exit 0
+} catch {
+    Write-Output 'PROVIDER_ERROR'; exit 1
+}
+'@
+    $start = [System.Diagnostics.ProcessStartInfo]::new()
+    $start.FileName = [string]$pwshCommand.Source
+    $start.UseShellExecute = $false
+    $start.CreateNoWindow = $true
+    $start.RedirectStandardOutput = $true
+    $start.RedirectStandardError = $true
+    foreach ($argument in @(
+        '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta',
+        '-EncodedCommand',
+        [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
+    )) {
+        [void]$start.ArgumentList.Add($argument)
+    }
+    $start.Environment['AUTOSPORT_UIA_DUPLICATE_PIDS'] = (
+        @($ProcessIds | Sort-Object -Unique) -join ','
+    )
+    $start.Environment['AUTOSPORT_UIA_DUPLICATE_HANDLES'] = (
+        @($WindowHandles | ForEach-Object { $_.ToInt64() } | Sort-Object -Unique) -join ','
+    )
+    $child = [System.Diagnostics.Process]::new()
+    $child.StartInfo = $start
+    $started = $false
+    try {
+        $started = $child.Start()
+        if (-not $started) { return 'LAUNCH_ERROR' }
+        if (-not $child.WaitForExit(6000)) {
+            try { $child.Kill($true) } catch {}
+            return 'TIMEOUT'
+        }
+        $code = [string]$child.StandardOutput.ReadToEnd().Trim()
+        $known = @(
+            'DIALOG_CLOSED', 'NO_DIALOG', 'SECOND_SEMANTIC_SURFACE',
+            'AMBIGUOUS_DIALOG', 'COPY_MISMATCH', 'APARTMENT_ERROR',
+            'NO_PROCESS_FAMILY', 'PROVIDER_ERROR'
+        )
+        if ($known -cnotcontains $code) { return 'INVALID_RESULT' }
+        if ($child.ExitCode -ne 0 -and $code -cin @('DIALOG_CLOSED', 'NO_DIALOG')) {
+            return 'INVALID_RESULT'
+        }
+        if ($child.ExitCode -eq 0 -and $code -cnotin @('DIALOG_CLOSED', 'NO_DIALOG')) {
+            return 'INVALID_RESULT'
+        }
+        return $code
+    } catch {
+        return 'LAUNCH_ERROR'
+    } finally {
+        if ($started) {
+            try { if (-not $child.HasExited) { $child.Kill($true) } } catch {}
+        }
+        $child.Dispose()
+    }
 }
 
 function Find-UiaRootWithElementForProcessFamily {
@@ -871,12 +1598,51 @@ function Find-UiaRootWithElementForProcessFamily {
         OTHER_HIDDEN = 0
         UNKNOWN = 0
     }
+    # A visible render HWND is only an OS-owned location candidate. The
+    # subsequent FromPoint call must return a genuine in-family UIA element.
+    [int[]]$pointCoordinates = @()
+    [IntPtr]$nativeHostHandle = [IntPtr]::Zero
+    [IntPtr]$nativeRendererHandle = [IntPtr]::Zero
     foreach ($candidateHandle in $nativeWindows) {
+        if (
+            $nativeHostHandle -eq [IntPtr]::Zero -and
+            [AutosportNativeWindows]::IsVisibleFamilyHost($candidateHandle, [int[]]$ProcessIds)
+        ) { $nativeHostHandle = $candidateHandle }
         $classBucket = [string][AutosportNativeWindows]::DiagnosticClassBucket($candidateHandle)
         if (-not $bucketCounts.Contains($classBucket)) { $classBucket = 'UNKNOWN' }
         $bucketCounts[$classBucket] = [int]$bucketCounts[$classBucket] + 1
+        if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and -not $script:nativeRendererAccessibilityRequestAttempted) {
+            # A stale/foreign HWND must not permit another request. The entire
+            # candidate set gets at most ONE finite OS message attempt.
+            $script:nativeRendererAccessibilityRequestAttempted = $true
+            # Bounded WM_GETOBJECT requests the actual renderer's accessibility
+            # provider; DELIVERED is diagnostic only, never semantic PASS.
+            $script:nativeRendererAccessibilityMessageStatus = [AutosportNativeWindows]::RequestRendererAccessibility(
+                $candidateHandle, [int[]]$ProcessIds
+            )
+        }
+        if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and $nativeRendererHandle -eq [IntPtr]::Zero) {
+            $nativeRendererHandle = $candidateHandle
+        }
+        if ($classBucket -eq 'RENDER_WIDGET_VISIBLE' -and $pointCoordinates.Count -eq 0) {
+            $pointCoordinates = [AutosportNativeWindows]::VisibleScreenCenterForHandle($candidateHandle)
+        }
     }
     $script:nativeSemanticCandidateBuckets = $bucketCounts
+    # Only bounded OS preparation belongs before acceptance. The separately
+    # killable FromHandle differentials are optional and can still perturb the
+    # live provider after their client times out. Cache primitive HWNDs only;
+    # run those diagnostics after a proven gate failure, never before the real
+    # semantic/duplicate/keyboard/STOP/LiveRegion sequence.
+    $script:failureDiagnosticHostHandle = $nativeHostHandle
+    $script:failureDiagnosticRendererHandle = $nativeRendererHandle
+    if ($nativeHostHandle -ne [IntPtr]::Zero) {
+        $hostProbe = [AutosportNativeWindows]::ProbeVisibleFamilyHost(
+            $nativeHostHandle, [int[]]$ProcessIds
+        )
+        $script:nativeHostMessageStatus = [string]$hostProbe[0]
+        $script:nativeHostFocusStatus = [string]$hostProbe[1]
+    }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_NATIVE_HANDLES_READY'
     foreach ($nativeHandle in $nativeWindows) {
         if ([DateTime]::UtcNow -ge $Deadline) { break }
@@ -921,18 +1687,50 @@ function Find-UiaRootWithElementForProcessFamily {
     # semantic root. The previous direct caller-runspace PropertyCondition
     # blocked >120s. Search the REAL scoped UIA provider in a bounded MTA job.
     $remainingSeconds = [int][Math]::Ceiling(($Deadline - [DateTime]::UtcNow).TotalSeconds)
-    if ($remainingSeconds -le 0) { return $null }
+    if ($remainingSeconds -le 0) {
+        # A native candidate consumed the remaining launch deadline. This is
+        # missing UIA proof, not an unknown COM exception or an audit PASS.
+        $script:semanticFailureClass = 'DESKTOP_BUDGET_EXHAUSTED'
+        return $null
+    }
     $budgetSeconds = [int][Math]::Min(4, $remainingSeconds)
+    # Run independent genuine UIA routes in separate bounded MTA workers.
+    # A blocked FocusedElement must not prevent FromPoint or process-scoped
+    # RootElement from producing their own real AutomationId/PID witness.
+    # No native HWND, OS focus or diagnostic marker can satisfy acceptance.
     $workerResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
-    $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
-    $workerProgress = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $workerStates = @()
+    $pointX = [int]::MinValue
+    $pointY = [int]::MinValue
+    if ($pointCoordinates.Count -eq 2) {
+        $pointX = [int]$pointCoordinates[0]
+        $pointY = [int]$pointCoordinates[1]
+    }
+    # The exact-head Windows gate observed a real in-family renderer FromHandle
+    # result while host/desktop routes stalled. Try the renderer subtree as a
+    # fourth independent genuine UIA route; native identity alone never passes.
+    $rendererProcessId = 0
+    if ($nativeRendererHandle -ne [IntPtr]::Zero) {
+        $rendererProcessId = [AutosportNativeWindows]::ProcessIdForHandle($nativeRendererHandle)
+    }
+    $rendererCandidateValid = (
+        $nativeRendererHandle -ne [IntPtr]::Zero -and
+        $rendererProcessId -gt 0 -and
+        ($ProcessIds -contains $rendererProcessId)
+    )
     $processIdsCsv = (@($ProcessIds | Sort-Object -Unique) -join ',')
     $childSearchScript = ${function:Find-UiaSemanticViaChildren}
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_START_PROBE'
+    foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS', 'RENDERER')) {
+    if ($workerMode -eq 'RENDERER' -and -not $rendererCandidateValid) { continue }
+    $workerCompleted = [System.Threading.ManualResetEventSlim]::new($false)
+    $workerProgress = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
     $desktopJob = Start-ThreadJob -ScriptBlock {
         param(
-            [string]$ProcessIdsCsv, [string]$AutomationId, [int]$RootProcessId,
-            [DateTime]$Deadline, [object]$ResultQueue, [object]$CompletionSignal,
+            [string]$Mode, [string]$ProcessIdsCsv, [string]$AutomationId, [int]$RootProcessId,
+            [int]$PointX, [int]$PointY, [IntPtr]$RendererHandle,
+            [int]$RendererProcessId, [DateTime]$Deadline,
+            [object]$ResultQueue, [object]$CompletionSignal,
             [object]$ProgressQueue, [scriptblock]$ChildSearchScript
         )
         function Write-ExternalUiaProgress {
@@ -940,9 +1738,13 @@ function Find-UiaRootWithElementForProcessFamily {
             $ProgressQueue.Enqueue($Stage)
         }
         function Find-BoundedUiaSemanticViaChildren {
-            param($Root, [string]$AutomationId, [DateTime]$Deadline)
-            # Already in bounded MTA job, so reuse the genuine RawView walker.
-            & $ChildSearchScript -Root $Root -AutomationId $AutomationId -Deadline $Deadline
+            param(
+                $Root, [string]$AutomationId, [DateTime]$Deadline,
+                [IntPtr]$NativeWindowHandle = [IntPtr]::Zero,
+                [int]$ExpectedProcessId = 0
+            )
+            # The real RawView walker runs only inside this bounded MTA worker.
+            & $ChildSearchScript -Root $Root -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $NativeWindowHandle -ExpectedProcessId $ExpectedProcessId
         }
         function New-BoundedUiaPair {
             param($Window, $Element)
@@ -958,12 +1760,38 @@ function Find-UiaRootWithElementForProcessFamily {
             $ProcessIds = [int[]]@($ProcessIdsCsv.Split(',') | ForEach-Object {
                 [int]::Parse($_, [System.Globalization.CultureInfo]::InvariantCulture)
             })
-        # Desktop ProcessIdProperty FindAll (38861632532) and FindFirst
-        # (38874072815) both blocked on this real Windows provider. Before
-        # querying all desktop children, try a different *real UIA* entry point:
-        # the currently focused element of the packaged process and its bounded
-        # process-owned RawView ancestor. This never sends keys, probes a
-        # foreign-process subtree or treats OS HWNDs as semantic evidence.
+        # Exact-head Windows Candidate 40049683170 blocks in FromPoint even
+        # after native foreground CLAIMED and WM_GETOBJECT DELIVERED. Give the
+        # independent genuine FocusedElement/RawView path a chance first.
+        # A prior focus attempt blocked before renderer initialization; this
+        # attempt follows the verified bounded renderer accessibility request.
+        # Never infer success from OS focus or HWND; require genuine in-family ID.
+        if ($Mode -eq 'RENDERER') {
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_RENDERER_PROBE'
+        if (
+            $RendererHandle -ne [IntPtr]::Zero -and
+            $RendererProcessId -gt 0 -and
+            ($ProcessIds -contains $RendererProcessId)
+        ) {
+            $rendererPair = Find-BoundedUiaSemanticViaChildren -Root $null -AutomationId $AutomationId -Deadline $Deadline -NativeWindowHandle $RendererHandle -ExpectedProcessId $RendererProcessId
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_RENDERER_READY'
+            if ($null -ne $rendererPair) {
+                if (
+                    $rendererPair -isnot [pscustomobject] -or
+                    $rendererPair.Root -isnot [System.Windows.Automation.AutomationElement] -or
+                    $rendererPair.Element -isnot [System.Windows.Automation.AutomationElement] -or
+                    [string]$rendererPair.Element.Current.AutomationId -cne $AutomationId -or
+                    -not ($ProcessIds -contains [int]$rendererPair.Element.Current.ProcessId) -or
+                    [int]$rendererPair.Root.Current.ProcessId -ne $RendererProcessId
+                ) {
+                    throw 'External UIA renderer candidate failed genuine semantic identity'
+                }
+                $ResultQueue.Enqueue([object]$rendererPair)
+                return
+            }
+        }
+        }
+        if ($Mode -eq 'FOCUS') {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_PROBE'
         $focusedElement = [System.Windows.Automation.AutomationElement]::FocusedElement
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_FOCUS_READY'
@@ -1001,6 +1829,60 @@ function Find-UiaRootWithElementForProcessFamily {
                 }
             }
         }
+        }
+        # An independent MTA worker runs each alternative, so a stalled
+        # FocusedElement cannot starve the process-scoped or point route.
+        # After an unsuccessful real focused-element probe, try the independent
+        # real UIA render-center path. This may still block in the provider;
+        # the isolated worker timeout must remain FAIL, never a synthetic ID.
+        if ($Mode -eq 'POINT') {
+        if ($PointX -ne [int]::MinValue -and $PointY -ne [int]::MinValue) {
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_PROBE'
+            $pointElement = [System.Windows.Automation.AutomationElement]::FromPoint(
+                [System.Windows.Point]::new([double]$PointX, [double]$PointY)
+            )
+            Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_READY'
+            if ($null -ne $pointElement) {
+                $pointPid = [int]$pointElement.Current.ProcessId
+                if ($ProcessIds -contains $pointPid) {
+                    $pointWalker = [System.Windows.Automation.TreeWalker]::RawViewWalker
+                    $pointRoot = $pointElement
+                    $pointHops = 0
+                    while ($pointHops -lt 64 -and [DateTime]::UtcNow -lt $Deadline) {
+                        $pointHops += 1
+                        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_ID_PROBE'
+                        if ([string]$pointRoot.Current.AutomationId -ceq $AutomationId) {
+                            $ResultQueue.Enqueue([object](New-BoundedUiaPair -Window $pointRoot -Element $pointRoot))
+                            return
+                        }
+                        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_PARENT_PROBE'
+                        $pointParent = $pointWalker.GetParent($pointRoot)
+                        if ($null -eq $pointParent) { break }
+                        if (-not ($ProcessIds -contains [int]$pointParent.Current.ProcessId)) { break }
+                        $pointRoot = $pointParent
+                    }
+                    if ($pointHops -ge 64) {
+                        throw 'External UIA point ancestor traversal exceeded its bound'
+                    }
+                    if ([DateTime]::UtcNow -lt $Deadline) {
+                        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_POINT_CHILD_PROBE'
+                        $pointSemantic = Find-BoundedUiaSemanticViaChildren -Root $pointRoot -AutomationId $AutomationId -Deadline $Deadline
+                        if ($null -ne $pointSemantic) {
+                            if (
+                                [string]$pointSemantic.Current.AutomationId -cne $AutomationId -or
+                                -not ($ProcessIds -contains [int]$pointSemantic.Current.ProcessId)
+                            ) {
+                                throw 'External UIA point candidate failed semantic identity'
+                            }
+                            $ResultQueue.Enqueue([object](New-BoundedUiaPair -Window $pointRoot -Element $pointSemantic))
+                            return
+                        }
+                    }
+                }
+            }
+        }
+        }
+        if ($Mode -eq 'ROOT') {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_PROBE'
         $desktop = [System.Windows.Automation.AutomationElement]::RootElement
         Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_ROOT_READY'
@@ -1057,29 +1939,71 @@ function Find-UiaRootWithElementForProcessFamily {
                 }
             }
         }
+        }
         } catch [System.Windows.Automation.ElementNotAvailableException] {
             # Stale UIA provider data cannot confer semantic readiness.
         } finally {
             $CompletionSignal.Set()
         }
     } -ArgumentList @(
-        $processIdsCsv, $AutomationId, $RootProcessId, $Deadline,
+        $workerMode, $processIdsCsv, $AutomationId, $RootProcessId, $pointX, $pointY,
+        $nativeRendererHandle, $rendererProcessId, $Deadline,
         $workerResults, $workerCompleted, $workerProgress, $childSearchScript
-    )
+    ) -ThrottleLimit 16
+    $workerStates += [pscustomobject]@{
+        Mode = $workerMode
+        Completion = $workerCompleted
+        Progress = $workerProgress
+        Job = $desktopJob
+    }
+    }
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_WAIT_PROBE'
-    $workerTerminal = $workerCompleted.Wait($budgetSeconds * 1000)
-    if (-not $workerTerminal) {
-        $lastWorkerStage = 'NOT_ENTERED'
-        $workerStage = $null
-        while ($workerProgress.TryDequeue([ref]$workerStage)) {
-            $lastWorkerStage = [string]$workerStage
+    $workerDeadline = [DateTime]::UtcNow.AddSeconds($budgetSeconds)
+    if ($Deadline -lt $workerDeadline) { $workerDeadline = $Deadline }
+    $result = $null
+    # Never wait synchronously on one possibly blocked UIA worker. Poll only
+    # thread-safe result queues and completion events; the outer process is
+    # the final watchdog for hung COM providers.
+    while ([DateTime]::UtcNow -lt $workerDeadline) {
+        if ($workerResults.TryDequeue([ref]$result)) { break }
+        $allCompleted = $true
+        foreach ($state in $workerStates) {
+            if (-not $state.Completion.Wait(0)) {
+                $allCompleted = $false
+                break
+            }
         }
-        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE'
-        # Persist which bounded COM operation stalled so the real Windows
-        # runner can distinguish focus/root/enumeration/provider failures.
-        # Fail closed for anything not in the audit's exact fixed vocabulary.
+        if ($allCompleted) { break }
+        Start-Sleep -Milliseconds 25
+    }
+    if ($null -eq $result) {
+        [void]$workerResults.TryDequeue([ref]$result)
+    }
+    if ($null -ne $result) {
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_RESULT_PROBE'
+        if (
+            $result -isnot [pscustomobject] -or
+            $result.Root -isnot [System.Windows.Automation.AutomationElement] -or
+            $result.Element -isnot [System.Windows.Automation.AutomationElement]
+        ) {
+            throw 'External desktop UIA semantic worker returned invalid evidence'
+        }
+        return $result
+    }
+    $unfinished = @($workerStates | Where-Object { -not $_.Completion.Wait(0) })
+    if ($unfinished.Count -gt 0) {
+        # Snapshot all independently launched routes before any result is lost.
+        # The old single-stage report selected the first unfinished route,
+        # concealing whether POINT and FOCUS also stalled on real UIA calls.
         $allowedDesktopWorkerStages = @(
             'NOT_ENTERED',
+            'SEMANTIC_DESKTOP_RENDERER_PROBE',
+            'SEMANTIC_DESKTOP_RENDERER_READY',
+            'SEMANTIC_DESKTOP_POINT_PROBE',
+            'SEMANTIC_DESKTOP_POINT_READY',
+            'SEMANTIC_DESKTOP_POINT_ID_PROBE',
+            'SEMANTIC_DESKTOP_POINT_PARENT_PROBE',
+            'SEMANTIC_DESKTOP_POINT_CHILD_PROBE',
             'SEMANTIC_DESKTOP_FOCUS_PROBE',
             'SEMANTIC_DESKTOP_FOCUS_READY',
             'SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE',
@@ -1095,29 +2019,39 @@ function Find-UiaRootWithElementForProcessFamily {
             'SEMANTIC_PRIMARY_DESCENDANT_PROBE',
             'SEMANTIC_CHILD_DESCENDANT_PROBE'
         )
+        $lastWorkerStage = 'NOT_ENTERED'
+        foreach ($state in $workerStates) {
+            $routeStage = 'NOT_ENTERED'
+            $workerStage = $null
+            while ($state.Progress.TryDequeue([ref]$workerStage)) {
+                $routeStage = [string]$workerStage
+            }
+            if ($state.Completion.Wait(0)) {
+                $script:lastDesktopWorkerRouteStages[$state.Mode] = 'COMPLETED'
+            } else {
+                $safeStage = if ($allowedDesktopWorkerStages -ccontains $routeStage) {
+                    $routeStage
+                } else {
+                    'UNKNOWN_FIXED_STAGE'
+                }
+                $script:lastDesktopWorkerRouteStages[$state.Mode] = $safeStage
+                if ($lastWorkerStage -eq 'NOT_ENTERED') { $lastWorkerStage = $safeStage }
+            }
+        }
+        Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE'
         $script:lastDesktopWorkerStage = if ($allowedDesktopWorkerStages -ccontains $lastWorkerStage) {
             $lastWorkerStage
         } else {
             'UNKNOWN_FIXED_STAGE'
         }
         $script:semanticWorkerTimedOut = $true
-        # Do not synchronously Stop-Job or reenter a stalled COM provider.
-        # The enclosing audit process owns cleanup; timeout is always FAIL.
+        $script:semanticFailureClass = 'DESKTOP_WORKER_TIMEOUT'
+        # Do not Stop-Job, Remove-Job or reenter a stalled provider. The outer
+        # Windows audit process owns termination. A timeout without an actual
+        # semantic witness is always FAIL.
         throw "External desktop UIA worker timed out without a real semantic witness; last_desktop_stage=$lastWorkerStage"
     }
-    Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_RESULT_PROBE'
-    $result = $null
-    $hasResult = $workerResults.TryDequeue([ref]$result)
-    $workerCompleted.Dispose()
-    if (-not $hasResult) { return $null }
-    if (
-        $result -isnot [pscustomobject] -or
-        $result.Root -isnot [System.Windows.Automation.AutomationElement] -or
-        $result.Element -isnot [System.Windows.Automation.AutomationElement]
-    ) {
-        throw 'External desktop UIA semantic worker returned invalid evidence'
-    }
-    return $result
+    foreach ($state in $workerStates) { $state.Completion.Dispose() }
     return $null
 }
 
@@ -1181,18 +2115,38 @@ $report = [ordered]@{
     launcher_exit_state = 'NOT_OBSERVED'
     launcher_exit_code = $null
     initial_window_observed = $false
+    native_foreground_activation_status = 'NOT_RUN'
+    native_foreground_top_level_counts = $null
+    native_foreground_top_level_class = 'NOT_OBSERVED'
     observed_window_class = 'NOT_OBSERVED'
     last_observed_process_family_count = 0
     native_semantic_candidate_buckets = $null
+    native_renderer_accessibility_message_status = 'NOT_ATTEMPTED'
+    native_host_message_status = 'NOT_ATTEMPTED'
+    native_host_focus_status = 'NOT_ATTEMPTED'
+    isolated_host_handle_status = 'NOT_ATTEMPTED'
+    isolated_renderer_handle_status = 'NOT_ATTEMPTED'
+    isolated_mta_focus_diagnostic_status = 'NOT_RUN'
     semantic_desktop_worker_timeout = $false
     semantic_desktop_worker_last_stage = 'NOT_RUN'
+    semantic_desktop_worker_route_stages = $null
     process_id = $null
     process_family_ids = @()
     root_name = $null
     descendant_count = 0
     duplicate_launch_status = 'NOT_RUN'
+    duplicate_start_diagnostic = 'NOT_RUN'
+    duplicate_start_worker_stage = 'NOT_RUN'
+    duplicate_dialog_probe_diagnostic = 'NOT_RUN'
     duplicate_launch_exit_code = $null
     duplicate_launch_dialog_title = $null
+    duplicate_python_stacks = $null
+    duplicate_process_state = 'NOT_OBSERVED'
+    duplicate_process_exit_code = $null
+    duplicate_process_family_count = 0
+    duplicate_visible_window_count = 0
+    automation_error_line = 0
+    automation_error_category = 0
     normal_close_status = 'NOT_RUN'
     normal_close_exit_code = $null
     runtime_witness_status = 'NOT_REQUESTED'
@@ -1242,35 +2196,23 @@ try {
     $report.launcher_process_id = $process.Id
     Write-ExternalUiaProgress -Stage 'WINDOW_LAUNCHED'
     $deadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    # Wait for the OS window without touching its UIA provider.  The frozen
+    # duplicate-launch control passed when no primary COM access preceded it.
+    $startupNativeObserved = $false
     while ([DateTime]::UtcNow -lt $deadline) {
         $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
-        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
-        if ($null -ne $uiaRoot) { break }
+        foreach ($startupFamilyId in $lastFamilyIds) {
+            $startupWindows = @([AutosportNativeWindows]::VisibleTopLevelWindowsForProcess([int]$startupFamilyId))
+            if ($startupWindows.Count -gt 0) {
+                $startupNativeObserved = $true
+                break
+            }
+        }
+        if ($startupNativeObserved) { break }
         Start-Sleep -Milliseconds 250
     }
-    if ($null -eq $uiaRoot) {
-        throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
-    }
-    $report.initial_window_observed = $true
-    Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'
-
-    # Record the exact last bounded diagnostic before a potentially blocking
-    # native UIA provider property read. Native emergency/startup dialogs must
-    # fail closed here, not be misinterpreted as missing semantic WebView DOM.
-    # UIA window names never enter the progress file or the error text.
-    Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'
-    $initialNativeName = ''
-    try { $initialNativeName = [string]$uiaRoot.Current.Name } catch {}
-    if ([string]::Equals($initialNativeName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
-        throw 'Packaged native emergency window is not semantic WebView2 readiness'
-    }
-    if ([string]::Equals($initialNativeName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
-        throw 'Packaged native startup-error window is not semantic WebView2 readiness'
-    }
-    if ([string]::Equals($initialNativeName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
-        $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
+    if (-not $startupNativeObserved) {
+        throw 'Timed out waiting for a real OS-visible primary product window'
     }
 
     # Native host visibility is not semantic readiness. The local native HWND
@@ -1300,9 +2242,306 @@ try {
             throw "Packaged WebView2 runtime witness unavailable before semantic UIA probe"
         }
     }
+
+    # Launch and fully verify the mandatory second normal instance before the
+    # deep semantic COM/UIA traversal. Exact Windows Candidate evidence showed
+    # that launching it after the traversal produced a live two-process
+    # PyInstaller family with no Python/native dialog surface for 90 seconds.
+    # The product-owned runtime witness above can only be published from inside
+    # _run_owned_interactive_gui, while both interactive locks are held. It is
+    # therefore the earliest safe ordering point for the real duplicate launch.
+    # The dialog copy/dismissal, absence of a second semantic surface and exact
+    # exit code remain mandatory; this reordering grants no acceptance by itself.
+    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_PROBE'
+    $duplicateStartResults = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
+    $duplicateStartOutcomes = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $duplicateStartStages = [System.Collections.Concurrent.ConcurrentQueue[string]]::new()
+    $duplicateStartCompleted = [System.Threading.ManualResetEventSlim]::new($false)
+    # PowerShell enumerates empty queues in @(); preserve six exact object slots.
+    $duplicateStartArguments = [object[]]::new(6)
+    $duplicateStartArguments[0] = $exePath
+    $duplicateStartArguments[1] = $launchWorkingDirectory
+    $duplicateStartArguments[2] = $duplicateStartResults
+    $duplicateStartArguments[3] = $duplicateStartOutcomes
+    $duplicateStartArguments[4] = $duplicateStartCompleted
+    $duplicateStartArguments[5] = $duplicateStartStages
+    try {
+        $duplicateStartWorker = Start-ThreadJob -ScriptBlock {
+            param(
+                [string]$exePath, [string]$launchWorkingDirectory,
+                [object]$Results, [object]$Outcomes, [object]$Completion,
+                [object]$Stages
+            )
+            try {
+                $Stages.Enqueue('WORKER_ENTER')
+                # Bypass Start-Process/ShellExecute's synchronous Windows
+                # invocation path. The worker is bounded by the independent
+                # completion event and runs before deep semantic COM traversal.
+                $startInfo = [System.Diagnostics.ProcessStartInfo]::new()
+                $startInfo.FileName = $exePath
+                $startInfo.WorkingDirectory = $launchWorkingDirectory
+                $startInfo.UseShellExecute = $true
+                $startInfo.CreateNoWindow = $false
+                $duplicateProcess = [System.Diagnostics.Process]::new()
+                $duplicateProcess.StartInfo = $startInfo
+                $Stages.Enqueue('PROCESS_START_PROBE')
+                if (-not $duplicateProcess.Start()) {
+                    $Outcomes.Enqueue('INVALID_PROCESS')
+                    $Stages.Enqueue('INVALID_PROCESS')
+                    $duplicateProcess.Dispose()
+                } elseif ([int]$duplicateProcess.Id -gt 0) {
+                    $Results.Enqueue($duplicateProcess)
+                    $Outcomes.Enqueue('RETURNED')
+                    $Stages.Enqueue('PROCESS_RETURNED')
+                } else {
+                    $Outcomes.Enqueue('INVALID_PROCESS')
+                    $Stages.Enqueue('INVALID_PROCESS')
+                    $duplicateProcess.Dispose()
+                }
+            } catch {
+                # Never publish exception text, executable path, PID or command line.
+                $Outcomes.Enqueue('LAUNCH_FAILED')
+                $Stages.Enqueue('PROCESS_EXCEPTION')
+            } finally {
+                $Completion.Set()
+            }
+        } -ArgumentList $duplicateStartArguments -ThrottleLimit 16
+    } catch {
+        $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
+        $report.duplicate_start_worker_stage = 'WORKER_LAUNCH_FAILED'
+        throw 'Second packaged launch worker could not start'
+    }
+    # Read only fixed, non-sensitive worker stages; no ThreadJob State/Receive-Job
+    # or Stop-Job call may reenter a blocked UIA/PowerShell provider.
+    $duplicateStartTerminal = $duplicateStartCompleted.Wait(6000)
+    $report.duplicate_start_worker_stage = 'NOT_ENTERED'
+    [string]$duplicateWorkerStage = $null
+    while ($duplicateStartStages.TryDequeue([ref]$duplicateWorkerStage)) {
+        $report.duplicate_start_worker_stage = [string]$duplicateWorkerStage
+    }
+    if (-not $duplicateStartTerminal) {
+        $report.duplicate_start_diagnostic = 'TIMED_OUT'
+        throw 'Second packaged launch bounded process creation timed out'
+    }
+    [string]$duplicateStartOutcome = $null
+    if (-not $duplicateStartOutcomes.TryDequeue([ref]$duplicateStartOutcome)) {
+        $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
+        throw 'Second packaged launch worker returned no outcome'
+    }
+    if ($duplicateStartOutcome -ne 'RETURNED') {
+        if ($duplicateStartOutcome -eq 'INVALID_PROCESS') {
+            $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
+        } else {
+            $report.duplicate_start_diagnostic = 'LAUNCH_FAILED'
+        }
+        throw 'Second packaged launch did not return a valid process'
+    }
+    [object]$duplicateStarted = $null
+    if (-not $duplicateStartResults.TryDequeue([ref]$duplicateStarted) -or
+        $null -eq $duplicateStarted) {
+        $report.duplicate_start_diagnostic = 'EMPTY_RESULT'
+        throw 'Second packaged launch did not return a valid process'
+    }
+    try {
+        $duplicateProcess = [System.Diagnostics.Process]$duplicateStarted
+        if ($null -eq $duplicateProcess -or [int]$duplicateProcess.Id -le 0) {
+            throw 'Invalid process receipt'
+        }
+    } catch {
+        $report.duplicate_start_diagnostic = 'INVALID_PROCESS'
+        throw 'Second packaged launch returned invalid process receipt'
+    }
+    $report.duplicate_start_diagnostic = 'RETURNED'
+    $duplicateStartCompleted.Dispose()
+    Write-ExternalUiaProgress -Stage 'DUPLICATE_START_PROCESS_READY'
+    # The one-file duplicate still receives a bounded startup allowance. This
+    # budget is independent of, and precedes, the semantic UIA budget below.
+    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds(
+        [Math]::Max(90, $TimeoutSeconds)
+    )
+    $report.duplicate_dialog_probe_diagnostic = 'NOT_RUN'
+    $duplicateDialogObserved = $false
+    $duplicateFamilyIds = @([int]$duplicateProcess.Id)
+    $nextDuplicateFamilyProbe = [DateTime]::MinValue
+    while ([DateTime]::UtcNow -lt $duplicateDeadline) {
+        if ([DateTime]::UtcNow -ge $nextDuplicateFamilyProbe) {
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_PROBE'
+            $duplicateFamilyIds = @(
+                Get-BoundedDuplicateProcessFamilyIds -RootProcessId $duplicateProcess.Id
+            )
+            $report.duplicate_process_family_count = [int]$duplicateFamilyIds.Count
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_PROCESS_FAMILY_READY'
+            Write-ExternalUiaProgress -Stage 'DUPLICATE_UIA_ROOT_PROBE'
+            $duplicateNativeHandles = @(
+                foreach ($duplicateFamilyId in $duplicateFamilyIds) {
+                    [AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(
+                        [int]$duplicateFamilyId
+                    )
+                }
+            )
+            if ($duplicateNativeHandles.Count -gt 4096) {
+                throw 'Second packaged launch native dialog census exceeded limit'
+            }
+            $report.duplicate_visible_window_count = [int]$duplicateNativeHandles.Count
+            $duplicateProbe = Invoke-IsolatedDuplicateDialogProbe `
+                -ProcessIds $duplicateFamilyIds `
+                -WindowHandles ([IntPtr[]]$duplicateNativeHandles)
+            $report.duplicate_dialog_probe_diagnostic = [string]$duplicateProbe
+            if ($duplicateProbe -ceq 'DIALOG_CLOSED') {
+                $duplicateDialogObserved = $true
+                $report.duplicate_launch_dialog_title = 'Автоспорт — помилка запуску'
+                break
+            }
+            if ($duplicateProbe -cin @(
+                'SECOND_SEMANTIC_SURFACE', 'AMBIGUOUS_DIALOG', 'COPY_MISMATCH',
+                'APARTMENT_ERROR', 'NO_PROCESS_FAMILY', 'PROVIDER_ERROR',
+                'INVALID_RESULT', 'LAUNCH_ERROR', 'UNAVAILABLE'
+            )) {
+                throw "Second packaged launch duplicate-dialog probe failed closed; fixed_code=$duplicateProbe"
+            }
+            $nextDuplicateFamilyProbe = [DateTime]::UtcNow.AddMilliseconds(1000)
+        }
+        Start-Sleep -Milliseconds 250
+    }
+    if (-not $duplicateDialogObserved) {
+        $duplicateExitState = 'unavailable'
+        try {
+            $duplicateProcess.Refresh()
+            if ($duplicateProcess.HasExited) {
+                $duplicateExitState = "exited:$([int]$duplicateProcess.ExitCode)"
+            } else {
+                $duplicateExitState = 'running'
+            }
+        } catch {
+            $duplicateExitState = 'unavailable'
+        }
+        $duplicateObservedFamilyCount = @($duplicateFamilyIds).Count
+        throw "Second packaged launch did not expose the bounded duplicate-instance dialog (process=$duplicateExitState; family_count=$duplicateObservedFamilyCount; fixed_code=$($report.duplicate_dialog_probe_diagnostic))"
+    }
+
+    if (-not $duplicateProcess.WaitForExit(5000)) {
+        throw "Second packaged launch did not terminate after duplicate-instance dialog dismissal"
+    }
+    if ($duplicateProcess.ExitCode -ne 2) {
+        throw "Second packaged launch returned unexpected exit code $($duplicateProcess.ExitCode)"
+    }
+    $report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode
+    $report.duplicate_launch_status = 'PASS'
+
+    # The real primary UIA root and startup-error checks remain mandatory after
+    # the duplicate process has displayed its dialog and exited with code 2.
+    $primaryUiaDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    while ([DateTime]::UtcNow -lt $primaryUiaDeadline) {
+        $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+        $uiaRoot = Find-UiaRootForProcessFamily -ProcessIds $lastFamilyIds
+        if ($null -ne $uiaRoot) { break }
+        Start-Sleep -Milliseconds 250
+    }
+    if ($null -eq $uiaRoot) {
+        throw "Timed out waiting for an externally inspectable Autosport main window across packaged process family"
+    }
+    $report.initial_window_observed = $true
+    Write-ExternalUiaProgress -Stage 'NATIVE_WINDOW_OBSERVED'
+    Write-ExternalUiaProgress -Stage 'NATIVE_ROOT_NAME_PROBE'
+    $initialNativeName = ''
+    try { $initialNativeName = [string]$uiaRoot.Current.Name } catch {}
+    if ([string]::Equals($initialNativeName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
+        throw 'Packaged native emergency window is not semantic WebView2 readiness'
+    }
+    if ([string]::Equals($initialNativeName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
+        throw 'Packaged native startup-error window is not semantic WebView2 readiness'
+    }
+    if ([string]::Equals($initialNativeName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
+        $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
+    }
+
+    # Startup and semantic provider readiness are two independent bounded
+    # phases. Windows Candidate 40032504012 published the genuine runtime
+    # witness near the end of the launch budget, leaving zero time for the
+    # mandatory desktop UIA probe and producing DESKTOP_BUDGET_EXHAUSTED.
+    # Start a fresh finite semantic budget only after the product-owned witness
+    # exists. The workflow's independent 120-second process watchdog remains
+    # authoritative, and every AutomationId/keyboard/STOP/LiveRegion gate below
+    # is still required; this does not turn a native HWND or witness into PASS.
+    $semanticDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
+    # WinForms UIA calibration #40017780628 succeeded only after native host
+    # activation. The packaged WebView2 client may otherwise be backgrounded
+    # before its first accessibility request. Claim only the exact launched
+    # process's visible main HWND, without querying the UIA COM provider.
+    # A denied foreground claim remains diagnostic; no HWND or focus state
+    # substitutes for the mandatory automation_id=330 semantic witness.
+    $report.native_foreground_activation_status = 'NOT_CLAIMED'
+    # A native HWND may belong to the launcher or a WebView2 child process.
+    # Count only OS-enumerated top-level HWNDs, in four fixed categories.
+    # This cannot establish UIA/keyboard/STOP/LiveRegion acceptance.
+    try {
+        $foregroundFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
+        $topLevelCounts = [AutosportNativeWindows]::TopLevelProcessOwnershipCounts(
+            [int]$process.Id, [int[]]$foregroundFamilyIds
+        )
+        $report.native_foreground_top_level_counts = [ordered]@{
+            LAUNCHER_VISIBLE = [int]$topLevelCounts[0]
+            LAUNCHER_HIDDEN = [int]$topLevelCounts[1]
+            FAMILY_CHILD_VISIBLE = [int]$topLevelCounts[2]
+            FAMILY_CHILD_HIDDEN = [int]$topLevelCounts[3]
+        }
+        if ($topLevelCounts[0] -gt 0) {
+            $report.native_foreground_top_level_class = 'LAUNCHER_VISIBLE'
+        } elseif ($topLevelCounts[2] -gt 0) {
+            $report.native_foreground_top_level_class = 'FAMILY_CHILD_VISIBLE_ONLY'
+        } else {
+            $report.native_foreground_top_level_class = 'NO_VISIBLE_FAMILY_TOP_LEVEL'
+        }
+    } catch {
+        # A failed OS census is UNKNOWN, not UIA success or provider evidence.
+        $report.native_foreground_top_level_class = 'UNAVAILABLE'
+    }
+    try {
+        $process.Refresh()
+        if ([AutosportNativeWindows]::TryClaimForegroundForProcess(
+            $process.MainWindowHandle, [int]$process.Id
+        )) {
+            $report.native_foreground_activation_status = 'CLAIMED'
+        }
+        if ($report.native_foreground_activation_status -ne 'CLAIMED') {
+            # MainWindowHandle can be zero/stale. Only actual visible TOP-LEVEL
+            # HWNDs of the exact launcher may be foreground candidates; never
+            # retry renderer/child HWNDs or use native focus as semantic evidence.
+            $exactLauncherWindows = [AutosportNativeWindows]::VisibleTopLevelWindowsForProcess(
+                [int]$process.Id
+            )
+            foreach ($candidateHandle in $exactLauncherWindows) {
+                if ([AutosportNativeWindows]::TryClaimForegroundForProcess(
+                    $candidateHandle, [int]$process.Id
+                )) {
+                    $report.native_foreground_activation_status = 'CLAIMED'
+                    break
+                }
+            }
+        }
+        if (
+            $report.native_foreground_activation_status -ne 'CLAIMED' -and
+            $report.native_foreground_top_level_class -eq 'FAMILY_CHILD_VISIBLE_ONLY' -and
+            [AutosportNativeWindows]::TryClaimForegroundForVisibleFamilyHost(
+                [int]$process.Id, [int[]]$foregroundFamilyIds
+            )
+        ) {
+            # Only OS foreground was claimed; AutomationId=330 and all other
+            # external accessibility witnesses below remain mandatory.
+            $report.native_foreground_activation_status = 'CLAIMED'
+        }
+    } catch {
+        # Foreground restrictions are not semantic evidence; retain fail-closed UIA.
+    }
+    # Optional MTA FocusedElement diagnostics must not precede the mandatory
+    # semantic probe: a timed-out external COM request can poison the WebView2
+    # provider before the real AutomationId/keyboard/STOP/LiveRegion gate.
+    # Run this differential only after semantic readiness has already FAILED.
     $semanticReady = $null
     $nextFamilyRefresh = [DateTime]::UtcNow.AddMilliseconds(1000)
-    while ([DateTime]::UtcNow -lt $deadline) {
+    while ([DateTime]::UtcNow -lt $semanticDeadline) {
         Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_PROBE'
         try {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_LOCAL_ROOT_ID_PROBE'
@@ -1323,7 +2562,7 @@ try {
             Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_PROBE'
             $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
             Write-ExternalUiaProgress -Stage 'SEMANTIC_FAMILY_IDS_READY'
-            $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330' -RootProcessId $process.Id -Deadline $deadline
+            $semanticSurface = Find-UiaRootWithElementForProcessFamily -ProcessIds $lastFamilyIds -AutomationId '330' -RootProcessId $process.Id -Deadline $semanticDeadline
             if ($null -ne $semanticSurface) {
                 $uiaRoot = $semanticSurface.Root
                 $semanticReady = $semanticSurface.Element
@@ -1334,6 +2573,13 @@ try {
         Start-Sleep -Milliseconds 100
     }
     if ($null -eq $semanticReady -or $null -eq $uiaRoot) {
+        # Failure-only, killable MTA differential. A returned ID is diagnostic,
+        # NEVER acceptance, and cannot affect an otherwise passing UIA gate.
+        # Use the latest bounded family snapshot, not a stale startup PID set.
+        $report.isolated_mta_focus_diagnostic_status = Get-IsolatedMtaFocusDiagnostic -ProcessIds ([int[]]$lastFamilyIds)
+        if ($script:semanticFailureClass -eq 'NOT_OBSERVED') {
+            $script:semanticFailureClass = 'SEMANTIC_NOT_OBSERVED'
+        }
         throw "Timed out waiting for WebView2 semantic UIA readiness (automation_id=330) across packaged process family"
     }
 
@@ -1388,94 +2634,6 @@ try {
         $report.runtime_witness_status = 'PASS'
         Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'
     }
-
-    # While the real packaged semantic shell is alive, a second normal launch must
-    # fail at the product-owned interactive lock boundary rather than opening a
-    # second WebView2/operator instance against either shared mutable root.
-    $duplicateProcess = Start-Process -FilePath $exePath -WorkingDirectory $launchWorkingDirectory -PassThru
-    # The packaged second process must be given the caller's actual bounded
-    # startup allowance. Ten seconds proved insufficient on the Windows candidate
-    # while the launcher was still running; the UIA gate remains fail-closed.
-    $duplicateDeadline = [DateTime]::UtcNow.AddSeconds($TimeoutSeconds)
-    $duplicateRoot = $null
-    $duplicateFamilyIds = @([int]$duplicateProcess.Id)
-    $nextDuplicateFamilyProbe = [DateTime]::MinValue
-    while ([DateTime]::UtcNow -lt $duplicateDeadline) {
-        # Avoid repeating expensive CIM process-tree and desktop UIA scans every
-        # 100ms on a busy Windows runner. Never infer lock success from process
-        # state: require the same externally observed native dialog as before.
-        if ([DateTime]::UtcNow -ge $nextDuplicateFamilyProbe) {
-            $duplicateFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id)
-            $duplicateRoot = Find-UiaRootForProcessFamily -ProcessIds $duplicateFamilyIds
-            if ($null -ne $duplicateRoot) { break }
-            $nextDuplicateFamilyProbe = [DateTime]::UtcNow.AddMilliseconds(1000)
-        }
-        Start-Sleep -Milliseconds 250
-    }
-    if ($null -eq $duplicateRoot) {
-        # Preserve FAIL: a missing externally observed dialog is never evidence
-        # that the interactive lock or native keyboard fallback worked. Record
-        # only bounded process metadata, not workspace paths or exception text.
-        $duplicateExitState = 'unavailable'
-        try {
-            $duplicateProcess.Refresh()
-            if ($duplicateProcess.HasExited) {
-                $duplicateExitState = "exited:$([int]$duplicateProcess.ExitCode)"
-            } else {
-                $duplicateExitState = 'running'
-            }
-        } catch {
-            $duplicateExitState = 'unavailable'
-        }
-        $duplicateObservedFamilyCount = @($duplicateFamilyIds).Count
-        throw "Second packaged launch did not expose the bounded duplicate-instance dialog (process=$duplicateExitState; family_count=$duplicateObservedFamilyCount)"
-    }
-
-    $duplicateTitle = [string]$duplicateRoot.Current.Name
-    $report.duplicate_launch_dialog_title = $duplicateTitle
-    if ($duplicateTitle -ne 'Автоспорт — помилка запуску') {
-        throw "Second packaged launch exposed an unexpected top-level window"
-    }
-    if ($null -ne (Find-UiaElementForProcessFamily -ProcessIds $duplicateFamilyIds -AutomationId '330')) {
-        throw "Second packaged launch exposed a second semantic WebView operator surface"
-    }
-
-    $duplicateNames = @()
-    try {
-        $duplicateDescendants = $duplicateRoot.FindAll(
-            [System.Windows.Automation.TreeScope]::Descendants,
-            [System.Windows.Automation.Condition]::TrueCondition
-        )
-        foreach ($item in $duplicateDescendants) {
-            $name = [string]$item.Current.Name
-            if (-not [string]::IsNullOrWhiteSpace($name)) { $duplicateNames += $name }
-        }
-    } catch {
-        throw "Second packaged launch duplicate-instance dialog could not be inspected"
-    }
-    $duplicateText = $duplicateNames -join ' '
-    if ($duplicateText -notmatch 'уже відкритий' -or $duplicateText -notmatch 'Economic і live state не змінено') {
-        throw "Second packaged launch did not expose the bounded duplicate-instance recovery copy"
-    }
-
-    $duplicateWindowPattern = $null
-    if ($duplicateRoot.TryGetCurrentPattern(
-        [System.Windows.Automation.WindowPattern]::Pattern,
-        [ref]$duplicateWindowPattern
-    ) -and $null -ne $duplicateWindowPattern) {
-        ([System.Windows.Automation.WindowPattern]$duplicateWindowPattern).Close()
-    } else {
-        $duplicateRoot.SetFocus()
-        [System.Windows.Forms.SendKeys]::SendWait('%{F4}')
-    }
-    if (-not $duplicateProcess.WaitForExit(5000)) {
-        throw "Second packaged launch did not terminate after duplicate-instance dialog dismissal"
-    }
-    if ($duplicateProcess.ExitCode -ne 2) {
-        throw "Second packaged launch returned unexpected exit code $($duplicateProcess.ExitCode)"
-    }
-    $report.duplicate_launch_exit_code = [int]$duplicateProcess.ExitCode
-    $report.duplicate_launch_status = 'PASS'
 
     $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
     $report.process_id = [int]$uiaRoot.Current.ProcessId
@@ -1838,8 +2996,32 @@ try {
 } catch {
     if ($script:lastDesktopWorkerStage -ne 'NOT_RUN') {
         $report.failures += 'external UIA audit failed: desktop semantic worker timeout'
+    } elseif ($script:semanticFailureClass -eq 'NATIVE_WORKER_TIMEOUT') {
+        $report.failures += 'external UIA audit failed: native semantic worker timeout'
+    } elseif ($script:semanticFailureClass -eq 'DESKTOP_BUDGET_EXHAUSTED') {
+        $report.failures += 'external UIA audit failed: desktop semantic budget exhausted'
+    } elseif ($script:semanticFailureClass -eq 'SEMANTIC_NOT_OBSERVED') {
+        $report.failures += 'external UIA audit failed: semantic readiness not observed'
     } else {
         $report.failures += 'external UIA audit failed: unexpected automation error'
+    }
+    # ErrorRecord-owned numeric location/category only. Never persist exception
+    # text, provider properties, source excerpts, paths or arbitrary type names.
+    $report.automation_error_line = [int]$_.InvocationInfo.ScriptLineNumber
+    $report.automation_error_category = [int]$_.CategoryInfo.Category
+    if ($null -ne $duplicateProcess) {
+        $report.duplicate_python_stacks = Get-DuplicatePythonStackDiagnostics `
+            -ProcessIds ([int[]]$duplicateFamilyIds) -RootProcessId ([int]$duplicateProcess.Id)
+    }
+    # Optional independent diagnostics may inspect cached primitive HWNDs only
+    # after acceptance has already failed. They cannot set status or bypass any
+    # gate, and must not reenter even a separate provider after a native worker
+    # timeout has declared that provider poisoned.
+    if ($report.status -ne 'PASS' -and -not $script:semanticWorkerTimedOut) {
+        $script:isolatedHostHandleStatus = Get-IsolatedMtaHandleDiagnostic `
+            -Window $script:failureDiagnosticHostHandle -ProcessIds ([int[]]$lastFamilyIds)
+        $script:isolatedRendererHandleStatus = Get-IsolatedMtaHandleDiagnostic `
+            -Window $script:failureDiagnosticRendererHandle -ProcessIds ([int[]]$lastFamilyIds)
     }
 } finally {
     # Preserve a bounded count from the actual pre-cleanup UIA search. A vanished
@@ -1847,8 +3029,14 @@ try {
     # Export neither descendant PIDs nor native window names in this diagnostic.
     $report.last_observed_process_family_count = [int]@($lastFamilyIds).Count
     $report.native_semantic_candidate_buckets = $script:nativeSemanticCandidateBuckets
+    $report.native_renderer_accessibility_message_status = $script:nativeRendererAccessibilityMessageStatus
+    $report.native_host_message_status = $script:nativeHostMessageStatus
+    $report.native_host_focus_status = $script:nativeHostFocusStatus
+    $report.isolated_host_handle_status = $script:isolatedHostHandleStatus
+    $report.isolated_renderer_handle_status = $script:isolatedRendererHandleStatus
     $report.semantic_desktop_worker_timeout = ($script:lastDesktopWorkerStage -ne 'NOT_RUN')
     $report.semantic_desktop_worker_last_stage = $script:lastDesktopWorkerStage
+    $report.semantic_desktop_worker_route_stages = $script:lastDesktopWorkerRouteStages
     # Record bounded process-lifetime evidence BEFORE cleanup can kill a live
     # window. Do not disclose command lines, workspace paths, or environment.
     # A missing semantic automation id must remain a hard FAIL regardless.
@@ -1865,24 +3053,15 @@ try {
             $report.launcher_exit_state = 'UNAVAILABLE'
         }
     }
-    # Classify only fixed, product-owned window titles. Never export an
-    # arbitrary UIA Name, which could contain user data or a filesystem path.
-    # This is a pre-cleanup diagnostic, NOT proof of WebView readiness or PASS.
-    if ($null -ne $uiaRoot -and -not $script:semanticWorkerTimedOut) {
-        $report.observed_window_class = 'OTHER_OR_UNAVAILABLE'
-        try {
-            $observedWindowName = [string]$uiaRoot.Current.Name
-            if ([string]::Equals($observedWindowName, 'Автоспорт — резервне аварійне керування', [System.StringComparison]::Ordinal)) {
-                $report.observed_window_class = 'NATIVE_EMERGENCY_STOP'
-            } elseif ([string]::Equals($observedWindowName, 'Автоспорт — помилка запуску', [System.StringComparison]::Ordinal)) {
-                $report.observed_window_class = 'NATIVE_STARTUP_ERROR'
-            } elseif ([string]::Equals($observedWindowName, 'Автоспорт', [System.StringComparison]::Ordinal)) {
-                $report.observed_window_class = 'PRODUCT_MAIN_WINDOW'
-            }
-        } catch {
-            $report.observed_window_class = 'OTHER_OR_UNAVAILABLE'
-        }
-    }
+    # Never reenter the UIA COM provider during failure cleanup. A Windows
+    # candidate watchdog has observed a provider stall with no serialized audit
+    # JSON (run 39951554204, stage SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED).
+    # Even if the bounded desktop worker has not marked a timeout, a separate
+    # native/desktop provider read can still be poisoned. Re-reading
+    # $uiaRoot.Current.Name here could hang beyond the independent watchdog.
+    # Preserve only the fixed class recorded during the initial native-root
+    # probe above. Unknown stays NOT_OBSERVED/OTHER_OR_UNAVAILABLE, never PASS.
+    # No COM/UIA access is permitted in this cleanup path.
     if ($null -ne $liveRegionProbe) {
         try {
             $liveRegionProbe.Dispose()
@@ -1890,6 +3069,17 @@ try {
         $liveRegionProbe = $null
     }
     if ($null -ne $duplicateProcess) {
+        try {
+            $duplicateProcess.Refresh()
+            if ($duplicateProcess.HasExited) {
+                $report.duplicate_process_state = 'EXITED'
+                $report.duplicate_process_exit_code = [int]$duplicateProcess.ExitCode
+            } else {
+                $report.duplicate_process_state = 'RUNNING'
+            }
+        } catch {
+            $report.duplicate_process_state = 'UNAVAILABLE'
+        }
         try {
             $duplicateCleanupIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id | Sort-Object -Unique -Descending)
         } catch {
@@ -1924,6 +3114,41 @@ try {
                 }
             } catch {}
         }
+    }
+    # Project equality/presence from original in-memory observations BEFORE
+    # privacy scrubbing. A nonempty '[redacted]' sentinel is never proof that
+    # a path, title, or status matched the real request/product observation.
+    $report.launch_working_directory_verified = (
+        -not [string]::IsNullOrWhiteSpace($launchWorkingDirectory) -and
+        [string]::Equals([string]$report.launch_working_directory,
+            $launchWorkingDirectory, [System.StringComparison]::OrdinalIgnoreCase)
+    )
+    $report.duplicate_dialog_title_verified = (
+        [string]$report.duplicate_launch_dialog_title -ceq 'Автоспорт — помилка запуску'
+    )
+    $report.emergency_stop_status_text_present = (
+        -not [string]::IsNullOrWhiteSpace([string]$report.emergency_stop_status_text)
+    )
+    $report.live_region_event_text_present = (
+        -not [string]::IsNullOrWhiteSpace([string]$report.live_region_event_text)
+    )
+    $report.runtime_browser_version_present = (
+        -not [string]::IsNullOrWhiteSpace([string]$report.runtime_browser_version)
+    )
+    $report.runtime_witness_matches_workspace = $false
+    $report.emergency_stop_journal_matches_workspace = $false
+    if (-not [string]::IsNullOrWhiteSpace($Workspace)) {
+        $bindingWorkspace = [System.IO.Path]::GetFullPath($Workspace)
+        $report.runtime_witness_matches_workspace = [string]::Equals(
+            [string]$report.runtime_witness_path,
+            (Join-Path $bindingWorkspace 'webview2-runtime-witness.json'),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
+        $report.emergency_stop_journal_matches_workspace = [string]::Equals(
+            [string]$report.emergency_stop_journal_path,
+            (Join-Path $bindingWorkspace 'execution-stop.jsonl'),
+            [System.StringComparison]::OrdinalIgnoreCase
+        )
     }
     # Keep UIA validation in memory; scrub provider-controlled names and
     # workspace paths before either PASS or FAIL is serialized to JSON/stdout.

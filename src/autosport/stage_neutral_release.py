@@ -19,6 +19,8 @@ LEGACY_PREFIX = "Autosport-V1/"
 STAGE_NEUTRAL_PREFIX = "Autosport/"
 LEGACY_BUILD_VERSION = "0.1.0-v1-prehuman"
 STAGE_NEUTRAL_BUILD_VERSION = "0.1.0-prehuman"
+CURRENT_UPDATE_VERSION = "0.1.0"
+CURRENT_UPDATE_SCHEMA = 1
 WINDOWS_START_GUIDE = "WINDOWS_START_HERE.txt"
 LEGACY_GUIDE_TITLE = "АВТОСПОРТ — V1 WINDOWS PAPER / MARKET LAB"
 STAGE_NEUTRAL_GUIDE_TITLE = (
@@ -307,7 +309,16 @@ def _transform_members(
             raise ValueError(
                 f"legacy BUILD_INFO.json must preserve {claim}=false when present"
             )
-    if build_info.get("version") != LEGACY_BUILD_VERSION:
+    update_capable = "update_version" in build_info or "update_schema" in build_info
+    if update_capable:
+        if (
+            build_info.get("version") != CURRENT_UPDATE_VERSION
+            or build_info.get("update_version") != CURRENT_UPDATE_VERSION
+            or type(build_info.get("update_schema")) is not int
+            or build_info.get("update_schema") != CURRENT_UPDATE_SCHEMA
+        ):
+            raise ValueError("legacy BUILD_INFO.json update identity is not canonical")
+    elif build_info.get("version") != LEGACY_BUILD_VERSION:
         raise ValueError(
             "legacy BUILD_INFO.json version is not the exact transitional version"
         )
@@ -324,7 +335,9 @@ def _transform_members(
         if name not in _CI_ONLY_QA_MEMBERS
     }
     transformed_build = dict(build_info)
-    transformed_build["version"] = STAGE_NEUTRAL_BUILD_VERSION
+    transformed_build["version"] = (
+        CURRENT_UPDATE_VERSION if update_capable else STAGE_NEUTRAL_BUILD_VERSION
+    )
     transformed_build["whole_product_complete"] = False
     transformed["BUILD_INFO.json"] = _canonical_json_bytes(transformed_build)
     transformed[WINDOWS_START_GUIDE] = _transform_windows_start_guide(
@@ -401,8 +414,18 @@ def _verify_stage_neutral_output(
         raise ValueError("stage-neutral BUILD_INFO.json product identity mismatch")
     if build_info.get("source_sha") != expected_source_sha:
         raise ValueError("stage-neutral BUILD_INFO.json source_sha mismatch")
-    if build_info.get("version") != STAGE_NEUTRAL_BUILD_VERSION:
+    update_capable = "update_version" in build_info or "update_schema" in build_info
+    expected_version = (
+        CURRENT_UPDATE_VERSION if update_capable else STAGE_NEUTRAL_BUILD_VERSION
+    )
+    if build_info.get("version") != expected_version:
         raise ValueError("stage-neutral BUILD_INFO.json version drifted")
+    if update_capable and (
+        build_info.get("update_version") != CURRENT_UPDATE_VERSION
+        or type(build_info.get("update_schema")) is not int
+        or build_info.get("update_schema") != CURRENT_UPDATE_SCHEMA
+    ):
+        raise ValueError("stage-neutral BUILD_INFO.json update identity drifted")
     _require_false_truth_labels(build_info)
     if build_info.get("whole_product_complete") is not False:
         raise ValueError(
@@ -418,13 +441,13 @@ def _verify_stage_neutral_output(
     if observed["PACKAGE_MANIFEST.json"] != _canonical_json_bytes(manifest):
         raise ValueError("stage-neutral PACKAGE_MANIFEST.json canonical JSON drifted")
 
-    return {
+    evidence: dict[str, object] = {
         "status": "PASS",
         "source_sha": expected_source_sha,
         "legacy_archive_name": LEGACY_ARCHIVE_NAME,
         "archive_name": STAGE_NEUTRAL_ARCHIVE_NAME,
         "package_prefix": STAGE_NEUTRAL_PREFIX,
-        "build_version": STAGE_NEUTRAL_BUILD_VERSION,
+        "build_version": expected_version,
         "package_sha256": authored_sha,
         "file_count": len(observed),
         "real_money_execution": False,
@@ -432,6 +455,10 @@ def _verify_stage_neutral_output(
         "nvda_verified": False,
         "whole_product_complete": False,
     }
+    if update_capable:
+        evidence["update_version"] = CURRENT_UPDATE_VERSION
+        evidence["update_schema"] = CURRENT_UPDATE_SCHEMA
+    return evidence
 
 
 def repackage_stage_neutral_windows_release(

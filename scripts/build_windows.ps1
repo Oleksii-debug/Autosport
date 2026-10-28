@@ -973,6 +973,8 @@ if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe rollback-release -
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe recover-update-release --help exited $LASTEXITCODE" }
 & $dataExe finalize-update-release --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe finalize-update-release --help exited $LASTEXITCODE" }
+& $dataExe migrate-market-store --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe migrate-market-store --help exited $LASTEXITCODE" }
 & $dataExe diagnose-update --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Packaged Autosport-Data.exe diagnose-update --help exited $LASTEXITCODE" }
 & $dataExe compare-strategies --help | Out-Null
@@ -1181,6 +1183,8 @@ if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe rollback-re
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe recover-update-release --help exited $LASTEXITCODE" }
 & $extractedDataExe finalize-update-release --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe finalize-update-release --help exited $LASTEXITCODE" }
+& $extractedDataExe migrate-market-store --help | Out-Null
+if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe migrate-market-store --help exited $LASTEXITCODE" }
 & $extractedDataExe diagnose-update --help | Out-Null
 if ($LASTEXITCODE -ne 0) { throw "Fresh-extracted Autosport-Data.exe diagnose-update --help exited $LASTEXITCODE" }
 & $extractedDataExe compare-strategies --help | Out-Null

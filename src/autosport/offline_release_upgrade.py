@@ -141,6 +141,8 @@ def upgrade_verified_paper_release(
     if txn.exists() or txn.is_symlink():
         raise OfflineInstallError("previous update transaction requires disposition")
     txn.mkdir(mode=0o700)
+    # Bind the exact transaction lease before staging or publishing releases.
+    txn_witness = _directory_witness(txn)
     candidate = txn / "candidate"
     previous = txn / "previous"
     try:
@@ -178,6 +180,8 @@ def upgrade_verified_paper_release(
         raise OfflineInstallError("installed directory identity changed before update commit")
     if _directory_witness(candidate) != candidate_witness:
         raise OfflineInstallError("staged release identity changed before update commit")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before update commit")
     # Atomic no-replace is required here too: on POSIX rename() can silently
     # replace an empty quarantine directory created by a concurrent worker.
     _publish_directory_no_replace(root, previous)
@@ -186,6 +190,9 @@ def upgrade_verified_paper_release(
     ):
         raise OfflineInstallError("installed identity changed during update")
     try:
+        # A parent swap during the first move can preserve both child inodes.
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed after previous release move")
         # The old release has moved, so re-check the exact vetted candidate
         # before publication; restore previous on a witnessed replacement.
         if _directory_witness(candidate) != candidate_witness:
@@ -201,10 +208,43 @@ def upgrade_verified_paper_release(
         )
         if _directory_witness(candidate) != candidate_witness:
             raise OfflineInstallError("staged release identity changed on final inspection")
+        # The previous directory's inode survives an in-place executable
+        # rewrite during quarantine. Never publish an update while its only
+        # rollback source has ceased to match the independently pinned ZIP.
+        if _directory_witness(previous) != incumbent_witness:
+            raise OfflineInstallError("previous release identity changed during update")
+        inspect_installed_release(
+            previous, archive=old_archive,
+            expected_source_sha=old_source_sha,
+            expected_package_sha256=old_package_sha256,
+        )
+        if _directory_witness(previous) != incumbent_witness:
+            raise OfflineInstallError("previous release identity changed during verification")
         _publish_directory_no_replace(candidate, root)
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during candidate publication")
     except Exception:
+        # Never restore a release from a foreign replacement lease.
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during failed publication")
         if not root.exists() and previous.is_dir():
-            _publish_directory_no_replace(previous, root)
+            # A failed update must not silently reinstall a corrupted or
+            # replaced rollback source. Leave the transaction quarantined
+            # for explicit operator recovery instead.
+            try:
+                if _directory_witness(previous) != incumbent_witness:
+                    raise OfflineInstallError("previous release identity changed before restoration")
+                inspect_installed_release(
+                    previous, archive=old_archive,
+                    expected_source_sha=old_source_sha,
+                    expected_package_sha256=old_package_sha256,
+                )
+                if _directory_witness(previous) != incumbent_witness:
+                    raise OfflineInstallError("previous release identity changed on restoration")
+            except (OfflineInstallError, OSError):
+                pass
+            else:
+                _publish_directory_no_replace(previous, root)
         raise
     if _directory_witness(root) != candidate_witness:
         # Never report success for bytes published from an unverified
@@ -221,6 +261,8 @@ def upgrade_verified_paper_release(
     )
     if _directory_witness(root) != candidate_witness:
         raise OfflineInstallError("published release identity changed during readback")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before success")
     return {
         "status": "UPDATED_PAPER_ONLY", "old_source_sha": old_source_sha,
         "source_sha": new_source_sha, "package_sha256": new_package_sha256,
@@ -238,6 +280,10 @@ def recover_update_gap(
     txn = _transaction_root(root)
     if root.exists() or root.is_symlink():
         raise OfflineInstallError("recovery cannot replace an occupied update destination")
+    # Bind the transaction namespace, not only the previous-release child:
+    # the same verified previous inode can be moved into a replacement lease.
+    txn = _inspection_root(txn)
+    txn_witness = _directory_witness(txn)
     previous = _inspection_root(txn / "previous")
     # Recovery is also a destructive directory publication. Bind the exact
     # previously inspected filesystem object, not just reproducible bytes:
@@ -258,6 +304,8 @@ def recover_update_gap(
     )
     if _directory_witness(previous) != previous_witness:
         raise OfflineInstallError("previous release identity changed before recovery publication")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before recovery publication")
     _publish_directory_no_replace(previous, root)
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during recovery")
@@ -270,16 +318,37 @@ def recover_update_gap(
     )
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during readback")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed during recovery publication")
     # Moving the sole `previous` release back leaves an empty transaction
     # directory. Keeping that empty lease would reject every future upgrade
     # as "previous update transaction requires disposition", even though the
     # old release was successfully recovered. Only retire an empty directory;
     # retained candidate/unknown artifacts must remain for explicit review.
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before recovery lease retirement")
     try:
         txn.rmdir()
     except OSError:
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during recovery lease retirement")
         if not any(txn.iterdir()):
             raise OfflineInstallError("empty recovered transaction could not be retired")
+    # Retiring the recovery lease is a filesystem mutation. An in-place
+    # rewrite of the restored executable leaves its directory inode stable.
+    # Reinspect the published bytes after retirement before acknowledging
+    # success, including when retained candidate files prevent lease removal.
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("restored release identity changed during transaction retirement")
+    inspect_installed_release(
+        root, archive=old_archive, expected_source_sha=old_source_sha,
+        expected_package_sha256=old_package_sha256,
+    )
+    if _directory_witness(root) != previous_witness:
+        raise OfflineInstallError("restored release identity changed after transaction retirement")
+    # A retained candidate is legitimate only in the original lease.
+    if (txn.exists() or txn.is_symlink()) and _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed after recovery lease retirement")
     return {"status": "OLD_RELEASE_RECOVERED", "source_sha": old_source_sha,
             "real_money_execution": False}
 
@@ -314,7 +383,10 @@ def rollback_verified_paper_release(
     new_archive: str | Path, new_source_sha: str, new_package_sha256: str,
 ) -> dict[str, object]:
     """Rollback only verified product bytes; keep new release quarantined."""
-    txn = _transaction_root(Path(destination))
+    txn = _inspection_root(_transaction_root(Path(destination)))
+    # A trusted previous/ inode can be reparented into a different lease.
+    # Bind the transaction parent before any archive/installed-file reads.
+    txn_witness = _directory_witness(txn)
     root = _inspection_root(destination)
     previous = _inspection_root(txn / "previous")
     previous_witness = _directory_witness(previous)
@@ -341,6 +413,8 @@ def rollback_verified_paper_release(
             or (original.st_dev, original.st_ino) != incumbent_witness
             or _directory_witness(previous) != previous_witness):
         raise OfflineInstallError("release identity changed before rollback commit")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before rollback commit")
     # Do not allow a concurrent newly-created quarantine directory to be
     # replaced by the installed product on POSIX.
     _publish_directory_no_replace(root, rejected)
@@ -349,6 +423,8 @@ def rollback_verified_paper_release(
     ):
         raise OfflineInstallError("installed identity changed during rollback")
     try:
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during rollback")
         # The prior read occurred before the active product moved to its
         # quarantine location. Reverify actual previous files here: an in-place
         # executable mutation does not alter the directory's inode witness.
@@ -360,10 +436,45 @@ def rollback_verified_paper_release(
         )
         if _directory_witness(previous) != previous_witness:
             raise OfflineInstallError("previous release identity changed on final rollback inspection")
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed before rollback publication")
         _publish_directory_no_replace(previous, root)
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed after rollback publication")
     except Exception:
-        if not root.exists() and rejected.is_dir():
-            _publish_directory_no_replace(rejected, root)
+        # A foreign replacement lease has no authority to restore a release.
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("update transaction identity changed during rollback recovery")
+        if not root.exists() and not root.is_symlink() and rejected.is_dir():
+            # The failed rollback left the formerly active release quarantined.
+            # Do not restore a replaced or corrupted copy: an in-place write
+            # during the attempted previous-release publication preserves its
+            # directory identity but invalidates the original SHA-pinned bytes.
+            try:
+                if _directory_witness(rejected) != incumbent_witness:
+                    raise OfflineInstallError("rejected release identity changed before restoration")
+                inspect_installed_release(
+                    rejected, archive=new_archive,
+                    expected_source_sha=new_source_sha,
+                    expected_package_sha256=new_package_sha256,
+                )
+                if _directory_witness(rejected) != incumbent_witness:
+                    raise OfflineInstallError("rejected release identity changed during restoration inspection")
+            except (OfflineInstallError, OSError):
+                # Keep the suspect release in the transaction for explicit
+                # operator recovery rather than silently republishing it.
+                pass
+            else:
+                _publish_directory_no_replace(rejected, root)
+                if _directory_witness(root) != incumbent_witness:
+                    raise OfflineInstallError("reinstalled release identity changed during failed rollback recovery")
+                inspect_installed_release(
+                    root, archive=new_archive,
+                    expected_source_sha=new_source_sha,
+                    expected_package_sha256=new_package_sha256,
+                )
+                if _directory_witness(root) != incumbent_witness:
+                    raise OfflineInstallError("reinstalled release identity changed after failed rollback recovery")
         raise
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during rollback")
@@ -375,6 +486,8 @@ def rollback_verified_paper_release(
     )
     if _directory_witness(root) != previous_witness:
         raise OfflineInstallError("restored release identity changed during rollback readback")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed during rollback readback")
     return {"status": "ROLLED_BACK_PAPER_ONLY", "source_sha": old_source_sha,
             "rejected_release_path": str(rejected), "real_money_execution": False}
 
@@ -394,7 +507,57 @@ def finalize_verified_paper_update(
     txn_path = _transaction_root(Path(destination))
     root = _inspection_root(destination)
     txn = _inspection_root(txn_path)
+    txn_witness = _directory_witness(txn)
     entries = {item.name for item in txn.iterdir()}
+    if not entries:
+        # An earlier finalization can remove the obsolete release but fail to
+        # retire its empty lease. An empty lease can also follow failed staging,
+        # so never claim that an update completed based on emptiness alone.
+        _require_forward_update_lineage(
+            old_archive=Path(old_archive), old_source_sha=old_source_sha,
+            old_package_sha256=old_package_sha256,
+            new_archive=Path(new_archive), new_source_sha=new_source_sha,
+            new_package_sha256=new_package_sha256,
+        )
+        active_witness = _directory_witness(root)
+        active = None
+        for candidate in (
+            (old_archive, old_source_sha, old_package_sha256),
+            (new_archive, new_source_sha, new_package_sha256),
+        ):
+            try:
+                inspect_installed_release(
+                    root, archive=candidate[0],
+                    expected_source_sha=candidate[1],
+                    expected_package_sha256=candidate[2],
+                )
+            except OfflineInstallError:
+                continue
+            active = candidate
+            break
+        if active is None:
+            raise OfflineInstallError("empty update transaction has no verified active release")
+        if _directory_witness(root) != active_witness:
+            raise OfflineInstallError("active release identity changed during empty transaction recovery")
+        inspect_installed_release(
+            root, archive=active[0],
+            expected_source_sha=active[1], expected_package_sha256=active[2],
+        )
+        if _directory_witness(root) != active_witness:
+            raise OfflineInstallError("active release identity changed before empty transaction retirement")
+        if _directory_witness(txn) != txn_witness:
+            raise OfflineInstallError("empty update transaction identity changed")
+        txn.rmdir()
+        if _directory_witness(root) != active_witness:
+            raise OfflineInstallError("active release identity changed during empty transaction retirement")
+        inspect_installed_release(
+            root, archive=active[0],
+            expected_source_sha=active[1], expected_package_sha256=active[2],
+        )
+        if _directory_witness(root) != active_witness:
+            raise OfflineInstallError("active release identity changed after empty transaction retirement")
+        return {"status": "EMPTY_UPDATE_TRANSACTION_RETIRED", "source_sha": active[1],
+                "real_money_execution": False}
     if entries == {"previous"}:
         active = (new_archive, new_source_sha, new_package_sha256)
         obsolete = txn / "previous"
@@ -410,16 +573,25 @@ def finalize_verified_paper_update(
         root, archive=active[0],
         expected_source_sha=active[1], expected_package_sha256=active[2],
     )
+    obsolete_witness = _directory_witness(obsolete)
     inspect_installed_release(
         obsolete, archive=discarded[0],
         expected_source_sha=discarded[1], expected_package_sha256=discarded[2],
     )
+    if _directory_witness(obsolete) != obsolete_witness:
+        raise OfflineInstallError("obsolete release identity changed during finalization inspection")
     _require_forward_update_lineage(
         old_archive=Path(old_archive), old_source_sha=old_source_sha,
         old_package_sha256=old_package_sha256,
         new_archive=Path(new_archive), new_source_sha=new_source_sha,
         new_package_sha256=new_package_sha256,
     )
+    # A byte-identical replacement of the transaction namespace or obsolete
+    # directory is not the object whose contents were admitted for disposal.
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before finalization")
+    if _directory_witness(obsolete) != obsolete_witness:
+        raise OfflineInstallError("obsolete release identity changed before finalization")
     # Do not delete the rollback source if the active product changed since
     # the initial SHA-bound inspection or lineage verification.
     if _directory_witness(root) != active_witness:
@@ -430,6 +602,10 @@ def finalize_verified_paper_update(
     )
     if _directory_witness(root) != active_witness:
         raise OfflineInstallError("active release identity changed during finalization preflight")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed before disposal")
+    if _directory_witness(obsolete) != obsolete_witness:
+        raise OfflineInstallError("obsolete release identity changed before disposal")
     uninstall_verified_release(
         obsolete, archive=discarded[0],
         expected_source_sha=discarded[1], expected_package_sha256=discarded[2],
@@ -444,6 +620,8 @@ def finalize_verified_paper_update(
     )
     if _directory_witness(root) != active_witness:
         raise OfflineInstallError("active release identity changed during final readback")
+    if _directory_witness(txn) != txn_witness:
+        raise OfflineInstallError("update transaction identity changed during disposal")
     txn.rmdir()
     # Retiring the transaction namespace is the final filesystem mutation.
     # Do not acknowledge an active release replaced or rewritten during it.

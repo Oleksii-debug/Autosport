@@ -49,3 +49,8 @@ WAIT; stressed balance remained 100 units. This is a valid abstention, not an
 earned profit or a real-money balance. Seventy-one focused tests passed on Linux
 including actual-result wins/losses, assumed fill, fee stress and reserve,
 preference causality, conflict hold and continued capture after a held projection.
+An additional end-to-end fixture feeds 30 declined winning outcomes into shadow
+memory, confirms the next frozen choice opens exactly one virtual ticket, then
+settles that ticket as a loss and records the 1% fee. The fixture proves the
+learning and accounting path works; its constructed wins are not evidence of
+real-world edge or earnings.

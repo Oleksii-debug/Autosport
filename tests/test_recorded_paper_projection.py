@@ -1,6 +1,9 @@
 import json
 import importlib.util
+import csv
+from datetime import datetime, timedelta, timezone
 from decimal import Decimal
+import io
 from pathlib import Path
 
 import pytest
@@ -8,6 +11,7 @@ import pytest
 from autosport.recorded_paper_projection import project, _fee_reserve_allows
 from autosport.paper import PaperBook
 from autosport.risk import PaperRiskPolicy
+from autosport.prospective_shadow_observer import observe_cycle
 from autosport.shadow_strategy_memory import ShadowStrategyMemory, digest
 from test_prospective_shadow_observer import cycle
 
@@ -100,3 +104,38 @@ def test_projection_error_holds_display_without_stopping_observation(tmp_path, m
     assert result["status"] == "HELD"
     assert result["profit_earned"] is None
     assert json.loads((tmp_path / "paper-projection.json").read_text()) == result
+
+
+def test_full_learning_loop_uses_declined_outcomes_before_opening_a_paper_ticket(tmp_path):
+    start = datetime(2026, 10, 1, tzinfo=timezone.utc)
+    def capture(index, after=False, outcome="1"):
+        initial = start + timedelta(days=index)
+        now = initial + timedelta(hours=4 if after else 0)
+        kickoff = initial + timedelta(hours=2)
+        item = {"id": index, "home": f"Home {index}", "away": f"Away {index}", "league": "League",
+                "kickoff_utc": kickoff.isoformat(), "status": "actionable", "fair_source": "live",
+                "benchmark_read_at": now.isoformat(), "fair_read_at": now.isoformat(),
+                "fair_probabilities": {"home": 0.5, "draw": 0.3, "away": 0.2},
+                "value": {"selection": "1", "bookmaker": "book", "best_soft_odds": 2.2}}
+        forecast = json.dumps({"generated_at": now.isoformat(), "predictions": [item]}).encode()
+        result = {"id": str(index), "home": item["home"], "away": item["away"], "league": "League",
+                  "kickoff_utc": kickoff.isoformat(), "result": outcome if after else "", "settled": "1" if after else "0"}
+        stream = io.StringIO()
+        writer = csv.DictWriter(stream, fieldnames=result)
+        writer.writeheader()
+        writer.writerow(result)
+        return observe_cycle(tmp_path, predictions=forecast, results=stream.getvalue().encode(), received_at=now.isoformat())
+
+    for index in range(30):
+        capture(index)
+        capture(index, after=True)
+    assert len(ShadowStrategyMemory.load(tmp_path / "memory.json").payload()["records"]) == 30
+    assert project(tmp_path)["opened_tickets"] == 0
+    capture(30)
+    pending = project(tmp_path)
+    assert pending["opened_tickets"] == pending["pending_tickets"] == 1
+    capture(30, after=True, outcome="2")
+    final = project(tmp_path)
+    assert final["won"] == 0 and final["lost"] == 1
+    assert Decimal(final["cost_stressed_net_units"]) == Decimal("-1.01")
+    assert len(ShadowStrategyMemory.load(tmp_path / "memory.json").payload()["records"]) == 31

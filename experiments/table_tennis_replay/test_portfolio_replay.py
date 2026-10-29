@@ -21,10 +21,11 @@ def frame(identity, seconds, home=2.0, away=1.5):
 
 
 def fixture(identity, frames, winner="away", end=200):
-    match = {"id": identity, "live_id": identity, "frames": frames}
+    match = {"id": identity, "live_id": identity, "frames": frames, "first_live_at": stamp(0)}
     if winner is not None:
         score = "11-2" if winner == "home" else "2-11"
         match["result"] = {"observed_at": stamp(end), "source_fixture_id": identity,
+                           "source_finished_at": stamp(end), "final_score": ",".join([score] * 3),
                            "periods": [{"score": score}] * 3}
     return match
 
@@ -55,6 +56,7 @@ def test_no_future_outcome_in_decisions():
                         fixture("b", [frame("b", 0), frame("b", 180)], "away")]}
     changed = deepcopy(data)
     changed["matches"][0]["result"]["periods"] = [{"score": "2-11"}] * 3
+    changed["matches"][0]["result"]["final_score"] = "2-11,2-11,2-11"
     opens = lambda r: [e for e in r["events"] if e["action"] == "open"]
     assert opens(replay(data)) == opens(replay(changed))
     assert replay(data)["lost"] == 2 and replay(changed)["won"] == 2
@@ -103,3 +105,14 @@ def test_unproven_cross_id_link_cannot_open_or_settle():
     a = fixture("a", [frame("alternate", 0)])
     a["live_id"] = "alternate"
     assert replay({"matches": [a, fixture("b", [frame("b", 0)])]})["opened"] == 0
+
+
+def test_inconsistent_result_time_or_scores_remain_pending():
+    for corruption in ("future", "score"):
+        a = fixture("a", [frame("a", 0)])
+        if corruption == "future":
+            a["result"]["source_finished_at"] = stamp(201)
+        else:
+            a["result"]["final_score"] = "11-2,11-2,11-2"
+        report = replay({"matches": [a, fixture("b", [frame("b", 0)])]})
+        assert report["pending"] == 1

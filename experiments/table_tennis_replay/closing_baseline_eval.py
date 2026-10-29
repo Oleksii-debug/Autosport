@@ -19,6 +19,8 @@ from next_day_player_eval import _paired_interval, _scores
 def market_probability(data, row, cutoff):
     if data.get('fixture_id') != row['fixture_id']:
         return None, 'fixture_mismatch'
+    if data.get('closed') is not True:
+        return None, 'closing_not_final'
     if data.get('kickoff_known') is not True or data.get('kickoff_estimated') is not False or data.get('pre_close_basis') != 'kickoff':
         return None, 'kickoff_unconfirmed'
     try:

@@ -96,9 +96,17 @@ def replay(data):
             except (ValueError, AttributeError):
                 continue
             parsed = result(match)
-            source_id = str(raw_result.get("source_fixture_id"))
+            source_id = raw_result.get("source_fixture_id")
             # Cross-ID reconciliation lacks a decision-time receipt here.
-            if source_id != identity:
+            try:
+                first_live = instant(match.get("first_live_at"))
+                last_seen = instant(raw_result.get("source_finished_at"))
+                periods = raw_result.get("periods") or []
+                same_scores = raw_result.get("final_score") == ",".join(p["score"] for p in periods)
+                if (source_id != identity or not (first_live <= last_seen <= observed)
+                        or not same_scores):
+                    parsed = None
+            except (ValueError, TypeError, KeyError):
                 parsed = None
             timeline[observed]["results"].append((identity, None if parsed is None else parsed[0]))
 

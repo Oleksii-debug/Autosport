@@ -11,7 +11,7 @@ def quote(side, odds, ts='2026-01-03T09:59:00Z'):
 
 
 def data():
-    return {'fixture_id': '42', 'kickoff_known': True, 'kickoff_estimated': False,
+    return {'fixture_id': '42', 'closed': True, 'kickoff_known': True, 'kickoff_estimated': False,
             'pre_close_basis': 'kickoff', 'kickoff_utc': '2026-01-03T10:00:00Z',
             'selections': [quote('A', 2), quote('B', 4)]}
 
@@ -24,6 +24,11 @@ class ClosingTest(unittest.TestCase):
     def test_fresh_pair_uses_normalized_implied_probability(self):
         p, reason = market_probability(data(), self.row, self.cutoff)
         self.assertIsNone(reason); self.assertAlmostEqual(p, 2 / 3)
+
+    def test_provisional_or_unknown_closing_is_rejected(self):
+        for value in (False, None):
+            d = data(); d['closed'] = value
+            self.assertEqual(market_probability(d, self.row, self.cutoff)[1], 'closing_not_final')
 
     def test_stale_suspended_and_same_instant_excluded(self):
         for change in ('stale', 'suspended', 'same'):

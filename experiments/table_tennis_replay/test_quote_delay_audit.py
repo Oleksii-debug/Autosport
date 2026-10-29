@@ -45,6 +45,10 @@ def test_adjacent_same_selection_and_pair_exposure(tmp_path):
     assert [total[k] for k in ('selected','lower','higher','missing_or_invalid')] == [2,1,1,0]
     assert total['initial_fixture_pairs'] == total['both_legs_comparable_pairs'] == 1
     assert total['comparable_pairs_at_least_one_lower'] == 1
+    # One shorter leg is offset by a larger improvement of the other leg.
+    assert total['pair_product_higher'] == 1
+    assert total['pair_any_leg_lower_product_not_lower'] == 1
+    assert total['pair_product_lower'] == total['pair_product_unchanged'] == 0
 
 
 def test_missing_suspended_stale_or_changed_id_is_not_a_loss(tmp_path):
@@ -98,3 +102,25 @@ def test_wrong_market_fixture_phase_or_duplicate_selection_rejected(tmp_path):
         sub=tmp_path/str(i)
         build_session(sub,[(0,[a]),(40,[match('a',40)])])
         assert audit(sub)['totals']['selected']==0
+
+
+def test_product_comparison_uses_exact_decimal_arithmetic():
+    from decimal import Decimal
+    from quote_delay_audit import _product_direction
+    first = (Decimal('1.12345678901234567890123456789012345'),
+             Decimal('1.12345678901234567890123456789012346'))
+    second = (Decimal('1.23456789012345678901234567890123456'),
+              Decimal('1.23456789012345678901234567890123456'))
+    assert _product_direction(first, second) == 'higher'
+    assert _product_direction((Decimal('2'), Decimal('1.5')),
+                              (Decimal('3'), Decimal('4'))) == 'unchanged'
+
+
+def test_product_categories_include_lower_and_unchanged_pairs(tmp_path):
+    first = [match(name, 0) for name in 'abc']
+    later = [match('a', 40, 1.4, 2.5), match('b', 40), match('c', 40)]
+    build_session(tmp_path, [(0, first), (40, later)])
+    total = audit(tmp_path)['totals']
+    assert total['both_legs_comparable_pairs'] == 3
+    assert (total['pair_product_lower'], total['pair_product_unchanged'], total['pair_product_higher']) == (2, 1, 0)
+    assert total['pair_any_leg_lower_product_not_lower'] == 0

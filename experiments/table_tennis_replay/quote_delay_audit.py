@@ -3,8 +3,9 @@ from __future__ import annotations
 
 import argparse
 from collections import Counter
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
+from itertools import combinations
 import json
 from pathlib import Path
 
@@ -85,6 +86,16 @@ def _snapshot(directory, seq, receipt):
     return fixtures
 
 
+def _product_direction(first, second):
+    """Compare two two-leg products without binary floats or Decimal rounding."""
+    prices = (*first, *second)
+    with localcontext() as ctx:
+        ctx.prec = sum(len(price.as_tuple().digits) for price in prices) + 4
+        old = first[0] * second[0]
+        new = first[1] * second[1]
+        return "lower" if new < old else "higher" if new > old else "unchanged"
+
+
 def audit(directory):
     verified = verify_session(directory)
     sequences = sorted(seq for seq, kind in verified if kind == "odds")
@@ -101,6 +112,7 @@ def audit(directory):
         original = _snapshot(directory, left, a)
         later = _snapshot(directory, right, b)
         counts = Counter()
+        comparable_prices = []
         for fixture, state in original.items():
             if state is None:
                 continue
@@ -118,6 +130,7 @@ def audit(directory):
                 counts["missing_or_invalid"] += 1
                 continue
             new_price = next_selections[side][1]
+            comparable_prices.append((old_price, new_price))
             counts["lower" if new_price < old_price else "higher" if new_price > old_price else "unchanged"] += 1
         n = counts["selected"]
         comparable = counts["lower"] + counts["higher"] + counts["unchanged"]
@@ -125,14 +138,23 @@ def audit(directory):
         counts["initial_fixture_pairs"] = n * (n - 1) // 2
         counts["both_legs_comparable_pairs"] = comparable * (comparable - 1) // 2
         counts["comparable_pairs_at_least_one_lower"] = counts["both_legs_comparable_pairs"] - no_lower * (no_lower - 1) // 2
+        for first, second in combinations(comparable_prices, 2):
+            direction = _product_direction(first, second)
+            counts["pair_product_" + direction] += 1
+            if (first[1] < first[0] or second[1] < second[0]) and direction != "lower":
+                counts["pair_any_leg_lower_product_not_lower"] += 1
         totals.update(counts)
         transitions.append({"from_sequence": left, "to_sequence": right,
                             "delay_seconds": elapsed, **{k: counts[k] for k in
                             ("selected", "lower", "unchanged", "higher", "missing_or_invalid",
-                             "initial_fixture_pairs", "both_legs_comparable_pairs", "comparable_pairs_at_least_one_lower")}})
+                             "initial_fixture_pairs", "both_legs_comparable_pairs", "comparable_pairs_at_least_one_lower",
+                             "pair_product_lower", "pair_product_unchanged", "pair_product_higher",
+                             "pair_any_leg_lower_product_not_lower")}})
     keys = ("selected", "lower", "unchanged", "higher", "missing_or_invalid", "initial_fixture_pairs",
-            "both_legs_comparable_pairs", "comparable_pairs_at_least_one_lower", "intervals_outside_30_60_seconds")
-    return {"schema": "research.tt_quote_delay_audit.v1", "transitions": transitions,
+            "both_legs_comparable_pairs", "comparable_pairs_at_least_one_lower", "pair_product_lower",
+            "pair_product_unchanged", "pair_product_higher", "pair_any_leg_lower_product_not_lower",
+            "intervals_outside_30_60_seconds")
+    return {"schema": "research.tt_quote_delay_audit.v2", "transitions": transitions,
             "totals": {k: totals[k] for k in keys}, "quotes_are_fills": False,
             "identity_verified": False, "rights_verified": False, "real_money_execution": False,
             "note": "Previously inspected, repeated correlated snapshots; no interpolation or accepted fills."}

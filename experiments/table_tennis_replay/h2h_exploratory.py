@@ -31,7 +31,9 @@ def result(match):
             if 3 in wins:
                 return None
             a, b = (int(v) for v in period["score"].split("-"))
-            if min(a, b) < 0 or max(a, b) < 11 or abs(a - b) < 2:
+            # A set ends at 11 unless deuce requires exactly a two-point lead.
+            hi, lo = max(a, b), min(a, b)
+            if lo < 0 or not ((hi == 11 and lo <= 9) or (hi > 11 and hi - lo == 2)):
                 return None
             wins[int(b > a)] += 1
         if max(wins) != 3 or min(wins) > 2 or len(periods) != sum(wins):

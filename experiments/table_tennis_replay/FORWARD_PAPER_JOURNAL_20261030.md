@@ -81,3 +81,32 @@ production-book update, real-money action or promotion occurred.
 The raw observations, receipts, journal, prior pinned history and reproduction
 instructions are stored in a private Drive archive referenced in issue #2591;
 the public repository contains no raw provider data or keys.
+
+## Later dated follow-up of the same ticket
+
+A [separate follow-up rule](https://github.com/Oleksii-debug/Autosport/issues/2591#issuecomment-6511715186)
+was published at 00:19:41 UTC, after the first dated receipt and before the
+next request. The first dated body contained neither selected ID, so there was
+no earlier dated row for those two IDs to reconcile. The original pending
+report and its receipt remain preserved without alteration.
+
+The second dated request began at 00:20:10.662158 UTC and was received at
+00:20:16.272336 UTC. Its body SHA-256 was
+`1d91266b1e1e59e54c6975c319bbba1b095a6a0af8efb0a11a251dcf6e1a6929`;
+the source identified `postgres` and returned eight structurally valid rows.
+Both selected fixture IDs had completed matching set scores, and the source
+reported that both selected sides won. Under the fixed hypothetical settlement
+rules, the **one ticket in each alternative book** was a PAPER win. Assuming
+the displayed leg prices and a 0.01 unit cost, the conditional result was
+approximately **+1.1289 units per alternative**; the NO_BET baseline was zero.
+These are two copies of the same fixture pair, not two independent wins. An
+independent Fraction calculation checked source-side set winners and the
+assumed-price arithmetic; it did not independently establish source truth,
+person identity, accepted prices or bookmaker settlement.
+
+This is one selected in-play pair, so the result cannot establish model
+accuracy, calibration, economic edge or profitability. The later source
+response first became locally available at its receipt; source last-live
+timestamps and local clocks remain independently unverified. The original
+earlier pending state is not backdated or silently replaced, and unrecorded
+intermediate provider corrections cannot be ruled out.

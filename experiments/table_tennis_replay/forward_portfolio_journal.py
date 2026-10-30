@@ -118,7 +118,7 @@ def _read_record(directory, kind, seq):
     return strict_json_loads(raw.decode("utf-8")), envelope
 
 
-def _freeze(directory, kind, seq, body, clock):
+def _freeze(directory, kind, seq, body, clock, *, validate_computed=None):
     directory = Path(directory)
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("journal must be a non-symlink directory")
@@ -126,10 +126,16 @@ def _freeze(directory, kind, seq, body, clock):
     if body_path.exists() or receipt_path.exists():
         raise ValueError("journal record already exists")
     computed = clock()
+    if computed.tzinfo is None or computed.utcoffset() is None:
+        raise ValueError("invalid journal clock")
+    # The recorded computation time must be admissible before either immutable
+    # file is written. I/O failures after this point remain visible for review.
+    if validate_computed is not None:
+        validate_computed(computed)
     raw = (json.dumps(body, sort_keys=True, ensure_ascii=False, separators=(",", ":")) + "\n").encode()
     _write_exclusive(body_path, raw)
     frozen = clock()
-    if computed.tzinfo is None or frozen.tzinfo is None or frozen < computed:
+    if frozen.tzinfo is None or frozen.utcoffset() is None or frozen < computed:
         raise ValueError("invalid journal clock")
     envelope = {"schema": "research.tt_forward_portfolio_receipt.v1", "kind": kind,
                 "sequence": seq, "bytes": len(raw), "sha256": _sha(raw),
@@ -151,12 +157,12 @@ def freeze_proposal(session, journal, seq, excluded, prior_head, *, clock=_utc_n
     if _last_key(verified) != (seq, "results"):
         raise ValueError("proposal must be frozen before next odds request")
     body = proposal(session, seq, excluded, prior_head)
-    env = _freeze(journal, "proposal", seq, body, clock)
-    if not instant(verified[(seq, "results")]["received_at"]) <= instant(env["computed_at"]):
-        raise ValueError("proposal frozen before its source receipt")
-    if (instant(env["computed_at"]) - instant(verified[(seq, "odds")]["received_at"])).total_seconds() > 30:
-        raise ValueError("proposal was computed more than 30 seconds after its quote")
-    return env
+    def validate_computed(computed):
+        if computed < instant(verified[(seq, "results")]["received_at"]):
+            raise ValueError("proposal frozen before its source receipt")
+        if (computed - instant(verified[(seq, "odds")]["received_at"])).total_seconds() > 30:
+            raise ValueError("proposal was computed more than 30 seconds after its quote")
+    return _freeze(journal, "proposal", seq, body, clock, validate_computed=validate_computed)
 
 
 def _make_states():
@@ -257,12 +263,13 @@ def freeze_action(session, journal, seq, excluded, prior_head, *, clock=_utc_now
     if _last_key(verified) != (seq + 1, "odds"):
         raise ValueError("action must be frozen before next results request")
     report = _replay(session, journal, excluded, prior_head, seq)
-    env = _freeze(journal, "action", seq, report, clock)
-    if instant(env["computed_at"]) < instant(verified[(seq + 1, "odds")]["received_at"]):
-        raise ValueError("action frozen before its source receipt")
-    if (instant(env["computed_at"]) - instant(verified[(seq + 1, "odds")]["received_at"])).total_seconds() > 30:
-        raise ValueError("action was computed more than 30 seconds after its quote")
-    return env
+    def validate_computed(computed):
+        received = instant(verified[(seq + 1, "odds")]["received_at"])
+        if computed < received:
+            raise ValueError("action frozen before its source receipt")
+        if (computed - received).total_seconds() > 30:
+            raise ValueError("action was computed more than 30 seconds after its quote")
+    return _freeze(journal, "action", seq, report, clock, validate_computed=validate_computed)
 
 
 def verify_actions(session, journal, excluded, prior_head, through=2):

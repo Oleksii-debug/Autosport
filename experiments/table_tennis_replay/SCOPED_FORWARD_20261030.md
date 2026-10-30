@@ -100,3 +100,21 @@ existing capture destination; malformed source response bytes are retained
 before validation, and no retry is automatic. The two source records are
 still not independent evidence of identities, executable prices, official
 settlement or research-data rights.
+
+## Third predeclared dated recheck
+
+After the separate [third protocol](https://github.com/Oleksii-debug/Autosport/issues/2591#issuecomment-6513866175),
+the request started at 02:59:49.288420 UTC and was received at 02:59:52.621355
+UTC. All six observed live IDs appeared among 53 structurally valid source
+rows. The two selected legs were 2 eligible, 0 quarantined, 0 unresolved. One
+selected side was reported a winner and one a loser, so the same single
+hypothetical ticket in each alternative book is a loss: **−1.01 units** using
+one assumed stake unit and 0.01 assumed cost. This is one dependent pair, not
+two independent losses or actual bookmaker P&L. Both earlier pending as-of
+reports remain intact. Source results, actual settlement and identities are not
+independently verified.
+
+The externally pinned third history link is
+`130ac6e916b9703ea887231a4b60e9e037d670d242612ec555c69e1f564bf295`;
+[checkpoint](https://github.com/Oleksii-debug/Autosport/issues/2591#issuecomment-6513874628).
+The scope of this result is the original frozen PAPER pair only.

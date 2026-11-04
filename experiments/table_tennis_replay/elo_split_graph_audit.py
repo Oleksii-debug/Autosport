@@ -41,8 +41,8 @@ def _read_rows(raw, expected_sha256):
     return summary, rows
 
 
-def _component_metrics(rows, cutoff, *, league_scoped):
-    """Union-find over exact keys; the whole-sample graph is retrospective."""
+def _component_membership(rows, *, league_scoped):
+    """Return a deterministic internal component label for each source row."""
     parents, ranks = {}, {}
     def find(node):
         parents.setdefault(node, node)
@@ -68,7 +68,24 @@ def _component_metrics(rows, cutoff, *, league_scoped):
     for day, league, a, b in rows:
         u, v = key(league, a), key(league, b)
         union(u, v)
-        edges.append((day < cutoff, u, v))
+        edges.append((u, v))
+    # A root selected by union-find depends on row order. A component's
+    # minimum exact key does not; labels remain private internal values.
+    anchors = {}
+    for node in parents:
+        root = find(node)
+        if root not in anchors or node < anchors[root]:
+            anchors[root] = node
+    return [anchors[find(u)] for u, _ in edges]
+
+
+def _component_metrics(rows, cutoff, *, league_scoped):
+    """Union-find over exact keys; the whole-sample graph is retrospective."""
+    labels = _component_membership(rows, league_scoped=league_scoped)
+    def key(league, identity):
+        return (league, identity) if league_scoped else identity
+    edges = [(day < cutoff, key(league, a), key(league, b))
+             for day, league, a, b in rows]
     early, later = [x for x in edges if x[0]], [x for x in edges if not x[0]]
     early_nodes = {node for _, a, b in early for node in (a, b)}
     later_nodes = {node for _, a, b in later for node in (a, b)}
@@ -78,10 +95,12 @@ def _component_metrics(rows, cutoff, *, league_scoped):
         known[int(a in early_nodes) + int(b in early_nodes)] += 1
     same_pair = sum(tuple(sorted((a, b))) in earlier_pairs for _, a, b in later)
     components = defaultdict(lambda: {"source_keys": 0, "early_rows": 0, "later_rows": 0})
-    for node in list(parents):
-        components[find(node)]["source_keys"] += 1
-    for is_early, a, _ in edges:
-        components[find(a)]["early_rows" if is_early else "later_rows"] += 1
+    nodes_by_component = defaultdict(set)
+    for label, (is_early, a, b) in zip(labels, edges):
+        nodes_by_component[label].update((a, b))
+        components[label]["early_rows" if is_early else "later_rows"] += 1
+    for label, nodes in nodes_by_component.items():
+        components[label]["source_keys"] = len(nodes)
     groups = list(components.values())
     crossing = [x for x in groups if x["early_rows"] and x["later_rows"]]
     largest = max(groups, key=lambda x: (x["early_rows"] + x["later_rows"], x["source_keys"]))

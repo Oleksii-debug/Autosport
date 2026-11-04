@@ -1,0 +1,54 @@
+{
+  "bookmaker_execution": false,
+  "cross_provider_identity_verified": false,
+  "date_label_cutoff": "2026-10-01",
+  "early_rows_before_cutoff": 1696,
+  "event_dates_verified": false,
+  "global_exact_id": {
+    "components": 118,
+    "components_crossing_boundary": 26,
+    "early_distinct_source_keys": 1223,
+    "early_rows_in_crossing_components": 1587,
+    "largest_component_source_keys": 262,
+    "largest_component_source_rows": 645,
+    "later_distinct_source_keys": 452,
+    "later_rows_in_crossing_components": 288,
+    "later_rows_with_early_keys": {
+      "one": 67,
+      "two": 217,
+      "zero": 20
+    },
+    "later_rows_with_unordered_pair_in_early": 46,
+    "source_keys_in_both_partitions": 359
+  },
+  "independent_holdout": false,
+  "later_rows_on_or_after_cutoff": 304,
+  "league_scoped_exact_id": {
+    "components": 129,
+    "components_crossing_boundary": 25,
+    "early_distinct_source_keys": 1229,
+    "early_rows_in_crossing_components": 1583,
+    "largest_component_source_keys": 262,
+    "largest_component_source_rows": 645,
+    "later_distinct_source_keys": 452,
+    "later_rows_in_crossing_components": 284,
+    "later_rows_with_early_keys": {
+      "one": 65,
+      "two": 215,
+      "zero": 24
+    },
+    "later_rows_with_unordered_pair_in_early": 46,
+    "source_keys_in_both_partitions": 354
+  },
+  "model_training_authorized": false,
+  "note": "Date labels and exact source keys only; components use both partitions retrospectively and are not causal features or verified independent groups.",
+  "physical_match_deduplicated": false,
+  "profitability_claim": false,
+  "publisher_model_provenance_verified": false,
+  "result_availability_verified": false,
+  "schema": "research.tt_elo_date_split_graph.v1",
+  "source_ids_verified_as_people": false,
+  "source_rights_verified": false,
+  "source_rows": 2000,
+  "source_sha256": "bbb2ab531f269a1eafff89e240086a4d17999114b582825ba4338986c6770fde"
+}

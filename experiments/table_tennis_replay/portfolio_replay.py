@@ -68,7 +68,9 @@ def _eligible(match, frame, observed, now):
         return None
 
 
-def replay(data):
+def replay(data, *, include_scenario_stress=False):
+    if type(include_scenario_stress) is not bool:
+        raise ValueError("include_scenario_stress must be a boolean")
     matches = data["matches"]
     if not isinstance(matches, list):
         raise ValueError("matches must be a list")
@@ -117,10 +119,13 @@ def replay(data):
     peak, max_drawdown, peak_committed = INITIAL, Decimal(0), Decimal(0)
     max_shared_fixture_stake = Decimal(0)
     max_tickets_sharing_fixture = 0
+    peak_snapshots = {"open": [], "shared": []}
+    peak_snapshot_open = peak_snapshot_shared = 0
     log = []
 
     def measure():
         nonlocal peak, max_drawdown, peak_committed, max_shared_fixture_stake, max_tickets_sharing_fixture
+        nonlocal peak_snapshot_open, peak_snapshot_shared
         exposure = Counter()
         for ticket in tickets:
             if ticket.status is TicketStatus.OPEN:
@@ -129,6 +134,18 @@ def replay(data):
         if exposure:
             max_tickets_sharing_fixture = max(max_tickets_sharing_fixture, max(exposure.values()))
             max_shared_fixture_stake = max(max_shared_fixture_stake, STAKE * max(exposure.values()))
+        if include_scenario_stress:
+            # Copy only at a new strict maximum: ties retain the first state.
+            # Snapshots remain internal; the public report contains aggregates.
+            from autosport.portfolio import _snapshot_open_tickets_for_analysis
+            n_open = sum(ticket.status is TicketStatus.OPEN for ticket in tickets)
+            n_shared = max(exposure.values(), default=0)
+            if n_open > peak_snapshot_open:
+                peak_snapshots["open"] = _snapshot_open_tickets_for_analysis(tickets)
+                peak_snapshot_open = n_open
+            if n_shared > peak_snapshot_shared:
+                peak_snapshots["shared"] = _snapshot_open_tickets_for_analysis(tickets)
+                peak_snapshot_shared = n_shared
         committed = book.committed_stake
         peak_committed = max(peak_committed, committed)
         equity = book.balance + committed - FEE * opened
@@ -181,7 +198,7 @@ def replay(data):
             measure()
     committed = book.committed_stake
     equity = book.balance + committed
-    return {"schema": "autosport.tt_exploratory_portfolio.v1", "fixtures": len(matches),
+    report = {"schema": "autosport.tt_exploratory_portfolio.v1", "fixtures": len(matches),
             "opened": opened, "won": won, "lost": lost, "pending": opened - won - lost,
             "risk_rejected": risk_rejected, "cash_units_before_cost": str(book.balance),
             "open_stake_units": str(committed), "max_open_stake_units": str(peak_committed),
@@ -193,6 +210,15 @@ def replay(data):
             "open_stakes_are_not_marked_to_market": True,
             "quotes_are_assumed_fills": True, "real_money_execution": False,
             "independent_holdout": False, "events": log}
+    if include_scenario_stress:
+        from portfolio_scenario_stress import summarize_snapshot
+        report["scenario_stress"] = {
+            "selection": "first occurrence of each maximum, selected retrospectively",
+            "first_peak_open_tickets": summarize_snapshot(peak_snapshots["open"]),
+            "first_peak_exact_id_sharing": summarize_snapshot(peak_snapshots["shared"]),
+            "scenario_summary_contains_fixture_ids_or_names": False,
+            "source_independence_verified": False, "profitability_claim": False}
+    return report
 
 
 def main():

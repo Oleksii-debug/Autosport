@@ -1,0 +1,85 @@
+{
+  "assumed_opened_tickets": 41,
+  "baseline_replay_unchanged": true,
+  "bookmaker_acceptance_verified": false,
+  "independent_holdout": false,
+  "input_bytes": 321389,
+  "input_sha256": "44508bfa10c57033a671277c949ad5bfd1485744a80211497ad9abe91d3971e9",
+  "model_training": false,
+  "profitability_claim": false,
+  "real_money_execution": false,
+  "replay_fixtures": 50,
+  "retrospective_postselected": true,
+  "scenario_stress": {
+    "first_peak_exact_id_sharing": {
+      "distinct_selected_quote_keys": 6,
+      "exact_event_ids": 4,
+      "executable_fill_verified": false,
+      "fraction_reference": {
+        "independent_input_or_event_selection": false,
+        "status": "matched_within_1e-24_scaled"
+      },
+      "grid_max_open_ticket_pnl_units": "0.45744949494949483625",
+      "grid_min_open_ticket_pnl_units": "-6",
+      "grid_states": 36,
+      "grid_status": "conservative-enumeration",
+      "hypothetical_opposed_side_event_count": 2,
+      "max_stake_sharing_exact_event_id": "5",
+      "max_tickets_sharing_exact_event_id": 5,
+      "no_probability_or_expected_return": true,
+      "one_event_loss_from_all_win": null,
+      "open_stake_units": "6",
+      "open_tickets": 6,
+      "physical_identity_verified": false,
+      "prior_settlements_and_fees_included": false,
+      "profitability_claim": false,
+      "real_money_execution": false,
+      "state_space_limit": 65536,
+      "void_refund_states_included": false
+    },
+    "first_peak_open_tickets": {
+      "distinct_selected_quote_keys": 8,
+      "exact_event_ids": 8,
+      "executable_fill_verified": false,
+      "fraction_reference": {
+        "independent_input_or_event_selection": false,
+        "status": "matched_within_1e-24_scaled"
+      },
+      "grid_max_open_ticket_pnl_units": "4.001388888888888644857142857",
+      "grid_min_open_ticket_pnl_units": "-7",
+      "grid_states": 256,
+      "grid_status": "exact",
+      "hypothetical_opposed_side_event_count": 0,
+      "max_stake_sharing_exact_event_id": "3",
+      "max_tickets_sharing_exact_event_id": 3,
+      "no_probability_or_expected_return": true,
+      "one_event_loss_from_all_win": {
+        "affected_stake_units_range": [
+          "3",
+          "3"
+        ],
+        "affected_ticket_count_range": [
+          3,
+          3
+        ],
+        "max_scenario_pnl_drop_units": "4.912500000000000000000000000",
+        "tied_event_count": 1
+      },
+      "open_stake_units": "7",
+      "open_tickets": 7,
+      "physical_identity_verified": false,
+      "prior_settlements_and_fees_included": false,
+      "profitability_claim": false,
+      "real_money_execution": false,
+      "state_space_limit": 65536,
+      "void_refund_states_included": false
+    },
+    "profitability_claim": false,
+    "scenario_summary_contains_fixture_ids_or_names": false,
+    "selection": "first occurrence of each maximum, selected retrospectively",
+    "source_independence_verified": false
+  },
+  "schema": "research.tt_paper_scenario_stress_replay.v1",
+  "source_identity_verified": false,
+  "source_rights_verified": false
+}

@@ -1,0 +1,37 @@
+{
+  "best_of_five_assumed": true,
+  "bookmaker_execution": false,
+  "counts": {
+    "ambiguous_signature_groups": 0,
+    "clock_label_different_candidates": 1,
+    "clock_label_equal_candidates": 1,
+    "clock_label_missing_candidates": 0,
+    "left_rows_in_ambiguous_groups": 0,
+    "opposite_side_order_candidates": 1,
+    "right_rows_in_ambiguous_groups": 0,
+    "unique_signature_candidates": 2,
+    "unmatched_left_rows": 0,
+    "unmatched_right_rows": 0
+  },
+  "crosswalk_verified": false,
+  "note": "Exact source-claim signatures under a proposed mapping only; clock labels are compared literally, not as instants. No candidate is a confirmed identity or unique physical match.",
+  "physical_identity_verified": false,
+  "physical_match_verified": false,
+  "profitability_claim": false,
+  "result_availability_verified": false,
+  "rights_verified": false,
+  "schema": "research.tt_cross_source_score_candidates.v1",
+  "source_independence_verified": false,
+  "source_rows": {
+    "left": 2,
+    "right": 2
+  },
+  "timezone_verified": false,
+  "training_authorized": false,
+  "transcription_independently_verified": false,
+  "transcription_sha256": "940bde1036d591af40998ce76ac68c0746dafa5c805a20d96ab49e3d55c8a580",
+  "unmapped_rows": {
+    "left": 0,
+    "right": 0
+  }
+}

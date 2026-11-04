@@ -1,0 +1,47 @@
+{
+  "date_interpretation_reference": {
+    "DMY": {
+      "earliest": "2022-01-07",
+      "invalid": 4944,
+      "latest": "2022-12-06",
+      "valid": 2907,
+      "year_month_counts": {
+        "2022-01": 247,
+        "2022-02": 232,
+        "2022-03": 242,
+        "2022-04": 303,
+        "2022-05": 299,
+        "2022-06": 294,
+        "2022-07": 307,
+        "2022-08": 156,
+        "2022-10": 284,
+        "2022-11": 252,
+        "2022-12": 291
+      }
+    },
+    "MDY": {
+      "earliest": "2022-06-10",
+      "invalid": 0,
+      "latest": "2022-07-08",
+      "valid": 7851,
+      "year_month_counts": {
+        "2022-06": 5771,
+        "2022-07": 2080
+      }
+    }
+  },
+  "eligible_temporal_rows": 7850,
+  "independent_temporal_input_parser": false,
+  "source_sha256": "d400562f49ced084133c8e926025efb6023dd62a8341fd4484864d567a4e392d",
+  "temporal_counts": {
+    "earlier_any_name_rows": 6313,
+    "earlier_any_name_within_30m_rows": 369,
+    "earlier_any_name_within_60m_rows": 4310,
+    "earlier_both_names_rows": 6134,
+    "earlier_same_pair_rows": 903,
+    "earlier_same_pair_within_30m_rows": 0,
+    "earlier_same_pair_within_60m_rows": 55,
+    "same_time_same_pair_rows": 8,
+    "same_time_shared_name_rows": 12
+  }
+}

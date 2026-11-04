@@ -97,9 +97,9 @@ def freeze(root, prior_session, prior_body, prior_receipt, identity_path, oppone
                "computed_at": computed.isoformat(), "frozen_at": frozen.isoformat(),
                "odds_sha256": journal["odds_sha256"],
                "prior_result_sha256": journal["prior_result_sha256"]}
-    _write_exclusive(root / "forecast.receipt.json",
-                     (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8"))
-    return receipt
+    receipt_payload = (json.dumps(receipt, sort_keys=True, indent=2) + "\n").encode("utf-8")
+    _write_exclusive(root / "forecast.receipt.json", receipt_payload)
+    return {**receipt, "receipt_sha256": hashlib.sha256(receipt_payload).hexdigest()}
 
 
 def _probability(value):
@@ -115,13 +115,16 @@ def _probability(value):
     return f
 
 
-def evaluate(root, raw, receipt, *, expected_forecast_sha256):
+def evaluate(root, raw, receipt, *, expected_forecast_sha256, expected_receipt_sha256):
     """Compare each candidate to market on the *same* eligible fixtures.
 
-    expected_forecast_sha256 must come from a separately anchored pre-outcome
-    record. Merely passing the digest from the local receipt proves no freeze.
+    Both digests must come from a separately anchored pre-outcome record.
+    Merely passing digests of local files proves no freeze.
     """
     journal, envelope, verified = verify_journal(root)
+    if (not isinstance(expected_receipt_sha256, str) or
+            _digest(Path(root) / "forecast.receipt.json") != expected_receipt_sha256):
+        raise ValueError("receipt does not match independently pinned digest")
     if journal.get("schema") != SCHEMA:
         raise ValueError("wrong candidate journal schema")
     if (not isinstance(expected_forecast_sha256, str) or
@@ -196,6 +199,7 @@ def main():
     score.add_argument("followup_receipt", type=Path)
     score.add_argument("output", type=Path)
     score.add_argument("--expected-forecast-sha256", required=True)
+    score.add_argument("--expected-receipt-sha256", required=True)
     args = parser.parse_args()
     if args.command == "freeze":
         result = freeze(args.root, args.prior_session, args.prior_body, args.prior_receipt,
@@ -203,7 +207,8 @@ def main():
     else:
         result = evaluate(args.root, args.followup_body.read_bytes(),
                           strict_json_loads(args.followup_receipt.read_text("utf-8")),
-                          expected_forecast_sha256=args.expected_forecast_sha256)
+                          expected_forecast_sha256=args.expected_forecast_sha256,
+                          expected_receipt_sha256=args.expected_receipt_sha256)
         _write_exclusive(args.output, (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     print(json.dumps(result, ensure_ascii=False))
 

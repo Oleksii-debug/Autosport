@@ -61,6 +61,11 @@ def complete(root, prior):
     return envelope
 
 
+def pins(envelope):
+    return {"expected_forecast_sha256": envelope["sha256"],
+            "expected_receipt_sha256": envelope["receipt_sha256"]}
+
+
 def results():
     return followup([dated("full", "A", "B"), dated("form", "A", "E", "away"),
                      dated("none", "noneA", "noneB")], requested=190, received=200)
@@ -68,8 +73,8 @@ def results():
 
 def test_frozen_candidates_and_matched_outcome_cohorts(tmp_path):
     prior = setup_frozen(tmp_path)
-    pinned = complete(tmp_path, prior)["sha256"]
-    report = evaluate(tmp_path, *results(), expected_forecast_sha256=pinned)
+    pinned = pins(complete(tmp_path, prior))
+    report = evaluate(tmp_path, *results(), **pinned)
     assert report["frozen_candidates"] == report["outcome_counts"]["eligible"] == 3
     assert report["all_eligible_market"]["matches"] == 3
     form = report["matched_form"]
@@ -89,13 +94,13 @@ def test_frozen_candidates_and_matched_outcome_cohorts(tmp_path):
 
 def test_unknown_outcome_and_conflicting_history_do_not_become_losses(tmp_path):
     prior = setup_frozen(tmp_path)
-    pinned = complete(tmp_path, prior)["sha256"]
+    pinned = pins(complete(tmp_path, prior))
     earlier = dated("full", "A", "B", "away")
     earlier["finished_at"] = earlier["updated_at"] = seconds(113.5).isoformat()
     set_session_results(tmp_path / "snapshots", 1, [earlier])
     raw, receipt = followup([dated("full", "A", "B"), dated("form", "A", "E")],
                             requested=190, received=200)
-    report = evaluate(tmp_path, raw, receipt, expected_forecast_sha256=pinned)
+    report = evaluate(tmp_path, raw, receipt, **pinned)
     assert report["outcome_counts"]["identity_time_or_correction_conflict"] == 1
     assert report["outcome_counts"]["not_present_in_followup"] == 1
     assert report["matched_form"]["fixture_ids"] == ["form"]
@@ -105,7 +110,7 @@ def test_unknown_outcome_and_conflicting_history_do_not_become_losses(tmp_path):
 
 def test_pre_result_boundary_and_existing_artifact_are_fail_closed(tmp_path):
     prior = setup_frozen(tmp_path)
-    pinned = complete(tmp_path, prior)["sha256"]
+    pinned = pins(complete(tmp_path, prior))
     with pytest.raises(ValueError, match="no current results"):
         freeze(tmp_path, *prior, clock=lambda: seconds(115))
     receipt_path = tmp_path / "forecast.receipt.json"
@@ -113,7 +118,7 @@ def test_pre_result_boundary_and_existing_artifact_are_fail_closed(tmp_path):
     envelope["frozen_at"] = seconds(113).isoformat()  # equals result request
     receipt_path.write_text(json.dumps(envelope))
     with pytest.raises(ValueError, match="chronology"):
-        evaluate(tmp_path, *results(), expected_forecast_sha256=pinned)
+        evaluate(tmp_path, *results(), **pinned)
 
 
 def test_store_change_during_construction_is_rejected(tmp_path, monkeypatch):
@@ -131,7 +136,7 @@ def test_store_change_during_construction_is_rejected(tmp_path, monkeypatch):
 
 def test_external_pin_rejects_rewritten_forecast_even_with_rewritten_receipt(tmp_path):
     prior = setup_frozen(tmp_path)
-    pinned = complete(tmp_path, prior)["sha256"]
+    pinned = pins(complete(tmp_path, prior))
     path = tmp_path / "forecast.body.json"
     journal = json.loads(path.read_text())
     journal["forecasts"][0]["strength_home_probability"] = "0.8"
@@ -142,7 +147,7 @@ def test_external_pin_rejects_rewritten_forecast_even_with_rewritten_receipt(tmp
     envelope["sha256"], envelope["bytes"] = hashlib.sha256(payload).hexdigest(), len(payload)
     receipt_path.write_text(json.dumps(envelope))
     with pytest.raises(ValueError, match="pinned digest"):
-        evaluate(tmp_path, *results(), expected_forecast_sha256=pinned)
+        evaluate(tmp_path, *results(), **pinned)
 
 
 def test_invalid_candidate_status_or_probability_is_rejected(tmp_path):
@@ -159,7 +164,8 @@ def test_invalid_candidate_status_or_probability_is_rejected(tmp_path):
     envelope["sha256"], envelope["bytes"] = hashlib.sha256(payload).hexdigest(), len(payload)
     receipt_path.write_text(json.dumps(envelope))
     with pytest.raises(ValueError, match="invalid candidate probability"):
-        evaluate(tmp_path, *results(), expected_forecast_sha256=envelope["sha256"])
+        evaluate(tmp_path, *results(), expected_forecast_sha256=envelope["sha256"],
+                 expected_receipt_sha256=hashlib.sha256(receipt_path.read_bytes()).hexdigest())
 
 
 def test_correction_at_decision_time_cannot_change_frozen_form(tmp_path):
@@ -173,9 +179,20 @@ def test_correction_at_decision_time_cannot_change_frozen_form(tmp_path):
     store.record_performance(observed(event="ac", subject="A", opponent="C", score="0",
                                       available=112, recorded=112,
                                       supersedes=original.performance_id))
-    pinned = complete(tmp_path, prior)["sha256"]
+    pinned = pins(complete(tmp_path, prior))
     journal = json.loads((tmp_path / "forecast.body.json").read_text())
     full = next(row for row in journal["forecasts"] if row["fixture_id"] == "full")
     assert float(full["strength_home_probability"]) == pytest.approx(9/14)
-    report = evaluate(tmp_path, *results(), expected_forecast_sha256=pinned)
+    report = evaluate(tmp_path, *results(), **pinned)
     assert report["matched_h2h"]["matches"] == 1
+
+
+def test_external_receipt_pin_rejects_changed_but_plausible_freeze_time(tmp_path):
+    prior = setup_frozen(tmp_path)
+    pinned = pins(complete(tmp_path, prior))
+    path = tmp_path / "forecast.receipt.json"
+    envelope = json.loads(path.read_text())
+    envelope["frozen_at"] = seconds(112.75).isoformat()  # still before result request
+    path.write_text(json.dumps(envelope))
+    with pytest.raises(ValueError, match="receipt does not match independently pinned digest"):
+        evaluate(tmp_path, *results(), **pinned)

@@ -26,7 +26,8 @@ MAX_MEMBER = 30 * 1024 * 1024
 MAX_TOTAL = 120 * 1024 * 1024
 
 
-def _extract_verified(raw, expected_sha256, directory):
+def _extract_verified(raw, expected_sha256, directory, *,
+                      schema="research.tt_stopped_overlap_bundle.v1"):
     if not isinstance(raw, bytes) or not 0 < len(raw) <= MAX_ARCHIVE:
         raise ValueError("empty or oversized stopped archive")
     if hashlib.sha256(raw).hexdigest() != expected_sha256:
@@ -40,7 +41,7 @@ def _extract_verified(raw, expected_sha256, directory):
             if sum(i.file_size for i in infos) > MAX_TOTAL:
                 raise ValueError("archive expands beyond limit")
             manifest = strict_json_loads(archive.read("manifest.json").decode("utf-8"))
-            if (not isinstance(manifest, dict) or manifest.get("schema") != "research.tt_stopped_overlap_bundle.v1"
+            if (not isinstance(manifest, dict) or manifest.get("schema") != schema
                     or not isinstance(manifest.get("entries"), dict)):
                 raise ValueError("invalid stopped archive manifest")
             entries = manifest["entries"]

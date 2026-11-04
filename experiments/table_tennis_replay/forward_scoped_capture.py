@@ -48,6 +48,23 @@ def wait_for_quote(session, seq):
         time.sleep(delay)
 
 
+def capture_results_with_fresh_quote(session, seq):
+    """Do not request results when the proposal deadline has already passed.
+
+    This preflight cannot guarantee that the request, parsing and freezing
+    complete in time. The journal's final 30-second check remains authoritative.
+    """
+    verified = verify_session(session)
+    try:
+        received = instant(verified[(seq, "odds")]["received_at"])
+    except KeyError as exc:
+        raise ValueError("proposal quote receipt is missing") from exc
+    age = (now() - received).total_seconds()
+    if age < 0 or age >= 30:
+        raise ValueError("proposal quote is outside the 30-second window before results request")
+    return capture_one(session, seq, "results")
+
+
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("stage", choices=("prepare", "initial", "action1", "results2", "action2", "finish", "followup"))
@@ -78,7 +95,7 @@ def main():
         odds = capture_one(session, 1, "odds")
         if instant(scope["prior_as_of"]) >= instant(odds["requested_at"]):
             raise ValueError("prior evidence overlaps new observation")
-        results = capture_one(session, 1, "results")
+        results = capture_results_with_fresh_quote(session, 1)
         envelope = freeze_proposal(session, journal, 1, excluded, args.history_head)
         body = strict_json_loads((journal / "proposal-0001.body.json").read_text("utf-8"))
         out = {"odds_requested_at": odds["requested_at"], "odds_received_at": odds["received_at"],
@@ -96,7 +113,7 @@ def main():
                "policies": {k: {n: v[n] for n in ("assumed_open", "open_stake", "peak_tickets_sharing_fixture")}
                             for k, v in report["policies"].items()}}
     elif args.stage == "results2":
-        result = capture_one(session, 2, "results")
+        result = capture_results_with_fresh_quote(session, 2)
         envelope = freeze_proposal(session, journal, 2, excluded, args.history_head)
         body = strict_json_loads((journal / "proposal-0002.body.json").read_text("utf-8"))
         out = {"results_requested_at": result["requested_at"], "results_received_at": result["received_at"],

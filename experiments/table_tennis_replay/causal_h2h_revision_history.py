@@ -26,6 +26,7 @@ _NAME = re.compile(r"^(\d{4})\.(body|receipt|link)\.json$")
 _SHA = re.compile(r"^[0-9a-f]{64}$")
 _FIELDS = {"schema", "sequence", "forecast_sha256", "previous_link_sha256",
            "body_sha256", "receipt_sha256"}
+_FIELDS_WITH_FORECAST_RECEIPT = _FIELDS | {"forecast_receipt_sha256"}
 MAX_RECEIPTS = 256
 
 
@@ -33,11 +34,15 @@ def _digest(raw):
     return hashlib.sha256(raw).hexdigest()
 
 
-def _read_history(directory, expected_head, forecast_sha):
+def _read_history(directory, expected_head, forecast_sha, *, forecast_receipt_sha256=None):
     """Check complete triplets and the externally supplied last-link digest."""
     directory = Path(directory)
     if not isinstance(expected_head, str) or not _SHA.fullmatch(expected_head):
         raise ValueError("expected latest link SHA-256 is required")
+    if forecast_receipt_sha256 is not None and (
+            not isinstance(forecast_receipt_sha256, str) or
+            not _SHA.fullmatch(forecast_receipt_sha256)):
+        raise ValueError("invalid frozen forecast receipt SHA-256")
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("history must be a non-symlink directory")
     entries = {}
@@ -61,10 +66,15 @@ def _read_history(directory, expected_head, forecast_sha):
         receipt_bytes = (directory / f"{stem}.receipt.json").read_bytes()
         link_bytes = (directory / f"{stem}.link.json").read_bytes()
         link = strict_json_loads(link_bytes.decode("utf-8"))
-        if (not isinstance(link, dict) or set(link) != _FIELDS or
-                link["schema"] != "research.tt_result_history_link.v1" or
+        fields = _FIELDS if forecast_receipt_sha256 is None else _FIELDS_WITH_FORECAST_RECEIPT
+        schema = ("research.tt_result_history_link.v1" if forecast_receipt_sha256 is None
+                  else "research.tt_result_history_link.v2")
+        if (not isinstance(link, dict) or set(link) != fields or
+                link["schema"] != schema or
                 type(link["sequence"]) is not int or link["sequence"] != sequence or
                 link["forecast_sha256"] != forecast_sha or
+                (forecast_receipt_sha256 is not None and
+                 link["forecast_receipt_sha256"] != forecast_receipt_sha256) or
                 link["previous_link_sha256"] != previous or
                 link["body_sha256"] != _digest(body) or
                 link["receipt_sha256"] != _digest(receipt_bytes)):
@@ -79,10 +89,11 @@ def _read_history(directory, expected_head, forecast_sha):
     return checked
 
 
-def evaluate_history(root, directory, expected_head):
-    """Score each as-of state, retaining quarantine through all later receipts."""
+def _evaluate_history(root, directory, expected_head, *, scorer, forecast_receipt_sha256=None):
+    """Shared reconciliation; the scorer owns forecast and outcome validation."""
     journal, envelope, _ = verify_journal(Path(root))
-    checked = _read_history(directory, expected_head, envelope["sha256"])
+    checked = _read_history(directory, expected_head, envelope["sha256"],
+                            forecast_receipt_sha256=forecast_receipt_sha256)
     forecasts = journal["forecasts"]
     ids = [row["fixture_id"] for row in forecasts]
     states = {fid: {"state": "unresolved", "unqualified_finished_seen": False,
@@ -93,7 +104,7 @@ def evaluate_history(root, directory, expected_head):
         if previous_receipt is not None and (
                 instant(previous_receipt["received_at"]) >= instant(receipt.get("requested_at"))):
             raise ValueError("later request must start strictly after prior receipt")
-        scored = score_followup(root, body, receipt)
+        scored = scorer(root, body, receipt)
         current_date = scored["followup_audit"]["source_date"]
         if previous_date is not None and current_date != previous_date:
             raise ValueError("history contains different source dates")
@@ -152,7 +163,13 @@ def evaluate_history(root, directory, expected_head):
                     "pin freshness, source clocks and source truth need independent evidence."}
 
 
-def append_followup(root, directory, body, receipt_bytes, *, expected_head):
+def evaluate_history(root, directory, expected_head):
+    """Score each as-of state, retaining quarantine through all later receipts."""
+    return _evaluate_history(root, directory, expected_head, scorer=score_followup)
+
+
+def _append_followup(root, directory, body, receipt_bytes, *, expected_head, scorer,
+                     forecast_receipt_sha256=None):
     """Append a verified response without overwriting any earlier evidence.
 
     expected_head must be None for a fresh empty directory, otherwise it must
@@ -162,9 +179,14 @@ def append_followup(root, directory, body, receipt_bytes, *, expected_head):
     directory = Path(directory)
     if directory.is_symlink() or not directory.is_dir():
         raise ValueError("history must be a non-symlink directory")
+    if forecast_receipt_sha256 is not None and (
+            not isinstance(forecast_receipt_sha256, str) or
+            not _SHA.fullmatch(forecast_receipt_sha256)):
+        raise ValueError("invalid frozen forecast receipt SHA-256")
     journal, envelope, _ = verify_journal(Path(root))
     if list(directory.iterdir()):
-        previous = evaluate_history(root, directory, expected_head)
+        previous = _evaluate_history(root, directory, expected_head, scorer=scorer,
+                                     forecast_receipt_sha256=forecast_receipt_sha256)
         previous_snapshot = previous["snapshots"][-1]
         sequence = previous_snapshot["sequence"] + 1
         previous_at = instant(previous_snapshot["as_of"])
@@ -178,20 +200,30 @@ def append_followup(root, directory, body, receipt_bytes, *, expected_head):
     receipt = strict_json_loads(receipt_bytes.decode("utf-8"))
     if not isinstance(receipt, dict):
         raise ValueError("invalid history receipt")
-    scored = score_followup(root, body, receipt)
+    scored = scorer(root, body, receipt)
     if previous_at is not None and previous_at >= instant(receipt.get("requested_at")):
         raise ValueError("later request must start strictly after prior receipt")
     if previous_date is not None and previous_date != scored["followup_audit"]["source_date"]:
         raise ValueError("history contains different source dates")
-    link = {"schema": "research.tt_result_history_link.v1", "sequence": sequence,
+    schema = ("research.tt_result_history_link.v1" if forecast_receipt_sha256 is None
+              else "research.tt_result_history_link.v2")
+    link = {"schema": schema, "sequence": sequence,
             "forecast_sha256": envelope["sha256"], "previous_link_sha256": expected_head,
             "body_sha256": _digest(body), "receipt_sha256": _digest(receipt_bytes)}
+    if forecast_receipt_sha256 is not None:
+        link["forecast_receipt_sha256"] = forecast_receipt_sha256
     link_bytes = (json.dumps(link, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8")
     stem = f"{sequence:04d}"
     _write_exclusive(directory / f"{stem}.body.json", body)
     _write_exclusive(directory / f"{stem}.receipt.json", receipt_bytes)
     _write_exclusive(directory / f"{stem}.link.json", link_bytes)
     return _digest(link_bytes)
+
+
+def append_followup(root, directory, body, receipt_bytes, *, expected_head):
+    """Append to the original market-only history using its version-one links."""
+    return _append_followup(root, directory, body, receipt_bytes,
+                            expected_head=expected_head, scorer=score_followup)
 
 
 def main():

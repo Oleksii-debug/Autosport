@@ -22,9 +22,9 @@ from next_day_player_eval import _scores
 from record import instant
 
 
-def evaluate(root, raw, receipt):
+def _eligible_rows(root, raw, receipt, journal, envelope, verified):
+    """Validate later source outcomes once for any frozen candidate cohort."""
     root = Path(root)
-    journal, envelope, verified = verify_journal(root)
     followup = validate_followup(root / "snapshots", raw, receipt)
     received = instant(receipt["received_at"])
     # This request started after the journal receipt was actually written. It
@@ -43,10 +43,8 @@ def evaluate(root, raw, receipt):
             journal.get("counts", {}).get("forecast_fixtures") != len(forecasts)):
         raise ValueError("invalid frozen forecast population")
     ids = [row.get("fixture_id") for row in forecasts]
-    if (any(not isinstance(i, str) or not i for i in ids) or len(ids) != len(set(ids)) or
-            any(row.get("h2h_status") != "identity_unresolved" or
-                row.get("h2h_home_probability") is not None for row in forecasts)):
-        raise ValueError("population contains duplicate IDs or unexpected H2H features")
+    if any(not isinstance(i, str) or not i for i in ids) or len(ids) != len(set(ids)):
+        raise ValueError("population contains duplicate or invalid fixture IDs")
     counts, rows = Counter(), []
     for forecast in forecasts:
         identity = forecast["fixture_id"]
@@ -88,6 +86,18 @@ def evaluate(root, raw, receipt):
         counts["eligible"] += 1
         rows.append({"fixture_id": identity, "market": p, "neutral": 0.5,
                      "outcome": int(side == "home")})
+    return counts, rows, followup, decision_bound
+
+
+def evaluate(root, raw, receipt):
+    journal, envelope, verified = verify_journal(root)
+    forecasts = journal.get("forecasts")
+    if not isinstance(forecasts, list) or any(
+            row.get("h2h_status") != "identity_unresolved" or
+            row.get("h2h_home_probability") is not None for row in forecasts):
+        raise ValueError("population contains unexpected H2H features")
+    counts, rows, followup, decision_bound = _eligible_rows(
+        root, raw, receipt, journal, envelope, verified)
     return {"schema": "research.tt_frozen_market_score.v1", "frozen_candidates": len(forecasts),
             "counts": {key: counts[key] for key in ("eligible", "not_present_in_followup",
                        "invalid_or_unfinished_result", "source_update_after_receipt",

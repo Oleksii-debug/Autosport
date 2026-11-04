@@ -29,6 +29,84 @@ from record import instant
 SOURCE = "moviodds.com"
 
 
+def _history_identity_status(relevant, before, registry, records):
+    """Validate provenance of relevant graph edges, without changing either store.
+
+    graph_edges deliberately exposes no bound alias records. Its canonical
+    as-known record view is currently private; use the same cutoff/view and
+    fail closed if a graph edge cannot be tied back to that record.
+    """
+    if not relevant:
+        return None
+    for edge in relevant:
+        record = records.get(edge.performance_id)
+        if record is None:
+            return "history_identity_unreconciled"
+        observation = record.observation
+        bindings = (
+            (observation.subject_alias, record.subject_alias_record_id, record.subject_entity_id),
+            (observation.opponent_alias, record.opponent_alias_record_id, record.opponent_entity_id),
+            (observation.league_alias, record.league_alias_record_id, record.league_entity_id),
+        )
+        for label, bound_id, entity_id in bindings:
+            try:
+                at_observation = registry.resolve_alias_record(
+                    observation.source_id, label, as_of=observation.available_at,
+                    view=IdentityView.AS_KNOWN_AT_DECISION)
+                at_decision = registry.resolve_alias_record(
+                    observation.source_id, label, as_of=before,
+                    view=IdentityView.AS_KNOWN_AT_DECISION)
+                # resolve_alias additionally verifies that the entity itself
+                # was available, even if an alias record existed earlier.
+                entity_at_observation = registry.resolve_alias(
+                    observation.source_id, label, as_of=observation.available_at,
+                    view=IdentityView.AS_KNOWN_AT_DECISION)
+                entity_at_decision = registry.resolve_alias(
+                    observation.source_id, label, as_of=before,
+                    view=IdentityView.AS_KNOWN_AT_DECISION)
+            except ParticipantIdentityError:
+                return "history_identity_unreconciled"
+            if (at_observation.record_id != bound_id or at_observation.entity_id != entity_id or
+                    entity_at_observation.entity_id != entity_id or entity_at_decision.entity_id != entity_id or
+                    at_observation.supersedes_record_id is not None or
+                    at_decision.record_id != bound_id or at_decision.entity_id != entity_id):
+                return "history_identity_unreconciled"
+            if at_observation.relation != "CONFIRMED" or at_decision.relation != "CONFIRMED":
+                return "history_identity_unconfirmed"
+    return None
+
+
+def _known_newly_relevant(edges, relevant_ids, fixture_id, before, registry, records,
+                          home_id, away_id, league_id):
+    """Detect recorded edges whose now-known aliases move them into this H2H.
+
+    This is only an alert: it never rewrites the edge or admits a corrected
+    match. Unresolvable names and unrecorded matches can still be missing.
+    """
+    resolutions = {}
+    for edge in edges:
+        if edge.event_id == fixture_id or edge.performance_id in relevant_ids:
+            continue
+        record = records.get(edge.performance_id)
+        if record is None:
+            return True
+        obs = record.observation
+        entities = []
+        for label in (obs.subject_alias, obs.opponent_alias, obs.league_alias):
+            key = (obs.source_id, label)
+            if key not in resolutions:
+                try:
+                    resolutions[key] = registry.resolve_alias(
+                        obs.source_id, label, as_of=before,
+                        view=IdentityView.AS_KNOWN_AT_DECISION).entity_id
+                except ParticipantIdentityError:
+                    resolutions[key] = None
+            entities.append(resolutions[key])
+        if {entities[0], entities[1]} == {home_id, away_id} and entities[2] == league_id:
+            return True
+    return False
+
+
 def feature(fixture_id, market, feature_cutoff, registry, store):
     """Construct an observational probability and canonical as-known H2H view."""
     if store.identity_registry is not registry:
@@ -68,9 +146,9 @@ def feature(fixture_id, market, feature_cutoff, registry, store):
         result["h2h_status"] = "identity_lineage_unreconciled"
         return result
     edges = store.graph_edges(as_of=before, view=IdentityView.AS_KNOWN_AT_DECISION,
-                              sport_id="table_tennis", league_entity_id=league_id.entity_id,
-                              market_context_id="match-outcome")
+                              sport_id="table_tennis", market_context_id="match-outcome")
     relevant = [edge for edge in edges if edge.event_id != fixture_id and
+                edge.league_entity_id == league_id.entity_id and
                 {edge.subject_entity_id, edge.opponent_entity_id} == {home_id.entity_id, away_id.entity_id}]
     relevant_ids = {edge.performance_id for edge in relevant}
     if any(item.target_id in relevant_ids and item.target_kind is InvalidationTarget.OPPONENT_EDGE and
@@ -78,6 +156,19 @@ def feature(fixture_id, market, feature_cutoff, registry, store):
            item.recompute_status is RecomputeStatus.REQUIRED and instant(item.detected_at) < cutoff
            for item in store.invalidations()):
         result["h2h_status"] = "history_identity_invalidated"
+        return result
+    # The graph has no public provenance accessor; the same canonical private
+    # as-known record view supplies the original bound alias IDs. This research
+    # adapter must be requalified if that internal interface changes.
+    records = {record.performance_id: record for record in store._active_performances(
+        as_of=before, view=IdentityView.AS_KNOWN_AT_DECISION)} if edges else {}
+    history_status = _history_identity_status(relevant, before, registry, records)
+    if history_status is not None:
+        result["h2h_status"] = history_status
+        return result
+    if _known_newly_relevant(edges, relevant_ids, fixture_id, before, registry, records,
+                             home_id.entity_id, away_id.entity_id, league_id.entity_id):
+        result["h2h_status"] = "history_identity_unreconciled"
         return result
     ids = [edge.event_id for edge in relevant]
     if len(ids) != len(set(ids)) or any(edge.score not in ("0", "1") for edge in relevant):

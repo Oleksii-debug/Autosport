@@ -1,0 +1,30 @@
+{
+  "bookmaker_execution": false,
+  "collision_group_size_counts": {
+    "2": 4
+  },
+  "collision_groups": 4,
+  "collision_rows": 8,
+  "eligible_temporal_rows": 7850,
+  "format_independently_verified": false,
+  "group_score_status": {
+    "all_qualified_different": 0,
+    "all_qualified_equal": 4,
+    "not_fully_qualified": 0
+  },
+  "groups_with_reversed_source_side_order": 0,
+  "identity_independently_verified": false,
+  "independent_holdout": false,
+  "model_training_authorized": false,
+  "note": "Exact source-label and structurally comparable score coincidences only; no source data or physical event was altered.",
+  "physical_match_deduplication_verified": false,
+  "posthoc_groups_equal_on_raw_fields_except_row_label": 4,
+  "profitability_claim": false,
+  "result_availability_verified": false,
+  "rights_verified": false,
+  "schema": "research.tt_setka_collision_audit.v1",
+  "source_outcomes_independently_verified": false,
+  "source_rows": 7851,
+  "source_sha256": "d400562f49ced084133c8e926025efb6023dd62a8341fd4484864d567a4e392d",
+  "structurally_qualified_collision_rows": 8
+}

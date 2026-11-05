@@ -1,0 +1,19 @@
+{
+  "bookmaker_execution": false,
+  "forecast_sha256": "407bba8c83e854636c74f857609d2954f9f5c92048ec31aff941390a15aee917",
+  "frozen_forecasts": 11,
+  "identity_verified": false,
+  "market_values_match": true,
+  "model_training": false,
+  "new_strength_values": 0,
+  "note": "Frozen, previously inspected market snapshots; no actual identities or new holdout.",
+  "odds_sha256": "c0de46bbf9b84f5b3b42575708ec61cb6d869e4d81eaee2d630a6a21a1b8ba23",
+  "profitability_claim": false,
+  "schema": "research.tt_empty_strength_replay.v1",
+  "source_rights_verified": false,
+  "status_counts": {
+    "identity_unresolved": 11,
+    "strength:blocked_by_identity_or_h2h_history": 11
+  },
+  "stores_unchanged": true
+}

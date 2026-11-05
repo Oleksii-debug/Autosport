@@ -1,0 +1,98 @@
+{
+  "assumed_opened_tickets": 41,
+  "baseline_replay_unchanged": true,
+  "bookmaker_acceptance_verified": false,
+  "bookmaker_void_rules_verified": false,
+  "independent_holdout": false,
+  "input_bytes": 321389,
+  "input_sha256": "44508bfa10c57033a671277c949ad5bfd1485744a80211497ad9abe91d3971e9",
+  "model_training": false,
+  "prior_binary_stress_unchanged": true,
+  "profitability_claim": false,
+  "real_money_execution": false,
+  "replay_fixtures": 50,
+  "retrospective_postselected": true,
+  "schema": "research.tt_paper_single_void_replay.v1",
+  "single_void_stress": {
+    "first_peak_exact_id_sharing": {
+      "affected_stake_units_range": [
+        "1",
+        "5"
+      ],
+      "affected_ticket_count_range": [
+        1,
+        5
+      ],
+      "binary_baseline_states": 36,
+      "bookmaker_void_rules_verified": false,
+      "comparison_cap": 65536,
+      "comparison_status": "exact",
+      "completed_paired_comparisons": 144,
+      "exact_event_ids": 4,
+      "executable_fill_verified": false,
+      "fraction_check": "all_pairs_matched_within_1e-24_scaled",
+      "independent_grid_fraction_check": "matched_within_1e-24_scaled",
+      "no_probability_or_expected_return": true,
+      "open_stake_units": "6",
+      "open_tickets": 6,
+      "physical_identity_verified": false,
+      "planned_paired_comparisons": 144,
+      "prior_settlements_and_fees_included": false,
+      "profitability_claim": false,
+      "real_money_execution": false,
+      "same_source_rows_for_reference": true,
+      "void_minus_nonvoid_max_units": "4.2625",
+      "void_minus_nonvoid_min_units": "-2.19494949494949483625",
+      "void_minus_nonvoid_sign_counts": {
+        "negative": 30,
+        "positive": 54,
+        "zero": 60
+      },
+      "void_scenario_pnl_max_units": "0.45744949494949483625",
+      "void_scenario_pnl_min_units": "-6"
+    },
+    "first_peak_open_tickets": {
+      "affected_stake_units_range": [
+        "1",
+        "3"
+      ],
+      "affected_ticket_count_range": [
+        1,
+        3
+      ],
+      "binary_baseline_states": 256,
+      "bookmaker_void_rules_verified": false,
+      "comparison_cap": 65536,
+      "comparison_status": "exact",
+      "completed_paired_comparisons": 2048,
+      "exact_event_ids": 8,
+      "executable_fill_verified": false,
+      "fraction_check": "all_pairs_matched_within_1e-24_scaled",
+      "independent_grid_fraction_check": "matched_within_1e-24_scaled",
+      "no_probability_or_expected_return": true,
+      "open_stake_units": "7",
+      "open_tickets": 7,
+      "physical_identity_verified": false,
+      "planned_paired_comparisons": 2048,
+      "prior_settlements_and_fees_included": false,
+      "profitability_claim": false,
+      "real_money_execution": false,
+      "same_source_rows_for_reference": true,
+      "void_minus_nonvoid_max_units": "3.468253968253968200000000000",
+      "void_minus_nonvoid_min_units": "-1.500000000000000000000000000",
+      "void_minus_nonvoid_sign_counts": {
+        "negative": 576,
+        "positive": 576,
+        "zero": 896
+      },
+      "void_scenario_pnl_max_units": "3.801865079365079060634920635",
+      "void_scenario_pnl_min_units": "-7"
+    },
+    "profitability_claim": false,
+    "scenario_summary_contains_fixture_ids_or_names": false,
+    "selection": "first occurrence of each maximum, selected retrospectively",
+    "source_independence_verified": false
+  },
+  "source_identity_verified": false,
+  "source_rights_verified": false
+}

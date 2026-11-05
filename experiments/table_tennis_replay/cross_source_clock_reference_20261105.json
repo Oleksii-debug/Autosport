@@ -1,0 +1,13 @@
+{
+  "feasible_full_pairings": 1,
+  "feasible_offset_minutes": [
+    179,
+    180,
+    181
+  ],
+  "feasible_pairing_offset_combinations": 3,
+  "forced_row_pairs_within_hypothesis": 4,
+  "possible_row_pairs": 4,
+  "schema": "research.tt_cross_source_clock_reference.v1",
+  "transcription_sha256": "1216c8bd37207e6839102e213e316337c994044d6bb0986c387ddefdf9a229d2"
+}

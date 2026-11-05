@@ -1,0 +1,51 @@
+{
+  "duplicate_prediction_groups": 1,
+  "groups": [
+    {
+      "candidate_multiplicity": "multiple",
+      "candidate_source_rows": 2,
+      "match_key": {
+        "distinct_values": 2,
+        "invalid_rows": 0,
+        "missing_rows": 0,
+        "present_rows": 2,
+        "repeated_values": 0,
+        "rows_in_repeated_values": 0
+      },
+      "prediction_rows": 2,
+      "source_match_id": {
+        "distinct_values": 2,
+        "invalid_rows": 0,
+        "missing_rows": 0,
+        "present_rows": 2,
+        "repeated_values": 0,
+        "rows_in_repeated_values": 0
+      }
+    }
+  ],
+  "independent_holdout_verified": false,
+  "individual_source_ids_published": false,
+  "note": "Candidate counts only for identical published prediction rows; exact source IDs are not physical-event proof, and the CSV lacks a source-match key.",
+  "physical_events_verified": false,
+  "physical_people_verified": false,
+  "prediction_csv_sha256": "9bcaa521b50cc573195545094c54601fa8f071b017ea8ed2e8498f076f80b983",
+  "prediction_groups_by_candidate_multiplicity": {
+    "multiple": 1,
+    "one": 0,
+    "zero": 0
+  },
+  "prediction_row_to_source_row_verified": false,
+  "real_money_execution": false,
+  "result_availability_verified": false,
+  "schema": "research.tt_topspin_duplicate_source_candidates.v1",
+  "source_parquet_sha256": "6d744f1001a48b5109790cd1d0ab896eacd7b1621885afd22d55195a4a970044",
+  "source_rights_verified": false,
+  "source_rows": 857,
+  "source_rows_eligible_for_key_matching": 857,
+  "source_rows_excluded": {
+    "not_usable_singles": 0,
+    "usable_rows_with_invalid_join_key": 0
+  },
+  "source_truth_verified": false,
+  "transcode_sha256": "d0b4080bf79ab6e225e53846470fd9e5d2d9521ce81953959a10029ebb74bd61"
+}

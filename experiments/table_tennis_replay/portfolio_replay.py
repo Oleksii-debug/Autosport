@@ -70,7 +70,7 @@ def _eligible(match, frame, observed, now):
 
 def replay(data, *, include_scenario_stress=False, include_single_void_stress=False,
            include_alias_sensitivity=False, include_probability_sensitivity=False,
-           include_joint_probability_bounds=False):
+           include_joint_probability_bounds=False, include_alias_probability_bounds=False):
     if type(include_scenario_stress) is not bool:
         raise ValueError("include_scenario_stress must be a boolean")
     if type(include_single_void_stress) is not bool:
@@ -81,6 +81,8 @@ def replay(data, *, include_scenario_stress=False, include_single_void_stress=Fa
         raise ValueError("include_probability_sensitivity must be a boolean")
     if type(include_joint_probability_bounds) is not bool:
         raise ValueError("include_joint_probability_bounds must be a boolean")
+    if type(include_alias_probability_bounds) is not bool:
+        raise ValueError("include_alias_probability_bounds must be a boolean")
     matches = data["matches"]
     if not isinstance(matches, list):
         raise ValueError("matches must be a list")
@@ -145,7 +147,8 @@ def replay(data, *, include_scenario_stress=False, include_single_void_stress=Fa
             max_tickets_sharing_fixture = max(max_tickets_sharing_fixture, max(exposure.values()))
             max_shared_fixture_stake = max(max_shared_fixture_stake, STAKE * max(exposure.values()))
         if (include_scenario_stress or include_single_void_stress or include_alias_sensitivity
-                or include_probability_sensitivity or include_joint_probability_bounds):
+                or include_probability_sensitivity or include_joint_probability_bounds
+                or include_alias_probability_bounds):
             # Copy only at a new strict maximum: ties retain the first state.
             # Snapshots remain internal; the public report contains aggregates.
             from autosport.portfolio import _snapshot_open_tickets_for_analysis
@@ -259,6 +262,14 @@ def replay(data, *, include_scenario_stress=False, include_single_void_stress=Fa
             "selection": "first occurrence of each maximum, selected retrospectively",
             "first_peak_open_tickets": summarize_joint_bounds(peak_snapshots["open"]),
             "first_peak_exact_id_sharing": summarize_joint_bounds(peak_snapshots["shared"]),
+            "scenario_summary_contains_fixture_ids_or_names": False,
+            "source_independence_verified": False, "profitability_claim": False}
+    if include_alias_probability_bounds:
+        from portfolio_alias_probability_bounds import summarize_alias_probability_bounds
+        report["alias_probability_bounds"] = {
+            "selection": "first occurrence of each maximum, selected retrospectively",
+            "first_peak_open_tickets": summarize_alias_probability_bounds(peak_snapshots["open"]),
+            "first_peak_exact_id_sharing": summarize_alias_probability_bounds(peak_snapshots["shared"]),
             "scenario_summary_contains_fixture_ids_or_names": False,
             "source_independence_verified": False, "profitability_claim": False}
     return report

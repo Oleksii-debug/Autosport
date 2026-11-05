@@ -122,15 +122,13 @@ def _count(train, test):
                 (item["raw_time"], item["pair"]) in pair_times) for item in test)}
 
 
-def audit(raw, *, expected_sha256, reference_pair_cap=REFERENCE_PAIR_CAP):
-    """Match the notebook's cleaning/split in installed versions; no fit."""
+def _load_notebook_population(raw, *, expected_sha256):
+    """Read pinned data and apply the notebook's cleaning; no fit or prediction."""
     if not isinstance(raw, bytes) or not raw or len(raw) > MAX_BYTES:
         raise ValueError("empty or oversized CSV")
     digest = hashlib.sha256(raw).hexdigest()
     if digest != expected_sha256:
         raise ValueError("CSV differs from pinned SHA-256")
-    if type(reference_pair_cap) is not int or not 0 <= reference_pair_cap <= REFERENCE_PAIR_CAP:
-        raise ValueError("invalid reference pair cap")
     try:
         reader = csv.DictReader(io.StringIO(raw.decode("utf-8-sig"), newline=""), strict=True)
         if tuple(reader.fieldnames or ()) != FIELDS:
@@ -158,6 +156,11 @@ def audit(raw, *, expected_sha256, reference_pair_cap=REFERENCE_PAIR_CAP):
     clean = clean.dropna(subset=["Date"])
     if clean.empty or not set(clean["HomeWinner"].unique()) <= {0, 1}:
         raise ValueError("notebook-cleaned labels must be binary and nonempty")
+    return digest, rows, clean
+
+
+def _notebook_split(clean):
+    """Verify local index and original two-margin frame splits coincide."""
     indices = clean.index.to_numpy()
     train_idx, test_idx = train_test_split(indices, test_size=0.2, random_state=42,
                                            stratify=clean["HomeWinner"])
@@ -169,6 +172,15 @@ def audit(raw, *, expected_sha256, reference_pair_cap=REFERENCE_PAIR_CAP):
                                              random_state=42, stratify=clean["HomeWinner"])
     if list(train_idx) != list(x_train.index) or list(test_idx) != list(x_test.index):
         raise ValueError("index split differs from notebook feature-frame split")
+    return train_idx, test_idx
+
+
+def audit(raw, *, expected_sha256, reference_pair_cap=REFERENCE_PAIR_CAP):
+    """Match the notebook's cleaning/split in installed versions; no fit."""
+    if type(reference_pair_cap) is not int or not 0 <= reference_pair_cap <= REFERENCE_PAIR_CAP:
+        raise ValueError("invalid reference pair cap")
+    digest, rows, clean = _load_notebook_population(raw, expected_sha256=expected_sha256)
+    train_idx, test_idx = _notebook_split(clean)
 
     def materialize(indices):
         result = []

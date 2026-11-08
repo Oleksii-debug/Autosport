@@ -31,7 +31,8 @@ def _fee_reserve_allows(book, risk, opened):
     return book.balance - FEE * (opened + 1) - STAKE >= INITIAL * risk.minimum_cash_reserve_fraction
 
 
-def project(root: Path):
+def validated_recorded_replay(root: Path, *, historical_seed=None):
+    """Recheck source decisions, returns and memory for a research replay."""
     root = Path(root)
     wrapper = json.loads((root / "observer.json").read_text("utf-8"))
     state = wrapper["state"]
@@ -39,8 +40,24 @@ def project(root: Path):
         raise ValueError("observer checkpoint integrity mismatch")
     plan = ObserverPlan(**state["plan"])
     memory = ShadowStrategyMemory.load(root / "memory.json")
-    records = {r["event_id"]: r for r in memory.payload()["records"]}
+    payload = memory.payload()
+    history = payload["records"]
+    seed_count = 0
+    seed_at = None
+    if historical_seed is not None:
+        seed_count = historical_seed["historical_feedback_count"]
+        seed_at = instant(historical_seed["seeded_at"])
+        if type(seed_count) is not int or not 0 < seed_count <= len(history):
+            raise ValueError("invalid historical feedback count")
+        prefix = history[:seed_count]
+        if (digest({**payload, "records": prefix}) != historical_seed["memory_sha256"]
+                or [record["event_id"] for record in prefix] != historical_seed["historical_event_ids"]
+                or any(instant(record["ingested_at"]) != seed_at for record in prefix)):
+            raise ValueError("historical memory changed before replay")
+    records = {r["event_id"]: r for r in history[seed_count:]}
     events = state["candidates"]
+    if any(record["event_id"] in events for record in history[:seed_count]):
+        raise ValueError("historical feedback overlaps future candidate identities")
     if any(event.get("source_conflict") for event in events.values()):
         raise ValueError("source correction requires explicit review; portfolio held")
     settled_ids = {identity for identity, event in events.items() if event["state"] == "RESULT_RECORDED_NOT_EXECUTED"}
@@ -82,6 +99,8 @@ def project(root: Path):
         if captured is None:
             raise ValueError("candidate missing from recorded forecast")
         decision_at = instant(event["decision_at"])
+        if seed_at is not None and decision_at <= seed_at:
+            raise ValueError("candidate must follow seed availability")
         if not 0 <= (decision_at - instant(generated_at)).total_seconds() <= plan.maximum_age_seconds or decision_at > instant(state["last_received_at"]):
             raise ValueError("forecast or decision chronology invalid")
         recomputed = candidate(captured, received_at=event["decision_at"], plan=plan)
@@ -112,7 +131,6 @@ def project(root: Path):
     actions.sort(key=lambda x: (x[0], x[1], x[2], x[3]))
     # The observer creates same-cycle decisions before consuming that cycle's labels.
     causal = ShadowStrategyMemory(memory.plan)
-    history = memory.payload()["records"]
     history_index = 0
     for when, kind, _, identity, event in actions:
         if kind != 0:
@@ -127,6 +145,11 @@ def project(root: Path):
         preference = causal.choose(as_of=event["decision_at"], admissible_actions=frozenset({"PRICE_GAP", "WAIT"}))
         if preference != event["memory_preference"]:
             raise ValueError("frozen agent preference cannot be derived from prior feedback")
+    return wrapper["sha256"], actions
+
+
+def project(root: Path):
+    observer_sha256, actions = validated_recorded_replay(root)
     book, risk = PaperBook(INITIAL), PaperRiskPolicy()
     tickets, diary = {}, []
     opened = won = lost = 0
@@ -163,7 +186,7 @@ def project(root: Path):
         peak = max(peak, equity)
         max_drawdown = max(max_drawdown, peak - equity)
     gross_equity = book.balance + book.committed_stake
-    return {"schema": "autosport.recorded_paper_projection.v1", "observer_sha256": wrapper["sha256"],
+    return {"schema": "autosport.recorded_paper_projection.v1", "observer_sha256": observer_sha256,
             "initial_units": str(INITIAL), "stake_units": str(STAKE), "opened_tickets": opened,
             "won": won, "lost": lost, "pending_tickets": opened-won-lost,
             "virtual_cash_excluding_cost": str(book.balance), "open_stake": str(book.committed_stake),

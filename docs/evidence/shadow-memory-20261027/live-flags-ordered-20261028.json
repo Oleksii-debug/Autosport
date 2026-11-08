@@ -1,0 +1,239 @@
+{
+  "attribution": "TipsAudit (2026), https://tipsaudit.com/data, CC BY 4.0",
+  "cohorts": {
+    "conditional_later_requote": {
+      "initial_prices": {
+        "0": {
+          "bets": 889,
+          "cost_bps_per_stake": 0,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.07455573505654281098546042003",
+            "0.08022222222222222222222222222"
+          ],
+          "max_drawdown_units": "33.940",
+          "net_units": "-6.510",
+          "roi": "-0.007322834645669291338582677165",
+          "wins": 437
+        },
+        "100": {
+          "bets": 889,
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.08455573505654281098546042003",
+            "0.07022222222222222222222222222"
+          ],
+          "max_drawdown_units": "38.500",
+          "net_units": "-15.400",
+          "roi": "-0.01732283464566929133858267717",
+          "wins": 437
+        },
+        "200": {
+          "bets": 889,
+          "cost_bps_per_stake": 200,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.09455573505654281098546042003",
+            "0.06022222222222222222222222222"
+          ],
+          "max_drawdown_units": "43.060",
+          "net_units": "-24.290",
+          "roi": "-0.02732283464566929133858267717",
+          "wins": 437
+        },
+        "50": {
+          "bets": 889,
+          "cost_bps_per_stake": 50,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.07955573505654281098546042003",
+            "0.07522222222222222222222222222"
+          ],
+          "max_drawdown_units": "36.220",
+          "net_units": "-10.955",
+          "roi": "-0.01232283464566929133858267717",
+          "wins": 437
+        }
+      },
+      "later_prices": {
+        "0": {
+          "bets": 889,
+          "cost_bps_per_stake": 0,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.08098922624877571008814887365",
+            "0.07561963190184049079754601227"
+          ],
+          "max_drawdown_units": "36.47",
+          "net_units": "-11.79",
+          "roi": "-0.01326209223847019122609673791",
+          "wins": 437
+        },
+        "100": {
+          "bets": 889,
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.09098922624877571008814887365",
+            "0.06561963190184049079754601227"
+          ],
+          "max_drawdown_units": "41.03",
+          "net_units": "-20.68",
+          "roi": "-0.02326209223847019122609673791",
+          "wins": 437
+        },
+        "200": {
+          "bets": 889,
+          "cost_bps_per_stake": 200,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.1009892262487757100881488737",
+            "0.05561963190184049079754601227"
+          ],
+          "max_drawdown_units": "45.59",
+          "net_units": "-29.57",
+          "roi": "-0.03326209223847019122609673791",
+          "wins": 437
+        },
+        "50": {
+          "bets": 889,
+          "cost_bps_per_stake": 50,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.08598922624877571008814887365",
+            "0.07061963190184049079754601227"
+          ],
+          "max_drawdown_units": "38.750",
+          "net_units": "-16.235",
+          "roi": "-0.01826209223847019122609673791",
+          "wins": 437
+        }
+      },
+      "matched_settled": 889
+    },
+    "current_rule": {
+      "candidates": 69,
+      "cost_scenarios": {
+        "0": {
+          "bets": 69,
+          "cost_bps_per_stake": 0,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.1296153846153846153846153846",
+            "0.3935"
+          ],
+          "max_drawdown_units": "6.990",
+          "net_units": "7.690",
+          "roi": "0.1114492753623188405797101449",
+          "wins": 29
+        },
+        "100": {
+          "bets": 69,
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.1396153846153846153846153846",
+            "0.3835"
+          ],
+          "max_drawdown_units": "7.100",
+          "net_units": "7.000",
+          "roi": "0.1014492753623188405797101449",
+          "wins": 29
+        },
+        "200": {
+          "bets": 69,
+          "cost_bps_per_stake": 200,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.1496153846153846153846153846",
+            "0.3735"
+          ],
+          "max_drawdown_units": "7.210",
+          "net_units": "6.310",
+          "roi": "0.09144927536231884057971014493",
+          "wins": 29
+        },
+        "50": {
+          "bets": 69,
+          "cost_bps_per_stake": 50,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.1346153846153846153846153846",
+            "0.3885"
+          ],
+          "max_drawdown_units": "7.045",
+          "net_units": "7.345",
+          "roi": "0.1064492753623188405797101449",
+          "wins": 29
+        }
+      },
+      "states": {
+        "SETTLED": 69
+      }
+    },
+    "provider_flags": {
+      "candidates": 1100,
+      "cost_scenarios": {
+        "0": {
+          "bets": 1100,
+          "cost_bps_per_stake": 0,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.04767403767403767403767403767",
+            "0.07891102257636122177954847278"
+          ],
+          "max_drawdown_units": "37.780",
+          "net_units": "5.900",
+          "roi": "0.005363636363636363636363636364",
+          "wins": 544
+        },
+        "100": {
+          "bets": 1100,
+          "cost_bps_per_stake": 100,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.05767403767403767403767403767",
+            "0.06891102257636122177954847278"
+          ],
+          "max_drawdown_units": "42.800",
+          "net_units": "-5.100",
+          "roi": "-0.004636363636363636363636363636",
+          "wins": 544
+        },
+        "200": {
+          "bets": 1100,
+          "cost_bps_per_stake": 200,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.06767403767403767403767403767",
+            "0.05891102257636122177954847278"
+          ],
+          "max_drawdown_units": "47.860",
+          "net_units": "-16.100",
+          "roi": "-0.01463636363636363636363636364",
+          "wins": 544
+        },
+        "50": {
+          "bets": 1100,
+          "cost_bps_per_stake": 50,
+          "day_block_bootstrap_roi_95pct": [
+            "-0.05267403767403767403767403767",
+            "0.07391102257636122177954847278"
+          ],
+          "max_drawdown_units": "40.290",
+          "net_units": "0.400",
+          "roi": "0.0003636363636363636363636363636",
+          "wins": 544
+        }
+      },
+      "states": {
+        "SETTLED": 1100
+      }
+    }
+  },
+  "decision_journal_sha256": "e8a311f5a9814ac0d308bb2f09ba2b0c2ed9dfa39542df9feec1c31f6a0d60bb",
+  "evaluation_mode": "exploratory source-recorded flags; not untouched holdout",
+  "exclusions": {
+    "not_source_sealed_live": 6401,
+    "outside_live_v2_or_late": 31,
+    "outside_provider_v2_rule": 4,
+    "unsupported_selection_or_book": 234
+  },
+  "full_report_sha256": "cc9ec4dc0d0e978da52e3b8b8461a2e34f1066d6b3c1b5270129052197617bce",
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "quote_acceptance_verified": false,
+  "real_money_execution": false,
+  "requote_subgroup_future_conditioned": true,
+  "schema": "autosport.recorded_live_flags.v1",
+  "source_rows": 7770,
+  "source_seal_independently_timestamped": false,
+  "source_sha256": "dd733c32609cd5f5bc4c2d6975a7ab2dca89559e965780e3fea90a0c24567d6e",
+  "source_time_rule": "ordered_with_90min_limit_posthoc"
+}

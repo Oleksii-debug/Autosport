@@ -1,4 +1,8 @@
 from pathlib import Path
+import shutil
+import subprocess
+
+import pytest
 
 
 _ROOT = Path(__file__).resolve().parents[1]
@@ -67,6 +71,35 @@ def test_external_uia_audit_preloads_json_cmdlet_for_clean_background_worker() -
     assert module_import in audit
     assert audit.index(module_import) < audit.index("Write-ExternalUiaProgress -Stage 'START'")
     assert audit.count("$report | ConvertTo-Json -Depth 8") == 2
+
+
+def test_uia_numeric_ordering_survives_unavailable_sort_cmdlet(tmp_path) -> None:
+    audit = _audit()
+    assert "| Sort-Object" not in audit
+    assert "$report.process_family_ids = @(Get-OrderedUiaNumbers -Values $lastFamilyIds)" in audit
+    assert "$cleanupIds = @(Get-OrderedUiaNumbers -Values $lastFamilyIds -Descending)" in audit
+    pwsh = shutil.which("pwsh")
+    if pwsh is None:
+        pytest.skip("PowerShell is not installed")
+    helper = audit.split("function Get-OrderedUiaNumbers {", 1)[1].split(
+        "# This file is a bounded diagnostic", 1
+    )[0]
+    probe = tmp_path / "uia_ordering.ps1"
+    probe.write_text(
+        "$ErrorActionPreference = 'Stop'\n"
+        "function Sort-Object { throw 'Sort-Object is unavailable' }\n"
+        "function Get-OrderedUiaNumbers {" + helper +
+        "$values = @(18, 2, 18, 4294967297, -2)\n"
+        "if ((@(Get-OrderedUiaNumbers -Values $values) -join ',') -cne '-2,2,18,4294967297') { exit 1 }\n"
+        "if ((@(Get-OrderedUiaNumbers -Values $values -Descending) -join ',') -cne '4294967297,18,2,-2') { exit 2 }\n"
+        "if (@(Get-OrderedUiaNumbers -Values @()).Count -ne 0) { exit 3 }\n",
+        encoding="utf-8",
+    )
+    result = subprocess.run(
+        [pwsh, "-NoProfile", "-NonInteractive", "-File", str(probe)],
+        capture_output=True, text=True, timeout=15,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 def test_external_uia_live_region_probe_resolves_runtime_monitor_without_compiler_forwarders() -> None:
@@ -1033,7 +1066,8 @@ def test_external_uia_distinguishes_primary_from_child_descendant_provider_stall
     end = audit.index("function Wait-ForUiaElement {", start)
     helper = audit[start:end]
     assert "[int]$RootProcessId" in helper
-    assert "foreach ($candidateProcessId in @($ProcessIds | Sort-Object -Unique))" in helper
+    assert "$processIdsCsv = (@(Get-OrderedUiaNumbers -Values $ProcessIds) -join ',')" in helper
+    assert "foreach ($candidateProcessId in $ProcessIds)" in helper
     assert "[System.Windows.Automation.AutomationElement]::ProcessIdProperty" in helper
     assert "$candidateProcessId = [int]$window.Current.ProcessId" not in helper
     assert "if ([int]$candidateProcessId -eq $RootProcessId)" in helper

@@ -16,6 +16,22 @@ $ErrorActionPreference = 'Stop'
 # utility module before any UIA work so PASS and FAIL evidence always retain
 # the same fail-closed JSON publication path.
 Import-Module Microsoft.PowerShell.Utility -ErrorAction Stop
+
+function Get-OrderedUiaNumbers {
+    param([long[]]$Values, [switch]$Descending)
+    # Hosted candidate 42506523419 lost Sort-Object after the real runtime
+    # witness. The same dependency in cleanup hid the actual UIA report.
+    $ordered = [System.Collections.Generic.SortedSet[long]]::new()
+    foreach ($value in $Values) {
+        [void]$ordered.Add($value)
+    }
+    if ($Descending) {
+        foreach ($value in $ordered.Reverse()) { $value }
+    } else {
+        foreach ($value in $ordered) { $value }
+    }
+}
+
 # This file is a bounded diagnostic of the real external audit, NOT audit PASS.
 # Never persist UIA names, command lines, paths, environment or user data.
 function Write-ExternalUiaProgress {
@@ -1171,7 +1187,7 @@ try {
     )) {
         [void]$start.ArgumentList.Add($argument)
     }
-    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@($ProcessIds | Sort-Object -Unique) -join ',')
+    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@(Get-OrderedUiaNumbers -Values $ProcessIds) -join ',')
     $child = [System.Diagnostics.Process]::new()
     $child.StartInfo = $start
     $started = $false
@@ -1228,7 +1244,7 @@ function Get-DuplicatePythonStackDiagnostics {
         return [pscustomobject]@{ status = 'NOT_CONFIGURED'; samples = @() }
     }
     $samples = [System.Collections.Generic.List[object]]::new()
-    foreach ($targetId in @($ProcessIds | Where-Object { $_ -ne $RootProcessId } | Sort-Object -Unique | Select-Object -First 2)) {
+    foreach ($targetId in @(Get-OrderedUiaNumbers -Values $ProcessIds | Where-Object { $_ -ne $RootProcessId } | Select-Object -First 2)) {
         $results = [System.Collections.Concurrent.ConcurrentQueue[object]]::new()
         $completion = [System.Threading.ManualResetEventSlim]::new($false)
         $arguments = [object[]]::new(7)
@@ -1354,7 +1370,7 @@ try {
         '-NoLogo', '-NoProfile', '-NonInteractive', '-Mta',
         '-EncodedCommand', [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($probe))
     )) { [void]$start.ArgumentList.Add($argument) }
-    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@($ProcessIds | Sort-Object -Unique) -join ',')
+    $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_PIDS'] = (@(Get-OrderedUiaNumbers -Values $ProcessIds) -join ',')
     $start.Environment['AUTOSPORT_UIA_DIAGNOSTIC_HANDLE'] = [string]$Window.ToInt64()
     $child = [System.Diagnostics.Process]::new()
     $child.StartInfo = $start
@@ -1531,10 +1547,10 @@ try {
         [void]$start.ArgumentList.Add($argument)
     }
     $start.Environment['AUTOSPORT_UIA_DUPLICATE_PIDS'] = (
-        @($ProcessIds | Sort-Object -Unique) -join ','
+        @(Get-OrderedUiaNumbers -Values $ProcessIds) -join ','
     )
     $start.Environment['AUTOSPORT_UIA_DUPLICATE_HANDLES'] = (
-        @($WindowHandles | ForEach-Object { $_.ToInt64() } | Sort-Object -Unique) -join ','
+        @(Get-OrderedUiaNumbers -Values @($WindowHandles | ForEach-Object { $_.ToInt64() })) -join ','
     )
     $child = [System.Diagnostics.Process]::new()
     $child.StartInfo = $start
@@ -1718,7 +1734,7 @@ function Find-UiaRootWithElementForProcessFamily {
         $rendererProcessId -gt 0 -and
         ($ProcessIds -contains $rendererProcessId)
     )
-    $processIdsCsv = (@($ProcessIds | Sort-Object -Unique) -join ',')
+    $processIdsCsv = (@(Get-OrderedUiaNumbers -Values $ProcessIds) -join ',')
     $childSearchScript = ${function:Find-UiaSemanticViaChildren}
     Write-ExternalUiaProgress -Stage 'SEMANTIC_DESKTOP_WORKER_START_PROBE'
     foreach ($workerMode in @('ROOT', 'POINT', 'FOCUS', 'RENDERER')) {
@@ -1892,7 +1908,8 @@ function Find-UiaRootWithElementForProcessFamily {
         # Ask the real UIA provider for exact OS-process-family windows first.
         # Never enumerate foreign window properties or treat a process match as
         # semantic acceptance: a real automation_id=330 remains mandatory.
-        foreach ($candidateProcessId in @($ProcessIds | Sort-Object -Unique)) {
+        # The parent serialized an already sorted, unique process family.
+        foreach ($candidateProcessId in $ProcessIds) {
             if ([DateTime]::UtcNow -ge $Deadline) { break }
             if ([int]$candidateProcessId -le 0) { continue }
             $processCondition = New-Object System.Windows.Automation.PropertyCondition(
@@ -2636,7 +2653,7 @@ try {
         Write-ExternalUiaProgress -Stage 'RUNTIME_WITNESS_OBSERVED'
     }
 
-    $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
+    $report.process_family_ids = @(Get-OrderedUiaNumbers -Values $lastFamilyIds)
     $report.process_id = [int]$uiaRoot.Current.ProcessId
     $report.root_name = [string]$uiaRoot.Current.Name
     if ([string]::IsNullOrWhiteSpace($report.root_name)) {
@@ -2710,7 +2727,7 @@ try {
     }
 
     $lastFamilyIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id)
-    $report.process_family_ids = @($lastFamilyIds | Sort-Object -Unique)
+    $report.process_family_ids = @(Get-OrderedUiaNumbers -Values $lastFamilyIds)
     $descendants = $uiaRoot.FindAll(
         [System.Windows.Automation.TreeScope]::Descendants,
         [System.Windows.Automation.Condition]::TrueCondition
@@ -2981,7 +2998,7 @@ try {
         if ($aliveAfterClose.Count -ne 0) {
             $report.failures += (
                 "main packaged launch did not terminate through ordinary close lifecycle; " +
-                "alive_process_ids=" + (($aliveAfterClose | Sort-Object -Unique) -join ',')
+                "alive_process_ids=" + (@(Get-OrderedUiaNumbers -Values $aliveAfterClose) -join ',')
             )
         } else {
             try {
@@ -3090,7 +3107,7 @@ try {
             $report.duplicate_process_state = 'UNAVAILABLE'
         }
         try {
-            $duplicateCleanupIds = @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id | Sort-Object -Unique -Descending)
+            $duplicateCleanupIds = @(Get-OrderedUiaNumbers -Values @(Get-ProcessFamilyIds -RootProcessId $duplicateProcess.Id) -Descending)
         } catch {
             $duplicateCleanupIds = @($duplicateProcess.Id)
         }
@@ -3105,9 +3122,9 @@ try {
     }
     if ($null -ne $process) {
         try {
-            $cleanupIds = @(Get-ProcessFamilyIds -RootProcessId $process.Id | Sort-Object -Unique -Descending)
+            $cleanupIds = @(Get-OrderedUiaNumbers -Values @(Get-ProcessFamilyIds -RootProcessId $process.Id) -Descending)
         } catch {
-            $cleanupIds = @($lastFamilyIds | Sort-Object -Unique -Descending)
+            $cleanupIds = @(Get-OrderedUiaNumbers -Values $lastFamilyIds -Descending)
         }
         foreach ($cleanupId in $cleanupIds) {
             try {

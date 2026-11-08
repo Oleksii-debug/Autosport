@@ -89,9 +89,10 @@ def _read_history(directory, expected_head, forecast_sha, *, forecast_receipt_sh
     return checked
 
 
-def _evaluate_history(root, directory, expected_head, *, scorer, forecast_receipt_sha256=None):
+def _evaluate_history(root, directory, expected_head, *, scorer, forecast_receipt_sha256=None,
+                      summarize=None):
     """Shared reconciliation; the scorer owns forecast and outcome validation."""
-    journal, envelope, _ = verify_journal(Path(root))
+    journal, envelope, verified = verify_journal(Path(root))
     checked = _read_history(directory, expected_head, envelope["sha256"],
                             forecast_receipt_sha256=forecast_receipt_sha256)
     forecasts = journal["forecasts"]
@@ -152,6 +153,8 @@ def _evaluate_history(root, directory, expected_head, *, scorer, forecast_receip
                           "market": _scores(admitted, "market"),
                           "neutral": _scores(admitted, "neutral"),
                           "rows": admitted, "records": records})
+        if summarize is not None:
+            snapshots[-1].update(summarize(journal, verified, admitted))
         previous_receipt, previous_date = receipt, current_date
     return {"schema": "research.tt_result_revision_history.v1", "forecast_sha256": envelope["sha256"],
             "expected_head_sha256": expected_head, "frozen_candidates": len(ids),

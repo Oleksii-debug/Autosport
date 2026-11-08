@@ -8,7 +8,7 @@ import math
 import pytest
 
 import causal_strength_frozen as module
-from causal_strength_frozen import evaluate, freeze
+from causal_strength_frozen import append_followup, evaluate, evaluate_history, freeze
 from prospective_capture import capture_one
 from test_causal_h2h_observer import observed
 from test_causal_strength_h2h import history, setup
@@ -110,6 +110,38 @@ def test_pending_selected_match_is_not_profit_or_a_confirmed_loss(tmp_path):
     assert tally["settled"] == 0
     assert Decimal(tally["settled_net_units"]) == 0
     assert Decimal(tally["if_all_unresolved_lose_units"]) == Decimal("-1.01")
+
+
+def test_result_revision_removes_reported_win_from_economic_totals(tmp_path):
+    prior = setup_frozen(tmp_path)
+    pinned = pins(complete(tmp_path, prior))
+    history = tmp_path / "history"
+    history.mkdir()
+    head = None
+    # An unfinished observation can mature; a later contradictory final
+    # result cannot rewrite the first report or settle the wager as a loss.
+    for index, fixtures in enumerate((
+        [dated("form", "A", "E")],
+        [dated("form", "A", "E"), dated("full", "A", "B")],
+        [dated("form", "A", "E"), dated("full", "A", "B", "away")],
+        [dated("form", "A", "E"), dated("full", "A", "B")],
+    )):
+        raw, receipt = followup(fixtures, requested=190 + 20 * index, received=200 + 20 * index)
+        old_head = head
+        head = append_followup(tmp_path, history, raw, json.dumps(receipt).encode(),
+                               expected_head=head, **pinned)
+    with pytest.raises(ValueError, match="externally pinned SHA"):
+        evaluate_history(tmp_path, history, expected_head=old_head, **pinned)
+    result = evaluate_history(tmp_path, history, expected_head=head, **pinned)
+    states = result["snapshots"]
+    assert [s["matched_h2h"]["matches"] for s in states] == [0, 1, 0, 0]
+    assert [s["counts"]["quarantined"] for s in states] == [0, 0, 1, 1]
+    tallies = [s["hypothetical_single_ticket_economics"]["matched"]["form_h2h"]
+               ["results"]["form_h2h"] for s in states]
+    assert [t["settled"] for t in tallies] == [0, 1, 0, 0]
+    assert [Decimal(t["settled_net_units"]) for t in tallies] == [0, Decimal("0.46"), 0, 0]
+    assert Decimal(tallies[-1]["if_all_unresolved_lose_units"]) == Decimal("-1.01")
+    assert result["profitability_claim"] is False
 
 
 def test_common_opponents_have_their_own_matched_market_comparison(tmp_path):

@@ -17,6 +17,7 @@ from autosport.json_integrity import strict_json_loads
 from autosport.opponent_intelligence import OpponentIntelligenceStore
 from autosport.participant_identity import ParticipantIdentityRegistry
 from causal_h2h_observer import build_journal, prepare_prior, verify_journal
+from causal_h2h_revision_history import _append_followup, _evaluate_history
 from causal_h2h_score import _eligible_rows
 from causal_strength_h2h import compare
 from delay_policy_audit import _exact_snapshot
@@ -118,6 +119,31 @@ def _economic_replay(population, outcomes, snapshot):
     return {"protocol": dict(PAPER_PROTOCOL), "matched": matched,
             "single_ticket_stress_only": True, "accepted_quotes_verified": False,
             "real_money_execution": False, "profitability_claim": False}
+
+
+def _economic_report(root, journal, verified, rows):
+    forecasts = journal["forecasts"]
+    if "paper_economic_protocol" not in journal:
+        if any("paper_economic_decision" in row for row in forecasts):
+            raise ValueError("economic decisions require a frozen protocol")
+        return None
+    if journal["paper_economic_protocol"] != PAPER_PROTOCOL:
+        raise ValueError("unsupported frozen economic protocol")
+    snapshot = _exact_snapshot(Path(root) / "snapshots", 1, verified[(1, "odds")])
+    return _economic_replay(forecasts, rows, snapshot)
+
+
+def _matched_scores(rows):
+    def cohort(items, keys):
+        return {"matches": len(items), "fixture_ids": [r["fixture_id"] for r in items],
+                "scores": {key: _scores(items, key) for key in keys}}
+    return {"all_eligible_market": cohort(rows, ("market",)),
+            "matched_form": cohort([r for r in rows if r["form"] is not None],
+                                   ("market", "form")),
+            "matched_h2h": cohort([r for r in rows if r["form_h2h"] is not None],
+                                  ("market", "form", "form_h2h")),
+            "matched_common_opponents": cohort([r for r in rows if r["common_opponents"] is not None],
+                                               ("market", "common_opponents"))}
 
 
 def build_strength_journal(session, prior, registry, store, *, feature_cutoff):
@@ -250,22 +276,9 @@ def evaluate(root, raw, receipt, *, expected_forecast_sha256, expected_receipt_s
         statuses["h2h_" + h2h] += 1
     counts, rows, followup, decision_bound = _eligible_rows(
         root, raw, receipt, journal, envelope, verified)
-    economic = None
-    if "paper_economic_protocol" in journal:
-        if journal["paper_economic_protocol"] != PAPER_PROTOCOL:
-            raise ValueError("unsupported frozen economic protocol")
-        snapshot = _exact_snapshot(Path(root) / "snapshots", 1, verified[(1, "odds")])
-        economic = _economic_replay(forecasts, rows, snapshot)
-    elif any("paper_economic_decision" in row for row in forecasts):
-        raise ValueError("economic decisions require a frozen protocol")
+    economic = _economic_report(root, journal, verified, rows)
     for row in rows:
         row.update(candidates[row["fixture_id"]])
-    form_rows = [r for r in rows if r["form"] is not None]
-    h2h_rows = [r for r in rows if r["form_h2h"] is not None]
-    common_rows = [r for r in rows if r["common_opponents"] is not None]
-    def cohort(items, keys):
-        return {"matches": len(items), "fixture_ids": [r["fixture_id"] for r in items],
-                "scores": {key: _scores(items, key) for key in keys}}
     return {"schema": "research.tt_frozen_strength_score.v1",
             "forecast_sha256": envelope["sha256"], "frozen_candidates": len(forecasts),
             "candidate_status_counts": dict(sorted(statuses.items())),
@@ -273,16 +286,46 @@ def evaluate(root, raw, receipt, *, expected_forecast_sha256, expected_receipt_s
                 "invalid_or_unfinished_result", "source_update_after_receipt",
                 "missing_or_mismatched_final_score", "identity_time_or_correction_conflict",
                 "invalid_probability")},
-            "all_eligible_market": cohort(rows, ("market",)),
-            "matched_form": cohort(form_rows, ("market", "form")),
-            "matched_h2h": cohort(h2h_rows, ("market", "form", "form_h2h")),
-            "matched_common_opponents": cohort(common_rows, ("market", "common_opponents")),
+            **_matched_scores(rows),
             "hypothetical_single_ticket_economics": economic,
             "rows": rows, "followup_audit": followup, "decision_bound": decision_bound.isoformat(),
             "source_results_independently_verified": False, "identity_verified": False,
             "rights_verified": False, "independent_holdout": False, "calibration_verified": False,
             "execution_verified": False, "profitability_claim": False, "model_training_authorized": False,
             "note": "Descriptive matched cohorts; no uncertainty or causal effect is established."}
+
+
+def _history_scorer(*, expected_forecast_sha256, expected_receipt_sha256):
+    def score(root, raw, receipt):
+        report = evaluate(root, raw, receipt, expected_forecast_sha256=expected_forecast_sha256,
+                          expected_receipt_sha256=expected_receipt_sha256)
+        return {**report, "counts": report["outcome_counts"]}
+    return score
+
+
+def append_followup(root, history, raw, receipt_bytes, *, expected_head,
+                    expected_forecast_sha256, expected_receipt_sha256):
+    """Append a later result without changing the pinned forecast or older receipts."""
+    scorer = _history_scorer(expected_forecast_sha256=expected_forecast_sha256,
+                             expected_receipt_sha256=expected_receipt_sha256)
+    return _append_followup(root, history, raw, receipt_bytes, expected_head=expected_head,
+                            scorer=scorer, forecast_receipt_sha256=expected_receipt_sha256)
+
+
+def evaluate_history(root, history, *, expected_head, expected_forecast_sha256,
+                     expected_receipt_sha256):
+    """Replay costs and prediction scores using only non-quarantined outcomes as of each receipt."""
+    scorer = _history_scorer(expected_forecast_sha256=expected_forecast_sha256,
+                             expected_receipt_sha256=expected_receipt_sha256)
+
+    def summarize(journal, verified, admitted):
+        return {**_matched_scores(admitted),
+                "hypothetical_single_ticket_economics": _economic_report(root, journal, verified, admitted)}
+
+    result = _evaluate_history(root, history, expected_head, scorer=scorer,
+                               forecast_receipt_sha256=expected_receipt_sha256, summarize=summarize)
+    return {**result, "schema": "research.tt_frozen_strength_revision_history.v1",
+            "forecast_receipt_sha256": expected_receipt_sha256}
 
 
 def main():
@@ -302,17 +345,38 @@ def main():
     score.add_argument("followup_body", type=Path)
     score.add_argument("followup_receipt", type=Path)
     score.add_argument("output", type=Path)
-    score.add_argument("--expected-forecast-sha256", required=True)
-    score.add_argument("--expected-receipt-sha256", required=True)
+    append = commands.add_parser("append-followup", help="append one recorded results receipt")
+    history = commands.add_parser("score-history", help="score the pinned result history")
+    for cmd in (append, history):
+        cmd.add_argument("root", type=Path)
+        cmd.add_argument("history", type=Path)
+        cmd.add_argument("--expected-head", required=cmd is history)
+    append.add_argument("followup_body", type=Path)
+    append.add_argument("followup_receipt", type=Path)
+    history.add_argument("output", type=Path)
+    for cmd in (score, append, history):
+        cmd.add_argument("--expected-forecast-sha256", required=True)
+        cmd.add_argument("--expected-receipt-sha256", required=True)
     args = parser.parse_args()
     if args.command == "freeze":
         result = freeze(args.root, args.prior_session, args.prior_body, args.prior_receipt,
                         args.identity_store, args.opponent_store)
-    else:
+    elif args.command == "score":
         result = evaluate(args.root, args.followup_body.read_bytes(),
                           strict_json_loads(args.followup_receipt.read_text("utf-8")),
                           expected_forecast_sha256=args.expected_forecast_sha256,
                           expected_receipt_sha256=args.expected_receipt_sha256)
+    elif args.command == "append-followup":
+        head = append_followup(args.root, args.history, args.followup_body.read_bytes(),
+                               args.followup_receipt.read_bytes(), expected_head=args.expected_head,
+                               expected_forecast_sha256=args.expected_forecast_sha256,
+                               expected_receipt_sha256=args.expected_receipt_sha256)
+        result = {"head_sha256": head}
+    else:
+        result = evaluate_history(args.root, args.history, expected_head=args.expected_head,
+                                  expected_forecast_sha256=args.expected_forecast_sha256,
+                                  expected_receipt_sha256=args.expected_receipt_sha256)
+    if args.command in ("score", "score-history"):
         _write_exclusive(args.output, (json.dumps(result, ensure_ascii=False, indent=2) + "\n").encode("utf-8"))
     print(json.dumps(result, ensure_ascii=False))
 

@@ -1,5 +1,6 @@
 """Synthetic only: integration and adversarial checks, no real results or bets."""
 from datetime import timedelta
+from decimal import Decimal
 import hashlib
 import json
 import math
@@ -88,8 +89,58 @@ def test_frozen_candidates_and_matched_outcome_cohorts(tmp_path):
     assert form["scores"]["form"]["log_loss"] == pytest.approx(
         -(math.log(1 - rows["form"]["form"]) + math.log(rows["full"]["form"])) / 2)
     assert combined["scores"]["form_h2h"]["brier"] == pytest.approx((1 - 59/84)**2)
+    economic = report["hypothetical_single_ticket_economics"]
+    combined_returns = economic["matched"]["form_h2h"]["results"]
+    assert combined_returns["market"]["selected"] == combined_returns["wait"]["selected"] == 0
+    assert combined_returns["form_h2h"]["settled"] == 1
+    assert Decimal(combined_returns["form_h2h"]["settled_net_units"]) == Decimal("0.46")
+    assert report["matched_common_opponents"]["matches"] == 0
+    assert economic["accepted_quotes_verified"] is economic["real_money_execution"] is False
     assert report["independent_holdout"] is report["identity_verified"] is False
     assert report["profitability_claim"] is report["model_training_authorized"] is False
+
+
+def test_pending_selected_match_is_not_profit_or_a_confirmed_loss(tmp_path):
+    prior = setup_frozen(tmp_path)
+    pinned = pins(complete(tmp_path, prior))
+    raw, receipt = followup([dated("form", "A", "E")], requested=190, received=200)
+    report = evaluate(tmp_path, raw, receipt, **pinned)
+    tally = report["hypothetical_single_ticket_economics"]["matched"]["form_h2h"]["results"]["form_h2h"]
+    assert tally["selected"] == tally["unresolved"] == 1
+    assert tally["settled"] == 0
+    assert Decimal(tally["settled_net_units"]) == 0
+    assert Decimal(tally["if_all_unresolved_lose_units"]) == Decimal("-1.01")
+
+
+def test_common_opponents_have_their_own_matched_market_comparison(tmp_path):
+    prior = setup_frozen(tmp_path)
+    from autosport.opponent_intelligence import OpponentIntelligenceStore
+    from autosport.participant_identity import ParticipantIdentityRegistry
+    registry = ParticipantIdentityRegistry(prior[-2])
+    store = OpponentIntelligenceStore(prior[-1], registry)
+    for name in ("C", "D"):
+        store.record_performance(observed(event="b" + name, subject="B", opponent=name, score="0"))
+    report = evaluate(tmp_path, *results(), **pins(complete(tmp_path, prior)))
+    compared = report["matched_common_opponents"]
+    assert compared["fixture_ids"] == ["full"]
+    assert compared["scores"]["common_opponents"]["brier"] == pytest.approx(1 / 9)
+    assert compared["scores"]["market"]["brier"] == pytest.approx((1 - 0.625) ** 2)
+    tally = report["hypothetical_single_ticket_economics"]["matched"]["common_opponents"]["results"]
+    # The heuristic is closer on this sample, but its modeled edge is too low to bet.
+    assert tally["common_opponents"]["selected"] == 0
+
+
+def test_frozen_economic_replay_cannot_substitute_a_better_quote(tmp_path):
+    prior = setup_frozen(tmp_path)
+    complete(tmp_path, prior)
+    journal = json.loads((tmp_path / "forecast.body.json").read_text("utf-8"))
+    from delay_policy_audit import _exact_snapshot
+    from prospective_capture import verify_session
+    session = tmp_path / "snapshots"
+    snapshot = _exact_snapshot(session, 1, verify_session(session)[(1, "odds")])
+    journal["forecasts"][0]["paper_economic_decision"]["displayed_odds"][0] = "12"
+    with pytest.raises(ValueError, match="does not match source quotes"):
+        module._economic_replay(journal["forecasts"], [], snapshot)
 
 
 def test_unknown_outcome_and_conflicting_history_do_not_become_losses(tmp_path):

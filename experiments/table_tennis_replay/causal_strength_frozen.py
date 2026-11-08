@@ -7,7 +7,7 @@ before outcomes are observed. Local receipt clocks are not trusted timestamps.
 from __future__ import annotations
 
 from collections import Counter
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 import hashlib
 import json
 import math
@@ -25,10 +25,99 @@ from prospective_capture import _utc_now, _write_exclusive, verify_session
 from record import instant
 
 SCHEMA = "research.tt_strength_h2h_observation.v1"
+PAPER_PROTOCOL = {"version": 1, "stake_units": "1", "cost_per_ticket": "0.01",
+                  "winning_payout_haircut": "0.02", "min_edge_units": "0.02"}
+POLICIES = ("market", "form", "form_h2h", "common_opponents")
 
 
 def _digest(path):
     return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def _common_probability(row):
+    shared = row.get("common_opponent_form")
+    if shared is None or shared.get("status") != "descriptive":
+        return None
+    diff = Decimal(shared["home_minus_away_not_probability"])
+    if not diff.is_finite() or not -1 < diff < 1:
+        raise ValueError("invalid common-opponent signal")
+    with localcontext() as ctx:
+        ctx.prec = 28
+        return str((1 + diff) / 2)
+
+
+def _economic_decision(row, state):
+    """Freeze hypothetical single-ticket choices using only decision-time quotes."""
+    home, away, _, quotes = state
+    odds = (quotes[home][1], quotes[away][1])
+    data = [row["market_home_probability"], row["strength_home_probability"],
+            row["strength_h2h_home_probability"], _common_probability(row)]
+    with localcontext() as ctx:
+        ctx.prec = 28
+        cost = Decimal(PAPER_PROTOCOL["cost_per_ticket"])
+        haircut = Decimal(PAPER_PROTOCOL["winning_payout_haircut"])
+        floor = Decimal(PAPER_PROTOCOL["min_edge_units"])
+        actions = {}
+        for policy, raw in zip(POLICIES, data, strict=True):
+            if raw is None:
+                actions[policy] = None
+                continue
+            _probability(raw)
+            p = Decimal(raw)
+            edge = (p * odds[0] * (1 - haircut) - 1 - cost,
+                    (1 - p) * odds[1] * (1 - haircut) - 1 - cost)
+            actions[policy] = ("WAIT" if edge[0] == edge[1] or max(edge) < floor
+                               else "HOME" if edge[0] > edge[1] else "AWAY")
+    return {"displayed_odds": [str(o) for o in odds], "actions": actions}
+
+
+def _economic_replay(population, outcomes, snapshot):
+    """Compare each candidate to market/WAIT on its same supported fixtures."""
+    settled = {row["fixture_id"]: row["outcome"] for row in outcomes}
+    frozen = {}
+    for row in population:
+        identity = row["fixture_id"]
+        state = snapshot.get(identity)
+        if state is None:
+            raise ValueError("missing decision-time quotes for economic replay")
+        decision = _economic_decision(row, state)
+        if row.get("paper_economic_decision") != decision:
+            raise ValueError("frozen economic decision does not match source quotes and policy")
+        frozen[identity] = decision
+
+    def tally(ids, policy):
+        chosen = resolved = wins = 0
+        net = Decimal(0)
+        with localcontext() as ctx:
+            ctx.prec = 28
+            loss = Decimal(1) + Decimal(PAPER_PROTOCOL["cost_per_ticket"])
+            haircut = Decimal(PAPER_PROTOCOL["winning_payout_haircut"])
+            for identity in ids:
+                decision = frozen[identity]
+                action = "WAIT" if policy == "wait" else decision["actions"][policy]
+                if action not in ("HOME", "AWAY"):
+                    continue
+                chosen += 1
+                if identity not in settled:
+                    continue
+                resolved += 1
+                won = settled[identity] == int(action == "HOME")
+                wins += int(won)
+                payout = Decimal(decision["displayed_odds"][int(action == "AWAY")]) * (1 - haircut)
+                net += payout - loss if won else -loss
+            pending = chosen - resolved
+            floor = net - pending * loss
+        return {"selected": chosen, "settled": resolved, "unresolved": pending, "wins": wins,
+                "settled_net_units": str(net), "if_all_unresolved_lose_units": str(floor)}
+
+    matched = {}
+    for policy in POLICIES[1:]:
+        ids = [identity for identity, row in frozen.items() if row["actions"][policy] is not None]
+        matched[policy] = {"supported_fixtures": len(ids),
+                           "results": {name: tally(ids, name) for name in ("wait", "market", policy)}}
+    return {"protocol": dict(PAPER_PROTOCOL), "matched": matched,
+            "single_ticket_stress_only": True, "accepted_quotes_verified": False,
+            "real_money_execution": False, "profitability_claim": False}
 
 
 def build_strength_journal(session, prior, registry, store, *, feature_cutoff):
@@ -51,10 +140,12 @@ def build_strength_journal(session, prior, registry, store, *, feature_cutoff):
                                              ("h2h_home_probability", "market_h2h_home_probability")):
             if row[baseline_key] != candidate[candidate_key]:
                 raise ValueError("baseline changed during candidate construction")
-        for key in ("strength_status", "home_form", "away_form",
+        for key in ("strength_status", "home_form", "away_form", "common_opponent_form",
                     "strength_home_probability", "strength_h2h_home_probability"):
             row[key] = candidate[key]
+        row["paper_economic_decision"] = _economic_decision(row, board[row["fixture_id"]])
     journal["schema"] = SCHEMA
+    journal["paper_economic_protocol"] = dict(PAPER_PROTOCOL)
     journal["note"] = ("Fixed illustrative form/H2H heuristics on local source quotes; "
                        "not fitted, calibrated, independently verified, or executable.")
     return journal
@@ -151,16 +242,27 @@ def evaluate(root, raw, receipt, *, expected_forecast_sha256, expected_receipt_s
             raise ValueError("form status/probability mismatch")
         if (status == "ready" and h2h == "ready") != (combined is not None):
             raise ValueError("H2H status/probability mismatch")
+        common = _common_probability(row)
         candidates[fixture] = {"form": _probability(form) if form is not None else None,
-                               "form_h2h": _probability(combined) if combined is not None else None}
+                               "form_h2h": _probability(combined) if combined is not None else None,
+                               "common_opponents": _probability(common) if common is not None else None}
         statuses["form_" + status] += 1
         statuses["h2h_" + h2h] += 1
     counts, rows, followup, decision_bound = _eligible_rows(
         root, raw, receipt, journal, envelope, verified)
+    economic = None
+    if "paper_economic_protocol" in journal:
+        if journal["paper_economic_protocol"] != PAPER_PROTOCOL:
+            raise ValueError("unsupported frozen economic protocol")
+        snapshot = _exact_snapshot(Path(root) / "snapshots", 1, verified[(1, "odds")])
+        economic = _economic_replay(forecasts, rows, snapshot)
+    elif any("paper_economic_decision" in row for row in forecasts):
+        raise ValueError("economic decisions require a frozen protocol")
     for row in rows:
         row.update(candidates[row["fixture_id"]])
     form_rows = [r for r in rows if r["form"] is not None]
     h2h_rows = [r for r in rows if r["form_h2h"] is not None]
+    common_rows = [r for r in rows if r["common_opponents"] is not None]
     def cohort(items, keys):
         return {"matches": len(items), "fixture_ids": [r["fixture_id"] for r in items],
                 "scores": {key: _scores(items, key) for key in keys}}
@@ -174,6 +276,8 @@ def evaluate(root, raw, receipt, *, expected_forecast_sha256, expected_receipt_s
             "all_eligible_market": cohort(rows, ("market",)),
             "matched_form": cohort(form_rows, ("market", "form")),
             "matched_h2h": cohort(h2h_rows, ("market", "form", "form_h2h")),
+            "matched_common_opponents": cohort(common_rows, ("market", "common_opponents")),
+            "hypothetical_single_ticket_economics": economic,
             "rows": rows, "followup_audit": followup, "decision_bound": decision_bound.isoformat(),
             "source_results_independently_verified": False, "identity_verified": False,
             "rights_verified": False, "independent_holdout": False, "calibration_verified": False,

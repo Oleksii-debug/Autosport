@@ -27,6 +27,7 @@ CONFIG_AND_MIGRATION_SOURCES = frozenset({
     "src/autosport/storage.py",
     "src/autosport/workspace_lock.py",
     "src/autosport/monotonic_workspace_authority.py",
+    "src/autosport/market_store_migration.py",
 })
 PYPROJECT = (
     b'[project]\n'

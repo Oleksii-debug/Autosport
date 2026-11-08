@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import hashlib
 import os
 import sys
 from pathlib import Path
@@ -36,6 +37,94 @@ _WORKSPACE_INSTANCE_LOCK_ERROR = (
     "Перевірте доступ до папки workspace та повторіть запуск. "
     "Economic і live state не змінено."
 )
+
+
+def _early_interactive_mutex_name() -> str | None:
+    """Return a path-bound, non-secret Win32 name before importing autosport.
+
+    The frozen entry module executes before the large application import graph.
+    This supplemental kernel object lets a second normal launch fail accessibly
+    without loading that graph.  The hardened workspace file locks below remain
+    authoritative and still cover physical-path aliases and integrity failures.
+    """
+
+    if sys.platform != "win32":
+        return None
+
+    override = os.environ.get("AUTOSPORT_WORKSPACE")
+    if override is not None and override.strip():
+        try:
+            workspace = Path(override).expanduser()
+        except RuntimeError:
+            return None
+    else:
+        local_app_data = os.environ.get("LOCALAPPDATA")
+        if not local_app_data:
+            # The canonical resolver can still use the Known Folder API. Avoid
+            # duplicating that larger implementation at this pre-import boundary.
+            return None
+        workspace = Path(local_app_data) / "Autosport" / "workspace"
+
+    if not workspace.is_absolute():
+        return None
+    try:
+        identity = os.path.normcase(str(workspace.resolve(strict=False)))
+    except (OSError, RuntimeError):
+        return None
+    digest = hashlib.sha256(identity.encode("utf-8", errors="strict")).hexdigest()
+    return f"Local\\Autosport.Interactive.{digest}"
+
+
+def _acquire_early_interactive_mutex() -> tuple[int | None, bool]:
+    """Create the lightweight pre-import mutex; return ``(handle, busy)``.
+
+    Any API uncertainty falls through to the existing fail-closed file-lock path.
+    Only Windows' exact ERROR_ALREADY_EXISTS result is treated as a duplicate.
+    """
+
+    mutex_name = _early_interactive_mutex_name()
+    if mutex_name is None:
+        return None, False
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        kernel32 = ctypes.WinDLL("kernel32", use_last_error=True)
+        create_mutex = kernel32.CreateMutexW
+        create_mutex.argtypes = (ctypes.c_void_p, wintypes.BOOL, wintypes.LPCWSTR)
+        create_mutex.restype = wintypes.HANDLE
+        close_handle = kernel32.CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+
+        ctypes.set_last_error(0)
+        handle = create_mutex(None, False, mutex_name)
+        error_code = ctypes.get_last_error()
+        if not handle:
+            return None, False
+        if error_code == 183:  # ERROR_ALREADY_EXISTS
+            close_handle(handle)
+            return None, True
+        return int(handle), False
+    except (AttributeError, OSError, TypeError, ValueError):
+        return None, False
+
+
+def _close_early_interactive_mutex(handle: int | None) -> None:
+    if handle is None or sys.platform != "win32":
+        return
+    try:
+        import ctypes
+        from ctypes import wintypes
+
+        close_handle = ctypes.WinDLL("kernel32", use_last_error=True).CloseHandle
+        close_handle.argtypes = (wintypes.HANDLE,)
+        close_handle.restype = wintypes.BOOL
+        close_handle(handle)
+    except (AttributeError, OSError, TypeError, ValueError):
+        # The canonical interactive file locks are still released by their own
+        # context managers. A process-lifetime kernel handle also closes on exit.
+        return
 
 
 def _show_workspace_configuration_error(detail: str) -> None:
@@ -345,7 +434,14 @@ def main(argv: list[str] | None = None) -> int:
         from autosport.research_demo_audit import run_research_demo_audit
 
         return run_research_demo_audit(args[1], args[2])
-    return _run_interactive_gui()
+    early_mutex, already_running = _acquire_early_interactive_mutex()
+    if already_running:
+        _show_startup_error(_WORKSPACE_INSTANCE_BUSY_ERROR)
+        return 2
+    try:
+        return _run_interactive_gui()
+    finally:
+        _close_early_interactive_mutex(early_mutex)
 
 
 if __name__ == "__main__":

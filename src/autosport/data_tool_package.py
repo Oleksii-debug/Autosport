@@ -224,6 +224,7 @@ def bind_portable_data_tool(
 def verify_portable_data_tool(
     package_zip: str | Path, *, require_data_executable_inventory: bool = False,
     require_data_binary_module_attribution: bool = False,
+    require_complete_binary_sbom: bool = False,
 ) -> dict[str, Any]:
     members, build_info, verification = _verified_base_members(Path(package_zip))
     if _DATA_TOOL not in members:
@@ -246,6 +247,8 @@ def verify_portable_data_tool(
             raise ValueError("Data executable inventory is not canonical JSON")
     if require_data_binary_module_attribution and _DATA_ATTRIBUTION not in members:
         raise ValueError("release package is missing Data binary module attribution")
+    if require_complete_binary_sbom and _DATA_ATTRIBUTION not in members:
+        raise ValueError("release package lacks complete Data binary module SBOM")
     if _DATA_ATTRIBUTION in members:
         if _DATA_INVENTORY not in members or _DEPENDENCY_GRAPH not in members:
             raise ValueError("Data binary attribution lacks sealed inventory or dependency graph")
@@ -254,6 +257,8 @@ def verify_portable_data_tool(
             members[_DEPENDENCY_GRAPH], _DEPENDENCY_GRAPH,
         )
         validate_binary_module_attribution(attribution, dependency_graph, inventory)
+        if require_complete_binary_sbom and attribution.get("schema_version") != 2:
+            raise ValueError("release package lacks complete Data binary module SBOM")
         if members[_DATA_ATTRIBUTION] != _json_bytes(attribution):
             raise ValueError("Data binary attribution is not canonical JSON")
     return {

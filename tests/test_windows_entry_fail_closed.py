@@ -263,6 +263,51 @@ class WindowsEntrypointFailClosedTests(unittest.TestCase):
         show_error.assert_called_once_with(windows_entry._WORKSPACE_INSTANCE_BUSY_ERROR)
         self.assertNotIn("secret internal busy detail", show_error.call_args.args[0])
 
+    def test_early_duplicate_gate_precedes_heavy_interactive_imports(self) -> None:
+        with (
+            patch.object(
+                windows_entry,
+                "_acquire_early_interactive_mutex",
+                return_value=(None, True),
+            ),
+            patch.object(windows_entry, "_show_startup_error") as show_error,
+            patch.object(
+                windows_entry,
+                "_run_interactive_gui",
+                side_effect=AssertionError("duplicate must stop before heavy imports"),
+            ),
+        ):
+            self.assertEqual(main([]), 2)
+
+        show_error.assert_called_once_with(windows_entry._WORKSPACE_INSTANCE_BUSY_ERROR)
+
+    def test_early_mutex_lifetime_covers_the_interactive_process(self) -> None:
+        with (
+            patch.object(
+                windows_entry,
+                "_acquire_early_interactive_mutex",
+                return_value=(123, False),
+            ),
+            patch.object(windows_entry, "_run_interactive_gui", return_value=17),
+            patch.object(windows_entry, "_close_early_interactive_mutex") as close_mutex,
+        ):
+            self.assertEqual(main([]), 17)
+
+        close_mutex.assert_called_once_with(123)
+
+    def test_machine_mode_does_not_reserve_interactive_mutex(self) -> None:
+        fake_diagnostic = types.ModuleType("autosport.diagnostic")
+        fake_diagnostic.run_machine_diagnostic = lambda _output: 23
+        with (
+            patch.object(
+                windows_entry,
+                "_acquire_early_interactive_mutex",
+                side_effect=AssertionError("machine mode must not reserve GUI mutex"),
+            ),
+            patch.dict(sys.modules, {"autosport.diagnostic": fake_diagnostic}),
+        ):
+            self.assertEqual(main(["--diagnostic-output", "report.json"]), 23)
+
     def test_interactive_lock_integrity_failure_is_bounded_and_secret_safe(self) -> None:
         from autosport.workspace_lock import WorkspaceEconomicLockError
 

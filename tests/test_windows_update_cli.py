@@ -922,6 +922,12 @@ def test_request_changed_after_parse_before_witness_never_reaches_preflight(
     path = write(tmp_path, request(tmp_path))
     original = path.read_bytes()
     parsed_original = cli._read_request
+    native_change = [100]
+    if mutation == "rewrite_same_bytes":
+        # Windows may not advance observable timestamps for a same-byte write
+        # before the next witness. Inject an actual ChangeTime *observation*
+        # change deterministically; do not relax the production trust guard.
+        monkeypatch.setattr(cli, "_native_change_time_100ns", lambda _fd: native_change[0])
 
     def switch_after_parse(selected):
         parsed = parsed_original(selected)
@@ -935,6 +941,7 @@ def test_request_changed_after_parse_before_witness_never_reaches_preflight(
             path.write_text(json.dumps(altered, ensure_ascii=False), encoding="utf-8")
         else:
             path.write_bytes(original)
+            native_change[0] = 101
         return parsed
 
     monkeypatch.setattr(cli, "_read_request", switch_after_parse)

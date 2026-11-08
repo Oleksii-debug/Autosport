@@ -14,7 +14,7 @@ from typing import Any
 
 from .release_sbom import (
     validate_direct_dependency_metadata, validate_embedded_executable_inventory,
-    validate_dependency_license_evidence,
+    validate_dependency_license_evidence, validate_runtime_license_evidence,
 )
 from .release_dependency_graph import validate_build_host_dependency_graph
 from .release_binary_attribution import validate_binary_module_attribution
@@ -559,6 +559,7 @@ _SOURCE_MANIFEST_INPUTS = frozenset({
     "src/autosport/storage.py",
     "src/autosport/workspace_lock.py",
     "src/autosport/monotonic_workspace_authority.py",
+    "src/autosport/market_store_migration.py",
     "src/autosport/release_dependency_graph.py",
     "src/autosport/windows_pe_integrity.py",
     "src/autosport/windows_update_admission.py",
@@ -794,6 +795,8 @@ def build_windows_package(
     dependency_graph: dict[str, Any] | None = None,
     dependency_license_manifest: dict[str, Any] | None = None,
     dependency_license_members: dict[str, bytes] | None = None,
+    runtime_license_manifest: dict[str, Any] | None = None,
+    runtime_license_members: dict[str, bytes] | None = None,
     embedded_executable_inventory: dict[str, Any] | None = None,
     binary_module_attribution: dict[str, Any] | None = None,
     update_version: str | None = None,
@@ -819,6 +822,12 @@ def build_windows_package(
             raise ValueError("license evidence requires source-bound dependency graph")
         validate_dependency_license_evidence(
             dependency_license_manifest, dependency_graph, dependency_license_members,
+        )
+    if (runtime_license_manifest is None) != (runtime_license_members is None):
+        raise ValueError("runtime license evidence manifest and files must be supplied together")
+    if runtime_license_manifest is not None:
+        validate_runtime_license_evidence(
+            runtime_license_manifest, runtime_license_members, source_sha=source_sha,
         )
     validate_requested_update_identity(
         update_version=update_version, update_schema=update_schema
@@ -910,6 +919,12 @@ def build_windows_package(
                 target = package_dir.joinpath(*relative.split("/"))
                 target.parent.mkdir(parents=True, exist_ok=True)
                 target.write_bytes(payload)
+        if runtime_license_manifest is not None:
+            _write_json(package_dir / "RUNTIME_LICENSE_EVIDENCE.json", runtime_license_manifest)
+            for relative, payload in sorted(runtime_license_members.items()):
+                target = package_dir.joinpath(*relative.split("/"))
+                target.parent.mkdir(parents=True, exist_ok=True)
+                target.write_bytes(payload)
 
         payload_hashes = {}
         for path in _sorted_package_files(package_dir):
@@ -949,8 +964,10 @@ def verify_windows_package(
     require_dependency_metadata: bool = False,
     require_dependency_graph: bool = False,
     require_dependency_license_evidence: bool = False,
+    require_runtime_license_evidence: bool = False,
     require_embedded_executable_inventory: bool = False,
     require_binary_module_attribution: bool = False,
+    require_complete_binary_sbom: bool = False,
 ) -> dict[str, Any]:
     """Fail closed on release ZIP identity, canonical metadata, truth labels, or payload drift."""
 
@@ -1073,6 +1090,26 @@ def verify_windows_package(
             raise ValueError("distribution license evidence is not canonical JSON")
     elif license_members:
         raise ValueError("release contains unclaimed distribution license files")
+    runtime_license_members = {
+        name: contents for name, contents in members.items()
+        if name.startswith("runtime-licenses/")
+    }
+    if require_runtime_license_evidence and "RUNTIME_LICENSE_EVIDENCE.json" not in members:
+        raise ValueError("release package is missing runtime license evidence")
+    if "RUNTIME_LICENSE_EVIDENCE.json" in members:
+        runtime_license_evidence = _decode_json_object(
+            members["RUNTIME_LICENSE_EVIDENCE.json"], "RUNTIME_LICENSE_EVIDENCE.json"
+        )
+        validate_runtime_license_evidence(
+            runtime_license_evidence, runtime_license_members,
+            source_sha=expected_source_sha,
+        )
+        if members["RUNTIME_LICENSE_EVIDENCE.json"] != _canonical_json_bytes(
+            runtime_license_evidence
+        ):
+            raise ValueError("runtime license evidence is not canonical JSON")
+    elif runtime_license_members:
+        raise ValueError("release contains unclaimed runtime license files")
     exe_sha = _sha256_bytes(members["Autosport.exe"])
     if build_info.get("autosport_exe_sha256") != exe_sha:
         raise ValueError("BUILD_INFO Autosport.exe hash mismatch")
@@ -1091,6 +1128,8 @@ def verify_windows_package(
 
     if require_binary_module_attribution and "BINARY_MODULE_ATTRIBUTION.json" not in members:
         raise ValueError("release package lacks sealed binary module attribution")
+    if require_complete_binary_sbom and "BINARY_MODULE_ATTRIBUTION.json" not in members:
+        raise ValueError("release package lacks complete binary module SBOM")
     if "BINARY_MODULE_ATTRIBUTION.json" in members:
         if (
             "DEPENDENCY_GRAPH_METADATA.json" not in members
@@ -1102,6 +1141,8 @@ def verify_windows_package(
             "BINARY_MODULE_ATTRIBUTION.json",
         )
         validate_binary_module_attribution(attribution, graph, inventory)
+        if require_complete_binary_sbom and attribution.get("schema_version") != 2:
+            raise ValueError("release package lacks complete binary module SBOM")
         if members["BINARY_MODULE_ATTRIBUTION.json"] != _canonical_json_bytes(attribution):
             raise ValueError("binary attribution is not canonical JSON")
 
@@ -1134,6 +1175,8 @@ def verify_windows_package(
             "DATA_BINARY_MODULE_ATTRIBUTION.json",
         )
         validate_binary_module_attribution(data_attribution, graph, data_inventory)
+        if require_complete_binary_sbom and data_attribution.get("schema_version") != 2:
+            raise ValueError("release package lacks complete Data binary module SBOM")
         if members["DATA_BINARY_MODULE_ATTRIBUTION.json"] != _canonical_json_bytes(data_attribution):
             raise ValueError("Data binary attribution is not canonical JSON")
 

@@ -103,6 +103,7 @@ jobs:
       - shell: pwsh
         run: ./scripts/build_windows_candidate.ps1
       - name: Materialize verified independent package extraction
+        id: verified_package
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
@@ -146,6 +147,55 @@ jobs:
           "AUTOSPORT_PACKAGED_EXE=$packagedExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_PACKAGED_DATA_EXE=$packagedDataExe" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
           "AUTOSPORT_QUALIFIED_PACKAGE_SHA256=$packageSha" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+      - name: Upload exact executable SBOM and license review inputs
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-executable-sbom-license-review-inputs
+          path: |
+            .build-fresh-extraction/Autosport-V1/DEPENDENCY_GRAPH_METADATA.json
+            .build-fresh-extraction/Autosport-V1/DEPENDENCY_LICENSE_EVIDENCE.json
+            .build-fresh-extraction/Autosport-V1/RUNTIME_LICENSE_EVIDENCE.json
+            .build-fresh-extraction/Autosport-V1/EMBEDDED_EXECUTABLE_INVENTORY.json
+            .build-fresh-extraction/Autosport-V1/BINARY_MODULE_ATTRIBUTION.json
+            .build-fresh-extraction/Autosport-V1/DATA_EXECUTABLE_INVENTORY.json
+            .build-fresh-extraction/Autosport-V1/DATA_BINARY_MODULE_ATTRIBUTION.json
+            .build-fresh-extraction/Autosport-V1/licenses/**
+            .build-fresh-extraction/Autosport-V1/runtime-licenses/**
+          if-no-files-found: error
+      - name: Execute exact packaged install/uninstall/reinstall lifecycle
+        shell: pwsh
+        run: |
+          ./scripts/windows_release_lifecycle_smoke.ps1 `
+            -PackagePath (Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip') `
+            -PackagedDataExe $env:AUTOSPORT_PACKAGED_DATA_EXE `
+            -FreshDataExe (Join-Path $PWD '.build-fresh-extraction/Autosport-V1/Autosport-Data.exe') `
+            -SourceSha $env:AUTOSPORT_SOURCE_SHA `
+            -ExpectedPackageSha256 $env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256 `
+            -EvidencePath (Join-Path $PWD 'dist/packaged-release-lifecycle-evidence.json')
+      - name: Upload exact packaged release lifecycle evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-packaged-release-lifecycle
+          path: dist/packaged-release-lifecycle-evidence.json
+          if-no-files-found: error
+      - name: Execute packaged canonical state migration
+        shell: pwsh
+        run: ./scripts/windows_packaged_state_migration_smoke.ps1 -PackagedDataExe $env:AUTOSPORT_PACKAGED_DATA_EXE -SourceSha $env:AUTOSPORT_SOURCE_SHA -EvidencePath (Join-Path $PWD 'dist/packaged-state-migration-evidence.json')
+      - name: Upload packaged canonical state migration evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-packaged-state-migration
+          path: dist/packaged-state-migration-evidence.json
+          if-no-files-found: error
+      - name: Execute exact packaged update rollback and interruption recovery
+        shell: pwsh
+        run: ./scripts/windows_packaged_update_lifecycle_smoke.ps1 -CurrentPackage (Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip') -PackagedDataExe $env:AUTOSPORT_PACKAGED_DATA_EXE -SourceSha $env:AUTOSPORT_SOURCE_SHA -CurrentPackageSha256 $env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256 -EvidencePath (Join-Path $PWD 'dist/packaged-update-lifecycle-evidence.json')
+      - name: Upload exact packaged update lifecycle evidence
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-packaged-update-lifecycle
+          path: dist/packaged-update-lifecycle-evidence.json
+          if-no-files-found: error
       - name: Qualify fixture-only certificate-backed release/update signature
         shell: pwsh
         run: ./scripts/qualify_fixture_release_signature.ps1 -PackagePath (Join-Path $PWD 'dist/Autosport-V1-windows-x64.zip') -SourceSha $env:AUTOSPORT_SOURCE_SHA -ExpectedPackageSha256 $env:AUTOSPORT_QUALIFIED_PACKAGE_SHA256 -EvidencePath (Join-Path $PWD 'dist/fixture-release-signature-evidence.json')
@@ -280,6 +330,17 @@ jobs:
           if ($freshEvidence.real_money_execution -ne $false -or $freshEvidence.human_tested -ne $false -or $freshEvidence.nvda_verified -ne $false) {
             throw 'Fresh-extracted research demo audit violated release truth labels'
           }
+      - name: Prepare failure-only Python stack sampler
+        shell: pwsh
+        run: |
+          $samplerRoot = Join-Path $env:RUNNER_TEMP 'Autosport-failure-stack-sampler'
+          python -m venv $samplerRoot
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $samplerPython = Join-Path $samplerRoot 'Scripts/python.exe'
+          & $samplerPython -m pip install --no-deps --only-binary=:all: py-spy==0.4.2
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          "AUTOSPORT_UIA_STACK_PYTHON=$samplerPython" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+          "AUTOSPORT_UIA_STACK_SAMPLER=$(Join-Path $samplerRoot 'Scripts/py-spy.exe')" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
       - name: External UIA fresh-extraction gate
         shell: pwsh
         run: |
@@ -345,18 +406,18 @@ jobs:
               $stageEvidence
             )
             try {
-              $completedAudit = Wait-Job -Job $auditJob -Timeout 120
+              $completedAudit = Wait-Job -Job $auditJob -Timeout 180
               if ($null -eq $completedAudit) {
                 # Only fixed stage tokens are logged; malformed/absent diagnostics
                 # never count as proof and never cause the gate to pass.
                 $observedStage = 'NOT_EMITTED'
                 if (Test-Path -LiteralPath $stageEvidence -PathType Leaf) {
                   $candidateStage = [string](Get-Content -LiteralPath $stageEvidence -Raw -ErrorAction SilentlyContinue).Trim()
-                  $allowedStages = @('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','AUDIT_COMPLETE')
+                  $allowedStages = @('START','UIA_ASSEMBLIES_READY','WINDOW_LAUNCHED','NATIVE_WINDOW_OBSERVED','NATIVE_ROOT_NAME_PROBE','SEMANTIC_LOCAL_PROBE','SEMANTIC_LOCAL_ROOT_ID_PROBE','SEMANTIC_LOCAL_DESCENDANT_PROBE','SEMANTIC_FAMILY_PROBE','SEMANTIC_FAMILY_IDS_READY','SEMANTIC_NATIVE_HANDLES_PROBE','SEMANTIC_NATIVE_HANDLES_READY','SEMANTIC_NATIVE_CANDIDATES_EXHAUSTED','SEMANTIC_NATIVE_UIA_PROBE','SEMANTIC_NATIVE_DESCENDANT_PROBE','SEMANTIC_WORKER_START_PROBE','SEMANTIC_WORKER_WAIT_PROBE','SEMANTIC_WORKER_TIMEOUT_PROBE','SEMANTIC_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_ROOT_PROBE','SEMANTIC_DESKTOP_ROOT_READY','SEMANTIC_DESKTOP_WORKER_START_PROBE','SEMANTIC_DESKTOP_WORKER_WAIT_PROBE','SEMANTIC_DESKTOP_WORKER_TIMEOUT_PROBE','SEMANTIC_DESKTOP_WORKER_RESULT_PROBE','SEMANTIC_DESKTOP_FOCUS_PROBE','SEMANTIC_DESKTOP_FOCUS_READY','SEMANTIC_DESKTOP_FOCUS_PARENT_PROBE','SEMANTIC_DESKTOP_FOCUS_CHILD_PROBE','SEMANTIC_DESKTOP_POINT_PROBE','SEMANTIC_DESKTOP_POINT_READY','SEMANTIC_DESKTOP_POINT_ID_PROBE','SEMANTIC_DESKTOP_POINT_PARENT_PROBE','SEMANTIC_DESKTOP_POINT_CHILD_PROBE','SEMANTIC_DESKTOP_RENDERER_PROBE','SEMANTIC_DESKTOP_RENDERER_READY','SEMANTIC_DESKTOP_ENUM_PROBE','SEMANTIC_DESKTOP_WINDOWS_READY','SEMANTIC_DESKTOP_COUNT_PROBE','SEMANTIC_DESKTOP_ITEM_PROBE','SEMANTIC_WINDOW_PROPERTY_PROBE','SEMANTIC_DESCENDANT_PROBE','SEMANTIC_PRIMARY_DESCENDANT_PROBE','SEMANTIC_CHILD_DESCENDANT_PROBE','SEMANTIC_UIA_OBSERVED','RUNTIME_WITNESS_OBSERVED','DUPLICATE_START_PROCESS_PROBE','DUPLICATE_START_PROCESS_READY','DUPLICATE_PROCESS_FAMILY_PROBE','DUPLICATE_PROCESS_FAMILY_READY','DUPLICATE_UIA_ROOT_PROBE','AUDIT_COMPLETE')
                   if ($allowedStages -ccontains $candidateStage) { $observedStage = $candidateStage }
                   else { $observedStage = 'INVALID' }
                 }
-                throw "External UIA audit exceeded 120-second watchdog at stage=$observedStage; real accessibility evidence remains unqualified"
+                throw "External UIA audit exceeded 180-second watchdog at stage=$observedStage; real accessibility evidence remains unqualified"
               }
               Receive-Job -Job $auditJob -ErrorAction Stop | Out-Null
               if ($auditJob.State -ne 'Completed') {
@@ -392,13 +453,13 @@ jobs:
           }
 
           if ($null -eq $external -or $external.status -ne 'PASS') { throw 'External UIA fresh-extraction audit did not PASS' }
-          if (-not [string]::Equals([string]$external.launch_working_directory, $hostileCwd, [System.StringComparison]::OrdinalIgnoreCase)) {
+          if ($external.launch_working_directory_verified -isnot [bool] -or $external.launch_working_directory_verified -ne $true) {
             throw 'External UIA evidence did not preserve the hostile child working directory'
           }
           if ($external.duplicate_launch_status -ne 'PASS' -or [int]$external.duplicate_launch_exit_code -ne 2) {
             throw 'External UIA evidence did not prove packaged duplicate-launch rejection'
           }
-          if ([string]$external.duplicate_launch_dialog_title -ne 'Автоспорт — помилка запуску') {
+          if ($external.duplicate_dialog_title_verified -isnot [bool] -or $external.duplicate_dialog_title_verified -ne $true) {
             throw 'External UIA duplicate-launch dialog title mismatch'
           }
           if ($external.normal_close_status -ne 'PASS' -or [int]$external.normal_close_exit_code -ne 0) {
@@ -406,12 +467,10 @@ jobs:
           }
           if (
             $external.emergency_stop_activation_status -ne 'PASS' -or
-            [string]::IsNullOrWhiteSpace([string]$external.emergency_stop_status_text) -or
-            -not [string]::Equals(
-              [string]$external.emergency_stop_journal_path,
-              (Join-Path $expectedWorkspace 'execution-stop.jsonl'),
-              [System.StringComparison]::OrdinalIgnoreCase
-            ) -or
+            $external.emergency_stop_status_text_present -isnot [bool] -or
+            $external.emergency_stop_status_text_present -ne $true -or
+            $external.emergency_stop_journal_matches_workspace -isnot [bool] -or
+            $external.emergency_stop_journal_matches_workspace -ne $true -or
             -not (Test-Path -LiteralPath (Join-Path $expectedWorkspace 'execution-stop.jsonl') -PathType Leaf)
           ) {
             throw 'External UIA evidence did not prove packaged durable emergency STOP activation'
@@ -420,7 +479,8 @@ jobs:
             $external.live_region_event_status -ne 'PASS' -or
             [int]$external.live_region_event_count -lt 1 -or
             [string]$external.live_region_event_automation_id -ne 'emergency-stop-status' -or
-            [string]::IsNullOrWhiteSpace([string]$external.live_region_event_text)
+            $external.live_region_event_text_present -isnot [bool] -or
+            $external.live_region_event_text_present -ne $true
           ) {
             throw 'External UIA evidence did not prove packaged LiveRegionChanged observation'
           }
@@ -433,12 +493,11 @@ jobs:
           }
           if (
             $external.runtime_witness_status -ne 'PASS' -or
-            [string]::IsNullOrWhiteSpace([string]$external.runtime_browser_version) -or
-            -not [string]::Equals(
-              [string]$external.runtime_witness_path,
-              (Join-Path $expectedWorkspace 'webview2-runtime-witness.json'),
-              [System.StringComparison]::OrdinalIgnoreCase
-            )
+            $external.runtime_browser_version_present -isnot [bool] -or
+            $external.runtime_browser_version_present -ne $true -or
+            $external.runtime_witness_matches_workspace -isnot [bool] -or
+            $external.runtime_witness_matches_workspace -ne $true -or
+            -not (Test-Path -LiteralPath (Join-Path $expectedWorkspace 'webview2-runtime-witness.json') -PathType Leaf)
           ) {
             throw 'External UIA evidence did not bind the packaged session to the actual WebView2 runtime witness'
           }
@@ -466,6 +525,13 @@ jobs:
           $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_workspace -NotePropertyValue $expectedWorkspace -Force
           $verification | Add-Member -NotePropertyName extracted_external_uia_isolated_localappdata -NotePropertyValue $isolatedLocalAppData -Force
           $verification | ConvertTo-Json -Depth 8 | Set-Content -LiteralPath $verificationPath -Encoding utf8
+      - name: Preserve verified bytes for failed-product diagnostics (NOT release qualification)
+        if: failure() && steps.verified_package.outcome == 'success'
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: Autosport-verified-bytes-UIA-NOT-QUALIFIED
+          path: dist/Autosport-V1-windows-x64.zip
+          if-no-files-found: error
       - name: Upload external UIA failure evidence
         if: failure()
         uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4

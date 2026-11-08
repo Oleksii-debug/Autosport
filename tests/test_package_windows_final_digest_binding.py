@@ -50,9 +50,11 @@ class PackageWindowsFinalDigestBindingTests(unittest.TestCase):
         for name, evidence in (
             ("capture_dependency_license_evidence",
              ({"evidence_class": "TEST_ONLY_LICENSE_TEXT"}, {})),
+            ("capture_runtime_license_evidence",
+             ({"evidence_class": "TEST_ONLY_RUNTIME_LICENSE_TEXT"}, {})),
             ("capture_embedded_executable_inventory",
              {"evidence_class": "TEST_ONLY_EMBEDDED_CENSUS"}),
-            ("capture_binary_module_attribution",
+            ("capture_complete_binary_sbom",
              {"evidence_class": "TEST_ONLY_BINARY_ATTRIBUTION"}),
         ):
             admission_patch = patch.object(

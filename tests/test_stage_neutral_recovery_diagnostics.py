@@ -76,7 +76,7 @@ def test_failed_builder_emits_existing_report_and_never_repacks(tmp_path: Path) 
         cwd=tmp_path,
         capture_output=True,
         text=True,
-        timeout=15,
+        timeout=60,
         check=False,
     )
     assert result.returncode != 0

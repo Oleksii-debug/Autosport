@@ -1,6 +1,8 @@
 import re
 from pathlib import Path
 
+import pytest
+
 
 _ACTIVITY_TYPES = (
     "types: [opened, synchronize, reopened, ready_for_review, converted_to_draft, closed]"
@@ -24,6 +26,16 @@ def _assert_runner_free_pr_admission(workflow: str) -> None:
     assert "github.event.pull_request.draft == false" in block
     assert "runs-on: ubuntu-slim" in block
     assert "timeout-minutes: 5" in block
+
+
+_CI_MATRIX_TIMEOUT_POLICY = "timeout-minutes: ${{ matrix.os == 'windows-latest' && 120 || 90 }}"
+
+
+def _assert_ci_matrix_timeout_policy(workflow: str) -> None:
+    # Check the heavy test job, not the unrelated 5-minute admission job.
+    test_job = workflow.split("\n  test:\n", 1)[1]
+    assert test_job.count("\n    timeout-minutes:") == 1
+    assert f"\n    {_CI_MATRIX_TIMEOUT_POLICY}\n" in test_job
 
 
 def _workflow(path: str) -> str:
@@ -79,11 +91,28 @@ def test_ci_heavy_matrix_is_deferred_for_stale_draft_or_closed_pull_request() ->
     assert "os: [ubuntu-latest, windows-latest]" in workflow
     assert "python-version: ['3.11', '3.12']" in workflow
     assert "cancel-in-progress: true" in workflow
-    # Full Windows/Python 3.12 qualification exceeded 60 minutes on exact-head #2035;
-    # keep the complete matrix and give it a bounded 90-minute execution ceiling.
-    assert "timeout-minutes: 90" in workflow
+    # The complete four-way matrix must remain bounded without cancelling the
+    # slower Windows 3.12 full-suite job at the former 90-minute ceiling.
+    # Ubuntu retains 90 minutes; Windows has 120 minutes. This must stay scoped
+    # to the heavy matrix rather than matching an unrelated job's timeout.
+    _assert_ci_matrix_timeout_policy(workflow)
     assert "python -m pytest -v tests" in workflow
     assert "python -m autosport demo" in workflow
+
+
+
+def test_ci_matrix_timeout_policy_rejects_uniform_or_unbounded_budgets() -> None:
+    workflow = _workflow(".github/workflows/ci.yml")
+    _assert_ci_matrix_timeout_policy(workflow)
+    for replacement in (
+        "timeout-minutes: 90",
+        "timeout-minutes: 120",
+        "timeout-minutes: 0",
+    ):
+        mutated = workflow.replace(_CI_MATRIX_TIMEOUT_POLICY, replacement, 1)
+        assert mutated != workflow
+        with pytest.raises(AssertionError):
+            _assert_ci_matrix_timeout_policy(mutated)
 
 
 def test_windows_candidate_is_deferred_for_stale_draft_or_closed_pull_request() -> None:

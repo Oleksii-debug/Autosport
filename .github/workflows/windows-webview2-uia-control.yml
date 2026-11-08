@@ -1,0 +1,134 @@
+name: Independent WebView2 UIA control (diagnostic only)
+
+on:
+  pull_request:
+    paths:
+      - 'scripts/external_uia_audit.ps1'
+      - 'scripts/windows_webview2_uia_control.py'
+      - '.github/workflows/windows-webview2-uia-control.yml'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  minimal-packaged-webview2:
+    name: Minimal packaged WebView2 vs independent UIA (NOT product acceptance)
+    runs-on: windows-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          persist-credentials: false
+      - name: Bind exact diagnostic source head
+        shell: pwsh
+        env:
+          EXPECTED_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+        run: |
+          if ((git rev-parse HEAD).Trim() -cne $env:EXPECTED_SHA) {
+            throw 'Diagnostic checkout does not match exact head'
+          }
+      - uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065
+        with:
+          python-version: '3.12'
+      - name: Install pinned disposable diagnostic dependencies
+        shell: pwsh
+        run: |
+          python -m pip install pywebview==6.2.1 pyinstaller==6.22.3 psutil==7.0.0
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+      - name: Syntax and negative semantic classifier checks
+        shell: pwsh
+        run: |
+          python -m py_compile scripts/windows_webview2_uia_control.py
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          python scripts/windows_webview2_uia_control.py selftest
+          exit $LASTEXITCODE
+      - name: Package independent WebView2 control host and probe
+        shell: pwsh
+        run: |
+          python -m PyInstaller --onefile --windowed --clean --name Autosport-WebView2-UIA-Control scripts/windows_webview2_uia_control.py
+          exit $LASTEXITCODE
+      - name: Probe minimal WebView2 with killable independent UIA client
+        shell: pwsh
+        run: |
+          $reportPath = Join-Path $PWD 'webview2-uia-control.json'
+          & ./dist/Autosport-WebView2-UIA-Control.exe run $reportPath
+          # PyInstaller windowed onefile can return from its bootloader before
+          # the GUI child has finished, and exact run 40062623389 returned a
+          # stale/non-authoritative launcher code while the independent MTA
+          # client atomically published SEMANTIC_BUTTON_RETURNED with exact ID.
+          # A process exit is NEVER UIA evidence. Poll and validate only the
+          # atomically published fixed-code semantic report.
+          $deadline = [DateTime]::UtcNow.AddSeconds(120)
+          $observed = 'NO_REPORT'
+          $evidence = $null
+          while ([DateTime]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+              try {
+                $evidence = Get-Content -LiteralPath $reportPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $observed = [string]$evidence.status
+              } catch {
+                $observed = 'UNREADABLE_REPORT'
+              }
+              if ($observed -notin @('STARTED', 'PROBE_ENTERED', 'UNREADABLE_REPORT')) { break }
+            }
+            Start-Sleep -Milliseconds 250
+          }
+          if ($observed -cne 'SEMANTIC_BUTTON_RETURNED') {
+            throw "Minimal WebView2 UIA control did not return real semantic evidence; fixed_stage=$observed"
+          }
+          if (
+            $null -eq $evidence -or
+            $evidence.exact_automation_id -ne $true -or
+            $evidence.autosport_product_uia_pass -ne $false -or
+            $evidence.human_tested -ne $false -or
+            $evidence.nvda_verified -ne $false -or
+            $evidence.real_money_execution -ne $false
+          ) {
+            throw 'Minimal WebView2 UIA control violated diagnostic-only truth labels'
+          }
+      - name: Probe local-file WebView2 origin with independent UIA client
+        shell: pwsh
+        run: |
+          # Autosport loads a local HTML file; the original control used
+          # inline HTML. This second falsifier changes only document origin.
+          $reportPath = Join-Path $PWD 'webview2-uia-control-file.json'
+          & ./dist/Autosport-WebView2-UIA-Control.exe run-file $reportPath
+          $deadline = [DateTime]::UtcNow.AddSeconds(120)
+          $observed = 'NO_REPORT'
+          $evidence = $null
+          while ([DateTime]::UtcNow -lt $deadline) {
+            if (Test-Path -LiteralPath $reportPath -PathType Leaf) {
+              try {
+                $evidence = Get-Content -LiteralPath $reportPath -Raw -ErrorAction Stop | ConvertFrom-Json -ErrorAction Stop
+                $observed = [string]$evidence.status
+              } catch {
+                $observed = 'UNREADABLE_REPORT'
+              }
+              if ($observed -notin @('STARTED', 'PROBE_ENTERED', 'UNREADABLE_REPORT')) { break }
+            }
+            Start-Sleep -Milliseconds 250
+          }
+          if ($observed -cne 'SEMANTIC_BUTTON_RETURNED') {
+            throw "File-origin WebView2 UIA control did not return real semantic evidence; fixed_stage=$observed"
+          }
+          if (
+            $null -eq $evidence -or
+            $evidence.exact_automation_id -ne $true -or
+            $evidence.autosport_product_uia_pass -ne $false -or
+            $evidence.human_tested -ne $false -or
+            $evidence.nvda_verified -ne $false -or
+            $evidence.real_money_execution -ne $false
+          ) {
+            throw 'File-origin WebView2 UIA control violated diagnostic-only truth labels'
+          }
+      - name: Preserve fixed diagnostic codes even on failure
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: independent-webview2-uia-control
+          path: |
+            webview2-uia-control.json
+            webview2-uia-control-file.json
+          if-no-files-found: warn

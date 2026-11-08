@@ -37,6 +37,7 @@ Usage:
   Autosport-Data.exe finalize-update-release --destination <installed-folder> --old-archive <old.zip> --old-source-sha <old-git-sha> --old-package-sha256 <old-zip-sha> --new-archive <new.zip> --new-source-sha <new-git-sha> --new-package-sha256 <new-zip-sha>
   Autosport-Data.exe backup-workspace --workspace <workspace-path> --output <private-backup.zip>
   Autosport-Data.exe restore-workspace --archive <private-backup.zip> --destination <new-workspace-path>
+  Autosport-Data.exe migrate-market-store --database <existing-market-store.db>
   Autosport-Data.exe repair-workspace [--workspace <workspace-path>]
   Autosport-Data.exe export-evidence <workspace-path> --output <manifest.json>
   Autosport-Data.exe verify-evidence <manifest.json> --workspace <workspace-path>
@@ -64,6 +65,7 @@ Commands:
   finalize-update-release   Remove only independently verified obsolete product to permit a future update.
   backup-workspace           Create a private, SHA-256 inventoried canonical workspace ZIP using the Plan 5 economic lock.
   restore-workspace          Verify the complete private backup and restore only to a NEW empty workspace path.
+  migrate-market-store       Run the existing canonical one-way market-store migration and exact reopen checks.
   repair-workspace           Reconcile a late-crashed economic run using the canonical fail-closed recovery path.
   export-evidence            Export the canonical deterministic metadata-only workspace evidence manifest.
   verify-evidence            Verify an exported evidence manifest against the current canonical workspace evidence.
@@ -149,6 +151,12 @@ def _dispatch(command: str, forwarded: list[str]) -> int:
         from autosport.cli import main as cli_main
 
         return cli_main([command, *forwarded])
+    if command == "migrate-market-store":
+        # SQLiteMarketStore remains the sole schema/migration authority. This
+        # packaged command is only an operator-reachable invocation and readback.
+        from autosport.market_store_migration import main as migration_main
+
+        return migration_main(forwarded)
     if command == "repair-workspace":
         from autosport.cli import main as cli_main
 

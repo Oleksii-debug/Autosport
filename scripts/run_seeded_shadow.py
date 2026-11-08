@@ -11,6 +11,7 @@ import time
 
 from autosport.integrity import atomic_write_json
 from autosport.prospective_shadow_observer import ObserverPlan, observe_cycle
+from autosport.recorded_paper_projection import validated_recorded_replay
 from autosport.shadow_strategy_memory import ShadowStrategyMemory, digest, instant
 from run_prospective_shadow_observer import fetch, SOURCES
 
@@ -39,23 +40,30 @@ def validate_seed(root):
 
 def summarize(root):
     seed = validate_seed(root)
-    wrapper = json.loads((root / "observer.json").read_text("utf-8"))
-    state = wrapper["state"]
-    if digest(state) != wrapper["sha256"]:
-        raise ValueError("prospective observer checkpoint changed")
-    values = list(state["candidates"].values())
-    if any(instant(v["decision_at"]) < instant(seed["seeded_at"]) for v in values):
-        raise ValueError("candidate predates seed availability")
+    observer_sha256, actions = validated_recorded_replay(root, historical_seed=seed)
+    values = [event for _, kind, _, _, event in actions if kind == 0]
     chosen = [v for v in values if v["memory_preference"] == "PRICE_GAP"]
-    settled = [v for v in chosen if v["state"] == "RESULT_RECORDED_NOT_EXECUTED" and not v.get("source_conflict")]
+    settled = [v for v in chosen if v["state"] == "RESULT_RECORDED_NOT_EXECUTED"]
     net = sum((Decimal(v["hypothetical_net_return"]) for v in settled), Decimal(0))
-    return {"seeded_at": seed["seeded_at"], "historical_feedback_count": seed["historical_feedback_count"],
+    return {"status": "OK", "observer_sha256": observer_sha256,
+            "seeded_at": seed["seeded_at"], "historical_feedback_count": seed["historical_feedback_count"],
             "future_candidates": len(values), "future_selected": len(chosen),
             "future_wait": sum(v["memory_preference"] == "WAIT" for v in values),
             "future_selected_settled": len(settled), "future_hypothetical_net_units": str(net),
             "source_conflicts": sum(bool(v.get("source_conflict")) for v in values),
             "historical_return_included": False, "quote_acceptance_verified": False,
             "profit_earned": None, "real_money_execution": False, "promotion_authorized": False}
+
+
+def save_summary(root):
+    try:
+        summary = summarize(root)
+    except (ValueError, KeyError, TypeError, ArithmeticError, OSError) as exc:
+        # A held report has no economic result. Observation can still continue.
+        summary = {"status": "HELD", "reason_type": type(exc).__name__,
+                   "profit_earned": None, "real_money_execution": False, "promotion_authorized": False}
+    atomic_write_json(root / "seeded-summary.json", summary)
+    return summary
 
 
 def main():
@@ -74,8 +82,7 @@ def main():
             results = fetch(SOURCES["results"])
             capture = observe_cycle(args.workspace, predictions=predictions, results=results,
                                     received_at=datetime.now(timezone.utc).isoformat(), plan=ObserverPlan())
-            summary = summarize(args.workspace)
-            atomic_write_json(args.workspace / "seeded-summary.json", summary)
+            summary = save_summary(args.workspace)
             print(json.dumps({"event": "seeded_shadow_cycle", "capture": capture, "summary": summary}), flush=True)
             failures = 0
         except (OSError, TimeoutError) as exc:

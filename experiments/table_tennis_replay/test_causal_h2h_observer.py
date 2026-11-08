@@ -214,7 +214,8 @@ def test_forecast_envelope_binds_bytes_and_strict_order(tmp_path):
         verify_journal(tmp_path)
 
 
-def test_one_cycle_durably_freezes_before_requesting_results(tmp_path, monkeypatch):
+@pytest.mark.parametrize("pinned", [False, True])
+def test_one_cycle_durably_freezes_before_requesting_results(tmp_path, monkeypatch, pinned):
     prior_session = tmp_path / "prior"
     build_session(prior_session, [(0, [match("old", 0)]), (40, [match("old", 40)])])
     raw, receipt = followup([later_result("known")])
@@ -222,6 +223,28 @@ def test_one_cycle_durably_freezes_before_requesting_results(tmp_path, monkeypat
     body_path.write_bytes(raw)
     receipt_path.write_text(json.dumps(receipt))
     root = tmp_path / "actual_run"
+    kwargs = {}
+    if pinned:
+        directory = tmp_path / "provided-history"
+        registry, store = store_fixture(directory)
+        for name in ("A", "B"):
+            registry.add_alias(AliasRecord("moviodds.com", "new" + name, name, stamp(0), None,
+                                           stamp(0), SHA, stamp(0)))
+        for name in ("C", "D"):
+            registry.add_entity(EntityIdentity(name, EntityKind.PARTICIPANT, "test:" + name,
+                                               SHA, stamp(0), stamp(0)))
+            registry.add_alias(AliasRecord("moviodds.com", name, name, stamp(0), None,
+                                           stamp(0), SHA, stamp(0)))
+        for subject in ("A", "B"):
+            for opponent in ("C", "D"):
+                store.record_performance(observed(event=subject + opponent, subject=subject,
+                                                  opponent=opponent, score="1" if subject == "A" else "0"))
+        store.record_performance(observed())
+        # This result is visible only after the forecast; it cannot become form.
+        store.record_performance(observed(event="future", available=112, recorded=112))
+        pins = {p.name: hashlib.sha256(p.read_bytes()).hexdigest()
+                for p in (directory / "identities.json", directory / "opponents.json")}
+        kwargs = {"history_directory": directory, "history_pins": pins}
     ticks = iter(BASE + timedelta(seconds=s) for s in (112, 113))
     monkeypatch.setattr(causal_h2h_observer, "_utc_now", lambda: next(ticks))
 
@@ -239,10 +262,26 @@ def test_one_cycle_durably_freezes_before_requesting_results(tmp_path, monkeypat
         return capture_one(directory, seq, kind, fetch=lambda _: payload, clock=lambda: next(times))
 
     monkeypatch.setattr(causal_h2h_observer, "capture_one", simulated_capture)
-    summary = run(prior_session, body_path, receipt_path, root)
+    summary = run(prior_session, body_path, receipt_path, root, **kwargs)
     journal, envelope, _ = verify_journal(root)
     assert summary["counts"]["forecast_fixtures"] == 1
     assert summary["exact_ids_present_in_later_results"] == 1
-    assert journal["forecasts"][0]["h2h_status"] == "identity_unresolved"
+    row = journal["forecasts"][0]
+    if pinned:
+        assert row["h2h_status"] == "ready"
+        assert row["prior_meetings"] == 1
+        assert row["form_comparison"]["h2h_support"] == 1
+        assert row["form_comparison"]["strength_status"] == "ready"
+        assert Decimal(row["form_comparison"]["strength_home_probability"]) > Decimal("0.5")
+        assert journal["history_inputs"] == envelope["history_inputs"] == pins
+        assert all(hashlib.sha256((directory / name).read_bytes()).hexdigest() == sha
+                   for name, sha in pins.items())
+        frozen = root / "history-inputs" / "opponents.json"
+        frozen.write_bytes(frozen.read_bytes() + b" ")
+        with pytest.raises(ValueError, match="SHA-256 pin"):
+            verify_journal(root)
+    else:
+        assert row["h2h_status"] == "identity_unresolved"
+        assert "form_comparison" not in row
     assert "result" not in journal["forecasts"][0]
     assert envelope["frozen_at"] < summary["later_results_requested_at"]

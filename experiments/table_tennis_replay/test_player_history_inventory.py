@@ -1,9 +1,22 @@
 import copy
 import unittest
-from player_history_inventory import build
+from player_history_inventory import build, pair_coverage
 
 
 class HistoryTests(unittest.TestCase):
+    def test_pair_coverage_separates_repeat_direct_indirect_and_disconnected(self):
+        def pair(league, a, b, count):
+            return {"league": league, "a": a, "b": b, "matches": count}
+        pairs = [pair("L", "A", "B", 4), pair("L", "B", "C", 1),
+                 pair("L", "D", "E", 1), pair("Other", "C", "D", 1)]
+        self.assertEqual(pair_coverage(pairs)["L"], {
+            "labels": 5, "possible_distinct_pairs": 10, "direct_pairs": 3,
+            "repeated_direct_pairs": 1, "connected_without_direct_result": 1,
+            "no_path_in_archive": 6, "components": 2,
+        })
+        with self.assertRaisesRegex(ValueError, "duplicate"):
+            pair_coverage(pairs + pairs[:1])
+
     def test_reversed_names_and_dedup(self):
         a={'fixture_id':'1','home':'A','away':'B','league':'L','status':'finished',
            'periods':[{'score':'11-5'}]*3,'finished_at':'2026-01-01T10:00:00Z',

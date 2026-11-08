@@ -238,6 +238,33 @@ def build_journal(session, prior, registry, store, *, feature_cutoff):
             "note": "Market-implied probabilities are observational; H2H requires prior canonical identities."}
 
 
+_HISTORY_FILES = ("identities.json", "opponents.json")
+_MAX_HISTORY_BYTES = 64 * 1024 * 1024
+
+
+def _pinned_history_bytes(directory, pins):
+    """Read a bounded, exact pair of canonical snapshots; never infer aliases."""
+    if not isinstance(pins, dict) or set(pins) != set(_HISTORY_FILES):
+        raise ValueError("identity and opponent snapshot SHA-256 pins are required")
+    directory = Path(directory)
+    if directory.is_symlink() or not directory.is_dir():
+        raise ValueError("history input must be a real directory")
+    payloads = {}
+    for name in _HISTORY_FILES:
+        pin = pins[name]
+        path = directory / name
+        if (not isinstance(pin, str) or len(pin) != 64
+                or any(c not in "0123456789abcdef" for c in pin)
+                or path.is_symlink() or not path.is_file()):
+            raise ValueError("invalid history input or SHA-256 pin")
+        with path.open("rb") as stream:
+            raw = stream.read(_MAX_HISTORY_BYTES + 1)
+        if len(raw) > _MAX_HISTORY_BYTES or hashlib.sha256(raw).hexdigest() != pin:
+            raise ValueError("history input does not match its bounded SHA-256 pin")
+        payloads[name] = raw
+    return payloads
+
+
 def verify_journal(root):
     """Verify exact forecast bytes and strict local receipt ordering."""
     root = Path(root)
@@ -251,28 +278,53 @@ def verify_journal(root):
             envelope.get("odds_sha256") != verified[(1, "odds")]["sha256"] or
             envelope.get("odds_sha256") != journal.get("odds_sha256") or
             envelope.get("prior_result_sha256") != journal.get("prior_result_sha256") or
+            envelope.get("history_inputs") != journal.get("history_inputs") or
             instant(envelope.get("computed_at")) != instant(journal.get("feature_cutoff"))):
         raise ValueError("forecast receipt does not bind journal and source")
+    if "history_inputs" in journal:
+        _pinned_history_bytes(root / "history-inputs", journal["history_inputs"])
+    elif (root / "history-inputs").exists():
+        raise ValueError("unbound history snapshots")
     if not (instant(verified[(1, "odds")]["received_at"]) < instant(envelope["computed_at"]) <=
             instant(envelope["frozen_at"]) < instant(verified[(1, "results")]["requested_at"])):
         raise ValueError("forecast freeze receipt chronology invalid")
     return journal, envelope, verified
 
 
-def run(prior_session, prior_body_path, prior_receipt_path, root):
+def run(prior_session, prior_body_path, prior_receipt_path, root, *,
+        history_directory=None, history_pins=None):
     prior_body = Path(prior_body_path).read_bytes()
     prior_receipt = strict_json_loads(Path(prior_receipt_path).read_text("utf-8"))
     prior = prepare_prior(prior_session, prior_body, prior_receipt)
+    if (history_directory is None) != (history_pins is None):
+        raise ValueError("history directory and both pins must be supplied together")
+    supplied = None if history_directory is None else _pinned_history_bytes(history_directory, history_pins)
     root = Path(root)
     root.mkdir(parents=True, exist_ok=False)
-    # Explicitly pristine private fixture stores: never resolve names by
-    # guessing or mutate the existing product's identity/opponent stores.
-    registry = ParticipantIdentityRegistry.initialize_pristine(root / "identity-empty.json")
-    store = OpponentIntelligenceStore.initialize_pristine(root / "opponents-empty.json", registry)
+    if supplied is None:
+        registry = ParticipantIdentityRegistry.initialize_pristine(root / "identity-empty.json")
+        store = OpponentIntelligenceStore.initialize_pristine(root / "opponents-empty.json", registry)
+    else:
+        frozen = root / "history-inputs"
+        frozen.mkdir(mode=0o700)
+        for name, raw in supplied.items():
+            _write_exclusive(frozen / name, raw)
+        registry = ParticipantIdentityRegistry(frozen / "identities.json")
+        store = OpponentIntelligenceStore(frozen / "opponents.json", registry)
     session = root / "snapshots"
     capture_one(session, 1, "odds")
     computed_at = _utc_now()
     journal = build_journal(session, prior, registry, store, feature_cutoff=computed_at.isoformat())
+    if supplied is not None:
+        journal["history_inputs"] = dict(history_pins)
+        from causal_strength_h2h import compare
+
+        odds = verify_session(session)[(1, "odds")]
+        board = _exact_snapshot(session, 1, odds)
+        for row in journal["forecasts"]:
+            fixture_id = row["fixture_id"]
+            row["form_comparison"] = compare(
+                fixture_id, board[fixture_id], journal["feature_cutoff"], registry, store)
     payload = (json.dumps(journal, ensure_ascii=False, indent=2) + "\n").encode("utf-8")
     _write_exclusive(root / "forecast.body.json", payload)
     frozen_at = _utc_now()
@@ -282,6 +334,8 @@ def run(prior_session, prior_body_path, prior_receipt_path, root):
                         "bytes": len(payload), "computed_at": computed_at.isoformat(),
                         "frozen_at": frozen_at.isoformat(), "odds_sha256": journal["odds_sha256"],
                         "prior_result_sha256": prior["result_sha256"]}
+    if supplied is not None:
+        forecast_receipt["history_inputs"] = dict(history_pins)
     _write_exclusive(root / "forecast.receipt.json",
                      (json.dumps(forecast_receipt, sort_keys=True, indent=2) + "\n").encode("utf-8"))
     # Forecast bytes and their receipt are fsynced before this request starts.
@@ -310,8 +364,17 @@ def main():
     parser.add_argument("prior_result_body", type=Path)
     parser.add_argument("prior_result_receipt", type=Path)
     parser.add_argument("output_directory", type=Path)
+    parser.add_argument("--history-directory", type=Path)
+    parser.add_argument("--identities-sha256")
+    parser.add_argument("--opponents-sha256")
     args = parser.parse_args()
-    summary = run(args.prior_session, args.prior_result_body, args.prior_result_receipt, args.output_directory)
+    pins = None
+    if any(value is not None for value in (args.history_directory, args.identities_sha256, args.opponents_sha256)):
+        if not all((args.history_directory, args.identities_sha256, args.opponents_sha256)):
+            parser.error("--history-directory, --identities-sha256 and --opponents-sha256 are required together")
+        pins = {"identities.json": args.identities_sha256, "opponents.json": args.opponents_sha256}
+    summary = run(args.prior_session, args.prior_result_body, args.prior_result_receipt,
+                  args.output_directory, history_directory=args.history_directory, history_pins=pins)
     print(json.dumps(summary, ensure_ascii=False))
 
 

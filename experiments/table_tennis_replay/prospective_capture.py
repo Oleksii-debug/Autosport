@@ -48,6 +48,11 @@ def _parse(body, kind):
         raise ValueError("missing source collection")
     if kind == "results" and value.get("sport") != "table_tennis":
         raise ValueError("wrong results sport")
+    if ("sport" in value and value["sport"] != "table_tennis") or any(
+        not isinstance(row, dict) or ("sport" in row and row["sport"] != "table_tennis")
+        for row in value[field]
+    ):
+        raise ValueError("response contains an invalid or non-table-tennis row")
     return value
 
 
@@ -179,21 +184,26 @@ def collect(directory, cycles=6, interval=30, *, fetch=_get, clock=_utc_now, sle
     if type(cycles) is not int or not 1 <= cycles <= 6 or type(interval) is not int or interval < 30:
         raise ValueError("cycles must be 1..6 and interval at least 30 seconds")
     verified = verify_session(directory)
-    initial = set(verified)
+    resumed = set(verified)
     if any(seq > cycles for seq, _ in verified):
         raise ValueError("existing session exceeds requested cycle count")
     for seq in range(1, cycles + 1):
+        if seq > 1 and (seq, "odds") not in verified:
+            delay = interval
+            if (seq - 1, "results") in resumed:
+                previous = instant(verified[(seq - 1, "results")]["received_at"])
+                current = clock()
+                if current.tzinfo is None or current.utcoffset() is None or current < previous:
+                    raise ValueError("local clock precedes the last verified receipt")
+                delay -= (current - previous).total_seconds()
+            if delay > 0:
+                sleep(delay)
         for kind in ("odds", "results"):
             if (seq, kind) in verified:
                 continue
             receipt = capture_one(directory, seq, kind, fetch=fetch, clock=clock)
             verified = verify_session(directory)
             print(json.dumps({"sequence": seq, "kind": kind, "received_at": receipt["received_at"]}), flush=True)
-        if seq < cycles:
-            # On resumption, skip waiting for already completed cycles, but wait
-            # after any newly completed cycle before starting the next one.
-            if any((s, k) not in initial for s in (seq,) for k in ("odds", "results")):
-                sleep(interval)
     return verified
 
 

@@ -66,6 +66,39 @@ def _summary(participant, inputs, before):
             "last_observed_at": last, "age_seconds": age, "within_exact_max_age": exact_fresh}
 
 
+def _common_opponent_form(home_id, away_id, home_records, away_records, before):
+    """Compare each side against the same opponents, not unequal schedules."""
+    cutoff = instant(before)
+
+    def by_opponent(player, records):
+        totals = {}
+        for record in records:
+            obs = record.observation
+            if not timedelta(0) <= cutoff - instant(obs.observed_at) <= timedelta(seconds=MAX_AGE_SECONDS):
+                continue
+            subject = record.subject_entity_id == player
+            opponent = record.opponent_entity_id if subject else record.subject_entity_id
+            wins, count = totals.get(opponent, (0, 0))
+            won = (obs.score == "1") if subject else (obs.score == "0")
+            totals[opponent] = (wins + int(won), count + 1)
+        return totals
+
+    home, away = by_opponent(home_id, home_records), by_opponent(away_id, away_records)
+    shared = sorted(home.keys() & away.keys())
+    support = {"common_opponents": len(shared),
+               "home_matches": sum(home[key][1] for key in shared),
+               "away_matches": sum(away[key][1] for key in shared)}
+    if len(shared) < MIN_EFFECTIVE_SUPPORT:
+        return {**support, "status": "insufficient", "home_minus_away_not_probability": None}
+    with localcontext() as ctx:
+        ctx.prec = 28
+        def rate(wins, count):
+            return Decimal(wins + 1) / Decimal(count + 2)
+        difference = sum((rate(*home[key]) - rate(*away[key]) for key in shared), Decimal(0)) / len(shared)
+    return {**support, "status": "descriptive",
+            "home_minus_away_not_probability": str(difference)}
+
+
 def compare(fixture_id, market, feature_cutoff, registry, store):
     """Compare fixed candidate values, as known strictly before a decision."""
     baseline = feature(fixture_id, market, feature_cutoff, registry, store)
@@ -73,7 +106,7 @@ def compare(fixture_id, market, feature_cutoff, registry, store):
               "market_h2h_home_probability": baseline["h2h_home_probability"],
               "h2h_status": baseline["h2h_status"], "h2h_support": baseline["prior_meetings"],
               "strength_status": "blocked_by_identity_or_h2h_history",
-              "home_form": None, "away_form": None,
+              "home_form": None, "away_form": None, "common_opponent_form": None,
               "strength_home_probability": None, "strength_h2h_home_probability": None,
               "source_rights_verified": False, "identity_independently_verified": False,
               "calibration_verified": False, "model_training": False,
@@ -128,7 +161,8 @@ def compare(fixture_id, market, feature_cutoff, registry, store):
     away_records = [records[edge.performance_id] for edge in relevant
                     if away_id in (edge.subject_entity_id, edge.opponent_entity_id)]
     hf, af = _summary(home_id, home_records, before), _summary(away_id, away_records, before)
-    result.update(home_form=hf, away_form=af, strength_status="insufficient_or_stale")
+    result.update(home_form=hf, away_form=af, strength_status="insufficient_or_stale",
+                  common_opponent_form=_common_opponent_form(home_id, away_id, home_records, away_records, before))
     if hf["state"] != SnapshotState.SUPPORTED.value or af["state"] != SnapshotState.SUPPORTED.value:
         return result
     with localcontext() as ctx:

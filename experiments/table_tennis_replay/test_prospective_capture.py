@@ -34,6 +34,30 @@ def test_capture_resume_avoids_refetch_and_preserves_receipts(tmp_path):
     assert (tmp_path / "0001.odds.receipt.json").read_bytes() == before
 
 
+def test_restart_observes_remaining_interval_from_last_receipt(tmp_path):
+    ticks = clock()
+    collect(tmp_path, cycles=1, fetch=fake_fetch, clock=lambda: next(ticks))
+    waits = []
+    def wait(seconds):
+        waits.append(seconds)
+        for _ in range(int(seconds)):
+            next(ticks)
+    result = collect(tmp_path, cycles=2, fetch=fake_fetch, clock=lambda: next(ticks), sleep=wait)
+    assert waits == [29]
+    assert result[(2, "odds")]["requested_at"] >= "2026-10-29T00:00:33+00:00"
+
+
+@pytest.mark.parametrize("body", [
+    b'{"sport":"soccer","matches":[]}',
+    b'{"matches":[{"sport":"tennis"}]}',
+])
+def test_wrong_sport_odds_do_not_create_evidence(tmp_path, body):
+    ticks = clock()
+    with pytest.raises(ValueError, match="non-table-tennis"):
+        capture_one(tmp_path, 1, "odds", fetch=lambda _: body, clock=lambda: next(ticks))
+    assert verify_session(tmp_path) == {}
+
+
 def test_failed_fetch_can_resume_after_verified_partial_cycle(tmp_path):
     ticks = clock()
     def fails_on_results(url):

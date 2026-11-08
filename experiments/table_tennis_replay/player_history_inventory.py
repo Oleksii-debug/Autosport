@@ -6,6 +6,51 @@ from pathlib import Path
 from h2h_exploratory import result, instant
 
 
+def pair_coverage(pairs):
+    """Distinguish direct matches, indirect paths and disconnected pairs.
+
+    League-local labels are not verified people. These whole-archive counts
+    are descriptive and cannot be used as earlier model features.
+    """
+    leagues = {}
+    for pair in pairs:
+        league, a, b = (pair[key] for key in ("league", "a", "b"))
+        if not all(isinstance(value, str) and value.strip() for value in (league, a, b)) or a >= b:
+            raise ValueError("invalid canonical pair")
+        graph, direct = leagues.setdefault(league, ({}, {}))
+        count = pair["matches"]
+        if (a, b) in direct or type(count) is not int or count < 1:
+            raise ValueError("invalid or duplicate pair support")
+        direct[(a, b)] = count
+        graph.setdefault(a, set()).add(b)
+        graph.setdefault(b, set()).add(a)
+    report = {}
+    for league, (graph, direct) in sorted(leagues.items()):
+        seen, sizes = set(), []
+        for seed in graph:
+            if seed in seen:
+                continue
+            seen.add(seed)
+            stack, size = [seed], 0
+            while stack:
+                node = stack.pop()
+                size += 1
+                for neighbor in graph[node] - seen:
+                    seen.add(neighbor)
+                    stack.append(neighbor)
+            sizes.append(size)
+        n = len(graph)
+        possible = n * (n - 1) // 2
+        connected = sum(size * (size - 1) // 2 for size in sizes)
+        report[league] = {
+            "labels": n, "possible_distinct_pairs": possible,
+            "direct_pairs": len(direct), "repeated_direct_pairs": sum(count > 1 for count in direct.values()),
+            "connected_without_direct_result": connected - len(direct),
+            "no_path_in_archive": possible - connected, "components": len(sizes),
+        }
+    return report
+
+
 def build(archive):
     if archive.get('sport') != 'table_tennis':
         raise ValueError('wrong sport')
@@ -53,7 +98,8 @@ def build(archive):
             'identity_verified':False,'causal_training_eligible':False,
             'source_rows':len(seen),'excluded':excluded,
             'players':[players[k] for k in sorted(players)],
-            'pairs':[pairs[k] for k in sorted(pairs)]}
+            'pairs':[pairs[k] for k in sorted(pairs)],
+            'pair_coverage_by_league':pair_coverage(pairs.values())}
 
 
 def main():

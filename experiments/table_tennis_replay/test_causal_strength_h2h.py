@@ -58,6 +58,23 @@ def test_no_h2h_returns_form_but_no_combined_value(tmp_path):
     assert result["h2h_status"] == "no_prior_history" and result["h2h_support"] == 0
     assert result["strength_status"] == "ready"
     assert result["strength_h2h_home_probability"] is None
+    assert result["common_opponent_form"]["status"] == "insufficient"
+
+
+def test_common_opponents_isolate_schedule_and_exclude_late_results(tmp_path):
+    registry, store = setup(tmp_path)
+    for event, a, b, score in (("ac", "A", "C", "0"), ("ad", "A", "D", "0"),
+                                ("cb", "C", "B", "0"), ("db", "D", "B", "0"),
+                                ("ae", "A", "E", "1"), ("af", "A", "F", "1")):
+        store.record_performance(observed(event=event, subject=a, opponent=b, score=score))
+    store.record_performance(observed(event="late", subject="A", opponent="C", score="1",
+                                      available=31, recorded=31))
+    at = compare("current", market(), stamp(31), registry, store)["common_opponent_form"]
+    assert at["common_opponents"] == at["home_matches"] == at["away_matches"] == 2
+    assert abs(Decimal(at["home_minus_away_not_probability"]) + Decimal(1) / 3) < Decimal("1e-26")
+    after = compare("current", market(), stamp(32), registry, store)["common_opponent_form"]
+    assert after["home_matches"] == 3
+    assert Decimal(after["home_minus_away_not_probability"]) > Decimal(at["home_minus_away_not_probability"])
 
 
 def test_future_and_same_instant_results_are_not_form_inputs(tmp_path):

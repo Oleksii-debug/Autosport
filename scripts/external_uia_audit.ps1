@@ -2153,6 +2153,7 @@ $report = [ordered]@{
     runtime_witness_path = $null
     runtime_browser_version = $null
     keyboard_shortcuts_status = 'NOT_RUN'
+    keyboard_shortcuts_last_stage = 'NOT_RUN'
     f2_focus_automation_id = $null
     f8_focus_automation_id = $null
     emergency_stop_activation_status = 'NOT_RUN'
@@ -2646,8 +2647,11 @@ try {
     # Windows input/UIA boundary. Static handler inspection alone cannot prove that
     # the packaged WebView receives the key or moves focus to the semantic target.
     try {
+        $report.keyboard_shortcuts_last_stage = 'F2_FOCUS_ROOT'
         $uiaRoot.SetFocus()
+        $report.keyboard_shortcuts_last_stage = 'F2_SEND'
         [System.Windows.Forms.SendKeys]::SendWait('{F2}')
+        $report.keyboard_shortcuts_last_stage = 'F2_READ_FOCUS'
         $shortcutDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
         $focusedF2 = Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '301' -Deadline $shortcutDeadline
         if ($null -eq $focusedF2) {
@@ -2655,16 +2659,21 @@ try {
         }
         $report.f2_focus_automation_id = [string]$focusedF2.Current.AutomationId
 
+        $report.keyboard_shortcuts_last_stage = 'F8_FOCUS_ROOT'
         $uiaRoot.SetFocus()
+        $report.keyboard_shortcuts_last_stage = 'F8_SEND'
         [System.Windows.Forms.SendKeys]::SendWait('{F8}')
+        $report.keyboard_shortcuts_last_stage = 'F8_READ_FOCUS'
         $shortcutDeadline = [DateTime]::UtcNow.AddSeconds([Math]::Min(2, $TimeoutSeconds))
         $focusedF8 = Wait-ForFocusedAutomationId -RootProcessId $process.Id -AutomationId '204' -Deadline $shortcutDeadline
         if ($null -eq $focusedF8) {
             throw "F8 did not move packaged keyboard focus to evaluation evidence"
         }
         $report.f8_focus_automation_id = [string]$focusedF8.Current.AutomationId
+        $report.keyboard_shortcuts_last_stage = 'COMPLETE'
         $report.keyboard_shortcuts_status = 'PASS'
     } catch {
+        $report.keyboard_shortcuts_status = 'FAIL'
         $report.failures += 'packaged keyboard shortcut audit failed: focus evidence unavailable'
     }
 

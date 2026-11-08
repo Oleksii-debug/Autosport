@@ -43,6 +43,23 @@ def test_external_uia_audit_loads_required_automation_assemblies() -> None:
     assert "Add-Type -AssemblyName System.Windows.Forms" in audit
 
 
+def test_keyboard_failure_identifies_bounded_stage_and_still_fails_closed() -> None:
+    audit = _audit()
+    before, block = audit.split("# Exercise the shipped keyboard accelerators", 1)
+    block = block.split("# Owner/manual details", 1)[0]
+    assert "keyboard_shortcuts_last_stage = 'NOT_RUN'" in before
+    expected = (
+        "F2_FOCUS_ROOT", "F2_SEND", "F2_READ_FOCUS",
+        "F8_FOCUS_ROOT", "F8_SEND", "F8_READ_FOCUS", "COMPLETE",
+    )
+    positions = [block.index(f"keyboard_shortcuts_last_stage = '{stage}'") for stage in expected]
+    assert positions == sorted(positions)
+    assert block.count("Wait-ForFocusedAutomationId") == 2
+    assert block.count("SendWait(") == 2
+    assert "keyboard_shortcuts_status = 'FAIL'" in block.split("} catch {", 1)[1]
+    assert "focus evidence unavailable" in block.split("} catch {", 1)[1]
+
+
 def test_external_uia_audit_preloads_json_cmdlet_for_clean_background_worker() -> None:
     audit = _audit()
 

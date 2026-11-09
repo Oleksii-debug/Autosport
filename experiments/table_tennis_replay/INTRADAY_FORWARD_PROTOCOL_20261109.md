@@ -15,12 +15,16 @@ No new model weights, stake sizing, edge threshold, or cost parameters are fitte
   SHA256 8331e851bf2a209810824a35ae31c6264c74ce823af8822d7ca17fa01b3f9688.
 - Make one read-only GET of today's `/results?sport=table_tennis&date=2026-11-09`
   and retain raw bytes, local receipt and hash. Only structurally valid completed
-  results whose updates predate that receipt may be added. Reject overlapping
-  fixture IDs between the old archive and the new valid results, rather than
-  silently counting a match twice or resolving a correction by guesswork.
+  results whose updates predate that receipt may be added. Quarantine overlapping
+  fixture IDs from BOTH history states, rather than silently counting a match
+  twice or resolving a source timestamp correction by guesswork. The first
+  source refresh exposed two such IDs and the initial run aborted before any
+  market-price request; see INTRADAY_SOURCE_REPAIR_20261109.md. Reuse that same
+  captured refresh, preserving the one-request rule and original receipt.
 - Both history states use the SAME feature cutoff, after receiving that results
   response and before receiving market prices. Thus the 30-day H2H window has
-  the same endpoint in both arms. The difference is the added observed matches.
+  the same endpoint in both arms. The difference is the added observed matches,
+  after the same documented overlapping-ID quarantine in both arms.
   The missing late-November-8 interval in the old archive is shared by both arms;
   this experiment does not claim a complete refreshed archive.
 - Seven fixed rules: market; old-archive Elo, H2H and combined anchors; and the

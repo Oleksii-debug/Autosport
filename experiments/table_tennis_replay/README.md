@@ -56,3 +56,13 @@ formulas with and without today's observed completed matches. The two-ID
 [timestamp-migration quarantine](INTRADAY_SOURCE_REPAIR_20261109.md) was documented
 before new prices or forecasts were collected. These comparisons do not retune
 the first cohort or imply that a single winning forecast establishes an edge.
+
+The [completed same-day-history comparison](INTRADAY_RESULTS_20261109.md)
+reports all 15 prospective results, seven fixed policies, the exploratory
+130-match comparison, and separate observed-feedback memory. Both history arms
+made identical prospective decisions: Elo lost 3.03 units, H2H lost 0.55 units,
+and the combination abstained. These are hypothetical returns, not real wagers.
+`intraday_history_screen.py` keeps the same H2H window endpoint in both arms
+and rejects future updates and inconsistent source outcomes. The private evidence
+also includes official roster references and independent score corroboration;
+abbreviated names and venue halls are not verified people or club affiliations.

@@ -27,3 +27,32 @@ it may end with missing or incomplete matches if the provider fails, changes
 identity, postpones events, or does not provide results. Progress is written on
 an isolated data branch and the final dataset is retained as a workflow artifact.
 The recording is public source data and never contains credentials or wagers.
+
+## Market-anchored research, 2026-11-09
+
+The [fixed price/history protocol](MARKET_ANCHOR_PROTOCOL_20261109.md),
+[adaptive-memory protocol](ADAPTIVE_MARKET_PROTOCOL_20261109.md), and
+[prospective forecast commitment](FORWARD_ANCHOR_FREEZE_20261109.md) have a
+separate [results report](MARKET_ANCHOR_RESULTS_20261109.md). They compare the
+market, Elo, head-to-head history, and their fixed combination after hypothetical
+costs. Positive small-sample PAPER results are not production-profit evidence.
+
+The new historical screen also rejects alleged prematch/live aliases when the
+linked ID has a separate result in the archive. The demonstrated source-link
+defect and scope of this repair are recorded in
+[the identity note](MARKET_ANCHOR_IDENTITY_REPAIR_20261109.md). A provider's alias
+assertion alone is insufficient to prove that two IDs represent one match;
+this study does not retroactively revalidate the older recording described above.
+
+`market_anchor_support.py` audits the actual hypothetical tickets, wager days,
+opponent pairs, and profit concentration supporting each shadow preference.
+It preserves the fixed model and distinguishes observed opportunities from
+placed bets. Source responses and research checkpoints remain in the private
+evidence package; this directory contains reproducible code and aggregate reports.
+
+The follow-up [same-day history protocol](INTRADAY_FORWARD_PROTOCOL_20261109.md)
+and [15-forecast commitment](INTRADAY_FORWARD_FREEZE_20261109.md) compare the same
+formulas with and without today's observed completed matches. The two-ID
+[timestamp-migration quarantine](INTRADAY_SOURCE_REPAIR_20261109.md) was documented
+before new prices or forecasts were collected. These comparisons do not retune
+the first cohort or imply that a single winning forecast establishes an edge.

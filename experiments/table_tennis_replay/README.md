@@ -66,3 +66,15 @@ and the combination abstained. These are hypothetical returns, not real wagers.
 and rejects future updates and inconsistent source outcomes. The private evidence
 also includes official roster references and independent score corroboration;
 abbreviated names and venue halls are not verified people or club affiliations.
+
+
+## Learned market residuals, 2026-11-10
+
+`market_residual_calibration.py` learns constrained Elo/H2H corrections to the
+market, with a null model, day-bootstrap sensitivity checks and explicit actions.
+The [completed two-day report](MARKET_RESIDUAL_RESULTS_20261110.md) preserves both
+predeclared test populations and the separate next-day learning challenger.
+The update learned zero weight for both corrections; abstention is not profit.
+The code passed 684 tests with two skips. Recorded forecasts, source receipts,
+model hashes and independent arithmetic checks remain in the private evidence
+package. These retrospective paper results do not establish executable profit.

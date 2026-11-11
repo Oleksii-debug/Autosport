@@ -11,6 +11,7 @@ from autosport.decision_ledger import ECONOMIC_DECISION_KIND, JsonlDecisionLedge
 from autosport.domain import MarketEvent, TicketLeg
 from autosport.economic_goal import EconomicGoalContract
 from autosport.forecasting import ForecastRecord
+from autosport.learning_environment import EnvironmentIdentity, Observation
 from autosport.paper import PaperBook
 from autosport.risk import (
     PaperRiskPolicy,
@@ -134,6 +135,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
         risk_of_ruin_evidence=None,
         decision_ledger=None,
         material_action_id=None,
+        causal_observation=None,
     ):
         book = book or self._book()
         candidate = candidate or self._candidate()
@@ -157,6 +159,7 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
             decision_ledger=ledger,
             replay_run_id="research-run",
             material_action_id=material_action_id,
+            causal_observation=causal_observation,
         )
         return book, ledger, decision
 
@@ -188,6 +191,61 @@ class ResearchDecisionPipelineTests(unittest.TestCase):
                 "exact-worst-case-change",
             )
             self.assertEqual(decision.audit_sha256, envelope["sha256"])
+
+    def test_economic_research_decision_binds_exact_causal_observation(self):
+        goal = self._economic_goal()
+        identity = EnvironmentIdentity(
+            source_id="research-source",
+            config_id="research-config",
+            data_id="research-data",
+            protocol_id="research-protocol",
+            cutoff_ts="2026-09-13T11:00:00+00:00",
+            seed=31,
+        )
+        observation = Observation(
+            environment_id=identity.environment_id,
+            observed_at="2026-09-13T10:00:00+00:00",
+            available_at="2026-09-13T10:00:02+00:00",
+            evidence=(("snapshot", SNAPSHOT),),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            _book, ledger, decision = self._decide(
+                tmp,
+                candidate=self._candidate(probability="0.60"),
+                forecast=self._forecast(probability="0.60"),
+                pipeline=self._goal_pipeline(goal),
+                market_quotes=[self._market_event()],
+                causal_observation=observation,
+            )
+
+            self.assertTrue(decision.approved)
+            record = ledger.verified_records()[0]
+            self.assertEqual(record.action, "OPEN_PAPER_RESEARCH_TICKET")
+            binding = record.payload["causal_observation"]
+            self.assertEqual(binding["environment_id"], observation.environment_id)
+            self.assertEqual(binding["observation_id"], observation.observation_id)
+            self.assertEqual(binding["observed_at"], observation.observed_at)
+            self.assertEqual(binding["available_at"], observation.available_at)
+            self.assertEqual(tuple(binding["evidence"]), (("snapshot", SNAPSHOT),))
+
+    def test_research_decision_rejects_future_causal_observation(self):
+        identity = EnvironmentIdentity(
+            source_id="research-source",
+            config_id="research-config",
+            data_id="research-data",
+            protocol_id="research-protocol",
+            cutoff_ts="2026-09-13T11:00:00+00:00",
+            seed=32,
+        )
+        observation = Observation(
+            environment_id=identity.environment_id,
+            observed_at="2026-09-13T10:00:03+00:00",
+            available_at="2026-09-13T10:00:04+00:00",
+            evidence=(("snapshot", SNAPSHOT),),
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            with self.assertRaisesRegex(ValueError, "available no later"):
+                self._decide(tmp, causal_observation=observation)
 
     def test_stale_source_evidence_is_rejected_without_book_mutation(self):
         with tempfile.TemporaryDirectory() as tmp:

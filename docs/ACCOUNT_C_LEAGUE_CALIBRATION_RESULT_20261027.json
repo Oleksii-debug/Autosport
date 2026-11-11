@@ -1,0 +1,5088 @@
+{
+  "base_script_sha256": "e35bba1696f4dfeb2403e7bce336809ea6a2e48d8e6417030d7998bfe109d436",
+  "by_league": {
+    "Challenger Series TT": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.20592458281249998,
+          "brier_delta_vs_publisher": 0.025738751562499995,
+          "log_loss": 0.6028706417738771
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.06981416875000002,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.19654291261969786,
+          "brier_delta_vs_publisher": 0.01635708136969788,
+          "log_loss": 0.5816118766591871
+        },
+        "past_dates_ridge": {
+          "brier": 0.1957167556605432,
+          "brier_delta_vs_publisher": 0.015530924410543212,
+          "log_loss": 0.580212072240823
+        },
+        "publisher": {
+          "brier": 0.18018583124999998,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.5399038497930155
+        }
+      },
+      "count": 8
+    },
+    "Czech Liga Pro": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25386010504789275,
+          "brier_delta_vs_publisher": -0.006153112078544021,
+          "log_loss": 0.700903176945885
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.010013217126436769,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.25330496292714844,
+          "brier_delta_vs_publisher": -0.006708254199288333,
+          "log_loss": 0.6997897549307988
+        },
+        "past_dates_ridge": {
+          "brier": 0.2558170485403477,
+          "brier_delta_vs_publisher": -0.004196168586089066,
+          "log_loss": 0.7048874223004175
+        },
+        "publisher": {
+          "brier": 0.26001321712643677,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7135975085286141
+        }
+      },
+      "count": 261
+    },
+    "European Champs": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.27066006249999996,
+          "brier_delta_vs_publisher": -0.021480187500000025,
+          "log_loss": 0.7344901440943278
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.04214024999999999,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2799234197934895,
+          "brier_delta_vs_publisher": -0.012216830206510487,
+          "log_loss": 0.7530625824457171
+        },
+        "past_dates_ridge": {
+          "brier": 0.2799234197934895,
+          "brier_delta_vs_publisher": -0.012216830206510487,
+          "log_loss": 0.7530625824457171
+        },
+        "publisher": {
+          "brier": 0.29214025,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7776163371863952
+        }
+      },
+      "count": 1
+    },
+    "European Champs MD": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24211320249999999,
+          "brier_delta_vs_publisher": 0.0077603925000000185,
+          "log_loss": 0.6773722614445831
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.015647190000000033,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23877641244116882,
+          "brier_delta_vs_publisher": 0.00442360244116885,
+          "log_loss": 0.6706961691268736
+        },
+        "past_dates_ridge": {
+          "brier": 0.23877641244116882,
+          "brier_delta_vs_publisher": 0.00442360244116885,
+          "log_loss": 0.6706961691268736
+        },
+        "publisher": {
+          "brier": 0.23435280999999997,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6618423307315328
+        }
+      },
+      "count": 1
+    },
+    "European Champs Women": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2418317541666667,
+          "brier_delta_vs_publisher": 0.007304737500000019,
+          "log_loss": 0.6767768363862365
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.015472983333333329,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23884996506959225,
+          "brier_delta_vs_publisher": 0.004322948402925575,
+          "log_loss": 0.6707552389372706
+        },
+        "past_dates_ridge": {
+          "brier": 0.23881304501651446,
+          "brier_delta_vs_publisher": 0.004286028349847787,
+          "log_loss": 0.6706855092177859
+        },
+        "publisher": {
+          "brier": 0.23452701666666667,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6619460988519309
+        }
+      },
+      "count": 6
+    },
+    "European Champs XD": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25102080250000003,
+          "brier_delta_vs_publisher": -0.0010624074999999733,
+          "log_loss": 0.6951889487084002
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.002083210000000002,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2514757097897793,
+          "brier_delta_vs_publisher": -0.0006075002102207128,
+          "log_loss": 0.6960990843500022
+        },
+        "past_dates_ridge": {
+          "brier": 0.25145680298176515,
+          "brier_delta_vs_publisher": -0.0006264070182348536,
+          "log_loss": 0.6960612615267394
+        },
+        "publisher": {
+          "brier": 0.25208321,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6973149224703294
+        }
+      },
+      "count": 2
+    },
+    "Setka Cup": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24523068841825904,
+          "brier_delta_vs_publisher": -0.0006207276751592217,
+          "log_loss": 0.6835063067511442
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.004148583906581738,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2461769722770823,
+          "brier_delta_vs_publisher": 0.00032555618366403305,
+          "log_loss": 0.6854275211439756
+        },
+        "past_dates_ridge": {
+          "brier": 0.24509157410647658,
+          "brier_delta_vs_publisher": -0.0007598419869416784,
+          "log_loss": 0.683185556248936
+        },
+        "publisher": {
+          "brier": 0.24585141609341826,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6846716257017351
+        }
+      },
+      "count": 471
+    },
+    "Setka Cup Women": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.22916246442307694,
+          "brier_delta_vs_publisher": 0.014535683653846193,
+          "log_loss": 0.6511465112987989
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.03537321923076925,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2210308647565646,
+          "brier_delta_vs_publisher": 0.006404083987333858,
+          "log_loss": 0.6342250489764178
+        },
+        "past_dates_ridge": {
+          "brier": 0.2226640936826305,
+          "brier_delta_vs_publisher": 0.008037312913399736,
+          "log_loss": 0.6376910217353695
+        },
+        "publisher": {
+          "brier": 0.21462678076923075,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6202672176262182
+        }
+      },
+      "count": 13
+    },
+    "TT Cup": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2467484201839827,
+          "brier_delta_vs_publisher": -0.000698507305194801,
+          "log_loss": 0.6865816501614416
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.0025530725108225127,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24725945997424106,
+          "brier_delta_vs_publisher": -0.00018746751493642355,
+          "log_loss": 0.6874623703327316
+        },
+        "past_dates_ridge": {
+          "brier": 0.24667578159112086,
+          "brier_delta_vs_publisher": -0.0007711458980566299,
+          "log_loss": 0.6863931409486305
+        },
+        "publisher": {
+          "brier": 0.2474469274891775,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6878863626753462
+        }
+      },
+      "count": 231
+    },
+    "TT Elite Series": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.23897729709728033,
+          "brier_delta_vs_publisher": 0.0011842174947698791,
+          "log_loss": 0.6708067039830563
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.012206920397489551,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23774407078863347,
+          "brier_delta_vs_publisher": -4.900881387698286e-05,
+          "log_loss": 0.6683977941761237
+        },
+        "past_dates_ridge": {
+          "brier": 0.2376981460134849,
+          "brier_delta_vs_publisher": -9.493358902554205e-05,
+          "log_loss": 0.6681384703982887
+        },
+        "publisher": {
+          "brier": 0.23779307960251045,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6686361818770205
+        }
+      },
+      "count": 478
+    },
+    "WTT Champions Macao": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.23843689,
+          "brier_delta_vs_publisher": 0.011289329999999986,
+          "log_loss": 0.6700167631710908
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.022852439999999974,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23407105350371207,
+          "brier_delta_vs_publisher": 0.006923493503712047,
+          "log_loss": 0.6612782367983187
+        },
+        "past_dates_ridge": {
+          "brier": 0.23407105350371207,
+          "brier_delta_vs_publisher": 0.006923493503712047,
+          "log_loss": 0.6612782367983187
+        },
+        "publisher": {
+          "brier": 0.22714756000000003,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6474092888860916
+        }
+      },
+      "count": 1
+    },
+    "WTT Champions Macao Women": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2371203025,
+          "brier_delta_vs_publisher": 0.012539092500000015,
+          "log_loss": 0.6673819726739189
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.025418790000000024,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23254858305500625,
+          "brier_delta_vs_publisher": 0.007967373055006277,
+          "log_loss": 0.6582297781875055
+        },
+        "past_dates_ridge": {
+          "brier": 0.23254858305500625,
+          "brier_delta_vs_publisher": 0.007967373055006277,
+          "log_loss": 0.6582297781875055
+        },
+        "publisher": {
+          "brier": 0.22458120999999998,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6422639702453755
+        }
+      },
+      "count": 1
+    },
+    "WTT China Smash": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2703847449999999,
+          "brier_delta_vs_publisher": -0.024854235000000002,
+          "log_loss": 0.734242470242951
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.04523897999999993,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.28298455928961636,
+          "brier_delta_vs_publisher": -0.012254420710383573,
+          "log_loss": 0.7602899387750077
+        },
+        "past_dates_ridge": {
+          "brier": 0.281263622841053,
+          "brier_delta_vs_publisher": -0.013975357158946933,
+          "log_loss": 0.7567294637706101
+        },
+        "publisher": {
+          "brier": 0.29523897999999993,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7865616705500675
+        }
+      },
+      "count": 2
+    },
+    "WTT Contender Almaty Quals": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25260675999999993,
+          "brier_delta_vs_publisher": -0.0026202800000000304,
+          "log_loss": 0.6983607476128327
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.005227039999999961,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.253681664321203,
+          "brier_delta_vs_publisher": -0.0015453756787969786,
+          "log_loss": 0.7005106415535572
+        },
+        "past_dates_ridge": {
+          "brier": 0.253681664321203,
+          "brier_delta_vs_publisher": -0.0015453756787969786,
+          "log_loss": 0.7005106415535572
+        },
+        "publisher": {
+          "brier": 0.25522703999999996,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7036016384638042
+        }
+      },
+      "count": 1
+    },
+    "WTT Contender Almaty Women": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.248985685,
+          "brier_delta_vs_publisher": -0.0026570550000000193,
+          "log_loss": 0.6910902971367994
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.0016427400000000314,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2515187350912437,
+          "brier_delta_vs_publisher": -0.00012400490875635883,
+          "log_loss": 0.6961792182670917
+        },
+        "past_dates_ridge": {
+          "brier": 0.2497581488737748,
+          "brier_delta_vs_publisher": -0.0018845911262252435,
+          "log_loss": 0.6926022200844446
+        },
+        "publisher": {
+          "brier": 0.25164274000000003,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.696312699959691
+        }
+      },
+      "count": 2
+    },
+    "WTT Europe Smash Sweden": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25262166375,
+          "brier_delta_vs_publisher": -0.003764991250000016,
+          "log_loss": 0.6983871947379804
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.006386655000000019,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2546775970829055,
+          "brier_delta_vs_publisher": -0.0017090579170945253,
+          "log_loss": 0.7025091453127998
+        },
+        "past_dates_ridge": {
+          "brier": 0.25416433077811423,
+          "brier_delta_vs_publisher": -0.0022223242218857853,
+          "log_loss": 0.7014743799494315
+        },
+        "publisher": {
+          "brier": 0.256386655,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7059132574039051
+        }
+      },
+      "count": 4
+    },
+    "WTT Europe Smash Sweden WD": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24770529000000002,
+          "brier_delta_vs_publisher": 0.0022841300000000786,
+          "log_loss": 0.688557728226138
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.004578840000000056,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24680610606999087,
+          "brier_delta_vs_publisher": 0.0013849460699909277,
+          "log_loss": 0.6867593053967821
+        },
+        "past_dates_ridge": {
+          "brier": 0.24680610606999087,
+          "brier_delta_vs_publisher": 0.0013849460699909277,
+          "log_loss": 0.6867593053967821
+        },
+        "publisher": {
+          "brier": 0.24542115999999994,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6839892427751796
+        }
+      },
+      "count": 1
+    },
+    "WTT Europe Smash Sweden Women Quals": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24636332250000006,
+          "brier_delta_vs_publisher": 0.0036100325000000266,
+          "log_loss": 0.6858736965934471
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.007246709999999962,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24494233548118113,
+          "brier_delta_vs_publisher": 0.0021890454811810955,
+          "log_loss": 0.6830315038568755
+        },
+        "past_dates_ridge": {
+          "brier": 0.24494233548118113,
+          "brier_delta_vs_publisher": 0.0021890454811810955,
+          "log_loss": 0.6830315038568755
+        },
+        "publisher": {
+          "brier": 0.24275329000000004,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6786527344094928
+        }
+      },
+      "count": 1
+    },
+    "WTT Feeder Bangkok WD": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.29713401,
+          "brier_delta_vs_publisher": -0.051202030000000065,
+          "log_loss": 0.7876776644061787
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.09833604000000007,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.3162750151477498,
+          "brier_delta_vs_publisher": -0.032061024852250264,
+          "log_loss": 0.8264119451889118
+        },
+        "past_dates_ridge": {
+          "brier": 0.3162750151477498,
+          "brier_delta_vs_publisher": -0.032061024852250264,
+          "log_loss": 0.8264119451889118
+        },
+        "publisher": {
+          "brier": 0.34833604000000007,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.8920860431773376
+        }
+      },
+      "count": 1
+    },
+    "WTT Feeder Berlin": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.248286825,
+          "brier_delta_vs_publisher": 0.001439524999999997,
+          "log_loss": 0.6897189204350231
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.0031527000000000083,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24778805383920055,
+          "brier_delta_vs_publisher": 0.0009407538392005588,
+          "log_loss": 0.6887188992368006
+        },
+        "past_dates_ridge": {
+          "brier": 0.24778805383920055,
+          "brier_delta_vs_publisher": 0.0009407538392005588,
+          "log_loss": 0.6887188992368006
+        },
+        "publisher": {
+          "brier": 0.2468473,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6868271323963897
+        }
+      },
+      "count": 2
+    },
+    "WTT Feeder Linz": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24475200625000004,
+          "brier_delta_vs_publisher": 0.00509398124999999,
+          "log_loss": 0.6826487628028262
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.010341974999999948,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24261523059634288,
+          "brier_delta_vs_publisher": 0.0029572055963428268,
+          "log_loss": 0.6783708069804462
+        },
+        "past_dates_ridge": {
+          "brier": 0.2425955514290914,
+          "brier_delta_vs_publisher": 0.0029375264290913417,
+          "log_loss": 0.6783314007835142
+        },
+        "publisher": {
+          "brier": 0.23965802500000005,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6724441342090981
+        }
+      },
+      "count": 2
+    },
+    "WTT Feeder Olomouc": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25185342250000003,
+          "brier_delta_vs_publisher": -0.0018602675000000124,
+          "log_loss": 0.6968540424912718
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.0037136900000000472,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.25257907336124097,
+          "brier_delta_vs_publisher": -0.0011346166387590784,
+          "log_loss": 0.6983053728537877
+        },
+        "past_dates_ridge": {
+          "brier": 0.25257907336124097,
+          "brier_delta_vs_publisher": -0.0011346166387590784,
+          "log_loss": 0.6983053728537877
+        },
+        "publisher": {
+          "brier": 0.25371369000000005,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.700574696388742
+        }
+      },
+      "count": 1
+    },
+    "WTT Feeder Puerto Princesa WD": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25160256000000003,
+          "brier_delta_vs_publisher": -0.0016076799999999447,
+          "log_loss": 0.6963523115088938
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.0032102399999999753,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.25219661639569063,
+          "brier_delta_vs_publisher": -0.0010136236043093438,
+          "log_loss": 0.6975404415227863
+        },
+        "past_dates_ridge": {
+          "brier": 0.25219661639569063,
+          "brier_delta_vs_publisher": -0.0010136236043093438,
+          "log_loss": 0.6975404415227863
+        },
+        "publisher": {
+          "brier": 0.25321024,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6995677483628681
+        }
+      },
+      "count": 1
+    },
+    "WTT Feeder Tashkent Women": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2611721025,
+          "brier_delta_vs_publisher": -0.0114163075,
+          "log_loss": 0.7154950442238529
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.022588410000000003,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.26544056418003964,
+          "brier_delta_vs_publisher": -0.007147845819960363,
+          "log_loss": 0.7240379102178546
+        },
+        "past_dates_ridge": {
+          "brier": 0.26544056418003964,
+          "brier_delta_vs_publisher": -0.007147845819960363,
+          "log_loss": 0.7240379102178546
+        },
+        "publisher": {
+          "brier": 0.27258841,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7383537733980245
+        }
+      },
+      "count": 1
+    },
+    "WTT Feeder Vientiane": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24393721000000002,
+          "brier_delta_vs_publisher": 0.005988369999999993,
+          "log_loss": 0.6810210007621047
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.012051159999999977,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2410186134198815,
+          "brier_delta_vs_publisher": 0.0030697734198814886,
+          "log_loss": 0.6751824485455341
+        },
+        "past_dates_ridge": {
+          "brier": 0.2410186134198815,
+          "brier_delta_vs_publisher": 0.0030697734198814886,
+          "log_loss": 0.6751824485455341
+        },
+        "publisher": {
+          "brier": 0.23794884000000002,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6690401052167122
+        }
+      },
+      "count": 1
+    },
+    "WTT Feeder Vientiane MD": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25964120249999995,
+          "brier_delta_vs_publisher": -0.009823607500000053,
+          "log_loss": 0.7124319419718124
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.01946481,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.26409313903575193,
+          "brier_delta_vs_publisher": -0.005371670964248065,
+          "log_loss": 0.7213407728924589
+        },
+        "past_dates_ridge": {
+          "brier": 0.26409313903575193,
+          "brier_delta_vs_publisher": -0.005371670964248065,
+          "log_loss": 0.7213407728924589
+        },
+        "publisher": {
+          "brier": 0.26946481,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7320959306985201
+        }
+      },
+      "count": 1
+    },
+    "WTT Feeder Vientiane Women": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.23921971249999996,
+          "brier_delta_vs_publisher": 0.010540862499999998,
+          "log_loss": 0.6715831314509835
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.02132115000000004,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2346292216168151,
+          "brier_delta_vs_publisher": 0.005950371616815137,
+          "log_loss": 0.6623952848086503
+        },
+        "past_dates_ridge": {
+          "brier": 0.2347396946303816,
+          "brier_delta_vs_publisher": 0.0060608446303816454,
+          "log_loss": 0.6626164975682036
+        },
+        "publisher": {
+          "brier": 0.22867884999999996,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6504775356445809
+        }
+      },
+      "count": 2
+    },
+    "WTT Star Contender Astana": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24621443999999998,
+          "brier_delta_vs_publisher": 0.0037566799999999845,
+          "log_loss": 0.6855759150636271
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.007542240000000006,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24477138262096507,
+          "brier_delta_vs_publisher": 0.0023136226209650723,
+          "log_loss": 0.6826895615759011
+        },
+        "past_dates_ridge": {
+          "brier": 0.24477138262096507,
+          "brier_delta_vs_publisher": 0.0023136226209650723,
+          "log_loss": 0.6826895615759011
+        },
+        "publisher": {
+          "brier": 0.24245776,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6780615431419044
+        }
+      },
+      "count": 1
+    },
+    "WTT Star Contender Astana Women": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.26615281,
+          "brier_delta_vs_publisher": -0.016658430000000057,
+          "log_loss": 0.7254637820364884
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.032811240000000075,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2725980553496031,
+          "brier_delta_vs_publisher": -0.010213184650397,
+          "log_loss": 0.7383731018738992
+        },
+        "past_dates_ridge": {
+          "brier": 0.2725980553496031,
+          "brier_delta_vs_publisher": -0.010213184650397,
+          "log_loss": 0.7383731018738992
+        },
+        "publisher": {
+          "brier": 0.2828112400000001,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7588597239253267
+        }
+      },
+      "count": 1
+    },
+    "WTT Star Contender Brazil": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25900542125000003,
+          "brier_delta_vs_publisher": -0.009166263750000014,
+          "log_loss": 0.7111600007792438
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.01817168500000005,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.26236064802734493,
+          "brier_delta_vs_publisher": -0.005811036972655115,
+          "log_loss": 0.7178736473517782
+        },
+        "past_dates_ridge": {
+          "brier": 0.26244334364547695,
+          "brier_delta_vs_publisher": -0.005728341354523103,
+          "log_loss": 0.7180391157188741
+        },
+        "publisher": {
+          "brier": 0.26817168500000005,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7295065969795864
+        }
+      },
+      "count": 2
+    },
+    "WTT Star Contender Brazil Women": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2444860925,
+          "brier_delta_vs_publisher": 0.005441722499999996,
+          "log_loss": 0.6821186825294315
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.010955629999999994,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24278467886950308,
+          "brier_delta_vs_publisher": 0.0037403088695030784,
+          "log_loss": 0.6787150037555438
+        },
+        "past_dates_ridge": {
+          "brier": 0.24278467886950308,
+          "brier_delta_vs_publisher": 0.0037403088695030784,
+          "log_loss": 0.6787150037555438
+        },
+        "publisher": {
+          "brier": 0.23904437,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6712305166093113
+        }
+      },
+      "count": 2
+    }
+  },
+  "by_week": {
+    "2026-07-20": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24273331564814815,
+          "brier_delta_vs_publisher": 0.0008037567592592554,
+          "log_loss": 0.6782062201365937
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.008070441111111104,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23971853602622265,
+          "brier_delta_vs_publisher": -0.002211022862666251,
+          "log_loss": 0.6702496640428328
+        },
+        "past_dates_ridge": {
+          "brier": 0.24184614271885985,
+          "brier_delta_vs_publisher": -8.341617002904922e-05,
+          "log_loss": 0.6760017974533499
+        },
+        "publisher": {
+          "brier": 0.2419295588888889,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6747052130971347
+        }
+      },
+      "count": 81
+    },
+    "2026-07-27": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2472937260887097,
+          "brier_delta_vs_publisher": -0.0028521460080644934,
+          "log_loss": 0.687600405791669
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.0001458720967741911,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2468365012990405,
+          "brier_delta_vs_publisher": -0.0033093707977336906,
+          "log_loss": 0.6863967468810828
+        },
+        "past_dates_ridge": {
+          "brier": 0.2479032313946354,
+          "brier_delta_vs_publisher": -0.0022426407021387817,
+          "log_loss": 0.6887112903454186
+        },
+        "publisher": {
+          "brier": 0.2501458720967742,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6931589445414453
+        }
+      },
+      "count": 124
+    },
+    "2026-08-03": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2446346104411765,
+          "brier_delta_vs_publisher": 0.0007323031302521321,
+          "log_loss": 0.6823216653201686
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.0060976926890756455,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2481719900168414,
+          "brier_delta_vs_publisher": 0.004269682705917044,
+          "log_loss": 0.6896202544831725
+        },
+        "past_dates_ridge": {
+          "brier": 0.24410679818643366,
+          "brier_delta_vs_publisher": 0.00020449087550930556,
+          "log_loss": 0.6812320393476125
+        },
+        "publisher": {
+          "brier": 0.24390230731092435,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6807330730559099
+        }
+      },
+      "count": 119
+    },
+    "2026-08-10": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24240737815476193,
+          "brier_delta_vs_publisher": 0.0016072306150793914,
+          "log_loss": 0.6780249946749783
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.00919985246031746,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24159873887693098,
+          "brier_delta_vs_publisher": 0.0007985913372484388,
+          "log_loss": 0.6768985010119011
+        },
+        "past_dates_ridge": {
+          "brier": 0.24131538964730287,
+          "brier_delta_vs_publisher": 0.0005152421076203284,
+          "log_loss": 0.6761543561721414
+        },
+        "publisher": {
+          "brier": 0.24080014753968254,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6764400067234762
+        }
+      },
+      "count": 126
+    },
+    "2026-08-17": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2530616834433962,
+          "brier_delta_vs_publisher": -0.00838127674528305,
+          "log_loss": 0.6993195674194079
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.011442960188679241,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2566981638799076,
+          "brier_delta_vs_publisher": -0.004744796308771615,
+          "log_loss": 0.7072732655457425
+        },
+        "past_dates_ridge": {
+          "brier": 0.2557654573226786,
+          "brier_delta_vs_publisher": -0.005677502866000661,
+          "log_loss": 0.704932622745474
+        },
+        "publisher": {
+          "brier": 0.26144296018867924,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7172699028836064
+        }
+      },
+      "count": 106
+    },
+    "2026-08-24": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24009483340909094,
+          "brier_delta_vs_publisher": 0.0034354997727272796,
+          "log_loss": 0.6728365918929604
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.013340666363636344,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23326036935533329,
+          "brier_delta_vs_publisher": -0.00339896428103037,
+          "log_loss": 0.658082522164888
+        },
+        "past_dates_ridge": {
+          "brier": 0.23848657882190955,
+          "brier_delta_vs_publisher": 0.0018272451855458893,
+          "log_loss": 0.6690407234717304
+        },
+        "publisher": {
+          "brier": 0.23665933363636366,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6632406729852159
+        }
+      },
+      "count": 110
+    },
+    "2026-08-31": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24704104741869917,
+          "brier_delta_vs_publisher": -0.00224753250000001,
+          "log_loss": 0.6872015766888394
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.0007114200813008176,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.2439484633295433,
+          "brier_delta_vs_publisher": -0.005340116589155869,
+          "log_loss": 0.6809857727856607
+        },
+        "past_dates_ridge": {
+          "brier": 0.24748388918763672,
+          "brier_delta_vs_publisher": -0.0018046907310624583,
+          "log_loss": 0.6881394007450601
+        },
+        "publisher": {
+          "brier": 0.24928857991869918,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6921297141942779
+        }
+      },
+      "count": 123
+    },
+    "2026-09-07": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24259083408119658,
+          "brier_delta_vs_publisher": 0.000748010576923086,
+          "log_loss": 0.678120152689232
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.008157176495726504,
+          "log_loss": 0.6931471805599452
+        },
+        "league_prior_ridge": {
+          "brier": 0.24045130536863502,
+          "brier_delta_vs_publisher": -0.001391518135638481,
+          "log_loss": 0.6731478114954791
+        },
+        "past_dates_ridge": {
+          "brier": 0.24174794194717575,
+          "brier_delta_vs_publisher": -9.488155709774793e-05,
+          "log_loss": 0.6762482327743818
+        },
+        "publisher": {
+          "brier": 0.2418428235042735,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6761799619115322
+        }
+      },
+      "count": 117
+    },
+    "2026-09-14": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.23683987935546877,
+          "brier_delta_vs_publisher": 0.005613955683593769,
+          "log_loss": 0.6663519266800286
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.018774076328125,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23137787388550643,
+          "brier_delta_vs_publisher": 0.0001519502136314299,
+          "log_loss": 0.6538476190603595
+        },
+        "past_dates_ridge": {
+          "brier": 0.233628816062028,
+          "brier_delta_vs_publisher": 0.002402892390153011,
+          "log_loss": 0.6593227258970181
+        },
+        "publisher": {
+          "brier": 0.231225923671875,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6531375222590043
+        }
+      },
+      "count": 128
+    },
+    "2026-09-21": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2495991693526786,
+          "brier_delta_vs_publisher": -0.005348400915178547,
+          "log_loss": 0.6924790726505071
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.004947570267857138,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.25591364475141026,
+          "brier_delta_vs_publisher": 0.0009660744835531254,
+          "log_loss": 0.7072698773123596
+        },
+        "past_dates_ridge": {
+          "brier": 0.2513863246332365,
+          "brier_delta_vs_publisher": -0.0035612456346206245,
+          "log_loss": 0.6965740856227984
+        },
+        "publisher": {
+          "brier": 0.25494757026785714,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7056166305587649
+        }
+      },
+      "count": 112
+    },
+    "2026-09-28": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24173895471153847,
+          "brier_delta_vs_publisher": 0.00206005894230768,
+          "log_loss": 0.6764335720012528
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.010321104230769207,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.24395977680583514,
+          "brier_delta_vs_publisher": 0.004280881036604345,
+          "log_loss": 0.6812870838206982
+        },
+        "past_dates_ridge": {
+          "brier": 0.24022977457816921,
+          "brier_delta_vs_publisher": 0.0005508788089384209,
+          "log_loss": 0.6732582365798099
+        },
+        "publisher": {
+          "brier": 0.2396788957692308,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6721785293814293
+        }
+      },
+      "count": 104
+    },
+    "2026-10-05": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.24394831344036697,
+          "brier_delta_vs_publisher": 0.001435793623853182,
+          "log_loss": 0.6808630467080913
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.007487480183486217,
+          "log_loss": 0.6931471805599454
+        },
+        "league_prior_ridge": {
+          "brier": 0.24241260809093748,
+          "brier_delta_vs_publisher": -9.991172557630157e-05,
+          "log_loss": 0.6774913169573656
+        },
+        "past_dates_ridge": {
+          "brier": 0.2428246805508486,
+          "brier_delta_vs_publisher": 0.00031216073433482094,
+          "log_loss": 0.6783492043315822
+        },
+        "publisher": {
+          "brier": 0.24251251981651378,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.677221200142342
+        }
+      },
+      "count": 109
+    },
+    "2026-10-12": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.25270948518907566,
+          "brier_delta_vs_publisher": -0.009386438760504157,
+          "log_loss": 0.6986747081184118
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": -0.012095923949579812,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.25747226579116145,
+          "brier_delta_vs_publisher": -0.0046236581584183645,
+          "log_loss": 0.7095203850863132
+        },
+        "past_dates_ridge": {
+          "brier": 0.25594564466123493,
+          "brier_delta_vs_publisher": -0.006150279288344884,
+          "log_loss": 0.7056560111718211
+        },
+        "publisher": {
+          "brier": 0.2620959239495798,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.7199718318131487
+        }
+      },
+      "count": 119
+    },
+    "2026-10-19": {
+      "arms": {
+        "fixed_half": {
+          "brier": 0.2338033454,
+          "brier_delta_vs_publisher": 0.006205963799999992,
+          "log_loss": 0.6602873230369236
+        },
+        "flat": {
+          "brier": 0.25,
+          "brier_delta_vs_publisher": 0.02240261839999999,
+          "log_loss": 0.6931471805599453
+        },
+        "league_prior_ridge": {
+          "brier": 0.23486035245491885,
+          "brier_delta_vs_publisher": 0.007262970854918838,
+          "log_loss": 0.6627791151090677
+        },
+        "past_dates_ridge": {
+          "brier": 0.23042935107203963,
+          "brier_delta_vs_publisher": 0.0028319694720396194,
+          "log_loss": 0.65305042277859
+        },
+        "publisher": {
+          "brier": 0.2275973816,
+          "brier_delta_vs_publisher": 0.0,
+          "log_loss": 0.6463174617792421
+        }
+      },
+      "count": 25
+    }
+  },
+  "economic_metrics": {
+    "drawdown": null,
+    "net_profit": null,
+    "roi": null,
+    "status": "UNAVAILABLE_NO_ODDS_COSTS_OR_FILLS"
+  },
+  "input_count": 2000,
+  "input_sha256": "bbb2ab531f269a1eafff89e240086a4d17999114b582825ba4338986c6770fde",
+  "learning_history": [
+    {
+      "date": "2026-06-25",
+      "global_slope": 0.0,
+      "league": "Setka Cup",
+      "league_slope": 0.0,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-25",
+      "global_slope": 0.0,
+      "league": "Setka Cup Women",
+      "league_slope": 0.0,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-25",
+      "global_slope": 0.0,
+      "league": "TT Cup",
+      "league_slope": 0.0,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-25",
+      "global_slope": 0.0,
+      "league": "TT Elite Series",
+      "league_slope": 0.0,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-26",
+      "global_slope": 0.0,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-26",
+      "global_slope": 0.0,
+      "league": "Setka Cup",
+      "league_slope": 0.0003999997440001753,
+      "prior_rows": 2
+    },
+    {
+      "date": "2026-06-26",
+      "global_slope": 0.0,
+      "league": "TT Cup",
+      "league_slope": 0.007998027846293696,
+      "prior_rows": 2
+    },
+    {
+      "date": "2026-06-26",
+      "global_slope": 0.0,
+      "league": "TT Elite Series",
+      "league_slope": 0.0,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-06-27",
+      "global_slope": 0.005575888963977618,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-06-27",
+      "global_slope": 0.005575888963977618,
+      "league": "Setka Cup",
+      "league_slope": 0.030190083223373868,
+      "prior_rows": 4
+    },
+    {
+      "date": "2026-06-27",
+      "global_slope": 0.005575888963977618,
+      "league": "TT Cup",
+      "league_slope": 0.02779112935438234,
+      "prior_rows": 4
+    },
+    {
+      "date": "2026-06-27",
+      "global_slope": 0.005575888963977618,
+      "league": "TT Elite Series",
+      "league_slope": 0.014015166676475132,
+      "prior_rows": 5
+    },
+    {
+      "date": "2026-06-27",
+      "global_slope": 0.005575888963977618,
+      "league": "WTT United States Smash Quals",
+      "league_slope": 0.005575888963977618,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-28",
+      "global_slope": 0.003897524142331803,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 5
+    },
+    {
+      "date": "2026-06-28",
+      "global_slope": 0.003897524142331803,
+      "league": "Setka Cup",
+      "league_slope": 0.02069349365241606,
+      "prior_rows": 8
+    },
+    {
+      "date": "2026-06-28",
+      "global_slope": 0.003897524142331803,
+      "league": "TT Cup",
+      "league_slope": 0.09783227836932114,
+      "prior_rows": 6
+    },
+    {
+      "date": "2026-06-28",
+      "global_slope": 0.003897524142331803,
+      "league": "TT Elite Series",
+      "league_slope": 0.0,
+      "prior_rows": 8
+    },
+    {
+      "date": "2026-06-28",
+      "global_slope": 0.003897524142331803,
+      "league": "WTT United States Smash Women Quals",
+      "league_slope": 0.003897524142331803,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-29",
+      "global_slope": 0.04173707836739444,
+      "league": "Challenger Series TT",
+      "league_slope": 0.04173707836739444,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-29",
+      "global_slope": 0.04173707836739444,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 7
+    },
+    {
+      "date": "2026-06-29",
+      "global_slope": 0.04173707836739444,
+      "league": "Setka Cup",
+      "league_slope": 0.034763199513084535,
+      "prior_rows": 9
+    },
+    {
+      "date": "2026-06-29",
+      "global_slope": 0.04173707836739444,
+      "league": "TT Cup",
+      "league_slope": 0.13845698917450971,
+      "prior_rows": 7
+    },
+    {
+      "date": "2026-06-29",
+      "global_slope": 0.04173707836739444,
+      "league": "TT Elite Series",
+      "league_slope": 0.08417150091124882,
+      "prior_rows": 13
+    },
+    {
+      "date": "2026-06-29",
+      "global_slope": 0.04173707836739444,
+      "league": "WTT United States Smash Women",
+      "league_slope": 0.04173707836739444,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-06-30",
+      "global_slope": 0.1775160629392543,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.16156491469712225,
+      "prior_rows": 9
+    },
+    {
+      "date": "2026-06-30",
+      "global_slope": 0.1775160629392543,
+      "league": "Setka Cup",
+      "league_slope": 0.12065176202554712,
+      "prior_rows": 15
+    },
+    {
+      "date": "2026-06-30",
+      "global_slope": 0.1775160629392543,
+      "league": "TT Cup",
+      "league_slope": 0.37804000822341643,
+      "prior_rows": 11
+    },
+    {
+      "date": "2026-06-30",
+      "global_slope": 0.1775160629392543,
+      "league": "TT Elite Series",
+      "league_slope": 0.24587092048085685,
+      "prior_rows": 24
+    },
+    {
+      "date": "2026-07-01",
+      "global_slope": 0.2789469858072205,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.2720563485685941,
+      "prior_rows": 14
+    },
+    {
+      "date": "2026-07-01",
+      "global_slope": 0.2789469858072205,
+      "league": "Setka Cup",
+      "league_slope": 0.1869242695080858,
+      "prior_rows": 21
+    },
+    {
+      "date": "2026-07-01",
+      "global_slope": 0.2789469858072205,
+      "league": "TT Cup",
+      "league_slope": 0.490383480873924,
+      "prior_rows": 15
+    },
+    {
+      "date": "2026-07-01",
+      "global_slope": 0.2789469858072205,
+      "league": "TT Elite Series",
+      "league_slope": 0.442938714360478,
+      "prior_rows": 31
+    },
+    {
+      "date": "2026-07-01",
+      "global_slope": 0.2789469858072205,
+      "league": "WTT Feeder Istanbul Quals Women",
+      "league_slope": 0.2789469858072205,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-07-02",
+      "global_slope": 0.13766213229705698,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.012611769835079589,
+      "prior_rows": 19
+    },
+    {
+      "date": "2026-07-02",
+      "global_slope": 0.13766213229705698,
+      "league": "Setka Cup",
+      "league_slope": 0.10256554859060137,
+      "prior_rows": 25
+    },
+    {
+      "date": "2026-07-02",
+      "global_slope": 0.13766213229705698,
+      "league": "TT Cup",
+      "league_slope": 0.2957258022475741,
+      "prior_rows": 19
+    },
+    {
+      "date": "2026-07-02",
+      "global_slope": 0.13766213229705698,
+      "league": "TT Elite Series",
+      "league_slope": 0.28347608648836614,
+      "prior_rows": 33
+    },
+    {
+      "date": "2026-07-03",
+      "global_slope": 0.18812319722198817,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.04810454345392845,
+      "prior_rows": 21
+    },
+    {
+      "date": "2026-07-03",
+      "global_slope": 0.18812319722198817,
+      "league": "Setka Cup",
+      "league_slope": 0.1875163609608266,
+      "prior_rows": 30
+    },
+    {
+      "date": "2026-07-03",
+      "global_slope": 0.18812319722198817,
+      "league": "TT Cup",
+      "league_slope": 0.34071620804211394,
+      "prior_rows": 22
+    },
+    {
+      "date": "2026-07-03",
+      "global_slope": 0.18812319722198817,
+      "league": "TT Elite Series",
+      "league_slope": 0.34826841879021647,
+      "prior_rows": 40
+    },
+    {
+      "date": "2026-07-03",
+      "global_slope": 0.18812319722198817,
+      "league": "WTT Feeder Istanbul II",
+      "league_slope": 0.18812319722198817,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-07-03",
+      "global_slope": 0.18812319722198817,
+      "league": "WTT Feeder Istanbul II Women",
+      "league_slope": 0.18812319722198817,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-07-04",
+      "global_slope": 0.1998818642140851,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0729639015947275,
+      "prior_rows": 22
+    },
+    {
+      "date": "2026-07-04",
+      "global_slope": 0.1998818642140851,
+      "league": "Setka Cup",
+      "league_slope": 0.1700283646286216,
+      "prior_rows": 33
+    },
+    {
+      "date": "2026-07-04",
+      "global_slope": 0.1998818642140851,
+      "league": "TT Cup",
+      "league_slope": 0.30810006985917254,
+      "prior_rows": 28
+    },
+    {
+      "date": "2026-07-04",
+      "global_slope": 0.1998818642140851,
+      "league": "TT Elite Series",
+      "league_slope": 0.41240725673843404,
+      "prior_rows": 47
+    },
+    {
+      "date": "2026-07-04",
+      "global_slope": 0.1998818642140851,
+      "league": "WTT Feeder Istanbul II Women",
+      "league_slope": 0.1915290864590205,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-07-04",
+      "global_slope": 0.1998818642140851,
+      "league": "WTT United States Smash",
+      "league_slope": 0.1998818642140851,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-07-05",
+      "global_slope": 0.33312596039667286,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.19840769789877125,
+      "prior_rows": 26
+    },
+    {
+      "date": "2026-07-05",
+      "global_slope": 0.33312596039667286,
+      "league": "Setka Cup",
+      "league_slope": 0.47196103878209544,
+      "prior_rows": 43
+    },
+    {
+      "date": "2026-07-05",
+      "global_slope": 0.33312596039667286,
+      "league": "Setka Cup Women",
+      "league_slope": 0.3221242752966784,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-07-05",
+      "global_slope": 0.33312596039667286,
+      "league": "TT Cup",
+      "league_slope": 0.443107771297822,
+      "prior_rows": 29
+    },
+    {
+      "date": "2026-07-05",
+      "global_slope": 0.33312596039667286,
+      "league": "TT Elite Series",
+      "league_slope": 0.49673036375736435,
+      "prior_rows": 53
+    },
+    {
+      "date": "2026-07-06",
+      "global_slope": 0.47134653326519727,
+      "league": "Challenger Series TT",
+      "league_slope": 0.4386050922015801,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-07-06",
+      "global_slope": 0.47134653326519727,
+      "league": "Setka Cup",
+      "league_slope": 0.6926633766997246,
+      "prior_rows": 48
+    },
+    {
+      "date": "2026-07-06",
+      "global_slope": 0.47134653326519727,
+      "league": "TT Cup",
+      "league_slope": 0.5645019955289661,
+      "prior_rows": 32
+    },
+    {
+      "date": "2026-07-06",
+      "global_slope": 0.47134653326519727,
+      "league": "TT Elite Series",
+      "league_slope": 0.6657743448913662,
+      "prior_rows": 58
+    },
+    {
+      "date": "2026-07-07",
+      "global_slope": 0.511311142274675,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.3307849076404623,
+      "prior_rows": 29
+    },
+    {
+      "date": "2026-07-07",
+      "global_slope": 0.511311142274675,
+      "league": "Setka Cup",
+      "league_slope": 0.7649053689442792,
+      "prior_rows": 55
+    },
+    {
+      "date": "2026-07-07",
+      "global_slope": 0.511311142274675,
+      "league": "TT Cup",
+      "league_slope": 0.5925275801005797,
+      "prior_rows": 34
+    },
+    {
+      "date": "2026-07-07",
+      "global_slope": 0.511311142274675,
+      "league": "TT Elite Series",
+      "league_slope": 0.7108915427363943,
+      "prior_rows": 67
+    },
+    {
+      "date": "2026-07-08",
+      "global_slope": 0.43949615018442917,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.2636772643270114,
+      "prior_rows": 31
+    },
+    {
+      "date": "2026-07-08",
+      "global_slope": 0.43949615018442917,
+      "league": "Setka Cup",
+      "league_slope": 0.7187640235213515,
+      "prior_rows": 59
+    },
+    {
+      "date": "2026-07-08",
+      "global_slope": 0.43949615018442917,
+      "league": "TT Cup",
+      "league_slope": 0.5143430832111101,
+      "prior_rows": 37
+    },
+    {
+      "date": "2026-07-08",
+      "global_slope": 0.43949615018442917,
+      "league": "TT Elite Series",
+      "league_slope": 0.5728411013565105,
+      "prior_rows": 72
+    },
+    {
+      "date": "2026-07-09",
+      "global_slope": 0.4581296515629136,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.3032576572414942,
+      "prior_rows": 34
+    },
+    {
+      "date": "2026-07-09",
+      "global_slope": 0.4581296515629136,
+      "league": "Setka Cup",
+      "league_slope": 0.6947406604787701,
+      "prior_rows": 62
+    },
+    {
+      "date": "2026-07-09",
+      "global_slope": 0.4581296515629136,
+      "league": "TT Cup",
+      "league_slope": 0.5377757317782619,
+      "prior_rows": 39
+    },
+    {
+      "date": "2026-07-09",
+      "global_slope": 0.4581296515629136,
+      "league": "TT Elite Series",
+      "league_slope": 0.6150110748674319,
+      "prior_rows": 78
+    },
+    {
+      "date": "2026-07-10",
+      "global_slope": 0.44399958282733937,
+      "league": "Setka Cup",
+      "league_slope": 0.5618006483923241,
+      "prior_rows": 74
+    },
+    {
+      "date": "2026-07-10",
+      "global_slope": 0.44399958282733937,
+      "league": "Setka Cup Women",
+      "league_slope": 0.4804454128952602,
+      "prior_rows": 2
+    },
+    {
+      "date": "2026-07-10",
+      "global_slope": 0.44399958282733937,
+      "league": "TT Cup",
+      "league_slope": 0.5351073199754336,
+      "prior_rows": 43
+    },
+    {
+      "date": "2026-07-10",
+      "global_slope": 0.44399958282733937,
+      "league": "TT Elite Series",
+      "league_slope": 0.6391008764020747,
+      "prior_rows": 91
+    },
+    {
+      "date": "2026-07-11",
+      "global_slope": 0.5626198834077372,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.3973252053205608,
+      "prior_rows": 35
+    },
+    {
+      "date": "2026-07-11",
+      "global_slope": 0.5626198834077372,
+      "league": "Setka Cup",
+      "league_slope": 0.6626669532832016,
+      "prior_rows": 79
+    },
+    {
+      "date": "2026-07-11",
+      "global_slope": 0.5626198834077372,
+      "league": "TT Cup",
+      "league_slope": 0.6544587248752127,
+      "prior_rows": 47
+    },
+    {
+      "date": "2026-07-11",
+      "global_slope": 0.5626198834077372,
+      "league": "TT Elite Series",
+      "league_slope": 0.8063033234721003,
+      "prior_rows": 101
+    },
+    {
+      "date": "2026-07-11",
+      "global_slope": 0.5626198834077372,
+      "league": "WTT Feeder Asuncion",
+      "league_slope": 0.5626198834077372,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-07-12",
+      "global_slope": 0.5463198796707635,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.2801066264304812,
+      "prior_rows": 40
+    },
+    {
+      "date": "2026-07-12",
+      "global_slope": 0.5463198796707635,
+      "league": "Setka Cup",
+      "league_slope": 0.6350787703113377,
+      "prior_rows": 84
+    },
+    {
+      "date": "2026-07-12",
+      "global_slope": 0.5463198796707635,
+      "league": "TT Cup",
+      "league_slope": 0.6050098599305318,
+      "prior_rows": 50
+    },
+    {
+      "date": "2026-07-12",
+      "global_slope": 0.5463198796707635,
+      "league": "TT Elite Series",
+      "league_slope": 0.8478421854387952,
+      "prior_rows": 111
+    },
+    {
+      "date": "2026-07-13",
+      "global_slope": 0.5310582923153938,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.4088867831944665,
+      "prior_rows": 45
+    },
+    {
+      "date": "2026-07-13",
+      "global_slope": 0.5310582923153938,
+      "league": "Setka Cup",
+      "league_slope": 0.4898373749580695,
+      "prior_rows": 90
+    },
+    {
+      "date": "2026-07-13",
+      "global_slope": 0.5310582923153938,
+      "league": "TT Cup",
+      "league_slope": 0.5840155191937239,
+      "prior_rows": 53
+    },
+    {
+      "date": "2026-07-13",
+      "global_slope": 0.5310582923153938,
+      "league": "TT Elite Series",
+      "league_slope": 0.8379674566334927,
+      "prior_rows": 113
+    },
+    {
+      "date": "2026-07-14",
+      "global_slope": 0.4999673969581612,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.37060708335257936,
+      "prior_rows": 48
+    },
+    {
+      "date": "2026-07-14",
+      "global_slope": 0.4999673969581612,
+      "league": "Setka Cup",
+      "league_slope": 0.42858115619355464,
+      "prior_rows": 91
+    },
+    {
+      "date": "2026-07-14",
+      "global_slope": 0.4999673969581612,
+      "league": "TT Cup",
+      "league_slope": 0.5974915546199768,
+      "prior_rows": 54
+    },
+    {
+      "date": "2026-07-14",
+      "global_slope": 0.4999673969581612,
+      "league": "TT Elite Series",
+      "league_slope": 0.7761860806159572,
+      "prior_rows": 116
+    },
+    {
+      "date": "2026-07-15",
+      "global_slope": 0.5548696832810667,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.462924210371901,
+      "prior_rows": 58
+    },
+    {
+      "date": "2026-07-15",
+      "global_slope": 0.5548696832810667,
+      "league": "Setka Cup",
+      "league_slope": 0.4508238710635061,
+      "prior_rows": 93
+    },
+    {
+      "date": "2026-07-15",
+      "global_slope": 0.5548696832810667,
+      "league": "TT Cup",
+      "league_slope": 0.6632282336360086,
+      "prior_rows": 57
+    },
+    {
+      "date": "2026-07-15",
+      "global_slope": 0.5548696832810667,
+      "league": "TT Elite Series",
+      "league_slope": 0.8445294984475562,
+      "prior_rows": 123
+    },
+    {
+      "date": "2026-07-16",
+      "global_slope": 0.6009549856693768,
+      "league": "Challenger Series TT",
+      "league_slope": 0.5347315743227357,
+      "prior_rows": 3
+    },
+    {
+      "date": "2026-07-16",
+      "global_slope": 0.6009549856693768,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.5542017334540726,
+      "prior_rows": 61
+    },
+    {
+      "date": "2026-07-16",
+      "global_slope": 0.6009549856693768,
+      "league": "Setka Cup",
+      "league_slope": 0.5008753820217157,
+      "prior_rows": 97
+    },
+    {
+      "date": "2026-07-16",
+      "global_slope": 0.6009549856693768,
+      "league": "TT Cup",
+      "league_slope": 0.7405302302815748,
+      "prior_rows": 60
+    },
+    {
+      "date": "2026-07-16",
+      "global_slope": 0.6009549856693768,
+      "league": "TT Elite Series",
+      "league_slope": 0.8719529008693994,
+      "prior_rows": 125
+    },
+    {
+      "date": "2026-07-17",
+      "global_slope": 0.5972492391933318,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.5908414123643178,
+      "prior_rows": 66
+    },
+    {
+      "date": "2026-07-17",
+      "global_slope": 0.5972492391933318,
+      "league": "Setka Cup",
+      "league_slope": 0.5552987617041886,
+      "prior_rows": 104
+    },
+    {
+      "date": "2026-07-17",
+      "global_slope": 0.5972492391933318,
+      "league": "TT Cup",
+      "league_slope": 0.6463683999981401,
+      "prior_rows": 63
+    },
+    {
+      "date": "2026-07-17",
+      "global_slope": 0.5972492391933318,
+      "league": "TT Elite Series",
+      "league_slope": 0.8370016958940952,
+      "prior_rows": 132
+    },
+    {
+      "date": "2026-07-18",
+      "global_slope": 0.6365685450026805,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.7034262885526854,
+      "prior_rows": 70
+    },
+    {
+      "date": "2026-07-18",
+      "global_slope": 0.6365685450026805,
+      "league": "Setka Cup",
+      "league_slope": 0.45076660241789,
+      "prior_rows": 109
+    },
+    {
+      "date": "2026-07-18",
+      "global_slope": 0.6365685450026805,
+      "league": "Setka Cup Women",
+      "league_slope": 0.6778824309921464,
+      "prior_rows": 4
+    },
+    {
+      "date": "2026-07-18",
+      "global_slope": 0.6365685450026805,
+      "league": "TT Cup",
+      "league_slope": 0.7851746545051892,
+      "prior_rows": 69
+    },
+    {
+      "date": "2026-07-18",
+      "global_slope": 0.6365685450026805,
+      "league": "TT Elite Series",
+      "league_slope": 0.8794515338181911,
+      "prior_rows": 139
+    },
+    {
+      "date": "2026-07-19",
+      "global_slope": 0.6652402450476228,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.8017821275383048,
+      "prior_rows": 73
+    },
+    {
+      "date": "2026-07-19",
+      "global_slope": 0.6652402450476228,
+      "league": "Setka Cup",
+      "league_slope": 0.4707166833126306,
+      "prior_rows": 113
+    },
+    {
+      "date": "2026-07-19",
+      "global_slope": 0.6652402450476228,
+      "league": "TT Cup",
+      "league_slope": 0.8584832373444052,
+      "prior_rows": 71
+    },
+    {
+      "date": "2026-07-19",
+      "global_slope": 0.6652402450476228,
+      "league": "TT Elite Series",
+      "league_slope": 0.8602626374330908,
+      "prior_rows": 143
+    },
+    {
+      "date": "2026-07-20",
+      "global_slope": 0.6428604519724763,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.758802818096387,
+      "prior_rows": 76
+    },
+    {
+      "date": "2026-07-20",
+      "global_slope": 0.6428604519724763,
+      "league": "Setka Cup",
+      "league_slope": 0.38565812093645774,
+      "prior_rows": 118
+    },
+    {
+      "date": "2026-07-20",
+      "global_slope": 0.6428604519724763,
+      "league": "TT Cup",
+      "league_slope": 0.8517957690328729,
+      "prior_rows": 73
+    },
+    {
+      "date": "2026-07-20",
+      "global_slope": 0.6428604519724763,
+      "league": "TT Elite Series",
+      "league_slope": 0.863991369032626,
+      "prior_rows": 148
+    },
+    {
+      "date": "2026-07-21",
+      "global_slope": 0.6391819706478482,
+      "league": "Setka Cup",
+      "league_slope": 0.2749321699358144,
+      "prior_rows": 125
+    },
+    {
+      "date": "2026-07-21",
+      "global_slope": 0.6391819706478482,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7090804270457701,
+      "prior_rows": 6
+    },
+    {
+      "date": "2026-07-21",
+      "global_slope": 0.6391819706478482,
+      "league": "TT Cup",
+      "league_slope": 0.8915359311732293,
+      "prior_rows": 75
+    },
+    {
+      "date": "2026-07-21",
+      "global_slope": 0.6391819706478482,
+      "league": "TT Elite Series",
+      "league_slope": 0.8915894374655166,
+      "prior_rows": 151
+    },
+    {
+      "date": "2026-07-22",
+      "global_slope": 0.7420822140986123,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.850697055460459,
+      "prior_rows": 80
+    },
+    {
+      "date": "2026-07-22",
+      "global_slope": 0.7420822140986123,
+      "league": "Setka Cup",
+      "league_slope": 0.3513926587512258,
+      "prior_rows": 130
+    },
+    {
+      "date": "2026-07-22",
+      "global_slope": 0.7420822140986123,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 81
+    },
+    {
+      "date": "2026-07-22",
+      "global_slope": 0.7420822140986123,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 160
+    },
+    {
+      "date": "2026-07-23",
+      "global_slope": 0.6992165973768416,
+      "league": "Challenger Series TT",
+      "league_slope": 0.6582714910827547,
+      "prior_rows": 5
+    },
+    {
+      "date": "2026-07-23",
+      "global_slope": 0.6992165973768416,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.7500432862143293,
+      "prior_rows": 87
+    },
+    {
+      "date": "2026-07-23",
+      "global_slope": 0.6992165973768416,
+      "league": "Setka Cup",
+      "league_slope": 0.28024388171474957,
+      "prior_rows": 134
+    },
+    {
+      "date": "2026-07-23",
+      "global_slope": 0.6992165973768416,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 82
+    },
+    {
+      "date": "2026-07-23",
+      "global_slope": 0.6992165973768416,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 169
+    },
+    {
+      "date": "2026-07-23",
+      "global_slope": 0.6992165973768416,
+      "league": "WTT Star Contender Brazil",
+      "league_slope": 0.6992165973768416,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-07-24",
+      "global_slope": 0.6556195218047451,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.6127770942453153,
+      "prior_rows": 91
+    },
+    {
+      "date": "2026-07-24",
+      "global_slope": 0.6556195218047451,
+      "league": "Setka Cup",
+      "league_slope": 0.303926788162983,
+      "prior_rows": 142
+    },
+    {
+      "date": "2026-07-24",
+      "global_slope": 0.6556195218047451,
+      "league": "TT Cup",
+      "league_slope": 0.9729645996609643,
+      "prior_rows": 83
+    },
+    {
+      "date": "2026-07-24",
+      "global_slope": 0.6556195218047451,
+      "league": "TT Elite Series",
+      "league_slope": 0.9503478648254695,
+      "prior_rows": 176
+    },
+    {
+      "date": "2026-07-24",
+      "global_slope": 0.6556195218047451,
+      "league": "WTT Star Contender Brazil Women",
+      "league_slope": 0.6556195218047451,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-07-25",
+      "global_slope": 0.6755241390108475,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.5689173068187787,
+      "prior_rows": 95
+    },
+    {
+      "date": "2026-07-25",
+      "global_slope": 0.6755241390108475,
+      "league": "Setka Cup",
+      "league_slope": 0.25747986002251666,
+      "prior_rows": 146
+    },
+    {
+      "date": "2026-07-25",
+      "global_slope": 0.6755241390108475,
+      "league": "TT Elite Series",
+      "league_slope": 0.9899427336646514,
+      "prior_rows": 185
+    },
+    {
+      "date": "2026-07-25",
+      "global_slope": 0.6755241390108475,
+      "league": "WTT Star Contender Brazil",
+      "league_slope": 0.6654684926347169,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-07-26",
+      "global_slope": 0.6862425763004614,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.5422996392117045,
+      "prior_rows": 99
+    },
+    {
+      "date": "2026-07-26",
+      "global_slope": 0.6862425763004614,
+      "league": "Setka Cup",
+      "league_slope": 0.3304081791826771,
+      "prior_rows": 152
+    },
+    {
+      "date": "2026-07-26",
+      "global_slope": 0.6862425763004614,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7265123693423368,
+      "prior_rows": 7
+    },
+    {
+      "date": "2026-07-26",
+      "global_slope": 0.6862425763004614,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 87
+    },
+    {
+      "date": "2026-07-26",
+      "global_slope": 0.6862425763004614,
+      "league": "TT Elite Series",
+      "league_slope": 0.9918984289017009,
+      "prior_rows": 191
+    },
+    {
+      "date": "2026-07-27",
+      "global_slope": 0.7193240133564979,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.49447413276293223,
+      "prior_rows": 102
+    },
+    {
+      "date": "2026-07-27",
+      "global_slope": 0.7193240133564979,
+      "league": "Setka Cup",
+      "league_slope": 0.35572595419677117,
+      "prior_rows": 156
+    },
+    {
+      "date": "2026-07-27",
+      "global_slope": 0.7193240133564979,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 91
+    },
+    {
+      "date": "2026-07-27",
+      "global_slope": 0.7193240133564979,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 198
+    },
+    {
+      "date": "2026-07-28",
+      "global_slope": 0.6882010454405385,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.416698061830977,
+      "prior_rows": 107
+    },
+    {
+      "date": "2026-07-28",
+      "global_slope": 0.6882010454405385,
+      "league": "Setka Cup",
+      "league_slope": 0.33359093759417907,
+      "prior_rows": 161
+    },
+    {
+      "date": "2026-07-28",
+      "global_slope": 0.6882010454405385,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 95
+    },
+    {
+      "date": "2026-07-28",
+      "global_slope": 0.6882010454405385,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 206
+    },
+    {
+      "date": "2026-07-28",
+      "global_slope": 0.6882010454405385,
+      "league": "WTT Feeder Tashkent Women",
+      "league_slope": 0.6882010454405385,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-07-29",
+      "global_slope": 0.6674117060736384,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.39848591213180123,
+      "prior_rows": 111
+    },
+    {
+      "date": "2026-07-29",
+      "global_slope": 0.6674117060736384,
+      "league": "Setka Cup",
+      "league_slope": 0.27819079589026624,
+      "prior_rows": 163
+    },
+    {
+      "date": "2026-07-29",
+      "global_slope": 0.6674117060736384,
+      "league": "TT Cup",
+      "league_slope": 0.9669591575237786,
+      "prior_rows": 97
+    },
+    {
+      "date": "2026-07-29",
+      "global_slope": 0.6674117060736384,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 214
+    },
+    {
+      "date": "2026-07-30",
+      "global_slope": 0.6838626948611363,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.42117753101136085,
+      "prior_rows": 116
+    },
+    {
+      "date": "2026-07-30",
+      "global_slope": 0.6838626948611363,
+      "league": "Setka Cup",
+      "league_slope": 0.251257574647259,
+      "prior_rows": 170
+    },
+    {
+      "date": "2026-07-30",
+      "global_slope": 0.6838626948611363,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 99
+    },
+    {
+      "date": "2026-07-30",
+      "global_slope": 0.6838626948611363,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 219
+    },
+    {
+      "date": "2026-07-31",
+      "global_slope": 0.7006534992692989,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.46576309291967144,
+      "prior_rows": 118
+    },
+    {
+      "date": "2026-07-31",
+      "global_slope": 0.7006534992692989,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 100
+    },
+    {
+      "date": "2026-07-31",
+      "global_slope": 0.7006534992692989,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 223
+    },
+    {
+      "date": "2026-08-01",
+      "global_slope": 0.7138650729464626,
+      "league": "Setka Cup",
+      "league_slope": 0.2445889050368748,
+      "prior_rows": 176
+    },
+    {
+      "date": "2026-08-01",
+      "global_slope": 0.7138650729464626,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7905282558935673,
+      "prior_rows": 8
+    },
+    {
+      "date": "2026-08-01",
+      "global_slope": 0.7138650729464626,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 104
+    },
+    {
+      "date": "2026-08-01",
+      "global_slope": 0.7138650729464626,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 228
+    },
+    {
+      "date": "2026-08-02",
+      "global_slope": 0.6983698084530319,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.4670014507377067,
+      "prior_rows": 120
+    },
+    {
+      "date": "2026-08-02",
+      "global_slope": 0.6983698084530319,
+      "league": "Setka Cup",
+      "league_slope": 0.19968112989170508,
+      "prior_rows": 182
+    },
+    {
+      "date": "2026-08-02",
+      "global_slope": 0.6983698084530319,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7260018969895502,
+      "prior_rows": 10
+    },
+    {
+      "date": "2026-08-02",
+      "global_slope": 0.6983698084530319,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 107
+    },
+    {
+      "date": "2026-08-02",
+      "global_slope": 0.6983698084530319,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 235
+    },
+    {
+      "date": "2026-08-03",
+      "global_slope": 0.6764378494031639,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.38405512905115585,
+      "prior_rows": 124
+    },
+    {
+      "date": "2026-08-03",
+      "global_slope": 0.6764378494031639,
+      "league": "Setka Cup",
+      "league_slope": 0.26058136466290366,
+      "prior_rows": 186
+    },
+    {
+      "date": "2026-08-03",
+      "global_slope": 0.6764378494031639,
+      "league": "TT Cup",
+      "league_slope": 0.9752185836842608,
+      "prior_rows": 112
+    },
+    {
+      "date": "2026-08-03",
+      "global_slope": 0.6764378494031639,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 244
+    },
+    {
+      "date": "2026-08-04",
+      "global_slope": 0.6914504811148493,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.3745117930468416,
+      "prior_rows": 128
+    },
+    {
+      "date": "2026-08-04",
+      "global_slope": 0.6914504811148493,
+      "league": "Setka Cup",
+      "league_slope": 0.3539399903398735,
+      "prior_rows": 195
+    },
+    {
+      "date": "2026-08-04",
+      "global_slope": 0.6914504811148493,
+      "league": "TT Cup",
+      "league_slope": 0.9403056065897494,
+      "prior_rows": 113
+    },
+    {
+      "date": "2026-08-04",
+      "global_slope": 0.6914504811148493,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 248
+    },
+    {
+      "date": "2026-08-04",
+      "global_slope": 0.6914504811148493,
+      "league": "WTT Feeder Vientiane Women",
+      "league_slope": 0.6914504811148493,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-08-05",
+      "global_slope": 0.6972701809615993,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.34688401529672525,
+      "prior_rows": 131
+    },
+    {
+      "date": "2026-08-05",
+      "global_slope": 0.6972701809615993,
+      "league": "Setka Cup",
+      "league_slope": 0.446431325851526,
+      "prior_rows": 200
+    },
+    {
+      "date": "2026-08-05",
+      "global_slope": 0.6972701809615993,
+      "league": "TT Cup",
+      "league_slope": 0.9643212841327177,
+      "prior_rows": 117
+    },
+    {
+      "date": "2026-08-05",
+      "global_slope": 0.6972701809615993,
+      "league": "TT Elite Series",
+      "league_slope": 0.9779268038864549,
+      "prior_rows": 251
+    },
+    {
+      "date": "2026-08-06",
+      "global_slope": 0.7429126420417741,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.3943330547434161,
+      "prior_rows": 135
+    },
+    {
+      "date": "2026-08-06",
+      "global_slope": 0.7429126420417741,
+      "league": "Setka Cup",
+      "league_slope": 0.48718204910077256,
+      "prior_rows": 206
+    },
+    {
+      "date": "2026-08-06",
+      "global_slope": 0.7429126420417741,
+      "league": "TT Cup",
+      "league_slope": 0.9705927217726165,
+      "prior_rows": 118
+    },
+    {
+      "date": "2026-08-06",
+      "global_slope": 0.7429126420417741,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 261
+    },
+    {
+      "date": "2026-08-06",
+      "global_slope": 0.7429126420417741,
+      "league": "WTT Feeder Vientiane",
+      "league_slope": 0.7429126420417741,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-08-07",
+      "global_slope": 0.727745076188109,
+      "league": "Challenger Series TT",
+      "league_slope": 0.6598318090503941,
+      "prior_rows": 6
+    },
+    {
+      "date": "2026-08-07",
+      "global_slope": 0.727745076188109,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.41491727187354943,
+      "prior_rows": 138
+    },
+    {
+      "date": "2026-08-07",
+      "global_slope": 0.727745076188109,
+      "league": "Setka Cup",
+      "league_slope": 0.42108750560178826,
+      "prior_rows": 212
+    },
+    {
+      "date": "2026-08-07",
+      "global_slope": 0.727745076188109,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7904277023859609,
+      "prior_rows": 12
+    },
+    {
+      "date": "2026-08-07",
+      "global_slope": 0.727745076188109,
+      "league": "TT Cup",
+      "league_slope": 0.978450607505227,
+      "prior_rows": 119
+    },
+    {
+      "date": "2026-08-07",
+      "global_slope": 0.727745076188109,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 267
+    },
+    {
+      "date": "2026-08-07",
+      "global_slope": 0.727745076188109,
+      "league": "WTT Feeder Vientiane MD",
+      "league_slope": 0.727745076188109,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-08-07",
+      "global_slope": 0.727745076188109,
+      "league": "WTT Feeder Vientiane Women",
+      "league_slope": 0.7374030572034259,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-08-08",
+      "global_slope": 0.7367342464194568,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.46035078009696606,
+      "prior_rows": 140
+    },
+    {
+      "date": "2026-08-08",
+      "global_slope": 0.7367342464194568,
+      "league": "Setka Cup",
+      "league_slope": 0.4008355642134146,
+      "prior_rows": 218
+    },
+    {
+      "date": "2026-08-08",
+      "global_slope": 0.7367342464194568,
+      "league": "TT Elite Series",
+      "league_slope": 1.0,
+      "prior_rows": 270
+    },
+    {
+      "date": "2026-08-09",
+      "global_slope": 0.6963707613344454,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.4841392752713333,
+      "prior_rows": 142
+    },
+    {
+      "date": "2026-08-09",
+      "global_slope": 0.6963707613344454,
+      "league": "Setka Cup",
+      "league_slope": 0.39041291056122374,
+      "prior_rows": 220
+    },
+    {
+      "date": "2026-08-09",
+      "global_slope": 0.6963707613344454,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7933118384807406,
+      "prior_rows": 13
+    },
+    {
+      "date": "2026-08-09",
+      "global_slope": 0.6963707613344454,
+      "league": "TT Cup",
+      "league_slope": 0.9930232186630461,
+      "prior_rows": 120
+    },
+    {
+      "date": "2026-08-09",
+      "global_slope": 0.6963707613344454,
+      "league": "TT Elite Series",
+      "league_slope": 0.9201910402235635,
+      "prior_rows": 276
+    },
+    {
+      "date": "2026-08-09",
+      "global_slope": 0.6963707613344454,
+      "league": "WTT Europe Smash Sweden Women Quals",
+      "league_slope": 0.6963707613344454,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-08-10",
+      "global_slope": 0.6965566467390206,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.44316676019085477,
+      "prior_rows": 144
+    },
+    {
+      "date": "2026-08-10",
+      "global_slope": 0.6965566467390206,
+      "league": "Setka Cup",
+      "league_slope": 0.4141418579625522,
+      "prior_rows": 228
+    },
+    {
+      "date": "2026-08-10",
+      "global_slope": 0.6965566467390206,
+      "league": "TT Cup",
+      "league_slope": 0.9932039462880602,
+      "prior_rows": 123
+    },
+    {
+      "date": "2026-08-10",
+      "global_slope": 0.6965566467390206,
+      "league": "TT Elite Series",
+      "league_slope": 0.9164508377495011,
+      "prior_rows": 282
+    },
+    {
+      "date": "2026-08-10",
+      "global_slope": 0.6965566467390206,
+      "league": "WTT Europe Smash Sweden",
+      "league_slope": 0.6965566467390206,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-08-10",
+      "global_slope": 0.6965566467390206,
+      "league": "WTT Europe Smash Sweden WD",
+      "league_slope": 0.6965566467390206,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-08-11",
+      "global_slope": 0.6701518067038532,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.4720265838885919,
+      "prior_rows": 148
+    },
+    {
+      "date": "2026-08-11",
+      "global_slope": 0.6701518067038532,
+      "league": "Setka Cup",
+      "league_slope": 0.3085271586880038,
+      "prior_rows": 239
+    },
+    {
+      "date": "2026-08-11",
+      "global_slope": 0.6701518067038532,
+      "league": "TT Cup",
+      "league_slope": 0.9644967831519299,
+      "prior_rows": 127
+    },
+    {
+      "date": "2026-08-11",
+      "global_slope": 0.6701518067038532,
+      "league": "TT Elite Series",
+      "league_slope": 0.9085714981800603,
+      "prior_rows": 289
+    },
+    {
+      "date": "2026-08-11",
+      "global_slope": 0.6701518067038532,
+      "league": "WTT Europe Smash Sweden",
+      "league_slope": 0.6607281105947302,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-08-12",
+      "global_slope": 0.6535948815118862,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.38783216240703816,
+      "prior_rows": 153
+    },
+    {
+      "date": "2026-08-12",
+      "global_slope": 0.6535948815118862,
+      "league": "Setka Cup",
+      "league_slope": 0.29758185095886236,
+      "prior_rows": 244
+    },
+    {
+      "date": "2026-08-12",
+      "global_slope": 0.6535948815118862,
+      "league": "TT Cup",
+      "league_slope": 0.936532272671942,
+      "prior_rows": 129
+    },
+    {
+      "date": "2026-08-12",
+      "global_slope": 0.6535948815118862,
+      "league": "TT Elite Series",
+      "league_slope": 0.914231248637898,
+      "prior_rows": 295
+    },
+    {
+      "date": "2026-08-12",
+      "global_slope": 0.6535948815118862,
+      "league": "WTT Europe Smash Sweden",
+      "league_slope": 0.61003627024182,
+      "prior_rows": 2
+    },
+    {
+      "date": "2026-08-13",
+      "global_slope": 0.6759485679214842,
+      "league": "Challenger Series TT",
+      "league_slope": 0.658022057589761,
+      "prior_rows": 7
+    },
+    {
+      "date": "2026-08-13",
+      "global_slope": 0.6759485679214842,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.41271353319806026,
+      "prior_rows": 155
+    },
+    {
+      "date": "2026-08-13",
+      "global_slope": 0.6759485679214842,
+      "league": "Setka Cup",
+      "league_slope": 0.4114189667758585,
+      "prior_rows": 251
+    },
+    {
+      "date": "2026-08-13",
+      "global_slope": 0.6759485679214842,
+      "league": "TT Cup",
+      "league_slope": 0.9628827716134407,
+      "prior_rows": 135
+    },
+    {
+      "date": "2026-08-13",
+      "global_slope": 0.6759485679214842,
+      "league": "TT Elite Series",
+      "league_slope": 0.89095071042097,
+      "prior_rows": 301
+    },
+    {
+      "date": "2026-08-13",
+      "global_slope": 0.6759485679214842,
+      "league": "WTT Europe Smash Sweden",
+      "league_slope": 0.6635385170925739,
+      "prior_rows": 3
+    },
+    {
+      "date": "2026-08-14",
+      "global_slope": 0.7220535240626648,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.41742886744765534,
+      "prior_rows": 157
+    },
+    {
+      "date": "2026-08-14",
+      "global_slope": 0.7220535240626648,
+      "league": "Setka Cup",
+      "league_slope": 0.5357177025881369,
+      "prior_rows": 257
+    },
+    {
+      "date": "2026-08-14",
+      "global_slope": 0.7220535240626648,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 137
+    },
+    {
+      "date": "2026-08-14",
+      "global_slope": 0.7220535240626648,
+      "league": "TT Elite Series",
+      "league_slope": 0.897570776039188,
+      "prior_rows": 308
+    },
+    {
+      "date": "2026-08-15",
+      "global_slope": 0.7355983167962464,
+      "league": "Setka Cup",
+      "league_slope": 0.5446688667390966,
+      "prior_rows": 262
+    },
+    {
+      "date": "2026-08-15",
+      "global_slope": 0.7355983167962464,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 140
+    },
+    {
+      "date": "2026-08-15",
+      "global_slope": 0.7355983167962464,
+      "league": "TT Elite Series",
+      "league_slope": 0.9354032810478421,
+      "prior_rows": 314
+    },
+    {
+      "date": "2026-08-16",
+      "global_slope": 0.7149402962590305,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.3725465055827193,
+      "prior_rows": 159
+    },
+    {
+      "date": "2026-08-16",
+      "global_slope": 0.7149402962590305,
+      "league": "Setka Cup",
+      "league_slope": 0.49846193682451007,
+      "prior_rows": 268
+    },
+    {
+      "date": "2026-08-16",
+      "global_slope": 0.7149402962590305,
+      "league": "TT Elite Series",
+      "league_slope": 0.9123475405732004,
+      "prior_rows": 318
+    },
+    {
+      "date": "2026-08-17",
+      "global_slope": 0.725236965030638,
+      "league": "Setka Cup",
+      "league_slope": 0.4850720918615612,
+      "prior_rows": 274
+    },
+    {
+      "date": "2026-08-17",
+      "global_slope": 0.725236965030638,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 141
+    },
+    {
+      "date": "2026-08-17",
+      "global_slope": 0.725236965030638,
+      "league": "TT Elite Series",
+      "league_slope": 0.9273402680230293,
+      "prior_rows": 320
+    },
+    {
+      "date": "2026-08-18",
+      "global_slope": 0.7014785027646925,
+      "league": "Setka Cup",
+      "league_slope": 0.43593988381669174,
+      "prior_rows": 282
+    },
+    {
+      "date": "2026-08-18",
+      "global_slope": 0.7014785027646925,
+      "league": "TT Cup",
+      "league_slope": 0.9893147030514753,
+      "prior_rows": 146
+    },
+    {
+      "date": "2026-08-18",
+      "global_slope": 0.7014785027646925,
+      "league": "TT Elite Series",
+      "league_slope": 0.9220591468924553,
+      "prior_rows": 323
+    },
+    {
+      "date": "2026-08-19",
+      "global_slope": 0.6914201765911044,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.41454839319274206,
+      "prior_rows": 162
+    },
+    {
+      "date": "2026-08-19",
+      "global_slope": 0.6914201765911044,
+      "league": "Setka Cup",
+      "league_slope": 0.399110582454503,
+      "prior_rows": 288
+    },
+    {
+      "date": "2026-08-19",
+      "global_slope": 0.6914201765911044,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 147
+    },
+    {
+      "date": "2026-08-19",
+      "global_slope": 0.6914201765911044,
+      "league": "TT Elite Series",
+      "league_slope": 0.9066854141551443,
+      "prior_rows": 329
+    },
+    {
+      "date": "2026-08-20",
+      "global_slope": 0.6628057665001457,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.34220230194595624,
+      "prior_rows": 167
+    },
+    {
+      "date": "2026-08-20",
+      "global_slope": 0.6628057665001457,
+      "league": "Setka Cup",
+      "league_slope": 0.3975676661874328,
+      "prior_rows": 290
+    },
+    {
+      "date": "2026-08-20",
+      "global_slope": 0.6628057665001457,
+      "league": "TT Cup",
+      "league_slope": 0.9878945886242111,
+      "prior_rows": 150
+    },
+    {
+      "date": "2026-08-20",
+      "global_slope": 0.6628057665001457,
+      "league": "TT Elite Series",
+      "league_slope": 0.8650201155092844,
+      "prior_rows": 336
+    },
+    {
+      "date": "2026-08-20",
+      "global_slope": 0.6628057665001457,
+      "league": "WTT Feeder Berlin",
+      "league_slope": 0.6628057665001457,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-08-21",
+      "global_slope": 0.6378681082354715,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.30027600031270263,
+      "prior_rows": 170
+    },
+    {
+      "date": "2026-08-21",
+      "global_slope": 0.6378681082354715,
+      "league": "Setka Cup",
+      "league_slope": 0.37839275015204854,
+      "prior_rows": 297
+    },
+    {
+      "date": "2026-08-21",
+      "global_slope": 0.6378681082354715,
+      "league": "TT Cup",
+      "league_slope": 0.9915903898308946,
+      "prior_rows": 152
+    },
+    {
+      "date": "2026-08-21",
+      "global_slope": 0.6378681082354715,
+      "league": "TT Elite Series",
+      "league_slope": 0.8313818768324807,
+      "prior_rows": 341
+    },
+    {
+      "date": "2026-08-22",
+      "global_slope": 0.650327787595817,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.30610426253323564,
+      "prior_rows": 171
+    },
+    {
+      "date": "2026-08-22",
+      "global_slope": 0.650327787595817,
+      "league": "Setka Cup",
+      "league_slope": 0.4224537395909477,
+      "prior_rows": 301
+    },
+    {
+      "date": "2026-08-22",
+      "global_slope": 0.650327787595817,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 156
+    },
+    {
+      "date": "2026-08-22",
+      "global_slope": 0.650327787595817,
+      "league": "TT Elite Series",
+      "league_slope": 0.8242969753789987,
+      "prior_rows": 348
+    },
+    {
+      "date": "2026-08-23",
+      "global_slope": 0.6490049686831979,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.2905720450812938,
+      "prior_rows": 173
+    },
+    {
+      "date": "2026-08-23",
+      "global_slope": 0.6490049686831979,
+      "league": "Setka Cup",
+      "league_slope": 0.4265528601656986,
+      "prior_rows": 304
+    },
+    {
+      "date": "2026-08-23",
+      "global_slope": 0.6490049686831979,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7774749730056676,
+      "prior_rows": 14
+    },
+    {
+      "date": "2026-08-23",
+      "global_slope": 0.6490049686831979,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 157
+    },
+    {
+      "date": "2026-08-23",
+      "global_slope": 0.6490049686831979,
+      "league": "TT Elite Series",
+      "league_slope": 0.8229113499542323,
+      "prior_rows": 350
+    },
+    {
+      "date": "2026-08-24",
+      "global_slope": 0.6470061287276314,
+      "league": "Challenger Series TT",
+      "league_slope": 0.6884974756285238,
+      "prior_rows": 8
+    },
+    {
+      "date": "2026-08-24",
+      "global_slope": 0.6470061287276314,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.2601550999020883,
+      "prior_rows": 177
+    },
+    {
+      "date": "2026-08-24",
+      "global_slope": 0.6470061287276314,
+      "league": "Setka Cup",
+      "league_slope": 0.4798212262990886,
+      "prior_rows": 309
+    },
+    {
+      "date": "2026-08-24",
+      "global_slope": 0.6470061287276314,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 159
+    },
+    {
+      "date": "2026-08-24",
+      "global_slope": 0.6470061287276314,
+      "league": "TT Elite Series",
+      "league_slope": 0.816374684081026,
+      "prior_rows": 355
+    },
+    {
+      "date": "2026-08-25",
+      "global_slope": 0.6955818357062357,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.2397568916045317,
+      "prior_rows": 181
+    },
+    {
+      "date": "2026-08-25",
+      "global_slope": 0.6955818357062357,
+      "league": "Setka Cup",
+      "league_slope": 0.5793407414289844,
+      "prior_rows": 316
+    },
+    {
+      "date": "2026-08-25",
+      "global_slope": 0.6955818357062357,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 160
+    },
+    {
+      "date": "2026-08-25",
+      "global_slope": 0.6955818357062357,
+      "league": "TT Elite Series",
+      "league_slope": 0.860381593296548,
+      "prior_rows": 361
+    },
+    {
+      "date": "2026-08-26",
+      "global_slope": 0.6952583330357126,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.2626858885182253,
+      "prior_rows": 183
+    },
+    {
+      "date": "2026-08-26",
+      "global_slope": 0.6952583330357126,
+      "league": "Setka Cup",
+      "league_slope": 0.5762386601976751,
+      "prior_rows": 321
+    },
+    {
+      "date": "2026-08-26",
+      "global_slope": 0.6952583330357126,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 165
+    },
+    {
+      "date": "2026-08-26",
+      "global_slope": 0.6952583330357126,
+      "league": "TT Elite Series",
+      "league_slope": 0.8583009902299745,
+      "prior_rows": 369
+    },
+    {
+      "date": "2026-08-26",
+      "global_slope": 0.6952583330357126,
+      "league": "WTT Feeder Olomouc",
+      "league_slope": 0.6952583330357126,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-08-27",
+      "global_slope": 0.6917533160062902,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.20549484550628908,
+      "prior_rows": 189
+    },
+    {
+      "date": "2026-08-27",
+      "global_slope": 0.6917533160062902,
+      "league": "Setka Cup",
+      "league_slope": 0.5859449680720744,
+      "prior_rows": 327
+    },
+    {
+      "date": "2026-08-27",
+      "global_slope": 0.6917533160062902,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 166
+    },
+    {
+      "date": "2026-08-27",
+      "global_slope": 0.6917533160062902,
+      "league": "TT Elite Series",
+      "league_slope": 0.8598617481179865,
+      "prior_rows": 375
+    },
+    {
+      "date": "2026-08-28",
+      "global_slope": 0.6810123720419871,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.17090381322126333,
+      "prior_rows": 190
+    },
+    {
+      "date": "2026-08-28",
+      "global_slope": 0.6810123720419871,
+      "league": "Setka Cup",
+      "league_slope": 0.5163158982710048,
+      "prior_rows": 336
+    },
+    {
+      "date": "2026-08-28",
+      "global_slope": 0.6810123720419871,
+      "league": "TT Elite Series",
+      "league_slope": 0.8691871805571976,
+      "prior_rows": 381
+    },
+    {
+      "date": "2026-08-29",
+      "global_slope": 0.6891887630429961,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.13409411180080524,
+      "prior_rows": 192
+    },
+    {
+      "date": "2026-08-29",
+      "global_slope": 0.6891887630429961,
+      "league": "Setka Cup",
+      "league_slope": 0.563533240816169,
+      "prior_rows": 341
+    },
+    {
+      "date": "2026-08-29",
+      "global_slope": 0.6891887630429961,
+      "league": "TT Elite Series",
+      "league_slope": 0.8723364396041848,
+      "prior_rows": 385
+    },
+    {
+      "date": "2026-08-30",
+      "global_slope": 0.6943387234147294,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.1269899194316082,
+      "prior_rows": 193
+    },
+    {
+      "date": "2026-08-30",
+      "global_slope": 0.6943387234147294,
+      "league": "Setka Cup",
+      "league_slope": 0.5697153140318675,
+      "prior_rows": 342
+    },
+    {
+      "date": "2026-08-30",
+      "global_slope": 0.6943387234147294,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 170
+    },
+    {
+      "date": "2026-08-30",
+      "global_slope": 0.6943387234147294,
+      "league": "TT Elite Series",
+      "league_slope": 0.8811996927581877,
+      "prior_rows": 386
+    },
+    {
+      "date": "2026-08-31",
+      "global_slope": 0.6892271982935919,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.05011949799609232,
+      "prior_rows": 199
+    },
+    {
+      "date": "2026-08-31",
+      "global_slope": 0.6892271982935919,
+      "league": "Setka Cup",
+      "league_slope": 0.5668465723651078,
+      "prior_rows": 349
+    },
+    {
+      "date": "2026-08-31",
+      "global_slope": 0.6892271982935919,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 172
+    },
+    {
+      "date": "2026-08-31",
+      "global_slope": 0.6892271982935919,
+      "league": "TT Elite Series",
+      "league_slope": 0.8960036232708272,
+      "prior_rows": 388
+    },
+    {
+      "date": "2026-09-01",
+      "global_slope": 0.6689527025374324,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.01879466912833353,
+      "prior_rows": 202
+    },
+    {
+      "date": "2026-09-01",
+      "global_slope": 0.6689527025374324,
+      "league": "Setka Cup",
+      "league_slope": 0.5350658729920574,
+      "prior_rows": 356
+    },
+    {
+      "date": "2026-09-01",
+      "global_slope": 0.6689527025374324,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7151456519369057,
+      "prior_rows": 15
+    },
+    {
+      "date": "2026-09-01",
+      "global_slope": 0.6689527025374324,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 175
+    },
+    {
+      "date": "2026-09-01",
+      "global_slope": 0.6689527025374324,
+      "league": "TT Elite Series",
+      "league_slope": 0.891302189709627,
+      "prior_rows": 393
+    },
+    {
+      "date": "2026-09-02",
+      "global_slope": 0.7054247244444644,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0453167376100237,
+      "prior_rows": 204
+    },
+    {
+      "date": "2026-09-02",
+      "global_slope": 0.7054247244444644,
+      "league": "Setka Cup",
+      "league_slope": 0.5905375341176632,
+      "prior_rows": 366
+    },
+    {
+      "date": "2026-09-02",
+      "global_slope": 0.7054247244444644,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 179
+    },
+    {
+      "date": "2026-09-02",
+      "global_slope": 0.7054247244444644,
+      "league": "TT Elite Series",
+      "league_slope": 0.9210148861794037,
+      "prior_rows": 400
+    },
+    {
+      "date": "2026-09-02",
+      "global_slope": 0.7054247244444644,
+      "league": "WTT Contender Almaty Quals",
+      "league_slope": 0.7054247244444644,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-03",
+      "global_slope": 0.7095426327853775,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.048220441712907666,
+      "prior_rows": 208
+    },
+    {
+      "date": "2026-09-03",
+      "global_slope": 0.7095426327853775,
+      "league": "Setka Cup",
+      "league_slope": 0.5953774719459254,
+      "prior_rows": 371
+    },
+    {
+      "date": "2026-09-03",
+      "global_slope": 0.7095426327853775,
+      "league": "TT Elite Series",
+      "league_slope": 0.9424988299725046,
+      "prior_rows": 408
+    },
+    {
+      "date": "2026-09-03",
+      "global_slope": 0.7095426327853775,
+      "league": "WTT Contender Almaty Women",
+      "league_slope": 0.7095426327853775,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-04",
+      "global_slope": 0.7068774286813931,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.030573258364014907,
+      "prior_rows": 215
+    },
+    {
+      "date": "2026-09-04",
+      "global_slope": 0.7068774286813931,
+      "league": "Setka Cup",
+      "league_slope": 0.5729868699203127,
+      "prior_rows": 375
+    },
+    {
+      "date": "2026-09-04",
+      "global_slope": 0.7068774286813931,
+      "league": "TT Cup",
+      "league_slope": 0.9645995770245473,
+      "prior_rows": 183
+    },
+    {
+      "date": "2026-09-04",
+      "global_slope": 0.7068774286813931,
+      "league": "TT Elite Series",
+      "league_slope": 0.9601020325707457,
+      "prior_rows": 413
+    },
+    {
+      "date": "2026-09-04",
+      "global_slope": 0.7068774286813931,
+      "league": "WTT Contender Almaty Women",
+      "league_slope": 0.6627569658128186,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-09-05",
+      "global_slope": 0.7014096063657322,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.021341290870570778,
+      "prior_rows": 216
+    },
+    {
+      "date": "2026-09-05",
+      "global_slope": 0.7014096063657322,
+      "league": "Setka Cup",
+      "league_slope": 0.5644631589016412,
+      "prior_rows": 376
+    },
+    {
+      "date": "2026-09-05",
+      "global_slope": 0.7014096063657322,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 185
+    },
+    {
+      "date": "2026-09-05",
+      "global_slope": 0.7014096063657322,
+      "league": "TT Elite Series",
+      "league_slope": 0.9323333291997752,
+      "prior_rows": 419
+    },
+    {
+      "date": "2026-09-06",
+      "global_slope": 0.6848856686802509,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.028372956323411656,
+      "prior_rows": 219
+    },
+    {
+      "date": "2026-09-06",
+      "global_slope": 0.6848856686802509,
+      "league": "Setka Cup",
+      "league_slope": 0.5140571691629896,
+      "prior_rows": 383
+    },
+    {
+      "date": "2026-09-06",
+      "global_slope": 0.6848856686802509,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 187
+    },
+    {
+      "date": "2026-09-06",
+      "global_slope": 0.6848856686802509,
+      "league": "TT Elite Series",
+      "league_slope": 0.9140679720611089,
+      "prior_rows": 426
+    },
+    {
+      "date": "2026-09-07",
+      "global_slope": 0.6747338708977334,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 226
+    },
+    {
+      "date": "2026-09-07",
+      "global_slope": 0.6747338708977334,
+      "league": "Setka Cup",
+      "league_slope": 0.5180184294357976,
+      "prior_rows": 384
+    },
+    {
+      "date": "2026-09-07",
+      "global_slope": 0.6747338708977334,
+      "league": "TT Cup",
+      "league_slope": 0.9887865306740733,
+      "prior_rows": 189
+    },
+    {
+      "date": "2026-09-07",
+      "global_slope": 0.6747338708977334,
+      "league": "TT Elite Series",
+      "league_slope": 0.9255709030483467,
+      "prior_rows": 428
+    },
+    {
+      "date": "2026-09-08",
+      "global_slope": 0.6931148061102678,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 230
+    },
+    {
+      "date": "2026-09-08",
+      "global_slope": 0.6931148061102678,
+      "league": "Setka Cup",
+      "league_slope": 0.5306894554626981,
+      "prior_rows": 390
+    },
+    {
+      "date": "2026-09-08",
+      "global_slope": 0.6931148061102678,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 194
+    },
+    {
+      "date": "2026-09-08",
+      "global_slope": 0.6931148061102678,
+      "league": "TT Elite Series",
+      "league_slope": 0.9502846871702869,
+      "prior_rows": 435
+    },
+    {
+      "date": "2026-09-09",
+      "global_slope": 0.6919272716144425,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 232
+    },
+    {
+      "date": "2026-09-09",
+      "global_slope": 0.6919272716144425,
+      "league": "Setka Cup",
+      "league_slope": 0.5266244263982619,
+      "prior_rows": 394
+    },
+    {
+      "date": "2026-09-09",
+      "global_slope": 0.6919272716144425,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7961743287036004,
+      "prior_rows": 16
+    },
+    {
+      "date": "2026-09-09",
+      "global_slope": 0.6919272716144425,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 197
+    },
+    {
+      "date": "2026-09-09",
+      "global_slope": 0.6919272716144425,
+      "league": "TT Elite Series",
+      "league_slope": 0.9563644345057393,
+      "prior_rows": 438
+    },
+    {
+      "date": "2026-09-09",
+      "global_slope": 0.6919272716144425,
+      "league": "WTT Champions Macao",
+      "league_slope": 0.6919272716144425,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-10",
+      "global_slope": 0.6849413607169481,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 235
+    },
+    {
+      "date": "2026-09-10",
+      "global_slope": 0.6849413607169481,
+      "league": "Setka Cup",
+      "league_slope": 0.5170960265015843,
+      "prior_rows": 396
+    },
+    {
+      "date": "2026-09-10",
+      "global_slope": 0.6849413607169481,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7710534925881589,
+      "prior_rows": 17
+    },
+    {
+      "date": "2026-09-10",
+      "global_slope": 0.6849413607169481,
+      "league": "TT Cup",
+      "league_slope": 0.9790295247416828,
+      "prior_rows": 198
+    },
+    {
+      "date": "2026-09-10",
+      "global_slope": 0.6849413607169481,
+      "league": "TT Elite Series",
+      "league_slope": 0.9554108721003565,
+      "prior_rows": 447
+    },
+    {
+      "date": "2026-09-10",
+      "global_slope": 0.6849413607169481,
+      "league": "WTT Feeder Puerto Princesa WD",
+      "league_slope": 0.6849413607169481,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-11",
+      "global_slope": 0.6807312758853239,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 236
+    },
+    {
+      "date": "2026-09-11",
+      "global_slope": 0.6807312758853239,
+      "league": "Setka Cup",
+      "league_slope": 0.5083313696883933,
+      "prior_rows": 399
+    },
+    {
+      "date": "2026-09-11",
+      "global_slope": 0.6807312758853239,
+      "league": "TT Cup",
+      "league_slope": 0.9618543852505658,
+      "prior_rows": 200
+    },
+    {
+      "date": "2026-09-11",
+      "global_slope": 0.6807312758853239,
+      "league": "TT Elite Series",
+      "league_slope": 0.9531076238821277,
+      "prior_rows": 450
+    },
+    {
+      "date": "2026-09-11",
+      "global_slope": 0.6807312758853239,
+      "league": "WTT Champions Macao Women",
+      "league_slope": 0.6807312758853239,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-12",
+      "global_slope": 0.6559917187451144,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 239
+    },
+    {
+      "date": "2026-09-12",
+      "global_slope": 0.6559917187451144,
+      "league": "Setka Cup",
+      "league_slope": 0.484475052454256,
+      "prior_rows": 409
+    },
+    {
+      "date": "2026-09-12",
+      "global_slope": 0.6559917187451144,
+      "league": "Setka Cup Women",
+      "league_slope": 0.7634293423421763,
+      "prior_rows": 18
+    },
+    {
+      "date": "2026-09-12",
+      "global_slope": 0.6559917187451144,
+      "league": "TT Cup",
+      "league_slope": 0.9284096629566758,
+      "prior_rows": 201
+    },
+    {
+      "date": "2026-09-12",
+      "global_slope": 0.6559917187451144,
+      "league": "TT Elite Series",
+      "league_slope": 0.9208021177085997,
+      "prior_rows": 454
+    },
+    {
+      "date": "2026-09-13",
+      "global_slope": 0.6777514742715003,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 242
+    },
+    {
+      "date": "2026-09-13",
+      "global_slope": 0.6777514742715003,
+      "league": "Setka Cup",
+      "league_slope": 0.48584477409321764,
+      "prior_rows": 411
+    },
+    {
+      "date": "2026-09-13",
+      "global_slope": 0.6777514742715003,
+      "league": "TT Cup",
+      "league_slope": 0.9639299877463476,
+      "prior_rows": 202
+    },
+    {
+      "date": "2026-09-13",
+      "global_slope": 0.6777514742715003,
+      "league": "TT Elite Series",
+      "league_slope": 0.9370356186095229,
+      "prior_rows": 463
+    },
+    {
+      "date": "2026-09-14",
+      "global_slope": 0.6881549703017236,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.005853621261940254,
+      "prior_rows": 247
+    },
+    {
+      "date": "2026-09-14",
+      "global_slope": 0.6881549703017236,
+      "league": "Setka Cup",
+      "league_slope": 0.459208431405825,
+      "prior_rows": 417
+    },
+    {
+      "date": "2026-09-14",
+      "global_slope": 0.6881549703017236,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 205
+    },
+    {
+      "date": "2026-09-14",
+      "global_slope": 0.6881549703017236,
+      "league": "TT Elite Series",
+      "league_slope": 0.9433659707046804,
+      "prior_rows": 469
+    },
+    {
+      "date": "2026-09-15",
+      "global_slope": 0.679702104217537,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 250
+    },
+    {
+      "date": "2026-09-15",
+      "global_slope": 0.679702104217537,
+      "league": "Setka Cup",
+      "league_slope": 0.4529883080733692,
+      "prior_rows": 420
+    },
+    {
+      "date": "2026-09-15",
+      "global_slope": 0.679702104217537,
+      "league": "TT Cup",
+      "league_slope": 0.9389570230536669,
+      "prior_rows": 207
+    },
+    {
+      "date": "2026-09-15",
+      "global_slope": 0.679702104217537,
+      "league": "TT Elite Series",
+      "league_slope": 0.9580506656431312,
+      "prior_rows": 477
+    },
+    {
+      "date": "2026-09-16",
+      "global_slope": 0.6802600870811383,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 251
+    },
+    {
+      "date": "2026-09-16",
+      "global_slope": 0.6802600870811383,
+      "league": "Setka Cup",
+      "league_slope": 0.4609087594947129,
+      "prior_rows": 428
+    },
+    {
+      "date": "2026-09-16",
+      "global_slope": 0.6802600870811383,
+      "league": "TT Cup",
+      "league_slope": 0.9367411111186316,
+      "prior_rows": 210
+    },
+    {
+      "date": "2026-09-16",
+      "global_slope": 0.6802600870811383,
+      "league": "TT Elite Series",
+      "league_slope": 0.958442714160725,
+      "prior_rows": 480
+    },
+    {
+      "date": "2026-09-17",
+      "global_slope": 0.6916112494403294,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 254
+    },
+    {
+      "date": "2026-09-17",
+      "global_slope": 0.6916112494403294,
+      "league": "Setka Cup",
+      "league_slope": 0.4700313018625681,
+      "prior_rows": 438
+    },
+    {
+      "date": "2026-09-17",
+      "global_slope": 0.6916112494403294,
+      "league": "TT Cup",
+      "league_slope": 0.9416187805471584,
+      "prior_rows": 214
+    },
+    {
+      "date": "2026-09-17",
+      "global_slope": 0.6916112494403294,
+      "league": "TT Elite Series",
+      "league_slope": 0.9649334968554363,
+      "prior_rows": 487
+    },
+    {
+      "date": "2026-09-17",
+      "global_slope": 0.6916112494403294,
+      "league": "WTT Feeder Bangkok WD",
+      "league_slope": 0.6916112494403294,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-17",
+      "global_slope": 0.6916112494403294,
+      "league": "WTT Star Contender Astana",
+      "league_slope": 0.6916112494403294,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-18",
+      "global_slope": 0.6952590248223823,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 256
+    },
+    {
+      "date": "2026-09-18",
+      "global_slope": 0.6952590248223823,
+      "league": "Setka Cup",
+      "league_slope": 0.48620334481939015,
+      "prior_rows": 444
+    },
+    {
+      "date": "2026-09-18",
+      "global_slope": 0.6952590248223823,
+      "league": "TT Cup",
+      "league_slope": 0.9413806074836651,
+      "prior_rows": 216
+    },
+    {
+      "date": "2026-09-18",
+      "global_slope": 0.6952590248223823,
+      "league": "TT Elite Series",
+      "league_slope": 0.9706055840290829,
+      "prior_rows": 495
+    },
+    {
+      "date": "2026-09-18",
+      "global_slope": 0.6952590248223823,
+      "league": "WTT Star Contender Astana Women",
+      "league_slope": 0.6952590248223823,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-19",
+      "global_slope": 0.7116342940847936,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.004198594818935959,
+      "prior_rows": 261
+    },
+    {
+      "date": "2026-09-19",
+      "global_slope": 0.7116342940847936,
+      "league": "Setka Cup",
+      "league_slope": 0.4837265450295716,
+      "prior_rows": 450
+    },
+    {
+      "date": "2026-09-19",
+      "global_slope": 0.7116342940847936,
+      "league": "TT Elite Series",
+      "league_slope": 0.9806337791198055,
+      "prior_rows": 502
+    },
+    {
+      "date": "2026-09-20",
+      "global_slope": 0.7215907948227638,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.026800377465925493,
+      "prior_rows": 263
+    },
+    {
+      "date": "2026-09-20",
+      "global_slope": 0.7215907948227638,
+      "league": "Setka Cup",
+      "league_slope": 0.5092447813635236,
+      "prior_rows": 457
+    },
+    {
+      "date": "2026-09-20",
+      "global_slope": 0.7215907948227638,
+      "league": "TT Cup",
+      "league_slope": 0.9805842022162934,
+      "prior_rows": 221
+    },
+    {
+      "date": "2026-09-20",
+      "global_slope": 0.7215907948227638,
+      "league": "TT Elite Series",
+      "league_slope": 0.9779878370935294,
+      "prior_rows": 512
+    },
+    {
+      "date": "2026-09-21",
+      "global_slope": 0.7368963578309806,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.021355025583765126,
+      "prior_rows": 264
+    },
+    {
+      "date": "2026-09-21",
+      "global_slope": 0.7368963578309806,
+      "league": "Setka Cup",
+      "league_slope": 0.5200785825720835,
+      "prior_rows": 461
+    },
+    {
+      "date": "2026-09-21",
+      "global_slope": 0.7368963578309806,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 223
+    },
+    {
+      "date": "2026-09-21",
+      "global_slope": 0.7368963578309806,
+      "league": "TT Elite Series",
+      "league_slope": 0.9937524493745842,
+      "prior_rows": 515
+    },
+    {
+      "date": "2026-09-22",
+      "global_slope": 0.727354058595071,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0,
+      "prior_rows": 265
+    },
+    {
+      "date": "2026-09-22",
+      "global_slope": 0.727354058595071,
+      "league": "Setka Cup",
+      "league_slope": 0.5084348983870062,
+      "prior_rows": 465
+    },
+    {
+      "date": "2026-09-22",
+      "global_slope": 0.727354058595071,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 227
+    },
+    {
+      "date": "2026-09-22",
+      "global_slope": 0.727354058595071,
+      "league": "TT Elite Series",
+      "league_slope": 0.9728370576501288,
+      "prior_rows": 523
+    },
+    {
+      "date": "2026-09-23",
+      "global_slope": 0.7098826989484228,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.005323495874007244,
+      "prior_rows": 271
+    },
+    {
+      "date": "2026-09-23",
+      "global_slope": 0.7098826989484228,
+      "league": "Setka Cup",
+      "league_slope": 0.47490252013335066,
+      "prior_rows": 471
+    },
+    {
+      "date": "2026-09-23",
+      "global_slope": 0.7098826989484228,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 229
+    },
+    {
+      "date": "2026-09-23",
+      "global_slope": 0.7098826989484228,
+      "league": "TT Elite Series",
+      "league_slope": 0.9467728760715979,
+      "prior_rows": 526
+    },
+    {
+      "date": "2026-09-24",
+      "global_slope": 0.7052147613089988,
+      "league": "Challenger Series TT",
+      "league_slope": 0.8130912598929784,
+      "prior_rows": 9
+    },
+    {
+      "date": "2026-09-24",
+      "global_slope": 0.7052147613089988,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.00953491474345454,
+      "prior_rows": 273
+    },
+    {
+      "date": "2026-09-24",
+      "global_slope": 0.7052147613089988,
+      "league": "Setka Cup",
+      "league_slope": 0.48344773377690514,
+      "prior_rows": 473
+    },
+    {
+      "date": "2026-09-24",
+      "global_slope": 0.7052147613089988,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 230
+    },
+    {
+      "date": "2026-09-24",
+      "global_slope": 0.7052147613089988,
+      "league": "TT Elite Series",
+      "league_slope": 0.932354798955872,
+      "prior_rows": 534
+    },
+    {
+      "date": "2026-09-24",
+      "global_slope": 0.7052147613089988,
+      "league": "WTT Feeder Linz",
+      "league_slope": 0.7052147613089988,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-09-25",
+      "global_slope": 0.717871049630257,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.05535778730266006,
+      "prior_rows": 278
+    },
+    {
+      "date": "2026-09-25",
+      "global_slope": 0.717871049630257,
+      "league": "Setka Cup",
+      "league_slope": 0.5063766389183857,
+      "prior_rows": 479
+    },
+    {
+      "date": "2026-09-25",
+      "global_slope": 0.717871049630257,
+      "league": "TT Cup",
+      "league_slope": 1.0,
+      "prior_rows": 236
+    },
+    {
+      "date": "2026-09-25",
+      "global_slope": 0.717871049630257,
+      "league": "TT Elite Series",
+      "league_slope": 0.936652062163553,
+      "prior_rows": 541
+    },
+    {
+      "date": "2026-09-26",
+      "global_slope": 0.7091821341862699,
+      "league": "Setka Cup",
+      "league_slope": 0.5047149757833319,
+      "prior_rows": 483
+    },
+    {
+      "date": "2026-09-26",
+      "global_slope": 0.7091821341862699,
+      "league": "TT Cup",
+      "league_slope": 0.9875896463005668,
+      "prior_rows": 238
+    },
+    {
+      "date": "2026-09-26",
+      "global_slope": 0.7091821341862699,
+      "league": "TT Elite Series",
+      "league_slope": 0.9302028861771343,
+      "prior_rows": 546
+    },
+    {
+      "date": "2026-09-26",
+      "global_slope": 0.7091821341862699,
+      "league": "WTT Feeder Linz",
+      "league_slope": 0.7075244292452353,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-09-27",
+      "global_slope": 0.6979650013528398,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.031243023781266685,
+      "prior_rows": 280
+    },
+    {
+      "date": "2026-09-27",
+      "global_slope": 0.6979650013528398,
+      "league": "Setka Cup",
+      "league_slope": 0.4989638925016849,
+      "prior_rows": 487
+    },
+    {
+      "date": "2026-09-27",
+      "global_slope": 0.6979650013528398,
+      "league": "TT Cup",
+      "league_slope": 0.9766829751752091,
+      "prior_rows": 242
+    },
+    {
+      "date": "2026-09-27",
+      "global_slope": 0.6979650013528398,
+      "league": "TT Elite Series",
+      "league_slope": 0.9097157390877864,
+      "prior_rows": 549
+    },
+    {
+      "date": "2026-09-28",
+      "global_slope": 0.7053980937506916,
+      "league": "Challenger Series TT",
+      "league_slope": 0.8681231672232108,
+      "prior_rows": 10
+    },
+    {
+      "date": "2026-09-28",
+      "global_slope": 0.7053980937506916,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.07593323224858313,
+      "prior_rows": 282
+    },
+    {
+      "date": "2026-09-28",
+      "global_slope": 0.7053980937506916,
+      "league": "Setka Cup",
+      "league_slope": 0.5000712839710673,
+      "prior_rows": 491
+    },
+    {
+      "date": "2026-09-28",
+      "global_slope": 0.7053980937506916,
+      "league": "TT Cup",
+      "league_slope": 0.9835492067887054,
+      "prior_rows": 246
+    },
+    {
+      "date": "2026-09-28",
+      "global_slope": 0.7053980937506916,
+      "league": "TT Elite Series",
+      "league_slope": 0.9121640101521004,
+      "prior_rows": 553
+    },
+    {
+      "date": "2026-09-29",
+      "global_slope": 0.7148229505551301,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.09410436947552044,
+      "prior_rows": 284
+    },
+    {
+      "date": "2026-09-29",
+      "global_slope": 0.7148229505551301,
+      "league": "Setka Cup",
+      "league_slope": 0.5074618883038169,
+      "prior_rows": 498
+    },
+    {
+      "date": "2026-09-29",
+      "global_slope": 0.7148229505551301,
+      "league": "TT Cup",
+      "league_slope": 0.9822284322315643,
+      "prior_rows": 250
+    },
+    {
+      "date": "2026-09-29",
+      "global_slope": 0.7148229505551301,
+      "league": "TT Elite Series",
+      "league_slope": 0.9201081462871302,
+      "prior_rows": 556
+    },
+    {
+      "date": "2026-09-30",
+      "global_slope": 0.717249652734984,
+      "league": "Setka Cup",
+      "league_slope": 0.5399242486761431,
+      "prior_rows": 502
+    },
+    {
+      "date": "2026-09-30",
+      "global_slope": 0.717249652734984,
+      "league": "TT Cup",
+      "league_slope": 0.9593096344229273,
+      "prior_rows": 256
+    },
+    {
+      "date": "2026-09-30",
+      "global_slope": 0.717249652734984,
+      "league": "TT Elite Series",
+      "league_slope": 0.9175657897112802,
+      "prior_rows": 563
+    },
+    {
+      "date": "2026-10-01",
+      "global_slope": 0.7126660122003885,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.07785296127761084,
+      "prior_rows": 289
+    },
+    {
+      "date": "2026-10-01",
+      "global_slope": 0.7126660122003885,
+      "league": "Setka Cup",
+      "league_slope": 0.5007937814366139,
+      "prior_rows": 511
+    },
+    {
+      "date": "2026-10-01",
+      "global_slope": 0.7126660122003885,
+      "league": "TT Cup",
+      "league_slope": 0.9310336915385908,
+      "prior_rows": 257
+    },
+    {
+      "date": "2026-10-01",
+      "global_slope": 0.7126660122003885,
+      "league": "TT Elite Series",
+      "league_slope": 0.9339950519603488,
+      "prior_rows": 567
+    },
+    {
+      "date": "2026-10-02",
+      "global_slope": 0.7286021227065101,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.1156709835783522,
+      "prior_rows": 292
+    },
+    {
+      "date": "2026-10-02",
+      "global_slope": 0.7286021227065101,
+      "league": "Setka Cup",
+      "league_slope": 0.5425705145390074,
+      "prior_rows": 517
+    },
+    {
+      "date": "2026-10-02",
+      "global_slope": 0.7286021227065101,
+      "league": "TT Cup",
+      "league_slope": 0.9454614238606871,
+      "prior_rows": 258
+    },
+    {
+      "date": "2026-10-02",
+      "global_slope": 0.7286021227065101,
+      "league": "TT Elite Series",
+      "league_slope": 0.9366624650199762,
+      "prior_rows": 569
+    },
+    {
+      "date": "2026-10-03",
+      "global_slope": 0.7122670277723644,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.107946943329904,
+      "prior_rows": 295
+    },
+    {
+      "date": "2026-10-03",
+      "global_slope": 0.7122670277723644,
+      "league": "Setka Cup",
+      "league_slope": 0.554937290899414,
+      "prior_rows": 522
+    },
+    {
+      "date": "2026-10-03",
+      "global_slope": 0.7122670277723644,
+      "league": "TT Cup",
+      "league_slope": 0.9310449865922548,
+      "prior_rows": 259
+    },
+    {
+      "date": "2026-10-03",
+      "global_slope": 0.7122670277723644,
+      "league": "TT Elite Series",
+      "league_slope": 0.9001954130883127,
+      "prior_rows": 571
+    },
+    {
+      "date": "2026-10-04",
+      "global_slope": 0.713840080037256,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.09583572016623927,
+      "prior_rows": 299
+    },
+    {
+      "date": "2026-10-04",
+      "global_slope": 0.713840080037256,
+      "league": "Setka Cup",
+      "league_slope": 0.5640953767908718,
+      "prior_rows": 526
+    },
+    {
+      "date": "2026-10-04",
+      "global_slope": 0.713840080037256,
+      "league": "Setka Cup Women",
+      "league_slope": 0.8662294319732393,
+      "prior_rows": 19
+    },
+    {
+      "date": "2026-10-04",
+      "global_slope": 0.713840080037256,
+      "league": "TT Cup",
+      "league_slope": 0.9309200983188928,
+      "prior_rows": 260
+    },
+    {
+      "date": "2026-10-04",
+      "global_slope": 0.713840080037256,
+      "league": "TT Elite Series",
+      "league_slope": 0.9033494848822204,
+      "prior_rows": 574
+    },
+    {
+      "date": "2026-10-05",
+      "global_slope": 0.7191437374900129,
+      "league": "Setka Cup",
+      "league_slope": 0.5746782917905654,
+      "prior_rows": 529
+    },
+    {
+      "date": "2026-10-05",
+      "global_slope": 0.7191437374900129,
+      "league": "TT Cup",
+      "league_slope": 0.9384261726946749,
+      "prior_rows": 262
+    },
+    {
+      "date": "2026-10-05",
+      "global_slope": 0.7191437374900129,
+      "league": "TT Elite Series",
+      "league_slope": 0.8939308700444893,
+      "prior_rows": 581
+    },
+    {
+      "date": "2026-10-05",
+      "global_slope": 0.7191437374900129,
+      "league": "WTT China Smash",
+      "league_slope": 0.7191437374900129,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-10-06",
+      "global_slope": 0.7071475109143796,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.13270948117427067,
+      "prior_rows": 302
+    },
+    {
+      "date": "2026-10-06",
+      "global_slope": 0.7071475109143796,
+      "league": "Setka Cup",
+      "league_slope": 0.5525422414506033,
+      "prior_rows": 534
+    },
+    {
+      "date": "2026-10-06",
+      "global_slope": 0.7071475109143796,
+      "league": "TT Cup",
+      "league_slope": 0.9279972997397274,
+      "prior_rows": 266
+    },
+    {
+      "date": "2026-10-06",
+      "global_slope": 0.7071475109143796,
+      "league": "TT Elite Series",
+      "league_slope": 0.8817675115438968,
+      "prior_rows": 584
+    },
+    {
+      "date": "2026-10-07",
+      "global_slope": 0.7169168978179941,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.10556521942004089,
+      "prior_rows": 306
+    },
+    {
+      "date": "2026-10-07",
+      "global_slope": 0.7169168978179941,
+      "league": "Setka Cup",
+      "league_slope": 0.5637421708663756,
+      "prior_rows": 536
+    },
+    {
+      "date": "2026-10-07",
+      "global_slope": 0.7169168978179941,
+      "league": "TT Cup",
+      "league_slope": 0.9284977546317272,
+      "prior_rows": 267
+    },
+    {
+      "date": "2026-10-07",
+      "global_slope": 0.7169168978179941,
+      "league": "TT Elite Series",
+      "league_slope": 0.9017406232914725,
+      "prior_rows": 592
+    },
+    {
+      "date": "2026-10-08",
+      "global_slope": 0.7264986913743342,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.10099366016941742,
+      "prior_rows": 307
+    },
+    {
+      "date": "2026-10-08",
+      "global_slope": 0.7264986913743342,
+      "league": "Setka Cup",
+      "league_slope": 0.574533451997288,
+      "prior_rows": 541
+    },
+    {
+      "date": "2026-10-08",
+      "global_slope": 0.7264986913743342,
+      "league": "TT Cup",
+      "league_slope": 0.9398031180150295,
+      "prior_rows": 269
+    },
+    {
+      "date": "2026-10-08",
+      "global_slope": 0.7264986913743342,
+      "league": "TT Elite Series",
+      "league_slope": 0.9148101179401893,
+      "prior_rows": 597
+    },
+    {
+      "date": "2026-10-08",
+      "global_slope": 0.7264986913743342,
+      "league": "WTT China Smash",
+      "league_slope": 0.7500478170023112,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-10-09",
+      "global_slope": 0.7269877924553277,
+      "league": "Challenger Series TT",
+      "league_slope": 0.8991231651299424,
+      "prior_rows": 11
+    },
+    {
+      "date": "2026-10-09",
+      "global_slope": 0.7269877924553277,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.10321378514219669,
+      "prior_rows": 310
+    },
+    {
+      "date": "2026-10-09",
+      "global_slope": 0.7269877924553277,
+      "league": "Setka Cup",
+      "league_slope": 0.5973794372358906,
+      "prior_rows": 546
+    },
+    {
+      "date": "2026-10-09",
+      "global_slope": 0.7269877924553277,
+      "league": "TT Cup",
+      "league_slope": 0.9357473284075379,
+      "prior_rows": 271
+    },
+    {
+      "date": "2026-10-09",
+      "global_slope": 0.7269877924553277,
+      "league": "TT Elite Series",
+      "league_slope": 0.9101843253677316,
+      "prior_rows": 604
+    },
+    {
+      "date": "2026-10-10",
+      "global_slope": 0.7242902983413457,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.13401057808569594,
+      "prior_rows": 317
+    },
+    {
+      "date": "2026-10-10",
+      "global_slope": 0.7242902983413457,
+      "league": "Setka Cup",
+      "league_slope": 0.6255922756432434,
+      "prior_rows": 549
+    },
+    {
+      "date": "2026-10-10",
+      "global_slope": 0.7242902983413457,
+      "league": "TT Cup",
+      "league_slope": 0.9287488839098632,
+      "prior_rows": 279
+    },
+    {
+      "date": "2026-10-10",
+      "global_slope": 0.7242902983413457,
+      "league": "TT Elite Series",
+      "league_slope": 0.8963771203135059,
+      "prior_rows": 605
+    },
+    {
+      "date": "2026-10-11",
+      "global_slope": 0.7179727350868953,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.11396766020255585,
+      "prior_rows": 319
+    },
+    {
+      "date": "2026-10-11",
+      "global_slope": 0.7179727350868953,
+      "league": "European Champs",
+      "league_slope": 0.7179727350868953,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-10-11",
+      "global_slope": 0.7179727350868953,
+      "league": "European Champs XD",
+      "league_slope": 0.7179727350868953,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-10-11",
+      "global_slope": 0.7179727350868953,
+      "league": "Setka Cup",
+      "league_slope": 0.6146499922819816,
+      "prior_rows": 554
+    },
+    {
+      "date": "2026-10-11",
+      "global_slope": 0.7179727350868953,
+      "league": "TT Cup",
+      "league_slope": 0.9211647890489084,
+      "prior_rows": 281
+    },
+    {
+      "date": "2026-10-11",
+      "global_slope": 0.7179727350868953,
+      "league": "TT Elite Series",
+      "league_slope": 0.895325282816598,
+      "prior_rows": 606
+    },
+    {
+      "date": "2026-10-12",
+      "global_slope": 0.7281702051826148,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.10061161841338082,
+      "prior_rows": 325
+    },
+    {
+      "date": "2026-10-12",
+      "global_slope": 0.7281702051826148,
+      "league": "European Champs Women",
+      "league_slope": 0.7281702051826148,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-10-12",
+      "global_slope": 0.7281702051826148,
+      "league": "Setka Cup",
+      "league_slope": 0.6374793825714155,
+      "prior_rows": 558
+    },
+    {
+      "date": "2026-10-12",
+      "global_slope": 0.7281702051826148,
+      "league": "TT Cup",
+      "league_slope": 0.9365195120981095,
+      "prior_rows": 285
+    },
+    {
+      "date": "2026-10-12",
+      "global_slope": 0.7281702051826148,
+      "league": "TT Elite Series",
+      "league_slope": 0.9033107255890818,
+      "prior_rows": 610
+    },
+    {
+      "date": "2026-10-13",
+      "global_slope": 0.7139915751015059,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.11832189636069393,
+      "prior_rows": 327
+    },
+    {
+      "date": "2026-10-13",
+      "global_slope": 0.7139915751015059,
+      "league": "European Champs MD",
+      "league_slope": 0.7139915751015059,
+      "prior_rows": 0
+    },
+    {
+      "date": "2026-10-13",
+      "global_slope": 0.7139915751015059,
+      "league": "European Champs XD",
+      "league_slope": 0.7174074193342714,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-10-13",
+      "global_slope": 0.7139915751015059,
+      "league": "Setka Cup",
+      "league_slope": 0.6327822901141565,
+      "prior_rows": 563
+    },
+    {
+      "date": "2026-10-13",
+      "global_slope": 0.7139915751015059,
+      "league": "TT Cup",
+      "league_slope": 0.9048827784943843,
+      "prior_rows": 287
+    },
+    {
+      "date": "2026-10-13",
+      "global_slope": 0.7139915751015059,
+      "league": "TT Elite Series",
+      "league_slope": 0.8770304881212438,
+      "prior_rows": 614
+    },
+    {
+      "date": "2026-10-14",
+      "global_slope": 0.6913826055169368,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.09951501233372878,
+      "prior_rows": 331
+    },
+    {
+      "date": "2026-10-14",
+      "global_slope": 0.6913826055169368,
+      "league": "European Champs Women",
+      "league_slope": 0.703070859099014,
+      "prior_rows": 1
+    },
+    {
+      "date": "2026-10-14",
+      "global_slope": 0.6913826055169368,
+      "league": "Setka Cup",
+      "league_slope": 0.6124876114536263,
+      "prior_rows": 567
+    },
+    {
+      "date": "2026-10-14",
+      "global_slope": 0.6913826055169368,
+      "league": "TT Cup",
+      "league_slope": 0.8655575599744469,
+      "prior_rows": 293
+    },
+    {
+      "date": "2026-10-14",
+      "global_slope": 0.6913826055169368,
+      "league": "TT Elite Series",
+      "league_slope": 0.8526782070995504,
+      "prior_rows": 622
+    },
+    {
+      "date": "2026-10-15",
+      "global_slope": 0.697404422258589,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.06749290869809228,
+      "prior_rows": 335
+    },
+    {
+      "date": "2026-10-15",
+      "global_slope": 0.697404422258589,
+      "league": "European Champs Women",
+      "league_slope": 0.7525818677318433,
+      "prior_rows": 3
+    },
+    {
+      "date": "2026-10-15",
+      "global_slope": 0.697404422258589,
+      "league": "Setka Cup",
+      "league_slope": 0.6077074055932526,
+      "prior_rows": 572
+    },
+    {
+      "date": "2026-10-15",
+      "global_slope": 0.697404422258589,
+      "league": "TT Cup",
+      "league_slope": 0.8798863743679798,
+      "prior_rows": 295
+    },
+    {
+      "date": "2026-10-15",
+      "global_slope": 0.697404422258589,
+      "league": "TT Elite Series",
+      "league_slope": 0.866315782893363,
+      "prior_rows": 626
+    },
+    {
+      "date": "2026-10-16",
+      "global_slope": 0.6945486397101964,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.0925736239030892,
+      "prior_rows": 340
+    },
+    {
+      "date": "2026-10-16",
+      "global_slope": 0.6945486397101964,
+      "league": "Setka Cup",
+      "league_slope": 0.5902184331829283,
+      "prior_rows": 579
+    },
+    {
+      "date": "2026-10-16",
+      "global_slope": 0.6945486397101964,
+      "league": "TT Cup",
+      "league_slope": 0.8718777419346474,
+      "prior_rows": 298
+    },
+    {
+      "date": "2026-10-16",
+      "global_slope": 0.6945486397101964,
+      "league": "TT Elite Series",
+      "league_slope": 0.8670008342723438,
+      "prior_rows": 632
+    },
+    {
+      "date": "2026-10-17",
+      "global_slope": 0.7033158050448264,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.10684241431544442,
+      "prior_rows": 341
+    },
+    {
+      "date": "2026-10-17",
+      "global_slope": 0.7033158050448264,
+      "league": "Setka Cup",
+      "league_slope": 0.58427515120039,
+      "prior_rows": 584
+    },
+    {
+      "date": "2026-10-17",
+      "global_slope": 0.7033158050448264,
+      "league": "TT Cup",
+      "league_slope": 0.8794102857161922,
+      "prior_rows": 300
+    },
+    {
+      "date": "2026-10-17",
+      "global_slope": 0.7033158050448264,
+      "league": "TT Elite Series",
+      "league_slope": 0.8824887010351322,
+      "prior_rows": 637
+    },
+    {
+      "date": "2026-10-18",
+      "global_slope": 0.6987881209006789,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.10693871977520693,
+      "prior_rows": 344
+    },
+    {
+      "date": "2026-10-18",
+      "global_slope": 0.6987881209006789,
+      "league": "Setka Cup",
+      "league_slope": 0.569136879779331,
+      "prior_rows": 588
+    },
+    {
+      "date": "2026-10-18",
+      "global_slope": 0.6987881209006789,
+      "league": "TT Cup",
+      "league_slope": 0.8896798964921621,
+      "prior_rows": 304
+    },
+    {
+      "date": "2026-10-18",
+      "global_slope": 0.6987881209006789,
+      "league": "TT Elite Series",
+      "league_slope": 0.8751073367903133,
+      "prior_rows": 642
+    },
+    {
+      "date": "2026-10-19",
+      "global_slope": 0.6797821655091341,
+      "league": "Challenger Series TT",
+      "league_slope": 0.7661652687462716,
+      "prior_rows": 12
+    },
+    {
+      "date": "2026-10-19",
+      "global_slope": 0.6797821655091341,
+      "league": "Setka Cup",
+      "league_slope": 0.553063248175722,
+      "prior_rows": 593
+    },
+    {
+      "date": "2026-10-19",
+      "global_slope": 0.6797821655091341,
+      "league": "TT Cup",
+      "league_slope": 0.8529402983942659,
+      "prior_rows": 305
+    },
+    {
+      "date": "2026-10-19",
+      "global_slope": 0.6797821655091341,
+      "league": "TT Elite Series",
+      "league_slope": 0.8527266883498922,
+      "prior_rows": 644
+    },
+    {
+      "date": "2026-10-20",
+      "global_slope": 0.6886169462178261,
+      "league": "Czech Liga Pro",
+      "league_slope": 0.10803432848733788,
+      "prior_rows": 347
+    },
+    {
+      "date": "2026-10-20",
+      "global_slope": 0.6886169462178261,
+      "league": "Setka Cup",
+      "league_slope": 0.5709079683076191,
+      "prior_rows": 599
+    },
+    {
+      "date": "2026-10-20",
+      "global_slope": 0.6886169462178261,
+      "league": "TT Cup",
+      "league_slope": 0.8577552997561334,
+      "prior_rows": 310
+    },
+    {
+      "date": "2026-10-20",
+      "global_slope": 0.6886169462178261,
+      "league": "TT Elite Series",
+      "league_slope": 0.8562210976656142,
+      "prior_rows": 646
+    }
+  ],
+  "overall": {
+    "arms": {
+      "fixed_half": {
+        "brier": 0.24477987810046573,
+        "brier_delta_vs_publisher": -0.0007783568562874377,
+        "log_loss": 0.6825639869438827
+      },
+      "flat": {
+        "brier": 0.25,
+        "brier_delta_vs_publisher": 0.004441765043246837,
+        "log_loss": 0.6931471805599453
+      },
+      "league_prior_ridge": {
+        "brier": 0.24457095195440218,
+        "brier_delta_vs_publisher": -0.000987283002350986,
+        "log_loss": 0.6821334423571046
+      },
+      "past_dates_ridge": {
+        "brier": 0.2445665236859236,
+        "brier_delta_vs_publisher": -0.0009917112708295595,
+        "log_loss": 0.6820796983071792
+      },
+      "publisher": {
+        "brier": 0.24555823495675316,
+        "brier_delta_vs_publisher": 0.0,
+        "log_loss": 0.684140073134773
+      }
+    },
+    "count": 1503
+  },
+  "protocol": {
+    "league_ridge": 1.0,
+    "prior_sample_consumed": true,
+    "strictly_earlier_dates": true,
+    "warmup_calendar_days": 28,
+    "within_day_learning": false
+  },
+  "schema": "autosport.account_c.league_calibration.development.v1",
+  "script_sha256": "5630d29524202607f0c7a232a2884be13777f5d675e4e30b67bc856045c90aa6",
+  "source_commit": "9eba2ade435ce27b4f3dcbd5aafc6bfbcd52d534",
+  "source_commit_verified_by_caller": false,
+  "source_license": "CC BY 4.0",
+  "source_url": "https://github.com/lathise2025/table-tennis-elo-dataset",
+  "truth": {
+    "forward_evidence_eligible": false,
+    "profitability_claim": false,
+    "promotion_authorized": false,
+    "real_money_execution": false,
+    "untouched_holdout": false,
+    "upstream_point_in_time_verified": false,
+    "upstream_results_independently_verified": false
+  },
+  "warmup_count": 497
+}

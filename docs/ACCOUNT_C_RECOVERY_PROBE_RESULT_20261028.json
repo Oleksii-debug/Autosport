@@ -1,0 +1,231 @@
+{
+  "campaign_sha256": "cf72a40a48f461196703664016f0628233dd8693519185e66170d757f2e9c508",
+  "cases": [
+    {
+      "results": {
+        "baseline": {
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "-47.5",
+              "observations": 8,
+              "reward_sum": "-380"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-47.125",
+              "observations": 8,
+              "reward_sum": "-377"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "-44.625",
+              "observations": 8,
+              "reward_sum": "-357"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-44.25",
+              "observations": 8,
+              "reward_sum": "-354"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 148,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe": {
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "-46.5",
+              "observations": 10,
+              "reward_sum": "-465"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-46.1",
+              "observations": 10,
+              "reward_sum": "-461"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "-44.5",
+              "observations": 8,
+              "reward_sum": "-356"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-44.25",
+              "observations": 8,
+              "reward_sum": "-354"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 144,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "1636",
+          "net_reward": "-1636",
+          "ticket_count": 36,
+          "wait_count": 144
+        }
+      },
+      "scenario": "loss",
+      "snapshot_sha256": "b3ec92f73f39f9ce453b50b872b8cfc8b9c566b442fb1df11618cb47722a86c0"
+    },
+    {
+      "results": {
+        "baseline": {
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "1075.333559322033898305084746",
+              "observations": 118,
+              "reward_sum": "126889.3600"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "1047.113846153846153846153846",
+              "observations": 26,
+              "reward_sum": "27224.9600"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "178.3200",
+              "observations": 25,
+              "reward_sum": "4458.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "178.3636363636363636363636364",
+              "observations": 11,
+              "reward_sum": "1962.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "0",
+          "net_reward": "160534.3200",
+          "ticket_count": 180,
+          "wait_count": 0
+        },
+        "probe": {
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "1075.333559322033898305084746",
+              "observations": 118,
+              "reward_sum": "126889.3600"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "1047.113846153846153846153846",
+              "observations": 26,
+              "reward_sum": "27224.9600"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "178.3200",
+              "observations": 25,
+              "reward_sum": "4458.0000"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "178.3636363636363636363636364",
+              "observations": 11,
+              "reward_sum": "1962.0000"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 0,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "0",
+          "net_reward": "160534.3200",
+          "ticket_count": 180,
+          "wait_count": 0
+        }
+      },
+      "scenario": "favorable",
+      "snapshot_sha256": "cac0a2992a74b872dd2148ea1c3de7123abadf979c6b3f31869188591421cf25"
+    },
+    {
+      "results": {
+        "baseline": {
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "-47.5",
+              "observations": 8,
+              "reward_sum": "-380"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-47.125",
+              "observations": 8,
+              "reward_sum": "-377"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "-44.625",
+              "observations": 8,
+              "reward_sum": "-357"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-44.25",
+              "observations": 8,
+              "reward_sum": "-354"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 148,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "1468",
+          "net_reward": "-1468",
+          "ticket_count": 32,
+          "wait_count": 148
+        },
+        "probe": {
+          "estimates": {
+            "PARLAY_2_HIGH_ODDS": {
+              "mean_reward": "488.7368140350877192982456140",
+              "observations": 57,
+              "reward_sum": "27857.9984"
+            },
+            "PARLAY_2_LOW_ODDS": {
+              "mean_reward": "-46.55555555555555555555555556",
+              "observations": 9,
+              "reward_sum": "-419"
+            },
+            "SINGLE_HIGH_ODDS": {
+              "mean_reward": "-44.5",
+              "observations": 8,
+              "reward_sum": "-356"
+            },
+            "SINGLE_LOW_ODDS": {
+              "mean_reward": "-44.25",
+              "observations": 8,
+              "reward_sum": "-354"
+            },
+            "WAIT": {
+              "mean_reward": "0",
+              "observations": 98,
+              "reward_sum": "0"
+            }
+          },
+          "maximum_drawdown": "1552",
+          "net_reward": "26728.9984",
+          "ticket_count": 82,
+          "wait_count": 98
+        }
+      },
+      "scenario": "recovery",
+      "snapshot_sha256": "1abe65dec6b6c3042f1aa1cb490a34160a2321b7585c3fe441d036ed4a99891f"
+    }
+  ],
+  "forward_evidence_eligible": false,
+  "max_probes": 4,
+  "probe_interval": 40,
+  "profitability_claim": false,
+  "promotion_authorized": false,
+  "real_money_execution": false,
+  "schema": "autosport.account_c.recovery_probe.development.v1",
+  "script_sha256": "ac2976f8e567bf875d58feebd5b70c60a1ed9c05415f7264525de4f1b5c9085d",
+  "steps": 180,
+  "truth": "simulated"
+}

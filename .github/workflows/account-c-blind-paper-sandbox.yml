@@ -1,0 +1,107 @@
+name: Account C Blind PAPER Sandbox Endurance
+
+on:
+  push:
+    branches:
+      - work/account-c-live-campaign-integration-20261026
+    paths:
+      - 'src/autosport/paper_live_sandbox_campaign.py'
+      - 'scripts/run_account_c_blind_paper_campaign.py'
+      - 'tests/test_paper_live_sandbox_campaign.py'
+      - '.github/workflows/account-c-blind-paper-sandbox.yml'
+  pull_request:
+    branches:
+      - account-b/plan6-6a-packaged-lifecycle-smoke
+    paths:
+      - 'src/autosport/paper_live_sandbox_campaign.py'
+      - 'scripts/run_account_c_blind_paper_campaign.py'
+      - 'tests/test_paper_live_sandbox_campaign.py'
+      - '.github/workflows/account-c-blind-paper-sandbox.yml'
+  workflow_dispatch:
+    inputs:
+      segment_seconds:
+        description: Seconds in each of two restart-separated segments
+        required: true
+        default: 3600
+        type: number
+      poll_seconds:
+        description: Seconds between source snapshots
+        required: true
+        default: 30
+        type: number
+
+permissions:
+  contents: read
+
+concurrency:
+  group: account-c-blind-paper-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  sandbox-paper-endurance:
+    runs-on: ubuntu-latest
+    timeout-minutes: 150
+    env:
+      SEGMENT_SECONDS: ${{ inputs.segment_seconds || 3600 }}
+      POLL_SECONDS: ${{ inputs.poll_seconds || 30 }}
+    steps:
+      - name: Checkout exact source
+        uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+          fetch-depth: 1
+          persist-credentials: false
+      - name: Configure independent PaperBook authority root
+        shell: bash
+        run: >-
+          echo
+          "AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR=${RUNNER_TEMP}/account-c-paper-authority-${GITHUB_RUN_ID}"
+          >> "$GITHUB_ENV"
+      - name: Set up Python
+        uses: actions/setup-python@a26af69be951a213d495a4c3e4e4022e16d87065 # v5
+        with:
+          python-version: '3.12'
+      - name: Install tested source
+        run: python -m pip install -e '.[test]'
+      - name: Prove causal and restart contracts before network use
+        run: python -m pytest -q tests/test_paper_live_sandbox_campaign.py
+      - name: Collect and learn — session one
+        run: >-
+          python scripts/run_account_c_blind_paper_campaign.py
+          --workspace account-c-paper-evidence
+          --segment-seconds "$SEGMENT_SECONDS"
+          --poll-seconds "$POLL_SECONDS"
+          --cutoff-seconds 7800
+          --expect-new
+      - name: Restart, collect and learn — session two
+        run: >-
+          python scripts/run_account_c_blind_paper_campaign.py
+          --workspace account-c-paper-evidence
+          --segment-seconds "$SEGMENT_SECONDS"
+          --poll-seconds "$POLL_SECONDS"
+          --expect-resume
+      - name: Independently reload final durable checkpoint
+        run: >-
+          python scripts/run_account_c_blind_paper_campaign.py
+          --workspace account-c-paper-evidence
+          --verify-only
+      - name: Export independent PaperBook authority and artifact digests
+        shell: bash
+        run: |
+          mkdir -p account-c-paper-evidence/independent-authority-export
+          cp -R "$AUTOSPORT_PAPER_EXECUTION_WITNESS_DIR"/. \
+            account-c-paper-evidence/independent-authority-export/
+          find account-c-paper-evidence -type f -name '*.lock' -delete
+          find account-c-paper-evidence -type f \
+            ! -name artifact-sha256.txt -print0 \
+            | sort -z \
+            | xargs -0 sha256sum \
+            > account-c-paper-evidence/artifact-sha256.txt
+      - name: Upload bounded synthetic evidence
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        with:
+          name: account-c-blind-paper-${{ github.run_id }}
+          path: account-c-paper-evidence
+          if-no-files-found: error
+          retention-days: 14

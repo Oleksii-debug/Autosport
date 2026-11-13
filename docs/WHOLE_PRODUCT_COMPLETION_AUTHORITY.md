@@ -2,7 +2,7 @@
 
 ## Owner correction
 
-This document records the latest explicit owner instruction and overrides any older wording in repository documents, issues, task templates, worker prompts or reports that treats `V1`, `V1.1`, `V2`, `V3`, `V4`, `post-V1`, `first version`, `proof release`, `paper-only first release`, or any similar label as a separate product goal or as a stopping/optimization target.
+This document records the latest explicit owner instruction and overrides any older wording in repository documents, issues, task templates, or reports that treats `V1`, `V1.1`, `V2`, `V3`, `V4`, `post-V1`, `first version`, `proof release`, `paper-only first release`, or any similar label as a separate product goal or as a stopping/optimization target.
 
 There is **one product, one target, one completion definition**:
 

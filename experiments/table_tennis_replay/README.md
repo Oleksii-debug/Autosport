@@ -78,3 +78,11 @@ The update learned zero weight for both corrections; abstention is not profit.
 The code passed 684 tests with two skips. Recorded forecasts, source receipts,
 model hashes and independent arithmetic checks remain in the private evidence
 package. These retrospective paper results do not establish executable profit.
+
+
+## Pre-kickoff residual follow-up, 2026-11-13
+
+The [two-board report](FORWARD_RESIDUAL_RESULTS_20261113.md) reports the frozen
+pre-kickoff results, a separate fixed historical set-count comparison, the
+source-label opponent inventory, and a subsequent research-only model fit.
+All are distinct evidence classes. The new model still needs an untouched test.

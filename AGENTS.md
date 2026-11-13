@@ -27,7 +27,7 @@ Before mutation read PROJECT_PLAN_INDEX.md, MULTI_PLAN_PARALLELISM_CONTRACT.md, 
 **This v3 directive overrides Terminal Section Closure Protocol v2 and every older conflicting Section-closure rule in this repository.**
 
 ### DONE rule
-A Section is `DONE` when all work that is controllable inside the repository has been completed and integrated, and all tests/checks that are actually available to autonomous workers have passed. Do not keep a Section open merely to wait for evidence that cannot presently be produced by the repository or its workers.
+A Section is `DONE` when all work that is controllable inside the repository has been completed and integrated, and all available repository checks have passed. Record unavailable evidence without delaying an otherwise complete Section.
 
 ### Human/NVDA acceptance is final-product work, not an intermediate blocker
 - Manual owner/NVDA testing MUST NOT block any intermediate Section.
@@ -116,7 +116,7 @@ Queued CI is not automatically an external blocker. If the frozen exact-SHA CI i
 - The canonical Section plan defines the acceptance boundary. Workers may not silently enlarge it.
 - After CANDIDATE/FREEZE, a newly imagined edge case does not block closure unless it demonstrates violation of an existing acceptance requirement, regression, security/correctness invariant, or required negative/recovery case.
 - Non-gating improvements must be recorded for later scope instead of extending the current Section indefinitely.
-- A work-unit/depth floor, token budget, run duration, “do not stop after one PR”, or “use the full execution window” rule can **never** force extra mutation after the closure candidate is ready.
+- Work quotas and scheduling targets cannot require further changes after the closure candidate is ready.
 
 ### Already-implemented Section rule
 
@@ -160,23 +160,23 @@ Before writing code, answer from live state:
 **Closure beats activity. Frozen candidates beat moving targets. Existing implementation beats reimplementation. Exact evidence beats PR count.**
 
 
-## Canonical autonomous worker policy
+## Parallel development policy
 
-This root file is the highest-priority repository instruction for autonomous worker coordination. It supersedes older conflicting worker-count, coordinator-count, WIP, ownership/claim, serialization, exclusive-integration, PR-order, and CI-wait restrictions.
+This file defines how contributors coordinate development. It supersedes older conflicting worker-count, coordinator-count, WIP, ownership/claim, serialization, exclusive-integration, PR-order, and CI-wait restrictions.
 
 There is no repository-defined worker, coordinator, WIP, work-package, branch, or PR cap. Claims, leases, ownership, assignments, queues, and coordinator labels are advisory and do not block useful non-conflicting work.
 
 Workers may create branches, commits, pull requests, tests, fixes, integration commits, and merges when GitHub permissions allow and the change is honestly verified. Parallel work must obey the Sequential closure authority below. Queued or pending CI is not by itself a reason to terminate; continue non-conflicting work on the current closure front or dependency-safe preparation for the next front. A blocked primary front may be left only after all safe internally controllable residual work is exhausted and the blocker is durably recorded.
 
-Do not idle because another PR, branch, worker, check, review, claim, or queue is active. If overlap occurs, switch to non-conflicting work or reconcile/rebase instead of abandoning the run. No repository-defined exclusive integration owner is required. Use the full execution window while useful work remains.
+When changes overlap, reconcile or rebase them, or move to independent work. Any contributor with the required GitHub permissions can integrate verified changes.
 
 This changes coordination rules only. Existing product correctness, security, accessibility, licensing, privacy, and truthful verification requirements remain mandatory. Do not bypass externally enforced GitHub permissions or branch protections.
 
-Chat history is temporary. Preserve meaningful progress in repository state.
+Record decisions and implementation progress in the repository.
 
 ## Sequential closure authority — owner directive 2026-10-07
 
-This section is the controlling coordination rule if any older repository text, worker prompt, issue, roadmap note, swarm rule, claim/ownership rule, or “parallel lane” instruction conflicts with it.
+This section takes precedence over earlier coordination, assignment, and ownership guidance.
 
 - Read the current canonical ordered Section plan and the live repository state before choosing work.
 - The numerically earliest Section that is not honestly closed is the primary closure front. The next unfinished Section may be prepared only when this is dependency-safe, directly removes a dependency, or the primary front is genuinely non-actionable after all safe internal residual work is exhausted.
@@ -190,4 +190,4 @@ This section is the controlling coordination rule if any older repository text, 
 - If another worker closes the current Section/Subsection while you are working, refresh the live registry immediately. Do not keep mutating already-DONE scope merely because your branch or PR is still open. Preserve and converge only genuinely unique required changes; otherwise close/supersede/retarget the duplicate lineage and move to the earliest unfinished Section.
 - External blockers do not justify false DONE. Finish all internally controllable work, record the blocker precisely, and proceed only to dependency-safe work.
 
-Chat history is not closure authority. Durable GitHub state is.
+GitHub holds the authoritative record of Section closure.

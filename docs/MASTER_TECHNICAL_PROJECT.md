@@ -300,7 +300,7 @@ Canonical control:
 
 - Issue #1 — whole finished product control;
 - Issue #198 — one whole-product roadmap;
-- Issue #362 — binding swarm operating constitution;
+- Issue #362 — development coordination policy;
 - Issue #368 — live task dispatch/claim protocol;
 - `docs/WHOLE_PRODUCT_COMPLETION_AUTHORITY.md` — binding owner correction against version-splitting.
 

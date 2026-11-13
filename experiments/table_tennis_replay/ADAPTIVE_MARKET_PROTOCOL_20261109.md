@@ -1,0 +1,9 @@
+# Frozen adaptive research-memory screen — 2026-11-09
+
+Add-on to MARKET_ANCHOR_PROTOCOL_20261109.md, fixed before the first aggregate strategy score. Same selected population, quotes, four candidate policies, costs, no replacements, no extra price requests. Does not change that experiment.
+
+Reuse existing autosport.shadow_strategy_memory.ShadowStrategyMemory and ShadowMemoryPlan rather than adding a new production learner. Default window=100 qualified event opportunities, minimum_observations=30, minimum_mean_return=0.02, actions are the four fixed policies. Each policy's hypothetical per-event return is zero when it declines its wager, otherwise exact net return at the protocol costs. Support counts opportunities, NOT actual wagers, and must be reported as such.
+
+At UTC midnight of each evaluation day, reveal only earlier selected events with source updated_at strictly before that midnight. Ingest at that midnight in a labelled SIMULATED retrospective clock, using availability_basis=retrospective_assumed_delay; source update time is not actual past local receipt. Choose one policy (or WAIT) for the whole day before that day's outcomes. Do not fit on the later day or change thresholds after inspecting returns. Source outcome revisions and unresolved identity remain research limitations.
+
+Report every day's chosen policy and number of earlier feedback events; actual simulated wagers/wins/net return, negative and positive days, stress on same actions and comparison with each fixed policy and zero action. Persist the research-only memory checkpoint privately with execution_authorized=false and promotion_authorized=false. Do not import into the live agent or call this a trained profitable agent. This tests whether the existing learning mechanism can avoid repeating weak rules under the fixed simulated information order.

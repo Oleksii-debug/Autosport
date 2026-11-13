@@ -1,0 +1,17 @@
+{
+  "collision_group_size_counts": {
+    "2": 4
+  },
+  "collision_groups": 4,
+  "collision_rows": 8,
+  "group_score_status": {
+    "all_qualified_different": 0,
+    "all_qualified_equal": 4,
+    "not_fully_qualified": 0
+  },
+  "groups_with_reversed_source_side_order": 0,
+  "independent_input_parser_or_selection": false,
+  "posthoc_groups_equal_on_raw_fields_except_row_label": 4,
+  "source_sha256": "d400562f49ced084133c8e926025efb6023dd62a8341fd4484864d567a4e392d",
+  "structurally_qualified_collision_rows": 8
+}

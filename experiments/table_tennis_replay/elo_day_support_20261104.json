@@ -1,0 +1,35 @@
+{
+  "bookmaker_execution": false,
+  "date_labels": 118,
+  "event_date_verified": false,
+  "independent_holdout": false,
+  "league_comparison": "exact source label",
+  "model_training_authorized": false,
+  "note": "Source-row coincidences under optimistic assumptions, not causal features. File-order comparison does not establish within-day chronology.",
+  "physical_match_deduplicated": false,
+  "physical_people_verified": false,
+  "profitability_claim": false,
+  "result_available_before_decision_verified": false,
+  "same_day_prefix_in_file_order": {
+    "any_player_only_from_same_day": 20,
+    "both_players_only_from_same_day": 18,
+    "h2h_only_from_same_day": 5,
+    "h2h_support_includes_same_day": 5,
+    "player_support_includes_same_day": 129
+  },
+  "schema": "research.tt_elo_day_support_audit.v1",
+  "source_rights_verified": false,
+  "source_rows": 2000,
+  "source_sha256": "bbb2ab531f269a1eafff89e240086a4d17999114b582825ba4338986c6770fde",
+  "strict_earlier_date_h2h_count_distribution": {
+    "0": 1812,
+    "1": 164,
+    "2-4": 24,
+    "5+": 0
+  },
+  "strict_earlier_date_source_row_support": {
+    "any_player": 1607,
+    "both_players": 1028,
+    "h2h_pair": 188
+  }
+}

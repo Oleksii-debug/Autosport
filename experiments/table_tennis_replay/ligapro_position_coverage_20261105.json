@@ -1,0 +1,61 @@
+{
+  "actual_notebook_run_verified": false,
+  "bookmaker_acceptance_verified": false,
+  "historical_result_availability_verified": false,
+  "independent_holdout": false,
+  "model_fit_or_predict": false,
+  "notebook_clean_rows": 4271,
+  "position_coverage": {
+    "player1": {
+      "other_position_only": 1,
+      "same_position": 853,
+      "unseen_anywhere": 1
+    },
+    "player2": {
+      "other_position_only": 2,
+      "same_position": 851,
+      "unseen_anywhere": 2
+    },
+    "test_rows_any_position_unknown": 6,
+    "test_rows_both_positions_unknown": 0,
+    "test_rows_later_any_same_position": 828,
+    "test_rows_later_both_same_position": 706,
+    "test_rows_later_either_orientation_pair": 375,
+    "test_rows_later_reverse_orientation_pair": 234,
+    "test_rows_later_same_orientation_pair": 244,
+    "test_rows_later_same_position_player1": 771,
+    "test_rows_later_same_position_player2": 763,
+    "test_rows_reverse_only_pair_seen": 157,
+    "test_rows_same_oriented_pair_seen": 444
+  },
+  "previous_aggregate_unchanged": true,
+  "profitability_claim": false,
+  "real_money_execution": false,
+  "reference": {
+    "candidate_pairs": 2920680,
+    "same_source_rows_and_parsing": true,
+    "status": "matched_direct_pairwise"
+  },
+  "schema": "research.tt_ligapro_position_coverage.v1",
+  "source_bytes": 335346,
+  "source_names_verified_as_people": false,
+  "source_sha256": "375f235115651868337f273939b9094da0189da9f17c3e0432edd2f4041987a4",
+  "source_times_verified": false,
+  "split": {
+    "method": "stratified_random",
+    "notebook_feature_frame_indices_match": true,
+    "pandas_version": "2.2.3",
+    "random_state": 42,
+    "sklearn_version": "1.8.0",
+    "test_rows": 855,
+    "test_size": "0.2",
+    "train_rows": 3416
+  },
+  "test_invalid_pair_rows": 0,
+  "test_timezone_aware_excluded_from_time_comparison": 0,
+  "test_valid_pair_rows": 855,
+  "train_invalid_pair_rows": 0,
+  "train_timezone_aware_excluded_from_time_comparison": 0,
+  "train_valid_pair_rows": 3416,
+  "underlying_data_rights_verified": false
+}

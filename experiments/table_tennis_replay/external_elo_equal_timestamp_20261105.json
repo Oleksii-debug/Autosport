@@ -1,0 +1,30 @@
+{
+  "equal_timestamp_outcome_changes_target_elo": true,
+  "first_row_a_loses": {
+    "cumulative_matches_a": 1,
+    "cumulative_wins_a": 0,
+    "elo_a_before": 1484.0,
+    "form_last_5_a": 0.0
+  },
+  "first_row_a_wins": {
+    "cumulative_matches_a": 1,
+    "cumulative_wins_a": 1,
+    "elo_a_before": 1516.0,
+    "form_last_5_a": 1.0
+  },
+  "note": "Identical match_date labels, not evidence about actual real-match times. No upstream imports, network, credentials or real data are executed.",
+  "physical_match_verified": false,
+  "real_model_reproduced": false,
+  "real_money_execution": false,
+  "same_timestamp_on_both_input_rows": true,
+  "schema": "research.external_tt_equal_timestamp_probe.v1",
+  "synthetic_only": true,
+  "target_row_first_in_input": {
+    "cumulative_matches_a": 0,
+    "cumulative_wins_a": 0,
+    "elo_a_before": 1500.0,
+    "form_last_5_a": null
+  },
+  "training_data_observed": false,
+  "upstream_commit": "ebe19dd52f0bf6e7353f1fa5442afd2d5e361e40"
+}

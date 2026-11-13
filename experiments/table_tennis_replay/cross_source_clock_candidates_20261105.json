@@ -1,0 +1,45 @@
+{
+  "chapter_gap_minus_label_gap_seconds": [
+    -36,
+    50
+  ],
+  "crosswalk_verified": false,
+  "date_pair_groups": 2,
+  "feasible_full_pairings": 1,
+  "feasible_offset_minutes": [
+    179,
+    180,
+    181
+  ],
+  "feasible_pairing_offset_combinations": 3,
+  "forced_row_pairs_within_hypothesis": 4,
+  "midnight_wrap_modelled": false,
+  "mismatched_group_counts": 0,
+  "model_training_authorized": false,
+  "note": "Conditional full bijections over caller-selected source claims; no actual identity or event resolution.",
+  "offset_range_minutes": [
+    -840,
+    840
+  ],
+  "original_pages_or_video_bytes_retained": false,
+  "pairing_space": 4,
+  "physical_people_or_events_verified": false,
+  "possible_row_pairs": 4,
+  "real_money_execution": false,
+  "result_availability_verified": false,
+  "reversed_label_order_range": [
+    2,
+    2
+  ],
+  "rights_verified": false,
+  "schema": "research.tt_cross_source_clock_candidates.v1",
+  "source_independence_verified": false,
+  "source_rows": {
+    "comparison": 4,
+    "video_description": 4
+  },
+  "status": "conditional_candidates",
+  "timezone_or_clock_semantics_verified": false,
+  "tolerance_minutes": 1,
+  "transcription_sha256": "1216c8bd37207e6839102e213e316337c994044d6bb0986c387ddefdf9a229d2"
+}

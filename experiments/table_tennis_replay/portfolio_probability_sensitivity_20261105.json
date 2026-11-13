@@ -1,0 +1,78 @@
+{
+  "assumed_opened_tickets": 41,
+  "baseline_and_previous_stresses_unchanged": true,
+  "bookmaker_acceptance_verified": false,
+  "independent_holdout": false,
+  "input_bytes": 321389,
+  "input_sha256": "44508bfa10c57033a671277c949ad5bfd1485744a80211497ad9abe91d3971e9",
+  "model_training": false,
+  "probability_sensitivity": {
+    "first_peak_exact_id_sharing": {
+      "all_home_or_all_away": {
+        "conditional_mean_open_ticket_pnl_units": "-2.0263888888888889125",
+        "conditional_probability_all_open_tickets_lose": "0",
+        "fraction_reference": "matched_within_1e-24_scaled_per_state_and_mean",
+        "probability_authority_proven": false,
+        "scenario_search_cross_check": "not_applicable",
+        "state_count": 2
+      },
+      "event_identity_or_independence_proven": false,
+      "event_limit": 8,
+      "exact_event_ids": 4,
+      "hypothetical_opposed_side_event_count": 2,
+      "independent_exact_ids": {
+        "conditional_mean_open_ticket_pnl_units": "-3.16318392255892258755787037025",
+        "conditional_probability_all_open_tickets_lose": "0.3125",
+        "fraction_reference": "matched_within_1e-24_scaled_per_state_and_mean",
+        "probability_authority_proven": false,
+        "scenario_search_cross_check": "matched_exact_independent_groups",
+        "state_count": 16
+      },
+      "marginal_home_and_away_probability": "0.5_each_invented",
+      "open_tickets": 6,
+      "outcome_authority_or_execution_proven": false,
+      "probabilities_empirically_estimated": false,
+      "status": "computed_hypothetical_only",
+      "voids_costs_and_previous_pnl_included": false
+    },
+    "first_peak_open_tickets": {
+      "all_home_or_all_away": {
+        "conditional_mean_open_ticket_pnl_units": "-2.3993055555555555975714285715",
+        "conditional_probability_all_open_tickets_lose": "0.5",
+        "fraction_reference": "matched_within_1e-24_scaled_per_state_and_mean",
+        "probability_authority_proven": false,
+        "scenario_search_cross_check": "not_applicable",
+        "state_count": 2
+      },
+      "event_identity_or_independence_proven": false,
+      "event_limit": 8,
+      "exact_event_ids": 8,
+      "hypothetical_opposed_side_event_count": 0,
+      "independent_exact_ids": {
+        "conditional_mean_open_ticket_pnl_units": "-4.24965277777777783878571428575",
+        "conditional_probability_all_open_tickets_lose": "0.29296875",
+        "fraction_reference": "matched_within_1e-24_scaled_per_state_and_mean",
+        "probability_authority_proven": false,
+        "scenario_search_cross_check": "matched_exact_independent_groups",
+        "state_count": 256
+      },
+      "marginal_home_and_away_probability": "0.5_each_invented",
+      "open_tickets": 7,
+      "outcome_authority_or_execution_proven": false,
+      "probabilities_empirically_estimated": false,
+      "status": "computed_hypothetical_only",
+      "voids_costs_and_previous_pnl_included": false
+    },
+    "profitability_claim": false,
+    "scenario_summary_contains_fixture_ids_or_names": false,
+    "selection": "first occurrence of each maximum, selected retrospectively",
+    "source_independence_verified": false
+  },
+  "profitability_claim": false,
+  "real_money_execution": false,
+  "replay_fixtures": 50,
+  "retrospective_postselected": true,
+  "schema": "research.tt_paper_joint_probability_sensitivity_replay.v1",
+  "source_identity_verified": false,
+  "source_rights_verified": false
+}

@@ -1,0 +1,70 @@
+{
+  "all_eligible": {
+    "component_resampling": {
+      "components": 118,
+      "largest_component_rows": 644,
+      "lower_2_5_percentile": -0.011054700073529412,
+      "replicates": 2000,
+      "seed": 20261104,
+      "status": "descriptive_only",
+      "upper_97_5_percentile": 0.00482447918781726
+    },
+    "decimal_crosscheck": "matched_1e-12",
+    "eligible_rows": 1997,
+    "neutral": {
+      "brier": 0.25,
+      "log_loss": 0.6931471805599453
+    },
+    "publisher": {
+      "brier": 0.24514095738107158,
+      "log_loss": 0.6830235336182503
+    },
+    "publisher_minus_neutral_brier": -0.004859042618928416
+  },
+  "bookmaker_execution": false,
+  "calibration_verified": false,
+  "cutoff_date_label": "2026-10-01",
+  "exclusions_all": {
+    "probability_not_strictly_inside_zero_one": 0,
+    "score_or_winner_shape_unqualified": 3
+  },
+  "exclusions_later": {
+    "probability_not_strictly_inside_zero_one": 0,
+    "score_or_winner_shape_unqualified": 0
+  },
+  "independent_holdout": false,
+  "later_date_label_eligible": {
+    "component_resampling": {
+      "components": 41,
+      "largest_component_rows": 79,
+      "lower_2_5_percentile": -0.012421784471153849,
+      "replicates": 2000,
+      "seed": 20261104,
+      "status": "descriptive_only",
+      "upper_97_5_percentile": 0.006799680291970796
+    },
+    "decimal_crosscheck": "matched_1e-12",
+    "eligible_rows": 304,
+    "neutral": {
+      "brier": 0.25,
+      "log_loss": 0.6931471805599453
+    },
+    "publisher": {
+      "brier": 0.24839507023026314,
+      "log_loss": 0.6906460924167569
+    },
+    "publisher_minus_neutral_brier": -0.0016049297697368625
+  },
+  "market_odds_available": false,
+  "model_fit_provenance_verified": false,
+  "model_training_authorized": false,
+  "note": "Retrospective publisher values, not an independent validation. The component range is descriptive, not a certified confidence interval; the graph uses the entire known sample and is not a causal feature.",
+  "physical_results_verified": false,
+  "prediction_time_verified": false,
+  "profitability_claim": false,
+  "schema": "research.tt_publisher_probability_diagnostic.v1",
+  "source_ids_verified_as_people": false,
+  "source_rights_verified": false,
+  "source_rows": 2000,
+  "source_sha256": "bbb2ab531f269a1eafff89e240086a4d17999114b582825ba4338986c6770fde"
+}

@@ -1,0 +1,152 @@
+{
+  "alias_probability_bounds": {
+    "first_peak_exact_id_sharing": {
+      "alias_bounds": {
+        "all_tickets_lose_distribution": [
+          {
+            "lower": "0",
+            "mappings": 1,
+            "upper": "0"
+          },
+          {
+            "lower": "0",
+            "mappings": 5,
+            "upper": "1/2"
+          },
+          {
+            "lower": "0",
+            "mappings": 5,
+            "upper": "1"
+          },
+          {
+            "lower": "1/2",
+            "mappings": 1,
+            "upper": "1"
+          }
+        ],
+        "binary_states_per_mapping": 8,
+        "direct_fraction_state_check": "matched_zero_and_one_extremes",
+        "mappings_narrowing_all_tickets_lose": 7,
+        "mappings_narrowing_negative_open_ticket_pnl": 3,
+        "negative_open_ticket_pnl_distribution": [
+          {
+            "lower": "1/2",
+            "mappings": 9,
+            "upper": "1"
+          },
+          {
+            "lower": "1",
+            "mappings": 3,
+            "upper": "1"
+          }
+        ]
+      },
+      "all_loss_and_negative_pnl_are_distinct_predicates": true,
+      "baseline": {
+        "all_tickets_lose": {
+          "lower": "0",
+          "upper": "1"
+        },
+        "binary_states": 16,
+        "negative_open_ticket_pnl": {
+          "lower": "1/2",
+          "upper": "1"
+        }
+      },
+      "bookmaker_acceptance_verified": false,
+      "distinct_id_pairs": 6,
+      "event_limit": 8,
+      "exact_event_ids": 4,
+      "exact_primal_and_dual_certificates_checked": true,
+      "mapping_hypotheses_have_no_probabilities": true,
+      "mapping_limit": 56,
+      "marginal_home_and_away_probability": "1/2_each_invented",
+      "negative_pnl_strictly_less_than_zero": true,
+      "open_tickets": 6,
+      "physical_event_identity_verified": false,
+      "profitability_claim": false,
+      "real_money_execution": false,
+      "side_mappings": 12,
+      "status": "exact_fraction_primal_dual_certified",
+      "voids_costs_and_previous_pnl_included": false
+    },
+    "first_peak_open_tickets": {
+      "alias_bounds": {
+        "all_tickets_lose_distribution": [
+          {
+            "lower": "0",
+            "mappings": 7,
+            "upper": "1/2"
+          },
+          {
+            "lower": "0",
+            "mappings": 49,
+            "upper": "1"
+          }
+        ],
+        "binary_states_per_mapping": 128,
+        "direct_fraction_state_check": "matched_zero_and_one_extremes",
+        "mappings_narrowing_all_tickets_lose": 7,
+        "mappings_narrowing_negative_open_ticket_pnl": 1,
+        "negative_open_ticket_pnl_distribution": [
+          {
+            "lower": "1/2",
+            "mappings": 55,
+            "upper": "1"
+          },
+          {
+            "lower": "1",
+            "mappings": 1,
+            "upper": "1"
+          }
+        ]
+      },
+      "all_loss_and_negative_pnl_are_distinct_predicates": true,
+      "baseline": {
+        "all_tickets_lose": {
+          "lower": "0",
+          "upper": "1"
+        },
+        "binary_states": 256,
+        "negative_open_ticket_pnl": {
+          "lower": "1/2",
+          "upper": "1"
+        }
+      },
+      "bookmaker_acceptance_verified": false,
+      "distinct_id_pairs": 28,
+      "event_limit": 8,
+      "exact_event_ids": 8,
+      "exact_primal_and_dual_certificates_checked": true,
+      "mapping_hypotheses_have_no_probabilities": true,
+      "mapping_limit": 56,
+      "marginal_home_and_away_probability": "1/2_each_invented",
+      "negative_pnl_strictly_less_than_zero": true,
+      "open_tickets": 7,
+      "physical_event_identity_verified": false,
+      "profitability_claim": false,
+      "real_money_execution": false,
+      "side_mappings": 56,
+      "status": "exact_fraction_primal_dual_certified",
+      "voids_costs_and_previous_pnl_included": false
+    },
+    "profitability_claim": false,
+    "scenario_summary_contains_fixture_ids_or_names": false,
+    "selection": "first occurrence of each maximum, selected retrospectively",
+    "source_independence_verified": false
+  },
+  "assumed_opened_tickets": 41,
+  "baseline_and_previous_stresses_unchanged": true,
+  "bookmaker_acceptance_verified": false,
+  "independent_holdout": false,
+  "input_bytes": 321389,
+  "input_sha256": "44508bfa10c57033a671277c949ad5bfd1485744a80211497ad9abe91d3971e9",
+  "model_training": false,
+  "profitability_claim": false,
+  "real_money_execution": false,
+  "replay_fixtures": 50,
+  "retrospective_postselected": true,
+  "schema": "research.tt_paper_alias_probability_bounds_replay.v1",
+  "source_identity_verified": false,
+  "source_rights_verified": false
+}
